@@ -2,7 +2,7 @@
 
 MARVIS Risk Agent is a local-first credit-risk agent platform for modeling, analysis, strategy, and validation workflows.
 
-The current V1.0.0 release ships model validation as the first built-in workflow: it can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. That validation workflow is one part of the product direction, not the product boundary. Future work should keep MARVIS oriented around broader credit-risk work such as model building, portfolio analysis, strategy evaluation, monitoring, and governed task automation.
+The current V1.0.1 release ships model validation as the first built-in workflow: it can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. That validation workflow is one part of the product direction, not the product boundary. Future work should keep MARVIS oriented around broader credit-risk work such as model building, portfolio analysis, strategy evaluation, monitoring, and governed task automation.
 
 The public default brand is MARVIS:
 
