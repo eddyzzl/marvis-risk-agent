@@ -48,11 +48,12 @@ V<MAJOR>.<MINOR>.<PATCH>
 - 未合入稳定线、未对外交付的临时调试提交。
 - 纯格式化或无用户影响的小整理，除非它会作为单独交付节点。
 
-建议发布动作：
+建议发布动作。普通功能、文档或修复改动先按常规流程完成验证和 commit；确认 `main` 上没有未提交改动后，再运行 release helper。`release_push.py` 本身会创建一个单独的版本 bump commit、创建 annotated tag，并推送 `main` 和 tag。
 
 ```bash
 git status --short
 git diff --check
+git log -1 --oneline
 python scripts/release_push.py --bump patch
 ```
 
@@ -61,6 +62,16 @@ python scripts/release_push.py --bump patch
 ## 发布推送与 tag 自动更新
 
 对外发布不要使用裸 `git push` 手工移动 tag。发布时统一使用 `scripts/release_push.py`，让版本元数据、release commit、annotated tag 和远端推送保持一致。
+
+**执行时机：在普通业务 commit 之后运行。** 发布前应先完成并 commit 需要发布的功能、修复或文档改动，再确认工作区干净。脚本会拒绝 dirty worktree，避免把未提交改动混入版本发布提交。也就是说：
+
+1. 先完成代码或文档改动。
+2. 跑必要验证。
+3. 用普通 commit 提交这些改动。
+4. 确认 `git status --short` 没有输出。
+5. 再运行 `python scripts/release_push.py --bump patch` 或指定其他 bump 类型。
+
+不要在有未提交改动时运行 release helper；不要先跑 release helper 再回头补功能 commit。release commit 应只包含版本元数据更新。
 
 默认 patch 发布：
 
@@ -85,7 +96,7 @@ python scripts/release_push.py --version V1.1.0
 
 1. 要求工作区干净，避免把未提交业务改动混进版本 bump。
 2. 从最新 `V<MAJOR>.<MINOR>.<PATCH>` tag 计算下一个版本，或使用 `--version` 指定值。
-3. 自动更新 `pyproject.toml`、README、runbook 和 Notebook 要求文档中的当前发布版本。
+3. 自动更新 `pyproject.toml`、包版本、README 中英文版、runbook 和 Notebook 要求文档中的当前发布版本。
 4. 创建一个版本 bump commit。
 5. 创建 annotated tag。
 6. push `main` 和新 tag 到远端。

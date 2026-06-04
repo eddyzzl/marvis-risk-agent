@@ -33,6 +33,7 @@ def test_update_release_text_replaces_only_current_release_markers():
     release_push = _load_release_push_module()
     text = (
         "The current V1.0.0 release ships the first workflow.\n"
+        "当前 V1.0.0 版本已经稳定落地第一个内置工作流。\n"
         "Example tags: V1.0.0, V1.0.1, V1.1.0.\n"
         "version = \"1.0.0\"\n"
     )
@@ -40,8 +41,18 @@ def test_update_release_text_replaces_only_current_release_markers():
     updated = release_push.update_release_text(text, "1.0.0", "1.0.1")
 
     assert "The current V1.0.1 release ships the first workflow." in updated
+    assert "当前 V1.0.1 版本已经稳定落地第一个内置工作流。" in updated
     assert "Example tags: V1.0.0, V1.0.1, V1.1.0." in updated
     assert 'version = "1.0.1"' in updated
+
+
+def test_release_files_include_bilingual_readmes():
+    release_push = _load_release_push_module()
+
+    release_files = {path.as_posix() for path in release_push.RELEASE_FILES}
+
+    assert "README.md" in release_files
+    assert "README.zh-CN.md" in release_files
 
 
 def test_update_release_text_updates_runtime_version_marker():

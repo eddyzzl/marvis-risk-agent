@@ -1,10 +1,34 @@
-# MARVIS Risk Agent
+<p align="center">
+  <img src="riskmodel_checker/static/brand/marvis-logo.png" alt="MARVIS Risk Agent logo" width="148" />
+</p>
 
-MARVIS Risk Agent is a local-first credit-risk agent platform for modeling, analysis, strategy, and validation workflows.
+<h1 align="center">MARVIS Risk Agent</h1>
 
-The current V1.0.1 release ships model validation as the first built-in workflow: it can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. That validation workflow is one part of the product direction, not the product boundary. Future work should keep MARVIS oriented around broader credit-risk work such as model building, portfolio analysis, strategy evaluation, monitoring, and governed task automation.
+<p align="center">
+  A local-first credit-risk agent platform for modeling, analysis, strategy, and validation workflows.
+</p>
 
-The public default brand is MARVIS:
+<p align="center">
+  <a href="README.md"><strong>English</strong></a>
+  ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
+
+---
+
+MARVIS Risk Agent is built for governed credit-risk work that should stay close to local files, local runtimes, and auditable evidence. The long-term product direction is an all-purpose credit-risk agent for model building, portfolio analysis, strategy evaluation, monitoring, validation, and governed task automation.
+
+The current V1.0.1 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
+
+## What You Get
+
+- **Local-first execution**: serve the platform from your own machine or server workspace.
+- **Agent-assisted workflows**: guide credit-risk tasks with structured evidence and report drafting.
+- **Notebook validation runtime**: execute validation notebooks and downstream metrics with reproducible artifacts.
+- **Configurable branding**: keep private customer or institution branding outside source code.
+- **OSS-friendly defaults**: remove local branding config and the app falls back to the public MARVIS brand.
+
+## Public Default Brand
 
 - Platform name: `MARVIS-全能风控智能体`
 - Primary color: black
@@ -83,13 +107,13 @@ node --check riskmodel_checker/static/app.js
 
 ## Release Push
 
-Use the release helper instead of raw `git push` when publishing a new public version:
+Use the release helper instead of raw `git push` when publishing a new public version. Run it **after** the feature, fix, or documentation changes have been verified and committed. The helper requires a clean worktree and creates a separate version bump commit plus an annotated tag.
 
 ```bash
 python scripts/release_push.py --bump patch
 ```
 
-The helper updates release metadata, creates a release commit, creates an annotated `Vx.y.z` tag, and pushes `main` plus the tag. See `docs/versioning.md` for the versioning rules.
+The helper updates release metadata, creates a release commit, creates an annotated `Vx.y.z` tag, and pushes `main` plus the tag. See `docs/versioning.md` for the full release sequence and versioning rules.
 
 ## License
 

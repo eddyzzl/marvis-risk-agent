@@ -13,6 +13,7 @@ RELEASE_FILES = (
     Path("pyproject.toml"),
     Path("riskmodel_checker/__init__.py"),
     Path("README.md"),
+    Path("README.zh-CN.md"),
     Path("docs/runbook.md"),
     Path("docs/对notebook的要求.md"),
 )
@@ -45,6 +46,7 @@ def update_release_text(text: str, old_plain: str, new_plain: str) -> str:
         (f'version = "{old_plain}"', f'version = "{new_plain}"'),
         (f'__version__ = "{old_plain}"', f'__version__ = "{new_plain}"'),
         (f"current V{old_plain} release", f"current V{new_plain} release"),
+        (f"当前 V{old_plain} 版本", f"当前 V{new_plain} 版本"),
         (f"MARVIS 本地运行手册（V{old_plain}）", f"MARVIS 本地运行手册（V{new_plain}）"),
         (f"当前 V{old_plain} 公开版", f"当前 V{new_plain} 公开版"),
         (f"MARVIS V{old_plain} 当前内置", f"MARVIS V{new_plain} 当前内置"),
