@@ -1,0 +1,41 @@
+[project]
+name = "riskmodel-checker"
+version = "1.0.0"
+description = "Local MARVIS credit-risk agent; V1 ships a notebook-based model-validation workflow"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "nbformat",
+  "nbclient",
+  "openpyxl",
+  "python-docx",
+  "pydantic",
+  "pandas",
+  "numpy",
+  "pypmml",
+  "matplotlib",
+]
+
+[project.scripts]
+riskmodel-checker = "riskmodel_checker.__main__:main"
+marvis-risk-agent = "riskmodel_checker.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "httpx",
+  "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+riskmodel_checker = ["static/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*"]

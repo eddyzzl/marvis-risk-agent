@@ -1,0 +1,16 @@
+.omx/
+.superpowers/
+workspace/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+node_modules/
+dist/
+build/
+.playwright-mcp/
+word_html_preview/
+word-html-preview.png
+generated-word-html-preview.png
+riskmodel-download-buttons-snapshot.md

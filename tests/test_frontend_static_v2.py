@@ -1,0 +1,5868 @@
+"""Smoke-only frontend tests.
+
+These tests grep the static JS/HTML for v2 strings. They DO NOT load the
+frontend or exercise any flow; they only guard against accidental deletion
+of v2-shaped fields/endpoints. Real frontend behavior must be exercised in
+a browser against the running FastAPI app.
+"""
+
+import json
+import subprocess
+from pathlib import Path
+
+
+STATIC_DIR = Path(__file__).resolve().parents[1] / "riskmodel_checker" / "static"
+
+
+def _read_static(name: str) -> str:
+    return (STATIC_DIR / name).read_text(encoding="utf-8")
+
+
+def _css_rule(css: str, selector: str) -> str:
+    start = css.index(f"{selector} {{")
+    end = css.index("}", start)
+    return css[start:end]
+
+
+def _css_vars(rule: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in rule.splitlines():
+        line = line.strip()
+        if not line.startswith("--") or ":" not in line:
+            continue
+        name, value = line.rstrip(";").split(":", 1)
+        values[name.strip()] = value.strip()
+    return values
+
+
+def _hex_rgb(value: str) -> tuple[int, int, int]:
+    raw = value.strip().lstrip("#")
+    if len(raw) != 6:
+        raise ValueError(f"expected #RRGGBB color, got {value!r}")
+    return tuple(int(raw[index : index + 2], 16) for index in (0, 2, 4))
+
+
+def _relative_luminance(value: str) -> float:
+    def channel(component: int) -> float:
+        normalized = component / 255
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (channel(component) for component in _hex_rgb(value))
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _contrast_ratio(left: str, right: str) -> float:
+    light = max(_relative_luminance(left), _relative_luminance(right))
+    dark = min(_relative_luminance(left), _relative_luminance(right))
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _agent_timeline_items_for(
+    messages: list[dict],
+    visible_stages: list[str],
+    *,
+    frozen_snapshots: list[dict] | None = None,
+    selected_task_id: str | None = None,
+) -> list[dict]:
+    app_js = _read_static("app.js")
+    start = app_js.index("function agentTimelineStageDefinitions")
+    end = app_js.index("function renderAgentTimeline", start)
+    timeline_source = app_js[start:end]
+    snapshots = frozen_snapshots or []
+    snapshot_task = selected_task_id or ("test-task" if snapshots else "")
+    script = "\n".join(
+        [
+            timeline_source,
+            (
+                f"const selectedTaskId = {json.dumps(snapshot_task)};"
+                if snapshot_task
+                else "const selectedTaskId = null;"
+            ),
+            "const taskFrozenSectionSnapshots = new Map();",
+            f"const messages = {json.dumps(messages, ensure_ascii=False)};",
+            f"const visibleStages = {json.dumps(visible_stages, ensure_ascii=False)};",
+            "const agentMessages = messages;",
+            f"const __seedSnapshots = {json.dumps(snapshots, ensure_ascii=False)};",
+            "if (__seedSnapshots.length && selectedTaskId) {",
+            "  taskFrozenSectionSnapshots.set(selectedTaskId, __seedSnapshots);",
+            "}",
+            "const items = agentTimelineItems(messages, visibleStages).map((item) => {",
+            "  if (item.type === 'stage') return { type: item.type, stage: item.stage };",
+            "  if (item.type === 'frozen') return {",
+            "    type: item.type,",
+            "    triggerMessageId: item.snapshot?.triggerMessageId || '',",
+            "    stage: item.snapshot?.stage || '',",
+            "  };",
+            "  return { type: item.type, contents: item.messages.map((message) => message.content) };",
+            "});",
+            "process.stdout.write(JSON.stringify(items));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _agent_messages_html_for(messages: list[dict], label_stage: str | None = None) -> str:
+    app_js = _read_static("app.js")
+    start = app_js.index("function agentMessagesHtml")
+    end = app_js.index("function clearAgentStageMessages", start)
+    script = "\n".join(
+        [
+            "function agentStageLabel(stage) { return 'Agent'; }",
+            "function agentMessageHtml(message, labelStage = message?.stage, options = {}) {",
+            "  const label = message.role === 'user' ? '' : agentStageLabel(labelStage);",
+            "  return `${options.hideMeta || !label ? '' : `<meta>${label}</meta>`}<body>${message.content}</body>`;",
+            "}",
+            app_js[start:end],
+            f"const messages = {json.dumps(messages, ensure_ascii=False)};",
+            f"process.stdout.write(agentMessagesHtml(messages, {json.dumps(label_stage, ensure_ascii=False)}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
+    app_js = _read_static("app.js")
+    start = app_js.index("function agentReportMessagesForDisplay")
+    end = app_js.index("function clearAgentStageMessages", start)
+    script = "\n".join(
+        [
+            app_js[start:end],
+            f"const messages = {json.dumps(messages, ensure_ascii=False)};",
+            "process.stdout.write(JSON.stringify(agentReportMessagesForDisplay(messages)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _render_agent_markdown(markdown: str) -> str:
+    app_js = _read_static("app.js")
+    escape_start = app_js.index("function escapeHtml")
+    escape_end = app_js.index("function fileName", escape_start)
+    renderer_start = app_js.index("function renderAgentMarkdown")
+    renderer_end = app_js.index("function shouldPreserveOptimisticAgentMessages", renderer_start)
+    script = "\n".join(
+        [
+            app_js[escape_start:escape_end],
+            app_js[renderer_start:renderer_end],
+            f"process.stdout.write(renderAgentMarkdown({json.dumps(markdown, ensure_ascii=False)}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _workflow_step_statuses_for(task: dict, notebook_steps: list[dict]) -> list[str]:
+    app_js = _read_static("app.js")
+    failure_start = app_js.index("function taskFailedDuringScan")
+    failure_end = app_js.index("function taskFailureActionStatusTitle", failure_start)
+    workflow_start = app_js.index("function workflowIndex")
+    workflow_end = app_js.index("function workflowStepStatusLabel", workflow_start)
+    notebook_start = app_js.index("function notebookStepTone")
+    notebook_end = app_js.index("function plannedReproducibilitySteps", notebook_start)
+    script = "\n".join(
+        [
+            "const selectedTaskId = 'task-1';",
+            f"const selectedTask = {json.dumps(task, ensure_ascii=False)};",
+            f"let latestNotebookSteps = {json.dumps(notebook_steps, ensure_ascii=False)};",
+            "const workflowSteps = [{id:'scan'}, {id:'notebook'}, {id:'metrics'}, {id:'report'}];",
+            "function taskBusyAction() { return null; }",
+            "function taskServerBusyAction() { return null; }",
+            app_js[failure_start:failure_end],
+            app_js[workflow_start:workflow_end],
+            app_js[notebook_start:notebook_end],
+            "const statuses = workflowSteps.map((_, index) => workflowStepStatus(index, workflowIndex(selectedTask.status)));",
+            "process.stdout.write(JSON.stringify(statuses));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _notebook_step_tones_for(task: dict, notebook_steps: list[dict]) -> list[str]:
+    app_js = _read_static("app.js")
+    failure_start = app_js.index("function taskStopped")
+    failure_end = app_js.index("function workflowIndex", failure_start)
+    notebook_start = app_js.index("function notebookStepTone")
+    notebook_end = app_js.index("function plannedReproducibilitySteps", notebook_start)
+    script = "\n".join(
+        [
+            f"let selectedTask = {json.dumps(task, ensure_ascii=False)};",
+            app_js[failure_start:failure_end],
+            app_js[notebook_start:notebook_end],
+            f"const steps = {json.dumps(notebook_steps, ensure_ascii=False)};",
+            "process.stdout.write(JSON.stringify(steps.map((step) => notebookStepTone(step.status))));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _normalized_notebook_steps_for(notebook_steps: list[dict], notebook_cells: list[dict]) -> list[dict]:
+    app_js = _read_static("app.js")
+    normalize_start = app_js.index("function normalizeNotebookSteps")
+    normalize_end = app_js.index("function renderNotebookSteps", normalize_start)
+    script = "\n".join(
+        [
+            app_js[normalize_start:normalize_end],
+            f"const steps = {json.dumps(notebook_steps, ensure_ascii=False)};",
+            f"const cells = {json.dumps(notebook_cells, ensure_ascii=False)};",
+            "process.stdout.write(JSON.stringify(normalizeNotebookSteps(steps, cells)));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _task_action_status_for(task: dict) -> dict | None:
+    app_js = _read_static("app.js")
+    stopped_start = app_js.index("function taskStopped")
+    stopped_end = app_js.index("function taskBusyAction", stopped_start)
+    status_start = app_js.index("function taskFailureActionStatusMessage")
+    status_end = app_js.index("function actionFailureStatusTitle", status_start)
+    script = "\n".join(
+        [
+            f"let selectedTask = {json.dumps(task, ensure_ascii=False)};",
+            "let captured = null;",
+            "function setActionStatus(title, kind, detail) { captured = { title, kind, detail }; }",
+            "function setActionErrorDetail(detail) { captured = { title: '', kind: 'clear', detail }; }",
+            app_js[stopped_start:stopped_end],
+            app_js[status_start:status_end],
+            "setTaskFailureActionStatus(selectedTask);",
+            "process.stdout.write(JSON.stringify(captured));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _task_display_status_for(
+    task: dict,
+    *,
+    action_message: str = "已停止当前动作。",
+    action_kind: str = "stopped",
+) -> dict:
+    app_js = _read_static("app.js")
+    stopped_start = app_js.index("function taskStopped")
+    stopped_end = app_js.index("function taskBusyAction", stopped_start)
+    pill_start = app_js.index("function actionStatusPill")
+    pill_end = app_js.index("function describeActionStatus", pill_start)
+    label_start = app_js.index("function statusLabel")
+    label_end = app_js.index("function notebookReproducibilityComplete", label_start)
+    script = "\n".join(
+        [
+            f"const statusLabels = {json.dumps({'scanned': '已扫描', 'failed': '失败'}, ensure_ascii=False)};",
+            f"const task = {json.dumps(task, ensure_ascii=False)};",
+            app_js[stopped_start:stopped_end],
+            app_js[pill_start:pill_end],
+            app_js[label_start:label_end],
+            "statusLabels.review_required = '待复核';",
+            "process.stdout.write(JSON.stringify({",
+            "  rowLabel: taskStatusLabel(task),",
+            "  rowTone: taskStatusTone(task),",
+            f"  heroPill: actionStatusPill({json.dumps(action_message, ensure_ascii=False)}, {json.dumps(action_kind)}),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_browser_chrome_uses_public_default_branding():
+    index_html = _read_static("index.html")
+
+    assert "<title>MARVIS-全能风控智能体</title>" in index_html
+    assert '<link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png' in index_html
+    assert 'id="brandLogo"' in index_html
+    assert 'class="brand-mark"' in index_html
+    assert 'src="static/brand/marvis-logo.png' in index_html
+    assert 'id="platformName"' in index_html
+    assert "MARVIS-全能风控智能体" in index_html
+    assert "private-logo.svg" not in index_html
+    assert 'href="data:,"' not in index_html
+
+
+def test_runtime_branding_hooks_exist():
+    app_js = _read_static("app.js")
+
+    assert "const defaultBranding" in app_js
+    assert 'fetch("api/branding")' in app_js
+    assert "async function loadBranding()" in app_js
+    assert "function applyBranding(branding)" in app_js
+    assert "document.title = branding.browserTitle" in app_js
+    assert '$("platformName").textContent = branding.platformName' in app_js
+    assert '$("brandLogo").src = branding.logoUrl' in app_js
+    assert '$("brandLogo").alt = `${branding.platformName} logo`' in app_js
+    assert '$("workspaceBrandLogo").src = branding.logoUrl' in app_js
+    assert '$("workspaceBrandLogo").alt = `${branding.platformName} logo`' in app_js
+    assert 'favicon.href = branding.faviconUrl' in app_js
+    assert 'document.documentElement.style.setProperty("--brand-primary", branding.primaryColor)' in app_js
+    assert 'document.documentElement.style.setProperty("--brand-primary-hover"' in app_js
+    assert "loadBranding();" in app_js
+
+
+def test_frontend_uses_v2_task_actions_only():
+    app_js = _read_static("app.js")
+
+    assert "run-notebook" not in app_js
+    assert "report-template" not in app_js
+    assert "api/tasks/${taskId}/notebook" in app_js
+    assert "api/tasks/${taskId}/metrics" in app_js
+    assert "api/tasks/${taskId}/report" in app_js
+    assert "api/tasks/${selectedTaskId}/report/download" in app_js
+    assert "api/tasks/${selectedTaskId}/analysis/download" in app_js
+    assert "api/tasks/${selectedTaskId}/report/preview" in app_js
+    assert 'data-step-action="downloadWordReport"' in app_js
+    assert 'data-step-action="downloadExcelAnalysis"' in app_js
+    assert 'data-step-action="previewWordReport"' in app_js
+    assert "下载Word" in app_js
+    assert "下载Excel" in app_js
+    assert "预览" in app_js
+    assert "下载Word报告" not in app_js
+    assert "下载Excel分析" not in app_js
+    assert "预览Word报告" not in app_js
+    assert 'data-step-action="downloadReport"' not in app_js
+
+
+def test_word_report_preview_dialog_uses_task_dialog_backdrop():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="wordPreviewDialog"' in index_html
+    assert 'class="task-dialog word-preview-dialog"' in index_html
+    assert 'id="wordPreviewFrame"' in index_html
+    assert ".task-dialog::backdrop" in styles_css
+    assert ".word-preview-dialog" in styles_css
+    assert ".word-preview-frame" in styles_css
+
+
+def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    title_start = styles_css.index(".step-title {")
+    title_end = styles_css.index("}", title_start)
+    title_rule = styles_css[title_start:title_end]
+    assert "white-space: nowrap;" in title_rule
+    assert "text-overflow: ellipsis;" in title_rule
+    assert ".step-copy {" in styles_css
+    head_start = styles_css.index(".step-head {")
+    head_end = styles_css.index("}", head_start)
+    head_rule = styles_css[head_start:head_end]
+    assert "align-items: center;" in head_rule
+    assert "align-items: flex-start;" not in head_rule
+
+    copy_start = styles_css.index(".step-copy {")
+    copy_end = styles_css.index("}", copy_start)
+    copy_rule = styles_css[copy_start:copy_end]
+    assert "padding-top" not in copy_rule
+
+    assert "container: step-rail / inline-size;" in styles_css
+
+    renderer_start = app_js.index("function renderWorkflowStepper")
+    renderer_end = app_js.index("function formatDate", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+    assert '<span class="step-copy">' in renderer
+    assert '<div class="step-sub">' not in renderer
+
+    assert "const PROGRESS_WIDTH_MIN = 314;" in app_js
+    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
+    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
+
+
+def test_completed_report_actions_render_below_step_copy_with_excel_green():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    assert "function completedReportReadyForDownloads" in app_js
+    ready_start = app_js.index("function completedReportReadyForDownloads")
+    ready_end = app_js.index("function stepDownloadActionsHtml", ready_start)
+    ready_helper = app_js[ready_start:ready_end]
+    assert 'step.action === "report"' in ready_helper
+    assert "selectedTask?.report_available === true" in ready_helper
+    assert '["succeeded", "review_required"].includes(selectedTask?.status)' in ready_helper
+
+    assert "function stepDownloadActionsHtml" in app_js
+    downloads_start = app_js.index("function stepDownloadActionsHtml")
+    downloads_end = app_js.index("function stepActionButtonHtml", downloads_start)
+    downloads_renderer = app_js[downloads_start:downloads_end]
+    assert '<div class="step-download-actions">' in downloads_renderer
+    assert 'data-step-action="previewWordReport"' in downloads_renderer
+    assert 'data-step-action="downloadWordReport"' in downloads_renderer
+    assert 'data-step-action="downloadExcelAnalysis"' in downloads_renderer
+    assert "step-action-button excel" in downloads_renderer
+
+    step_renderer_start = app_js.index("function renderWorkflowStepper")
+    step_renderer_end = app_js.index("function formatDate", step_renderer_start)
+    step_renderer = app_js[step_renderer_start:step_renderer_end]
+    assert "stepActionButtonHtml(step)" in step_renderer
+    assert "stepDownloadActionsHtml(step)" in step_renderer
+    assert step_renderer.index("stepActionButtonHtml(step)") < step_renderer.index("stepDownloadActionsHtml(step)")
+
+    action_start = styles_css.index(".step-download-actions {")
+    action_end = styles_css.index("}", action_start)
+    action_rule = styles_css[action_start:action_end]
+    assert "margin-left: 48px;" in action_rule
+    assert "flex-wrap: nowrap;" in action_rule
+    assert "justify-content: stretch;" in action_rule
+
+    excel_start = styles_css.index(".step-action-button.excel")
+    excel_end = styles_css.index("}", excel_start)
+    excel_rule = styles_css[excel_start:excel_end]
+    assert "background: #1f7a3f;" in excel_rule
+    assert "border-color: #1f7a3f;" in excel_rule
+    assert "color: #fff;" in excel_rule
+
+
+def test_report_download_readiness_requires_generated_report_flag():
+    app_js = _read_static("app.js")
+    busy_start = app_js.index("function taskStopped")
+    busy_end = app_js.index("function $", busy_start)
+    ready_start = app_js.index("function completedReportReadyForDownloads")
+    ready_end = app_js.index("function stepDownloadActionsHtml", ready_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-1';",
+            "let globalBusyAction = null;",
+            "const taskBusyActions = new Map();",
+            app_js[busy_start:busy_end],
+            app_js[ready_start:ready_end],
+            "const step = { action: 'report' };",
+            "selectedTask = { status: 'review_required', report_available: false, active_job_kind: null };",
+            "const withoutReport = completedReportReadyForDownloads(step);",
+            "selectedTask = { status: 'review_required', report_available: true, active_job_kind: 'report' };",
+            "const busyReport = completedReportReadyForDownloads(step);",
+            "selectedTask = { status: 'review_required', report_available: true, active_job_kind: null };",
+            "const readyReport = completedReportReadyForDownloads(step);",
+            "process.stdout.write(JSON.stringify({ withoutReport, busyReport, readyReport }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "withoutReport": False,
+        "busyReport": False,
+        "readyReport": True,
+    }
+
+
+def test_stage_actions_capture_task_id_before_polling():
+    app_js = _read_static("app.js")
+
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_renderer = app_js[poll_start:poll_end]
+    assert "taskId = selectedTaskId" in poll_renderer
+    assert "const polledTask = findTaskInCache(taskId)" in poll_renderer
+    assert "selectedTaskId === taskId" in poll_renderer
+
+    for function_name in [
+        "scanCurrentTask",
+        "validateCurrentTask",
+        "generateMetrics",
+        "generateReport",
+    ]:
+        start = app_js.index(f"async function {function_name}")
+        end = app_js.index("\n}\n", start)
+        body = app_js[start:end]
+        assert "const taskId = selectedTaskId;" in body
+        assert "pollValidationProgress(" not in body or "taskId" in body
+
+
+def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
+    app_js = _read_static("app.js")
+
+    assert "const backgroundProgressPolls = new Map();" in app_js
+    assert "function ensureActiveTaskProgressPolling" in app_js
+
+    ensure_start = app_js.index("function ensureActiveTaskProgressPolling")
+    ensure_end = app_js.index("async function refreshTasks", ensure_start)
+    ensure_body = app_js[ensure_start:ensure_end]
+    assert "taskServerBusyAction(task)" in ensure_body
+    assert "backgroundProgressPolls.has(taskId)" in ensure_body
+    assert "pollValidationProgress(terminalTaskStatuses, taskId, { background: true })" in ensure_body
+    assert "backgroundProgressPolls.delete(taskId)" in ensure_body
+
+    refresh_start = app_js.index("async function refreshTasks")
+    refresh_end = app_js.index("async function scanCurrentTask", refresh_start)
+    refresh_body = app_js[refresh_start:refresh_end]
+    assert "syncSelectedTaskFromCache();" in refresh_body
+    assert "ensureActiveTaskProgressPolling();" in refresh_body
+
+    select_start = app_js.index("function selectTask")
+    select_end = app_js.index("function deselectCurrentTask", select_start)
+    select_body = app_js[select_start:select_end]
+    assert "ensureActiveTaskProgressPolling(task);" in select_body
+
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_body = app_js[poll_start:poll_end]
+    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "if (selectedTaskId === taskId && !background)" in poll_body
+    assert "if (selectedTaskId === taskId && !background) {" in poll_body
+
+
+def test_create_dialog_enter_does_not_submit_textareas():
+    app_js = _read_static("app.js")
+
+    handler_start = app_js.index('event.key === "Enter"')
+    handler_end = app_js.index("runAction(createTaskAndScan", handler_start)
+    handler = app_js[handler_start:handler_end]
+    assert 'event.target.closest("#taskDialog")' in handler
+    assert 'event.target.tagName !== "TEXTAREA"' in handler
+    assert "!event.isComposing" in handler
+
+
+def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    assert "static/app.js?v=20260603-zero-rail-collapse" in index_html
+    assert "static/app.js?v=20260603-task-validator-icon" not in index_html
+    assert "static/app.js?v=20260603-field-focus-ring" not in index_html
+    assert "static/app.js?v=20260603-dark-masks" not in index_html
+
+    assert "function formControlFocusTarget(target)" in app_js
+    assert "function installFormControlFocusRingGuard" in app_js
+    assert 'target?.closest?.("input, textarea, select")' in app_js
+    assert "let lastPointerDownControl = null;" in app_js
+    assert "let lastPointerDownAt = 0;" in app_js
+    assert 'document.addEventListener("pointerdown", handleFormControlPointerDown, true);' in app_js
+    assert 'document.addEventListener("mousedown", handleFormControlPointerDown, true);' in app_js
+    assert 'document.addEventListener("touchstart", handleFormControlPointerDown, true);' in app_js
+    assert 'document.addEventListener("click", handleFormControlLabelClick, true);' in app_js
+    assert 'document.addEventListener("focusin", handleFormControlFocusIn, true);' in app_js
+    assert 'document.addEventListener("focusout", handleFormControlFocusOut, true);' in app_js
+    assert "const pointerFocusPending = performance.now() - lastPointerDownAt < 750;" in app_js
+    focus_in_start = app_js.index("function handleFormControlFocusIn")
+    focus_in_end = app_js.index("function handleFormControlFocusOut", focus_in_start)
+    focus_in_body = app_js[focus_in_start:focus_in_end]
+    assert 'control.classList.toggle(' in focus_in_body
+    assert '"suppress-pointer-focus-ring"' in focus_in_body
+    assert "pointerFocusPending && lastPointerDownControl !== control" in focus_in_body
+    label_click_start = app_js.index("function handleFormControlLabelClick")
+    label_click_end = app_js.index("document.addEventListener", label_click_start)
+    label_click_body = app_js[label_click_start:label_click_end]
+    assert 'event.target.closest?.("label")' in label_click_body
+    assert "label.contains(focused)" in label_click_body
+    assert "focused.id === label.htmlFor" in label_click_body
+    assert 'focused.classList.add("suppress-pointer-focus-ring")' in label_click_body
+    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in app_js
+    assert "installFormControlFocusRingGuard();" in app_js
+
+    suppress_start = styles_css.index("input.suppress-pointer-focus-ring:focus-visible,")
+    suppress_end = styles_css.index("}", suppress_start)
+    suppress_rule = styles_css[suppress_start:suppress_end]
+    assert "textarea.suppress-pointer-focus-ring:focus-visible" in suppress_rule
+    assert "select.suppress-pointer-focus-ring:focus-visible" in suppress_rule
+    assert "outline: none" in suppress_rule
+    assert "box-shadow: none" in suppress_rule
+
+
+def test_create_task_payload_omits_notebook_contract_fields():
+    app_js = _read_static("app.js")
+
+    for field in ["report_values"]:
+        assert f"{field}:" in app_js
+
+    for removed_field in [
+        "algorithm:",
+        "notebook_path:",
+        "sample_path:",
+        "pmml_path:",
+        "dictionary_path:",
+        "target_col:",
+        "score_col:",
+        "split_col:",
+        "time_col:",
+        "feature_columns:",
+    ]:
+        assert removed_field not in app_js
+
+
+def test_create_task_uses_single_model_name_field():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="modelName"' in index_html
+    assert "模型名称" in index_html
+    assert 'id="modelVersion"' not in index_html
+    assert "模型版本" not in index_html
+    assert 'model_version: ""' in app_js
+    assert '$("modelVersion")' not in app_js
+    assert "请先填写模型名称、验证人员和材料目录。" in app_js
+    assert "请先填写模型名称、版本" not in app_js
+
+
+def test_task_display_does_not_require_model_version_separator():
+    app_js = _read_static("app.js")
+
+    assert "function taskDisplayName" in app_js
+    assert "taskDisplayName(selectedTask)" in app_js
+    assert "${selectedTask.model_name} · ${selectedTask.model_version}" not in app_js
+    assert "${task.model_name} · ${task.model_version}" not in app_js
+
+
+def test_create_dialog_hides_v2_config_controls():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    for removed_element_id in [
+        "algorithm",
+        "targetCol",
+        "scoreCol",
+        "splitCol",
+        "timeCol",
+        "featureColumns",
+        "notebookPath",
+        "samplePath",
+        "pmmlPath",
+        "dictionaryPath",
+        "draftDate",
+        "revisionVersion",
+        "revisionDate",
+        "revisionAuthor",
+        "createDataSourceSummary",
+        "createDatasetSplitSummary",
+        "revisionDescription",
+    ]:
+        assert f'id="{removed_element_id}"' not in index_html
+
+    assert "验证配置" not in index_html
+    assert "显式材料路径" not in index_html
+    assert "Notebook 路径" not in index_html
+    assert "样本路径" not in index_html
+    assert "PMML 路径" not in index_html
+    assert "数据字典路径" not in index_html
+    assert "起草日期" not in index_html
+    assert "修订版本" not in index_html
+    assert "修订日期" not in index_html
+    assert "修订人" not in index_html
+    assert "数据来源说明" not in index_html
+    assert "样本划分说明" not in index_html
+    assert "修订说明" not in index_html
+    assert 'optionalInputValue("notebookPath")' not in app_js
+    assert 'optionalInputValue("samplePath")' not in app_js
+    assert 'optionalInputValue("pmmlPath")' not in app_js
+    assert 'optionalInputValue("dictionaryPath")' not in app_js
+
+    for element_id in ["runModeManual", "runModeAgent", "modelName", "validator", "sourceDir"]:
+        assert f'id="{element_id}"' in index_html
+
+
+def test_create_dialog_omits_algorithm_choice_without_frontend_training_description_default():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="modelAlgorithm"' not in index_html
+    assert "模型算法" not in index_html
+    assert '$("modelAlgorithm").value' not in app_js
+    create_task_start = app_js.index("async function createTask")
+    create_task_end = app_js.index("if (!payload.model_name", create_task_start)
+    assert '"algorithm":' not in app_js[create_task_start:create_task_end]
+    defaults_start = app_js.index("function defaultCreateReportValues")
+    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = app_js[defaults_start:defaults_end]
+    assert '"TEXT:model_training_description"' not in defaults
+    assert "MODEL_TRAINING_DESCRIPTIONS" not in app_js
+
+
+def test_create_dialog_auto_fills_removed_report_values():
+    app_js = _read_static("app.js")
+
+    defaults_start = app_js.index("function defaultCreateReportValues")
+    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = app_js[defaults_start:defaults_end]
+
+    assert 'const today = formatDateInput();' in defaults
+    assert '"TEXT:draft_date": today' in defaults
+    assert '"TEXT:revision_date": today' in defaults
+    assert '"TEXT:revision_version": "V1"' in defaults
+    assert '"TEXT:revision_author": seed.validator' in defaults
+    assert '"TEXT:revision_description": "初稿"' in defaults
+    assert (
+        '"TEXT:model_overview": `为了更好的对xx用户进行授信环节风险管控，现开发${seed.modelName}模型，对xx客群做前置风险拦截，从授信申请阶段做好风险防范。`'
+        in defaults
+    )
+    assert '"TEXT:model_scope": "本模型适用于xx渠道用户。"' in defaults
+    assert '"TEXT:bad_sample_definition": "xx逾期 >= xx天"' in defaults
+    assert '"TEXT:good_sample_definition": "xx未逾期"' in defaults
+    assert '"TEXT:data_source_summary"' not in defaults
+    assert '"TEXT:dataset_split_summary"' not in defaults
+
+
+def test_create_dialog_uses_visual_run_mode_cards():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert 'class="run-mode-cards"' in index_html
+    assert 'class="run-mode-card selected-tone-amber"' in index_html
+    assert 'class="run-mode-card selected-tone-green"' in index_html
+    assert 'class="run-mode-icon"' in index_html
+    assert 'class="manual-checks"' in index_html
+    assert 'class="manual-check"' in index_html
+    assert 'class="robot-eye"' in index_html
+    assert 'class="robot-signal"' in index_html
+    assert 'class="robot-wrench"' in index_html
+    assert 'class="robot-tablet"' in index_html
+    assert 'name="runMode"' in index_html
+    assert 'value="manual"' in index_html
+    assert 'value="agent"' in index_html
+    assert 'name="runMode" type="radio" value="manual" checked' not in index_html
+    assert 'name="runMode" type="radio" value="agent" disabled' not in index_html
+    assert "预留" not in index_html
+    assert "后续" not in index_html
+    assert 'class="mode-choice"' not in index_html
+
+    assert ".run-mode-cards {" in styles_css
+    assert ".run-mode-card {" in styles_css
+    assert ".run-mode-card:hover:not(.disabled) {\n" not in styles_css
+    hover_start = styles_css.index(".run-mode-card:hover:not(.disabled):not(:has(input:checked))")
+    hover_end = styles_css.index("}", hover_start)
+    hover_rule = styles_css[hover_start:hover_end]
+    assert "transform: translateY(-1px)" in hover_rule
+    assert "0 0 24px" not in hover_rule
+    assert ".run-mode-card:has(input:checked)" in styles_css
+    checked_start = styles_css.index(".run-mode-card:has(input:checked)")
+    checked_end = styles_css.index("}", checked_start)
+    checked_rule = styles_css[checked_start:checked_end]
+    assert "border-color: var(--run-mode-tone)" in checked_rule
+    assert "border-color: var(--border)" not in checked_rule
+    assert "box-shadow:" in checked_rule
+    assert "0 0 24px color-mix(in srgb, var(--run-mode-tone) 24%, transparent)" in checked_rule
+
+    focus_start = styles_css.index(".run-mode-card:focus-within")
+    focus_end = styles_css.index("}", focus_start)
+    focus_rule = styles_css[focus_start:focus_end]
+    assert ".run-mode-card:focus-within:not(:has(input:checked))" in focus_rule
+    assert ".run-mode-card:focus-within {" not in focus_rule
+    assert "@keyframes run-mode-check-draw" in styles_css
+    assert "@keyframes run-mode-robot-blink" in styles_css
+    assert "@keyframes run-mode-robot-signal" in styles_css
+    assert "@keyframes run-mode-robot-crank" in styles_css
+    assert "@keyframes run-mode-robot-float" not in styles_css
+    assert ".mode-choice" not in styles_css
+
+
+def test_create_task_requires_run_mode_and_allows_agent_mode():
+    app_js = _read_static("app.js")
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_renderer = app_js[create_start:create_end]
+
+    assert "const selectedRunMode" in create_renderer
+    assert "请选择执行模式。" in create_renderer
+    assert "Agent 模式当前暂不支持创建任务，请选择手动模式。" not in create_renderer
+    assert "run_mode: selectedRunMode" in create_renderer
+    assert '?.value || "manual"' not in create_renderer
+
+
+def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
+    app_js = _read_static("app.js")
+
+    assert "function bindRunModeDeselectableCards" in app_js
+    assert "handleRunModeCardPointerDown" in app_js
+    assert "handleRunModeCardClick" in app_js
+    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in app_js
+    assert 'if (card.dataset.wasChecked !== "true") return;' in app_js
+    assert "event.preventDefault();" in app_js
+    assert "input.checked = false;" in app_js
+    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in app_js
+    assert "bindRunModeDeselectableCards();" in app_js
+
+
+def test_create_dialog_sections_are_unframed():
+    styles_css = _read_static("styles.css")
+
+    dialog_start = styles_css.index(".task-dialog {")
+    dialog_end = styles_css.index("}", dialog_start)
+    dialog_rule = styles_css[dialog_start:dialog_end]
+    assert "width: min(600px, calc(100vw - 32px))" in dialog_rule
+
+    section_start = styles_css.index(".task-form-section {")
+    section_end = styles_css.index("}", section_start)
+    section_rule = styles_css[section_start:section_end]
+    assert "border:" not in section_rule
+    assert "background:" not in section_rule
+    assert "padding: 0" in section_rule
+
+
+def test_create_dialog_uses_taller_desktop_height_without_stretching_environment_dialog():
+    styles_css = _read_static("styles.css")
+
+    create_dialog_start = styles_css.index(".task-dialog:not(.environment-dialog) {")
+    create_dialog_end = styles_css.index("}", create_dialog_start)
+    create_dialog_rule = styles_css[create_dialog_start:create_dialog_end]
+    assert "height: min(785px, calc(100dvh - 32px))" in create_dialog_rule
+    assert "overflow: hidden" in create_dialog_rule
+
+    head_start = styles_css.index(".dialog-head {")
+    head_end = styles_css.index("}", head_start)
+    head_rule = styles_css[head_start:head_end]
+    assert "height: 55px" in head_rule
+    assert "padding: 10px 16px" in head_rule
+
+    panel_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-dialog-panel {")
+    panel_end = styles_css.index("}", panel_start)
+    panel_rule = styles_css[panel_start:panel_end]
+    assert "height: 100%" in panel_rule
+    assert "display: flex" in panel_rule
+    assert "flex-direction: column" in panel_rule
+
+    form_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-form {")
+    form_end = styles_css.index("}", form_start)
+    form_rule = styles_css[form_start:form_end]
+    assert "flex: 1 1 auto" in form_rule
+    assert "max-height: none" in form_rule
+    assert "overflow: hidden" in form_rule
+    assert "grid-template-rows:" in form_rule
+
+    environment_start = styles_css.index(".environment-dialog {")
+    environment_end = styles_css.index("}", environment_start)
+    environment_rule = styles_css[environment_start:environment_end]
+    assert "width: min(520px, calc(100vw - 32px))" in environment_rule
+    assert "height: min(839px" not in environment_rule
+
+
+def test_workbench_uses_middle_output_and_right_step_rail_layout():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="progressRail"' in index_html
+    assert 'aria-label="验证步骤"' in index_html
+    assert 'id="taskSnapshot"' in index_html
+    assert index_html.index('id="scanSection"') < index_html.index('id="notebookSection"')
+    assert index_html.index('id="notebookSection"') < index_html.index('id="metricSection"')
+    assert index_html.index('id="metricSection"') < index_html.index('id="progressRail"')
+    assert 'class="progress-panel task-snapshot-panel"' not in index_html
+    assert "<h3>当前任务</h3>" not in index_html
+    assert "<h3>Word 输出</h3>" not in index_html
+    assert 'id="wordDocumentEditor"' not in index_html
+    assert "<h3>操作</h3>" not in index_html
+    assert "按步骤执行，也会显示 Notebook 标题进度。" not in index_html
+    assert 'id="scanTaskButton"' not in index_html
+    assert 'id="runNotebookButton"' not in index_html
+    assert 'id="generateReportButton"' not in index_html
+    assert "原始扫描结果" not in index_html
+    assert 'id="scanResult"' not in index_html
+    assert 'class="raw-details"' not in index_html
+    assert ".raw-details" not in styles_css
+    assert ".raw-json" not in styles_css
+    assert ".supporting-evidence {\n  display: none;" not in styles_css
+    assert "#reportSection[aria-hidden=\"true\"]" in styles_css
+    assert "#reportSection {\n  display: none;" not in styles_css
+
+
+def test_report_editor_form_and_summary_are_removed_from_frontend():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    removed_fragments = [
+        'id="reportSummary"',
+        'id="wordReportTitle"',
+        'id="reportFieldsForm"',
+        "fields-form",
+        "word-field-group",
+        "data-report-key",
+        "setReportEditorLocked",
+        "renderWordDocument",
+        "renderReportFields",
+        "saveReportFields",
+        "showReportFieldsLoading",
+        "还没生成 Word 报告",
+        "保存内容后在右侧步骤中点击",
+        "Word 内容有未保存修改",
+    ]
+    combined = "\n".join([index_html, app_js, styles_css])
+    for fragment in removed_fragments:
+        assert fragment not in combined
+
+
+def test_sidebar_empty_state_is_compact():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    empty_start = styles_css.index(".empty-state {\n  padding")
+    empty_end = styles_css.index("}", empty_start)
+    empty_rule = styles_css[empty_start:empty_end]
+    assert "padding: 9px 12px" in empty_rule
+    assert '<div class="empty-state">暂无任务</div>' in app_js
+    assert "暂无任务。先创建一个验证任务。" not in app_js
+
+    task_empty_start = styles_css.index(".task-list > .empty-state {")
+    task_empty_end = styles_css.index("}", task_empty_start)
+    task_empty_rule = styles_css[task_empty_start:task_empty_end]
+    assert "border: 0" in task_empty_rule
+    assert "background: transparent" in task_empty_rule
+    assert "text-align: center" in task_empty_rule
+
+
+def test_shell_has_collapsible_codex_style_sidebar():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    assert root_vars["--collapsed-entry-size"] == "44px"
+    assert root_vars["--collapsed-entry-gutter"] == "16px"
+    assert root_vars["--collapsed-popover-left"] == (
+        "calc(var(--collapsed-entry-gutter) + var(--collapsed-entry-size) + 10px)"
+    )
+
+    assert 'id="sidebarCollapseButton"' in index_html
+    assert 'id="sidebarBrandTrigger"' in index_html
+    assert 'aria-label="收起侧栏"' in index_html
+    assert "toggleSidebarCollapsed" in app_js
+    assert "expandSidebarFromBrand" in app_js
+    assert "handleSidebarBrandKeydown" in app_js
+    assert "restoreSidebarCollapsed" in app_js
+    assert 'localStorage.setItem("sidebarCollapsed"' in app_js
+    assert ".app-shell.sidebar-collapsed" in styles_css
+    assert "--sidebar-width: 314px" in styles_css
+    assert "--sidebar-width: 0px" in styles_css
+    assert ".app-shell.sidebar-collapsed .brand-logo h1" in styles_css
+    assert "task-row-short" not in app_js
+    assert ".app-shell.sidebar-collapsed .task-row-short" not in styles_css
+    assert 'class="collapse-panel"' in index_html
+    assert 'class="collapse-divider"' in index_html
+    assert 'class="collapse-chevron"' in index_html
+    collapse_start = styles_css.index(".sidebar-collapse-button {")
+    collapse_end = styles_css.index("}", collapse_start)
+    collapse_rule = styles_css[collapse_start:collapse_end]
+    assert "top: 23px" in collapse_rule
+    assert "width: var(--sidebar-control-size)" in collapse_rule
+    assert "height: var(--sidebar-control-size)" in collapse_rule
+    assert "border: 0" in collapse_rule
+    assert "background: transparent" in collapse_rule
+    assert "box-shadow:" not in collapse_rule
+    collapsed_sidebar_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .task-sidebar")
+    assert "position: fixed" in collapsed_sidebar_rule
+    assert "width: var(--collapsed-hit-area-width)" in collapsed_sidebar_rule
+    assert "border-right: 0" in collapsed_sidebar_rule
+    assert "background: transparent" in collapsed_sidebar_rule
+    assert "pointer-events: none" in collapsed_sidebar_rule
+
+    sidebar_start = styles_css.index(".task-sidebar {\n  display: flex")
+    sidebar_end = styles_css.index("}", sidebar_start)
+    sidebar_rule = styles_css[sidebar_start:sidebar_end]
+    assert "grid-column: 1" in sidebar_rule
+    workspace_rule = _css_rule(styles_css, ".validation-workspace")
+    assert "grid-column: 2" in workspace_rule
+
+    collapsed_head_start = styles_css.index(".app-shell.sidebar-collapsed .sidebar-head")
+    collapsed_head_end = styles_css.index("}", collapsed_head_start)
+    collapsed_head_rule = styles_css[collapsed_head_start:collapsed_head_end]
+    assert "position: fixed" in collapsed_head_rule
+    assert "top: 18px" in collapsed_head_rule
+    assert "left: var(--collapsed-entry-gutter)" in collapsed_head_rule
+    assert "width: var(--collapsed-entry-size)" in collapsed_head_rule
+    assert "padding: 0" in collapsed_head_rule
+    assert ".app-shell.sidebar-collapsed .brand-mark" in styles_css
+    collapsed_logo_start = styles_css.index(".app-shell.sidebar-collapsed .brand-mark")
+    collapsed_logo_end = styles_css.index("}", collapsed_logo_start)
+    collapsed_logo_rule = styles_css[collapsed_logo_start:collapsed_logo_end]
+    assert "width: var(--collapsed-entry-size)" in collapsed_logo_rule
+    assert "height: var(--collapsed-entry-size)" in collapsed_logo_rule
+
+    collapsed_brand_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo")
+    assert "cursor: pointer" in collapsed_brand_rule
+    assert "pointer-events: auto" in collapsed_brand_rule
+    assert "border-radius: 14px" in collapsed_brand_rule
+    collapsed_brand_hover_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo:hover")
+    assert "background: transparent" in collapsed_brand_hover_rule
+    assert "box-shadow: none" in collapsed_brand_hover_rule
+    assert "transform:" not in collapsed_brand_hover_rule
+
+    collapsed_mark_hover_start = styles_css.index(
+        ".app-shell.sidebar-collapsed .brand-logo:hover .brand-mark,"
+    )
+    collapsed_mark_hover_end = styles_css.index("}", collapsed_mark_hover_start)
+    collapsed_mark_hover_rule = styles_css[collapsed_mark_hover_start:collapsed_mark_hover_end]
+    assert ".app-shell.sidebar-collapsed .brand-logo:focus-visible .brand-mark" in collapsed_mark_hover_rule
+    assert "opacity: 0" in collapsed_mark_hover_rule
+    assert "transform: scale(0.88)" in collapsed_mark_hover_rule
+
+    collapsed_button_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .sidebar-collapse-button")
+    assert "position: fixed" in collapsed_button_rule
+    assert "top: 18px" in collapsed_button_rule
+    assert "left: var(--collapsed-entry-gutter)" in collapsed_button_rule
+    assert "width: var(--collapsed-entry-size)" in collapsed_button_rule
+    assert "height: var(--collapsed-entry-size)" in collapsed_button_rule
+    assert "color: var(--text)" in collapsed_button_rule
+    assert "opacity: 0" in collapsed_button_rule
+    assert "pointer-events: none" in collapsed_button_rule
+
+    collapsed_button_reveal_start = styles_css.index(
+        ".app-shell.sidebar-collapsed:has(.brand-logo:hover) .sidebar-collapse-button,"
+    )
+    collapsed_button_reveal_end = styles_css.index("}", collapsed_button_reveal_start)
+    collapsed_button_reveal_rule = styles_css[collapsed_button_reveal_start:collapsed_button_reveal_end]
+    assert ".app-shell.sidebar-collapsed:has(.brand-logo:focus-visible) .sidebar-collapse-button" in (
+        collapsed_button_reveal_rule
+    )
+    assert "opacity: 1" in collapsed_button_reveal_rule
+    assert "background: var(--option-hover)" in collapsed_button_reveal_rule
+    assert "box-shadow: none" in collapsed_button_reveal_rule
+    assert ".app-shell.sidebar-collapsed .brand-logo::before" not in styles_css
+
+    collapsed_hidden_rule = _css_rule(
+        styles_css,
+        ".app-shell.sidebar-collapsed .list-toolbar,\n.app-shell.sidebar-collapsed .task-list",
+    )
+    assert "display: none" in collapsed_hidden_rule
+
+
+def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
+    assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
+    assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-neutral-fill" not in index_html
+    assert "static/styles.css?v=20260603-task-validator-icon" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-border" not in index_html
+    assert "static/styles.css?v=20260603-scan-env-add-style" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-buttons" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-glow" not in index_html
+
+    brand_token_rule = _css_rule(styles_css, ":root")
+    assert "--sidebar-control-size: 34px" in brand_token_rule
+    assert "--sidebar-control-icon-size: 17px" in brand_token_rule
+    assert "--brand-icon-color: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
+    assert "--brand-icon-hover-bg:" not in brand_token_rule
+    assert "--brand-icon-ring: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
+
+    collapse_rule = _css_rule(styles_css, ".sidebar-collapse-button")
+    assert "width: var(--sidebar-control-size)" in collapse_rule
+    assert "height: var(--sidebar-control-size)" in collapse_rule
+    assert "color: var(--text)" in collapse_rule
+
+    search_toggle_start = styles_css.index("\n.list-search-toggle {")
+    search_toggle_end = styles_css.index("}", search_toggle_start)
+    search_toggle_rule = styles_css[search_toggle_start:search_toggle_end]
+    assert "width: var(--sidebar-control-size)" in search_toggle_rule
+    assert "height: var(--sidebar-control-size)" in search_toggle_rule
+    assert "color: var(--text)" in search_toggle_rule
+
+    settings_summary_start = styles_css.index("\n.sidebar-settings summary {")
+    settings_summary_end = styles_css.index("}", settings_summary_start)
+    settings_summary_rule = styles_css[settings_summary_start:settings_summary_end]
+    assert "min-height: var(--sidebar-control-size)" in settings_summary_rule
+    assert "color: var(--text)" in settings_summary_rule
+
+    shared_icon_rule_start = styles_css.index(".nav-action svg,")
+    shared_icon_rule_end = styles_css.index("}", shared_icon_rule_start)
+    shared_icon_rule = styles_css[shared_icon_rule_start:shared_icon_rule_end]
+    for selector in [
+        ".sidebar-collapse-button svg",
+        ".list-search-toggle svg",
+        ".sidebar-settings summary svg",
+    ]:
+        assert selector in shared_icon_rule
+    assert "width: var(--sidebar-control-icon-size)" in shared_icon_rule
+    assert "height: var(--sidebar-control-icon-size)" in shared_icon_rule
+    assert "18px" not in shared_icon_rule
+
+    collapse_hover_start = styles_css.index(
+        ".sidebar-collapse-button:hover,\n.sidebar-collapse-button:focus-visible {"
+    )
+    collapse_hover_end = styles_css.index("}", collapse_hover_start)
+    collapse_hover_rule = styles_css[collapse_hover_start:collapse_hover_end]
+    assert "color: var(--text)" in collapse_hover_rule
+    assert "background: var(--option-hover)" in collapse_hover_rule
+    assert "var(--brand-icon-hover-bg)" not in collapse_hover_rule
+    assert "var(--brand-icon-ring)" not in collapse_hover_rule
+    assert "var(--accent" not in collapse_hover_rule
+
+    search_input_rule = _css_rule(styles_css, "body.search-active .task-search input")
+    assert "border-color: var(--brand-primary)" in search_input_rule
+    assert "box-shadow: 0 0 0 3px var(--brand-icon-ring)" in search_input_rule
+    assert "var(--accent" not in search_input_rule
+
+    search_close_hover_start = styles_css.index(
+        ".task-search-close:hover,\n.task-search-close:focus-visible {"
+    )
+    search_close_hover_end = styles_css.index("}", search_close_hover_start)
+    search_close_hover_rule = styles_css[search_close_hover_start:search_close_hover_end]
+    assert "color: var(--brand-icon-color)" in search_close_hover_rule
+    assert "background: var(--option-hover)" in search_close_hover_rule
+    assert "var(--brand-icon-hover-bg)" not in search_close_hover_rule
+    assert "var(--brand-icon-ring)" not in search_close_hover_rule
+    assert "var(--accent" not in search_close_hover_rule
+
+    search_toggle_hover_start = styles_css.index(
+        ".list-search-toggle:hover,\n.list-search-toggle:focus-visible {"
+    )
+    search_toggle_hover_end = styles_css.index("}", search_toggle_hover_start)
+    search_toggle_hover_rule = styles_css[search_toggle_hover_start:search_toggle_hover_end]
+    assert "color: var(--text)" in search_toggle_hover_rule
+    assert "background: var(--option-hover)" in search_toggle_hover_rule
+    assert "var(--brand-icon-hover-bg)" not in search_toggle_hover_rule
+    assert "var(--brand-icon-ring)" not in search_toggle_hover_rule
+    assert "var(--accent" not in search_toggle_hover_rule
+
+    search_toggle_active_rule = _css_rule(styles_css, "body.search-active .list-search-toggle")
+    assert "color: var(--text)" in search_toggle_active_rule
+    assert "background: var(--option-hover)" in search_toggle_active_rule
+    assert "var(--brand-icon-hover-bg)" not in search_toggle_active_rule
+    assert "var(--brand-icon-ring)" not in search_toggle_active_rule
+    assert "var(--accent" not in search_toggle_active_rule
+
+    collapsed_search_toggle_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .list-search-toggle")
+    assert "width: var(--collapsed-entry-size)" in collapsed_search_toggle_rule
+    assert "height: var(--collapsed-entry-size)" in collapsed_search_toggle_rule
+    assert "margin: 0 auto" in collapsed_search_toggle_rule
+
+
+def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_search_button():
+    styles_css = _read_static("styles.css")
+
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    assert root_vars["--collapsed-search-top"] == "92px"
+
+    scrim_rule = _css_rule(styles_css, ".search-scrim")
+    assert "z-index: 50" in scrim_rule
+    assert "backdrop-filter: var(--scrim-blur)" in scrim_rule
+
+    active_sidebar_selector = "body.search-active .app-shell.sidebar-collapsed .task-sidebar"
+    assert f"{active_sidebar_selector} {{" in styles_css
+    active_sidebar_rule = _css_rule(styles_css, active_sidebar_selector)
+    assert "z-index: 70" in active_sidebar_rule
+
+    flyout_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-list-wrap")
+    assert "top: calc(var(--collapsed-search-top) - 10px)" in flyout_rule
+    assert "top: 58px" not in flyout_rule
+    assert "z-index: 60" in flyout_rule
+    assert "pointer-events: auto" in flyout_rule
+
+    collapsed_search_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-search")
+    assert "width: 100%" in collapsed_search_rule
+    assert "opacity: 1" in collapsed_search_rule
+    assert "transition: none" in collapsed_search_rule
+
+
+def test_sidebar_brand_title_stays_on_one_line():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    sidebar_head_start = styles_css.index(".sidebar-head {")
+    sidebar_head_end = styles_css.index("}", sidebar_head_start)
+    sidebar_head_rule = styles_css[sidebar_head_start:sidebar_head_end]
+    assert "padding: 18px 10px 14px 16px" in sidebar_head_rule
+
+    logo_start = styles_css.index(".brand-logo {")
+    logo_end = styles_css.index("}", logo_start)
+    logo_rule = styles_css[logo_start:logo_end]
+    assert "display: grid" in logo_rule
+    assert "grid-template-columns:" in logo_rule
+    assert "minmax(0, 1fr)" in logo_rule
+    assert "inline-size: 100%" in logo_rule
+    assert "container-type: inline-size" in logo_rule
+
+    brand_start = styles_css.index(".brand-logo h1 {")
+    brand_end = styles_css.index("}", brand_start)
+    brand_rule = styles_css[brand_start:brand_end]
+    assert "inline-size: 100%" in brand_rule
+    assert "font-size: clamp(16px, 7cqi, 22px)" in brand_rule
+    assert "cqi" in brand_rule
+    assert "vw" not in brand_rule
+    assert "white-space: nowrap" in brand_rule
+    assert "overflow-wrap: normal" in brand_rule
+    assert "word-break: keep-all" in brand_rule
+    assert "text-overflow" not in brand_rule
+    assert "letter-spacing: 0" in brand_rule
+
+    assert "const SIDEBAR_WIDTH_MIN = 314;" in app_js
+    assert "const SIDEBAR_WIDTH_MAX = 520;" in app_js
+    assert "clamp(stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
+    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
+    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
+    assert "grid-template-columns: min(var(--sidebar-width), 314px) minmax(0, 1fr)" in styles_css
+
+
+def test_sidebar_footer_and_create_action_match_brand_treatment():
+    styles_css = _read_static("styles.css")
+
+    footer_start = styles_css.index(".sidebar-footer {")
+    footer_end = styles_css.index("}", footer_start)
+    footer_rule = styles_css[footer_start:footer_end]
+    assert "border-top" not in footer_rule
+
+    create_start = styles_css.index(".nav-action {")
+    create_end = styles_css.index("}", create_start)
+    create_rule = styles_css[create_start:create_end]
+    assert "color: #ffffff" in create_rule
+    assert "background: var(--brand-primary)" in create_rule
+    assert "border: 1px solid var(--brand-primary)" in create_rule
+    assert "justify-content: center" in create_rule
+
+
+def test_empty_workspace_copy_is_shorter_and_direct():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert "验证任务" in index_html
+    assert "选择或创建验证任务" not in index_html
+    assert "选择或创建验证任务" not in app_js
+    assert "创建任务或从左侧选择已有任务" in index_html
+    assert "先创建任务或从左侧选择已有任务" not in index_html
+    assert "核心任务信息" in index_html
+    assert "选择任务后显示核心任务信息" not in index_html
+    assert "核心任务信息" in app_js
+    assert "选择任务后显示核心任务信息" not in app_js
+    assert '选择任务后点击\\"扫描材料\\"开始' in app_js
+    assert '还没扫描材料。选择任务后点击\\"扫描材料\\"开始。' not in app_js
+
+
+def test_selected_task_header_omits_local_validation_subtitle():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    current_start = app_js.index("function renderCurrentTask")
+    current_end = app_js.index("function workflowStepStatus", current_start)
+    current_renderer = app_js[current_start:current_end]
+    selected_branch = current_renderer[current_renderer.index("title.textContent = taskDisplayName") :]
+
+    assert "本地验证任务" not in current_renderer
+    assert 'subtitle.textContent = "";' in selected_branch
+    assert ".workspace-subtitle:empty" in styles_css
+    assert "display: none" in styles_css[
+        styles_css.index(".workspace-subtitle:empty") : styles_css.index("}", styles_css.index(".workspace-subtitle:empty"))
+    ]
+
+
+def test_unselected_workspace_shows_centered_welcome_only():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="workspaceWelcome"' in index_html
+    assert 'id="workspaceBrandLogo"' in index_html
+    assert 'class="workspace-brand-logo"' in index_html
+    assert 'id="workspaceGreetingTitle"' in index_html
+    assert 'id="workspaceGreetingText"' in index_html
+    assert 'id="workspaceGreetingCursor"' not in index_html
+    assert 'class="workspace-greeting-cursor"' not in index_html
+    assert 'class="workspace-greeting-nowrap"' in index_html
+    assert "早上好，开启活力一天" in index_html
+    assert "我来帮您完成信贷风控工作" in index_html
+    assert "我来帮您完成模型验证工作" not in index_html
+    assert "欢迎，我来帮您完成信贷风控工作" not in index_html
+    assert "创建任务或从左侧选择已有任务" in index_html
+    assert "validationWorkspace" in app_js
+    assert 'classList.toggle("is-empty", !selectedTask)' in app_js
+    assert 'class="validation-workspace region is-empty"' in index_html
+
+    assert ".workspace-welcome" in styles_css
+    assert ".workspace-brand-logo" in styles_css
+    assert ".workspace-greeting-nowrap" in styles_css
+    assert "white-space: nowrap" in styles_css
+    assert ".workspace-greeting-cursor" not in styles_css
+    assert "workspace-greeting-cursor-blink" not in styles_css
+    title_start = styles_css.index(".workspace-welcome h2 {")
+    title_end = styles_css.index("}", title_start)
+    title_rule = styles_css[title_start:title_end]
+    assert "white-space: nowrap" in title_rule
+    assert "max-width: none" in title_rule
+    assert "word-break: keep-all" in title_rule
+    logo_start = styles_css.index(".workspace-brand-logo {")
+    logo_end = styles_css.index("}", logo_start)
+    logo_rule = styles_css[logo_start:logo_end]
+    assert "width: 128px" in logo_rule
+    assert "height: 128px" in logo_rule
+    assert "object-fit: contain" in logo_rule
+    assert "margin: 0 0 28px" in logo_rule
+    assert "display: none" in styles_css
+    assert ".validation-workspace.is-empty .workspace-welcome" in styles_css
+    assert "display: grid" in styles_css
+    assert ".validation-workspace.is-empty .workspace-head" in styles_css
+    assert ".validation-workspace.is-empty .workspace-body" in styles_css
+
+
+def test_empty_workspace_greeting_changes_by_local_time():
+    app_js = _read_static("app.js")
+
+    assert "function workspaceGreetingForHour(hour)" in app_js
+    assert "function updateWorkspaceGreeting(now = new Date())" in app_js
+    assert "workspaceGreetingForHour(now.getHours())" in app_js
+    assert "$(\"workspaceGreetingText\").textContent = greeting" in app_js
+    assert "${greeting}，我来帮您完成信贷风控工作" not in app_js
+    assert "我来帮您完成模型验证工作" not in app_js
+    assert "updateWorkspaceGreeting();" in app_js
+
+    assert "早上好，开启活力一天" in app_js
+    assert "上午好，记得多补充水份" in app_js
+    assert "下午好，记得起来活动一下" in app_js
+    assert "晚上好，工作辛苦了" in app_js
+
+    greeting_start = app_js.index("function workspaceGreetingForHour(hour)")
+    greeting_end = app_js.index("function updateWorkspaceGreeting", greeting_start)
+    greeting_logic = app_js[greeting_start:greeting_end]
+    assert "hour >= 5 && hour < 9" in greeting_logic
+    assert "hour >= 9 && hour < 12" in greeting_logic
+    assert "hour >= 12 && hour < 18" in greeting_logic
+    assert "return \"晚上好，工作辛苦了\"" in greeting_logic
+
+
+def test_task_selection_can_be_toggled_off_and_refresh_does_not_auto_select():
+    app_js = _read_static("app.js")
+
+    sync_start = app_js.index("function syncSelectedTaskFromCache")
+    sync_end = app_js.index("function runModeLabel", sync_start)
+    sync_renderer = app_js[sync_start:sync_end]
+    assert "taskCache[0]" not in sync_renderer
+
+    select_start = app_js.index("function selectTask")
+    select_end = app_js.index("function renderMetricPreview", select_start)
+    select_renderer = app_js[select_start:select_end]
+    assert "if (selectedTaskId === task.id)" in select_renderer
+    assert "deselectCurrentTask()" in select_renderer
+    assert "renderMetricPreview({});" in select_renderer
+    assert "function deselectCurrentTask" in app_js
+
+
+def test_workspace_cards_float_on_one_background_with_top_step_rail():
+    styles_css = _read_static("styles.css")
+
+    assert ".validation-workspace {" in styles_css
+    assert "--workspace-main-gutter: 99px" in styles_css
+    assert "--workspace-rail-gap: 99px" in styles_css
+    assert "--progress-width: 314px" in styles_css
+    assert "grid-template-columns: minmax(0, 1fr) var(--workspace-rail-gap) var(--progress-width)" in styles_css
+    assert "grid-template-columns: minmax(340px, 1fr) var(--workspace-rail-gap) min(var(--progress-width), 340px)" in styles_css
+    workspace_start = styles_css.index(".validation-workspace {")
+    workspace_end = styles_css.index("}", workspace_start)
+    workspace_rule = styles_css[workspace_start:workspace_end]
+    assert "background: var(--surface)" in workspace_rule
+    assert ".workspace-body {" in styles_css
+    assert "display: contents" in styles_css
+    assert ".progress-rail {" in styles_css
+    rail_start = styles_css.index(".progress-rail {")
+    rail_end = styles_css.index("}", rail_start)
+    rail_rule = styles_css[rail_start:rail_end]
+    assert "align-self: start" in rail_rule
+    assert "height: auto" in rail_rule
+    assert "gap: 0" in rail_rule
+    assert "max-height: calc(100dvh - 28px)" in rail_rule
+    assert "min-width: 300px" in rail_rule
+    assert "margin: 14px 14px 14px 0" in rail_rule
+    assert ".progress-panel {" in styles_css
+    assert "--shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035)" in styles_css
+    assert ".result-scroll-content > .progress-panel" in styles_css
+    assert "flex: 0 0 auto" in styles_css
+
+
+def test_right_resize_handle_sits_on_step_rail_left_edge():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="rightResizeHandle"' in index_html
+    assert 'class="resize-handle resize-handle-right"' in index_html
+
+    handle_start = styles_css.index(".resize-handle-right {")
+    handle_end = styles_css.index("}", handle_start)
+    handle_rule = styles_css[handle_start:handle_end]
+    assert "grid-column: 3;" in handle_rule
+    assert "justify-self: start;" in handle_rule
+    assert "margin-left: -6px;" in handle_rule
+    assert "z-index: 2;" in handle_rule
+    assert "grid-column: 2;" not in handle_rule
+
+    handle_base_start = styles_css.index(".resize-handle {")
+    handle_base_end = styles_css.index("}", handle_base_start)
+    handle_base_rule = styles_css[handle_base_start:handle_base_end]
+    assert "width: 12px;" in handle_base_rule
+    assert "min-width: 12px;" in handle_base_rule
+
+    handle_line_start = styles_css.index(".resize-handle::after {")
+    handle_line_end = styles_css.index("}", handle_line_start)
+    handle_line_rule = styles_css[handle_line_start:handle_line_end]
+    assert "left: 5px;" in handle_line_rule
+
+
+def test_middle_result_sections_are_unframed():
+    styles_css = _read_static("styles.css")
+
+    start = styles_css.index(".result-scroll-content > .progress-panel {")
+    end = styles_css.index("}", start)
+    rule = styles_css[start:end]
+    assert "border: 0" in rule
+    assert "border-radius: 0" in rule
+    assert "background: transparent" in rule
+    assert "box-shadow: none" in rule
+    assert "padding: 0" in rule
+
+    assert ".result-scroll-content > .progress-panel > .result-summary" in styles_css
+    summary_start = styles_css.index(".result-scroll-content > .progress-panel > .result-summary")
+    summary_end = styles_css.index("}", summary_start)
+    summary_rule = styles_css[summary_start:summary_end]
+    assert "border: 0" in summary_rule
+    assert "border-radius: 0" in summary_rule
+    assert "background: transparent" in summary_rule
+    assert "box-shadow: none" in summary_rule
+    assert "padding: 0" in summary_rule
+
+
+def test_right_step_rail_uses_subtle_shadow():
+    styles_css = _read_static("styles.css")
+
+    rail_start = styles_css.index(".progress-rail {")
+    rail_end = styles_css.index("}", rail_start)
+    rail_rule = styles_css[rail_start:rail_end]
+    assert "box-shadow: 0 3px 12px rgba(0, 0, 0, 0.045)" in rail_rule
+
+    dark_start = styles_css.index('body[data-theme="dark"] .progress-rail')
+    dark_end = styles_css.index("}", dark_start)
+    dark_rule = styles_css[dark_start:dark_end]
+    assert "box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22)" in dark_rule
+
+
+def test_dark_theme_tokens_keep_panels_and_muted_text_readable():
+    styles_css = _read_static("styles.css")
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    assert dark_vars["--bg"] == "#181818"
+    assert dark_vars["--surface"] == "#2d2d2d"
+    assert dark_vars["--surface-soft"] == "#242424"
+    assert dark_vars["--sidebar-bg"] == "#1f1f1f"
+    assert dark_vars["--sidebar-hover"] == "#313131"
+    assert dark_vars["--border"] == "#363636"
+    assert dark_vars["--border-strong"] == "#474747"
+    assert _contrast_ratio(dark_vars["--surface"], dark_vars["--bg"]) >= 1.25
+    assert _contrast_ratio(dark_vars["--surface"], dark_vars["--surface-soft"]) >= 1.12
+    assert _contrast_ratio(dark_vars["--sidebar-bg"], dark_vars["--bg"]) >= 1.07
+    assert _contrast_ratio(dark_vars["--text-muted"], dark_vars["--surface"]) >= 6.5
+    assert _contrast_ratio(dark_vars["--text-secondary"], dark_vars["--surface"]) >= 8.0
+
+
+def test_dark_theme_visible_scrollbars_match_dark_surfaces():
+    styles_css = _read_static("styles.css")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    assert root_vars["--scrollbar-track"] == root_vars["--sidebar-bg"]
+    assert root_vars["--scrollbar-thumb"] == "#b8b8bf"
+    assert root_vars["--scrollbar-thumb-hover"] == "#9f9fa7"
+    assert dark_vars["--scrollbar-track"] == dark_vars["--sidebar-bg"]
+    assert dark_vars["--scrollbar-thumb"] == "#5f5f66"
+    assert dark_vars["--scrollbar-thumb-hover"] == "#74747c"
+    assert _contrast_ratio(dark_vars["--scrollbar-thumb"], dark_vars["--scrollbar-track"]) >= 2.0
+    assert _contrast_ratio(dark_vars["--scrollbar-thumb-hover"], dark_vars["--scrollbar-track"]) >= 2.5
+
+    visible_scrollbar_start = styles_css.index(".task-list,\n.task-list-wrap,")
+    visible_scrollbar_end = styles_css.index("}", visible_scrollbar_start)
+    visible_scrollbar_rule = styles_css[visible_scrollbar_start:visible_scrollbar_end]
+    for selector in (
+        ".task-list",
+        ".task-list-wrap",
+        ".task-form",
+        ".metric-table-scroll",
+    ):
+        assert selector in visible_scrollbar_rule
+    assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in visible_scrollbar_rule
+    assert "scrollbar-width: thin" in visible_scrollbar_rule
+
+    track_start = styles_css.index(".task-list::-webkit-scrollbar-track,")
+    track_end = styles_css.index("}", track_start)
+    track_rule = styles_css[track_start:track_end]
+    assert "background: var(--scrollbar-track)" in track_rule
+
+    thumb_start = styles_css.index(".task-list::-webkit-scrollbar-thumb,")
+    thumb_end = styles_css.index("}", thumb_start)
+    thumb_rule = styles_css[thumb_start:thumb_end]
+    assert "background: var(--scrollbar-thumb)" in thumb_rule
+    assert "border: 2px solid var(--scrollbar-track)" in thumb_rule
+
+    thumb_hover_start = styles_css.index(".task-list::-webkit-scrollbar-thumb:hover,")
+    thumb_hover_end = styles_css.index("}", thumb_hover_start)
+    thumb_hover_rule = styles_css[thumb_hover_start:thumb_hover_end]
+    assert "background: var(--scrollbar-thumb-hover)" in thumb_hover_rule
+
+    hidden_result_rule = _css_rule(styles_css, ".result-scroll-content::-webkit-scrollbar")
+    assert "display: none" in hidden_result_rule
+
+
+def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    assert root_vars["--option-hover"] == "#dedee3"
+    assert root_vars["--option-selected"] == "#d4d4da"
+    assert root_vars["--option-selected-border"] == root_vars["--option-selected"]
+    assert dark_vars["--option-hover"] == "#46464a"
+    assert dark_vars["--option-selected"] == "#525258"
+    assert dark_vars["--option-selected-border"] == dark_vars["--option-selected"]
+
+    assert _contrast_ratio(root_vars["--option-hover"], root_vars["--surface"]) >= 1.28
+    assert _contrast_ratio(root_vars["--option-selected"], root_vars["--surface"]) >= 1.42
+    assert _contrast_ratio(dark_vars["--option-hover"], dark_vars["--surface"]) >= 1.45
+    assert _contrast_ratio(dark_vars["--option-selected"], dark_vars["--surface"]) >= 1.75
+
+    for tokens in (root_vars, dark_vars):
+        assert _contrast_ratio(tokens["--text"], tokens["--option-selected"]) >= 4.5
+        assert _contrast_ratio(tokens["--text-secondary"], tokens["--option-selected"]) >= 4.5
+
+    settings_summary_start = styles_css.index(".sidebar-settings summary:hover,")
+    settings_summary_end = styles_css.index("}", settings_summary_start)
+    settings_summary_rule = styles_css[settings_summary_start:settings_summary_end]
+    assert "color: var(--text)" in settings_summary_rule
+    assert "background: var(--option-hover)" in settings_summary_rule
+    assert "var(--accent" not in settings_summary_rule
+
+    settings_hover_start = styles_css.index(".settings-environment-button:hover,")
+    settings_hover_end = styles_css.index("}", settings_hover_start)
+    settings_hover_rule = styles_css[settings_hover_start:settings_hover_end]
+    assert ".settings-select:focus-visible" in settings_hover_rule
+    assert "border-color: var(--option-hover)" in settings_hover_rule
+    assert "background: var(--option-hover)" in settings_hover_rule
+    assert "outline:" not in settings_hover_rule
+    assert "#b9d7fb" not in settings_hover_rule
+    assert "#f1f7ff" not in settings_hover_rule
+    assert (
+        "\n\n.settings-environment-button:focus-visible,\n.settings-select:focus-visible {\n  outline:"
+        not in styles_css
+    )
+
+    model_card_hover_start = styles_css.index(".llm-engine-item:hover,")
+    model_card_hover_end = styles_css.index("}", model_card_hover_start)
+    model_card_hover_rule = styles_css[model_card_hover_start:model_card_hover_end]
+    assert ".llm-engine-item:focus-visible" in model_card_hover_rule
+    assert "border-color: var(--option-hover)" in model_card_hover_rule
+    assert "background: var(--option-hover)" in model_card_hover_rule
+    assert "var(--accent" not in model_card_hover_rule
+    model_card_focus_start = styles_css.index("\n.llm-engine-item:focus-visible {", model_card_hover_end)
+    model_card_focus_end = styles_css.index("}", model_card_focus_start)
+    model_card_focus_rule = styles_css[model_card_focus_start:model_card_focus_end]
+    assert "outline: 3px solid var(--option-focus-ring)" in model_card_focus_rule
+    assert "outline: none" not in model_card_focus_rule
+
+    task_hover_start = styles_css.index(".task-row:hover,")
+    task_hover_end = styles_css.index("}", task_hover_start)
+    task_hover_rule = styles_css[task_hover_start:task_hover_end]
+    assert ".task-row-shell:hover .task-row" in task_hover_rule
+    assert "border-color: var(--option-hover)" in task_hover_rule
+    assert "background: var(--option-hover)" in task_hover_rule
+    assert "#9fbfe4" not in task_hover_rule
+    assert "#fbfdff" not in task_hover_rule
+
+    task_selected_rule = _css_rule(styles_css, ".task-row.selected")
+    assert "border-color: var(--option-selected)" in task_selected_rule
+    assert "background: var(--option-selected)" in task_selected_rule
+    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" in task_selected_rule
+    assert "var(--accent" not in task_selected_rule
+    assert "#f8fbff" not in task_selected_rule
+
+    assert ".app-shell.sidebar-collapsed .task-row-short" not in styles_css
+
+    assert "#182a3f" not in styles_css
+    assert "#345b8a" not in styles_css
+    assert "#172032" not in styles_css
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
+    assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
+    assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-neutral-fill" not in index_html
+    assert "static/styles.css?v=20260603-task-validator-icon" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-border" not in index_html
+    assert "static/styles.css?v=20260603-scan-env-add-style" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-buttons" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-glow" not in index_html
+    assert "static/styles.css?v=20260603-dark-scrollbar" not in index_html
+    assert "static/styles.css?v=20260603-task-options" not in index_html
+    assert "static/styles.css?v=20260603-neutral-options" not in index_html
+    assert "static/styles.css?v=20260603-brand-buttons" not in index_html
+
+
+def test_dark_theme_shell_columns_follow_reference_tones():
+    styles_css = _read_static("styles.css")
+
+    workspace_rule = _css_rule(styles_css, 'body[data-theme="dark"] .validation-workspace')
+    assert "background: var(--bg)" in workspace_rule
+
+    rail_rule = _css_rule(styles_css, 'body[data-theme="dark"] .progress-rail')
+    assert "background: var(--surface)" in rail_rule
+    assert "border-color: var(--border)" in rail_rule
+
+
+def test_dark_workspace_masks_match_center_background():
+    styles_css = _read_static("styles.css")
+
+    workspace_rule = _css_rule(styles_css, 'body[data-theme="dark"] .validation-workspace')
+    assert "--workspace-mask-bg: var(--bg)" in workspace_rule
+
+    head_rule = _css_rule(styles_css, ".workspace-head")
+    assert "var(--workspace-mask-bg, var(--surface)) 16.5px" in head_rule
+    assert "transparent 16px, var(--surface) 16.5px" not in head_rule
+
+    composer_mask_rule = _css_rule(styles_css, ".agent-composer::before")
+    assert "var(--workspace-mask-bg, var(--surface)) 24.5px" in composer_mask_rule
+    assert "transparent 24px, var(--surface) 24.5px" not in composer_mask_rule
+
+
+def test_primary_step_action_hover_keeps_button_text_readable():
+    styles_css = _read_static("styles.css")
+
+    assert ".button.primary:hover:not(:disabled)" in styles_css
+    hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
+    hover_end = styles_css.index("}", hover_start)
+    hover_rule = styles_css[hover_start:hover_end]
+    assert "color: #ffffff" in hover_rule
+    assert "background: #005ecb" in hover_rule
+    assert "border-color: #005ecb" in hover_rule
+
+
+def test_brand_primary_token_drives_create_environment_and_model_buttons():
+    styles_css = _read_static("styles.css")
+
+    create_start = styles_css.index("#createTaskButton.button.primary,")
+    create_end = styles_css.index("}", create_start)
+    solid_brand_rule = styles_css[create_start:create_end]
+    for selector in [
+        "#createTaskButton.button.primary",
+        "#saveExecutionEnvironmentButton.button.primary",
+        "#saveLLMEngineEditButton.button.primary",
+    ]:
+        assert selector in solid_brand_rule
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary" not in solid_brand_rule
+    assert "background: var(--brand-primary)" in solid_brand_rule
+    assert "border-color: var(--brand-primary)" in solid_brand_rule
+
+    solid_hover_start = styles_css.index(
+        "#createTaskButton.button.primary:hover:not(:disabled),"
+    )
+    solid_hover_end = styles_css.index("}", solid_hover_start)
+    solid_hover_rule = styles_css[solid_hover_start:solid_hover_end]
+    for selector in [
+        "#saveExecutionEnvironmentButton.button.primary:hover:not(:disabled)",
+        "#saveExecutionEnvironmentButton.button.primary:focus-visible:not(:disabled)",
+        "#saveLLMEngineEditButton.button.primary:hover:not(:disabled)",
+        "#saveLLMEngineEditButton.button.primary:focus-visible:not(:disabled)",
+    ]:
+        assert selector in solid_hover_rule
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover" not in solid_hover_rule
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible" not in solid_hover_rule
+    assert "background: var(--brand-primary-hover)" in solid_hover_rule
+    assert "border-color: var(--brand-primary-hover)" in solid_hover_rule
+
+    nav_start = styles_css.index(".nav-action {")
+    nav_end = styles_css.index("}", nav_start)
+    nav_rule = styles_css[nav_start:nav_end]
+    assert "background: var(--brand-primary)" in nav_rule
+    assert "border: 1px solid var(--brand-primary)" in nav_rule
+
+    send_start = styles_css.index(".agent-send {")
+    send_end = styles_css.index("}", send_start)
+    send_rule = styles_css[send_start:send_end]
+    assert "background: var(--brand-primary)" in send_rule
+
+    llm_add_rule = _css_rule(styles_css, ".llm-engine-add")
+    assert "color: var(--brand-primary)" in llm_add_rule
+    assert "border: 1px dashed var(--brand-primary)" in llm_add_rule
+
+    llm_add_hover_rule = _css_rule(styles_css, ".llm-engine-add:hover")
+    assert "color: var(--brand-primary-hover)" in llm_add_hover_rule
+    assert "border-color: var(--brand-primary-hover)" in llm_add_hover_rule
+    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in llm_add_hover_rule
+
+    scan_environment_rule = _css_rule(styles_css, "#refreshExecutionEnvironmentOptionsButton.button.secondary")
+    assert "color: var(--brand-primary)" in scan_environment_rule
+    assert "border: 1px dashed var(--brand-primary)" in scan_environment_rule
+    assert "background: transparent" in scan_environment_rule
+
+    scan_environment_hover_start = styles_css.index(
+        "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled),"
+    )
+    scan_environment_hover_end = styles_css.index("}", scan_environment_hover_start)
+    scan_environment_hover_rule = styles_css[scan_environment_hover_start:scan_environment_hover_end]
+    assert (
+        "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)"
+        in scan_environment_hover_rule
+    )
+    assert "color: var(--brand-primary-hover)" in scan_environment_hover_rule
+    assert "border-color: var(--brand-primary-hover)" in scan_environment_hover_rule
+    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in scan_environment_hover_rule
+
+    hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
+    hover_end = styles_css.index("}", hover_start)
+    hover_rule = styles_css[hover_start:hover_end]
+    assert "background: #005ecb" in hover_rule
+    assert "border-color: #005ecb" in hover_rule
+
+
+def test_sidebar_task_card_is_two_line_compact_without_icon():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    append_start = app_js.index("function appendTaskRow")
+    append_end = app_js.index("function renderTaskSnapshot", append_start)
+    append_renderer = app_js[append_start:append_end]
+
+    assert "task-row-icon" not in append_renderer
+    assert "task-row-top" in append_renderer
+    assert "task-row-meta" in append_renderer
+    assert "task-row-validator" in append_renderer
+    assert "task-row-validator-icon" in append_renderer
+    assert "task-row-validator-text" in append_renderer
+    assert "task-row-date" in append_renderer
+    assert 'aria-label="验证人员：${validatorName}"' in append_renderer
+    assert ">验证人员：" not in append_renderer
+    assert "delete-task-button" in append_renderer
+    assert "formatDate(task.updated_at)" in append_renderer
+    assert 'const validatorName = escapeHtml(task.validator || "-");' in append_renderer
+
+    tone_start = app_js.index("function statusTone")
+    tone_end = app_js.index("function notebookReproducibilityComplete", tone_start)
+    tone_renderer = app_js[tone_start:tone_end]
+    assert 'if (status === "failed") return "danger";' in tone_renderer
+    assert 'if (status === "review_required") return "success";' in tone_renderer
+    assert 'status === "succeeded" || status === "executed"' in tone_renderer
+    assert 'status === "running" || status === "computing_metrics") return "run";' in tone_renderer
+    assert 'status === "running" || status === "computing_metrics") return "warning";' not in tone_renderer
+    assert 'status === "failed" || status === "review_required"' not in tone_renderer
+    # writing_artifacts is dual-meaning (idle vs. report-job-running) so its
+    # tone must be resolved by taskStatusTone via active_job_kind, not by the
+    # status-only statusTone fallback.
+    assert '|| status === "writing_artifacts"' not in tone_renderer
+
+    row_start = styles_css.index("\n.task-row {\n  --task-card-action-space")
+    row_end = styles_css.index("}", row_start)
+    row_rule = styles_css[row_start:row_end]
+    assert "--task-card-action-space: 36px" in row_rule
+    assert "padding: 11px 12px" in row_rule
+    assert "padding: 11px 42px" not in row_rule
+
+    top_start = styles_css.index(".task-row-top {")
+    top_end = styles_css.index("}", top_start)
+    top_rule = styles_css[top_start:top_end]
+    assert "grid-template-columns: minmax(0, 1fr) max-content" in top_rule
+    assert "padding-right: var(--task-card-action-space)" in top_rule
+
+    meta_start = styles_css.index("\n.task-row-meta {", top_end)
+    meta_end = styles_css.index("}", meta_start)
+    meta_rule = styles_css[meta_start:meta_end]
+    assert "display: grid" in meta_rule
+    assert "grid-template-columns: minmax(0, 1fr) max-content" in meta_rule
+    assert "padding-right" not in meta_rule
+
+    name_start = styles_css.index(".task-row-name {")
+    name_end = styles_css.index("}", name_start)
+    name_rule = styles_css[name_start:name_end]
+    assert "min-width: 0" in name_rule
+
+    validator_start = styles_css.index(".task-row .task-row-validator {")
+    validator_end = styles_css.index("}", validator_start)
+    validator_rule = styles_css[validator_start:validator_end]
+    assert "display: inline-flex" in validator_rule
+    assert "align-items: center" in validator_rule
+    assert "gap: 4px" in validator_rule
+    assert "text-overflow: ellipsis" in validator_rule
+    assert "white-space: nowrap" in validator_rule
+
+    validator_icon_start = styles_css.index(".task-row-validator-icon {")
+    validator_icon_end = styles_css.index("}", validator_icon_start)
+    validator_icon_rule = styles_css[validator_icon_start:validator_icon_end]
+    assert "width: 16px" in validator_icon_rule
+    assert "height: 16px" in validator_icon_rule
+    assert "width: 14px" not in validator_icon_rule
+    assert "height: 14px" not in validator_icon_rule
+    assert "stroke: currentColor" in validator_icon_rule
+    assert "flex: 0 0 auto" in validator_icon_rule
+
+    validator_text_start = styles_css.index(".task-row-validator-text {")
+    validator_text_end = styles_css.index("}", validator_text_start)
+    validator_text_rule = styles_css[validator_text_start:validator_text_end]
+    assert "overflow: hidden" in validator_text_rule
+    assert "text-overflow: ellipsis" in validator_text_rule
+    assert "white-space: nowrap" in validator_text_rule
+
+    date_start = styles_css.index(".task-row .task-row-date {")
+    date_end = styles_css.index("}", date_start)
+    date_rule = styles_css[date_start:date_end]
+    assert "white-space: nowrap" in date_rule
+
+    pill_start = styles_css.index(".task-row-top .pill {")
+    pill_end = styles_css.index("}", pill_start)
+    pill_rule = styles_css[pill_start:pill_end]
+    assert "flex: 0 0 auto" in pill_rule
+    assert "white-space: nowrap" in pill_rule
+
+    run_pill_start = styles_css.index(".pill.run {")
+    run_pill_end = styles_css.index("}", run_pill_start)
+    run_pill_rule = styles_css[run_pill_start:run_pill_end]
+    assert "color: var(--accent)" in run_pill_rule
+    assert "background: var(--accent-soft)" in run_pill_rule
+
+
+def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    head_start = index_html.index('<header class="workspace-head"')
+    head_end = index_html.index("</header>", head_start)
+    head_markup = index_html[head_start:head_end]
+    result_workspace_start = index_html.index('id="resultWorkspace"')
+    result_workspace_end = index_html.index('id="scanSection"', result_workspace_start)
+    result_workspace_markup = index_html[result_workspace_start:result_workspace_end]
+
+    snapshot_start = app_js.index("function renderTaskSnapshot")
+    snapshot_end = app_js.index("function renderTaskList", snapshot_start)
+    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+
+    # status lives in the header hero, in order: name+pill, description, meta
+    assert head_markup.index('id="actionStatus"') < head_markup.index('id="actionErrorDetail"')
+    assert head_markup.index('id="actionErrorDetail"') < head_markup.index('id="taskSnapshot"')
+    assert 'class="task-pill"' in head_markup
+    # the header is fixed outside the inner scrolling content, so it does not move
+    # during trackpad boundary bounce.
+    assert 'class="workspace-head"' in result_workspace_markup
+    assert 'class="result-scroll-content"' in result_workspace_markup
+    assert result_workspace_markup.index('class="workspace-head"') < result_workspace_markup.index('class="result-scroll-content"')
+    head_css = styles_css[styles_css.index(".workspace-head {"):styles_css.index("}", styles_css.index(".workspace-head {"))]
+    assert "position: relative" in head_css
+    # status pill + status-keyed aurora, no "当前状态" tile label
+    assert ".task-pill {" in styles_css
+    assert '.task-hero[data-tone="fail"]' in styles_css
+    assert 'content: "当前状态"' not in styles_css
+    assert ".action-error-detail {" in styles_css
+    assert ".action-error-detail.error" in styles_css
+    # meta uses monochrome icons, not colored squares
+    assert ".task-snapshot-item .meta-ico" in styles_css
+    assert ".workspace-task-meta .task-snapshot-item::before" not in styles_css
+    assert 'snapshotItem("状态"' not in snapshot_renderer
+    assert 'snapshotItem("字段来源"' not in snapshot_renderer
+    assert 'snapshotItem("显式材料"' not in snapshot_renderer
+    assert "task-meta-tile" in snapshot_renderer
+    # validator was dropped from the task-hero snapshot per user feedback;
+    # only the execution mode and source directory remain.
+    assert "验证人员" not in snapshot_renderer
+    assert "执行模式" in snapshot_renderer
+    assert "材料目录" in snapshot_renderer
+
+
+def test_header_task_meta_values_stay_on_one_line():
+    styles_css = _read_static("styles.css")
+
+    head_start = styles_css.index(".workspace-head {")
+    head_end = styles_css.index("}", head_start)
+    head_rule = styles_css[head_start:head_end]
+    assert "min-width: 0" in head_rule
+    # fixed header layer; the card keeps the frosted glass surface instead of an
+    # opaque shell.
+    assert "position: relative" in head_rule
+    assert "margin: 0" in head_rule
+    assert "padding: 0" in head_rule
+    assert "background: transparent" in head_rule
+
+    result_start = styles_css.index(".result-workspace {")
+    result_end = styles_css.index("}", result_start)
+    result_rule = styles_css[result_start:result_end]
+    assert "margin: 14px 0 14px var(--workspace-main-gutter)" in result_rule
+    assert "overflow: hidden" in result_rule
+
+    scroll_start = styles_css.index(".result-scroll-content {")
+    scroll_end = styles_css.index("}", scroll_start)
+    scroll_rule = styles_css[scroll_start:scroll_end]
+    assert "overflow-y: auto" in scroll_rule
+    assert "overscroll-behavior-y: none" in scroll_rule
+    assert "grid-row: 1 / -1" in scroll_rule
+    assert "padding-top: calc(var(--workspace-head-space) + 12px)" in scroll_rule
+
+    # meta is a single horizontal icon row, values truncate on one line
+    list_start = styles_css.index(".task-snapshot-list {")
+    list_end = styles_css.index("}", list_start)
+    list_rule = styles_css[list_start:list_end]
+    assert "display: flex" in list_rule
+    assert "min-width: 0" in list_rule
+
+    tile_start = styles_css.index(".task-snapshot-item {")
+    tile_end = styles_css.index("}", tile_start)
+    tile_rule = styles_css[tile_start:tile_end]
+    assert "display: flex" in tile_rule
+    assert "align-items: center" in tile_rule
+
+    value_start = styles_css.index(".task-snapshot-item strong {")
+    value_end = styles_css.index("}", value_start)
+    value_rule = styles_css[value_start:value_end]
+    assert "overflow: hidden" in value_rule
+    assert "text-overflow: ellipsis" in value_rule
+    assert "white-space: nowrap" in value_rule
+
+
+def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
+    app_js = _read_static("app.js")
+
+    renderer_start = app_js.index("function stepActionButtonHtml")
+    renderer_end = app_js.index("function formatDate", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "data-step-action" in renderer
+    assert "step-action-button" in renderer
+    assert "renderNotebookStepRail" in renderer
+    assert 'step.id === "notebook"' in renderer
+    assert 'insertAdjacentHTML("beforeend", renderNotebookStepRail' not in renderer
+    assert "Notebook 标题步骤" not in app_js
+    assert "分段进度" in renderer
+    assert "扫描或执行后显示 Notebook 分段进度。" not in app_js
+    assert "notebookSteps.map" in app_js
+    assert "succeeded" in renderer
+    assert "running" in renderer
+    assert "failed" in renderer
+
+    steps_start = app_js.index("const workflowSteps = [")
+    steps_end = app_js.index("];", steps_start)
+    steps_config = app_js[steps_start:steps_end]
+    assert 'title: "模型材料完备性验证"' in steps_config
+    assert 'hint: "巡检材料内容"' in steps_config
+    assert 'title: "模型可复现性验证"' in steps_config
+    assert 'hint: "执行建模代码"' in steps_config
+    assert 'title: "模型效果&稳定性验证"' in steps_config
+    assert 'hint: "指标概览"' in steps_config
+    assert 'title: "报告输出"' in steps_config
+    assert 'hint: "Word报告与Excel分析"' in steps_config
+    assert 'title: "材料识别"' not in steps_config
+    assert 'title: "执行 Notebook"' not in steps_config
+    assert 'title: "指标概览"' not in steps_config
+    assert 'title: "Word 输出"' not in steps_config
+    assert "模型验证报告自动编写" not in steps_config
+    assert "文件与 RMC 字段检查" not in steps_config
+    assert "按标题分段执行" not in steps_config
+    assert "生成指标与 Excel" not in steps_config
+    assert "填充模板并保存" not in steps_config
+
+    assert "handleWorkflowStepperClick" in app_js
+    for action_id in ["scan", "notebook", "metrics", "report"]:
+        assert action_id in renderer
+
+
+def test_step_rail_splits_notebook_and_metrics_progress_with_elapsed_time():
+    app_js = _read_static("app.js")
+
+    assert "function stepWorkflowStage" in app_js
+    assert "function stepElapsedSeconds" in app_js
+    assert "function formatStepElapsed" in app_js
+    assert "function stepAfterInLatestNotebookSteps" in app_js
+    assert "metricStepsForRail" in app_js
+    assert "notebookStepsForRail" in app_js
+    assert 'step.id === "notebook" ? renderNotebookStepRail(notebookStepsForRail(), "分段进度", index + 1, stepStatus, "notebook") : ""' in app_js
+    assert 'step.id === "metrics" ? renderNotebookStepRail(metricStepsForRail(), "计算进度", index + 1, stepStatus, "metrics") : ""' in app_js
+    assert "formatStepElapsed(step, notebookSteps[index + 1] || stepAfterInLatestNotebookSteps(step))" in app_js
+    assert "elapsed_seconds" in app_js
+    elapsed_start = app_js.index("function stepElapsedSeconds")
+    elapsed_end = app_js.index("function formatStepElapsed", elapsed_start)
+    elapsed_helper = app_js[elapsed_start:elapsed_end]
+    assert "nextStep = null" in elapsed_helper
+    assert "nextStartedAt" in elapsed_helper
+    assert 'step?.status !== "running" && Number.isFinite(step?.elapsed_seconds)' in elapsed_helper
+    assert "Date.now()" in elapsed_helper
+
+    elapsed_start = app_js.index("function formatStepElapsed")
+    elapsed_end = app_js.index("function renderNotebookStepRail", elapsed_start)
+    elapsed_formatter = app_js[elapsed_start:elapsed_end]
+    assert 'return "0s";' in elapsed_formatter
+    assert "totalSeconds === 0" in elapsed_formatter
+
+
+def test_validate_action_primes_reproducibility_system_steps_immediately():
+    app_js = _read_static("app.js")
+
+    assert "function plannedReproducibilitySteps" in app_js
+    assert "function appendPendingReproducibilitySteps" in app_js
+    assert 'id: "system-repro-pmml"' in app_js
+    assert 'title: "PMML 打分"' in app_js
+    assert 'id: "system-repro-compare"' in app_js
+    assert 'title: "分数一致性对比"' in app_js
+
+    validate_start = app_js.index("async function validateCurrentTask")
+    validate_end = app_js.index("async function cancelCurrentNotebook", validate_start)
+    validate_renderer = app_js[validate_start:validate_end]
+    assert "appendPendingReproducibilitySteps();" in validate_renderer
+    assert validate_renderer.index("renderValidationResult(result)") < validate_renderer.index(
+        "appendPendingReproducibilitySteps();"
+    )
+    assert validate_renderer.index("appendPendingReproducibilitySteps();") < validate_renderer.index(
+        "pollValidationProgress"
+    )
+
+
+def test_metrics_action_primes_metric_system_steps_immediately():
+    app_js = _read_static("app.js")
+
+    assert "function plannedMetricSteps" in app_js
+    assert "function appendPendingMetricSteps" in app_js
+    for step_id, title in [
+        ("system-metrics-prepare", "指标数据准备"),
+        ("system-metrics-score", "RMC_SCORE_FN 全量打分"),
+        ("system-metrics-basic", "样本与变量概览"),
+        ("system-metrics-ks", "KS 计算"),
+        ("system-metrics-psi", "PSI 计算"),
+        ("system-metrics-binning", "分箱计算"),
+        ("system-metrics-stress", "压力测试"),
+        ("system-metrics-output", "写入指标产物"),
+    ]:
+        assert f'id: "{step_id}"' in app_js
+        assert f'title: "{title}"' in app_js
+
+    metrics_start = app_js.index("async function generateMetrics")
+    metrics_end = app_js.index("async function generateReport", metrics_start)
+    metrics_renderer = app_js[metrics_start:metrics_end]
+    assert "appendPendingMetricSteps();" in metrics_renderer
+    assert metrics_renderer.index("appendPendingMetricSteps();") < metrics_renderer.index(
+        "pollValidationProgress"
+    )
+
+
+def test_notebook_step_progress_items_are_single_line_and_compact():
+    styles_css = _read_static("styles.css")
+
+    step_start = styles_css.index(".notebook-step {")
+    step_end = styles_css.index("}", step_start)
+    step_rule = styles_css[step_start:step_end]
+    assert "grid-template-columns: 16px auto minmax(0, 1fr) auto" in step_rule
+    assert "min-height: 28px" in step_rule
+    assert "padding: 4px 8px" in step_rule
+
+    title_start = styles_css.index(".notebook-step strong {")
+    title_end = styles_css.index("}", title_start)
+    title_rule = styles_css[title_start:title_end]
+    assert "white-space: nowrap" in title_rule
+    assert "overflow: hidden" in title_rule
+    assert "text-overflow: ellipsis" in title_rule
+    assert "overflow-wrap: normal" in title_rule
+
+    cells_start = styles_css.index(".notebook-step small {")
+    cells_end = styles_css.index("}", cells_start)
+    cells_rule = styles_css[cells_start:cells_end]
+    assert "grid-column: auto" in cells_rule
+    assert "white-space: nowrap" in cells_rule
+    assert "tabular-nums" in cells_rule
+
+
+def test_running_step_buttons_turn_into_cancel_buttons():
+    app_js = _read_static("app.js")
+    renderer_start = app_js.index("function stepStopAction")
+    renderer_end = app_js.index("function notebookStepTone", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+    handler_start = app_js.index("function workflowActionConfig")
+    handler_end = app_js.index("function scrollStepTarget", handler_start)
+    handler = app_js[handler_start:handler_end]
+
+    assert "async function cancelCurrentNotebook" in app_js
+    assert "async function cancelCurrentMetrics" in app_js
+    assert "async function cancelCurrentReport" in app_js
+    assert "async function cancelCurrentScan" not in app_js
+    assert '`api/tasks/${taskId}/notebook/cancel`' in app_js
+    assert '`api/tasks/${taskId}/metrics/cancel`' in app_js
+    assert '`api/tasks/${taskId}/report/cancel`' in app_js
+    assert 'function stepStopAction' in app_js
+    assert '"cancelNotebook"' in renderer
+    assert '"cancelMetrics"' in renderer
+    assert '"cancelReport"' in renderer
+    assert '"cancelScan"' not in renderer
+    assert 'taskServerBusyAction() === "report"' in renderer
+    assert '"停止"' in renderer
+    assert "selectedBusy && !isStopAction" in renderer
+    assert 'actionId === "cancelNotebook"' in handler
+    assert 'actionId === "cancelMetrics"' in handler
+    assert 'actionId === "cancelReport"' in handler
+    assert 'actionId === "cancelScan"' not in handler
+    assert "cancelCurrentNotebook" in handler
+    assert "cancelCurrentMetrics" in handler
+    assert "cancelCurrentReport" in handler
+
+
+def test_running_visual_tone_uses_header_status_blue():
+    styles_css = _read_static("styles.css")
+
+    header_run_start = styles_css.index(".task-pill.run")
+    header_run_end = styles_css.index("}", header_run_start)
+    header_run_rule = styles_css[header_run_start:header_run_end]
+    assert "color: var(--accent)" in header_run_rule
+    assert "background: color-mix(in srgb, var(--accent)" in header_run_rule
+
+    action_busy_start = styles_css.index(".action-status.busy")
+    action_busy_end = styles_css.index("}", action_busy_start)
+    action_busy_rule = styles_css[action_busy_start:action_busy_end]
+    assert "color: var(--accent)" in action_busy_rule
+
+    check_running_start = styles_css.index(".check-icon.running")
+    check_running_end = styles_css.index("}", check_running_start)
+    check_running_rule = styles_css[check_running_start:check_running_end]
+    assert "border-top-color: var(--accent)" in check_running_rule
+
+    step_running_start = styles_css.index(".step.running .step-number")
+    step_running_end = styles_css.index("}", step_running_start)
+    step_running_rule = styles_css[step_running_start:step_running_end]
+    assert "color: var(--accent)" in step_running_rule
+
+
+def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
+    app_js = _read_static("app.js")
+
+    assert "const taskBusyActions = new Map();" in app_js
+    assert "let isBusy" not in app_js
+    assert "let busyAction" not in app_js
+    assert "function taskBusyAction" in app_js
+    assert "function taskServerBusyAction" in app_js
+    assert "function selectedTaskIsBusy" in app_js
+    assert "active_job_kind" in app_js
+    server_busy_start = app_js.index("function taskServerBusyAction")
+    server_busy_end = app_js.index("function selectedTaskIsBusy", server_busy_start)
+    server_busy = app_js[server_busy_start:server_busy_end]
+    assert server_busy.index('kind === "agent"') < server_busy.index("taskStopped(task)")
+
+    renderer_start = app_js.index("function stepActionButtonHtml")
+    renderer_end = app_js.index("function notebookStepTone", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+    assert "const selectedBusy = selectedTaskIsBusy();" in renderer
+    assert "selectedBusy && !isStopAction" in renderer
+    assert "current task is running" not in renderer
+
+    downloads_ready_start = app_js.index("function completedReportReadyForDownloads")
+    downloads_ready_end = app_js.index("function stepDownloadActionsHtml", downloads_ready_start)
+    downloads_ready = app_js[downloads_ready_start:downloads_ready_end]
+    assert "const selectedBusyAction = taskBusyAction();" in downloads_ready
+    assert "selectedTask?.report_available === true" in downloads_ready
+
+    action_start = app_js.index("async function runAction")
+    action_end = app_js.index("function handleTaskListKeydown", action_start)
+    action_runner = app_js[action_start:action_end]
+    assert "const taskId = options.taskId || selectedTaskId;" in action_runner
+    assert 'setBusy(actionId, options.busyText || "正在处理...", taskId)' in action_runner
+    assert 'setBusy(null, "", taskId)' in action_runner
+
+
+def test_workflow_actions_are_gated_by_completed_previous_steps():
+    app_js = _read_static("app.js")
+
+    assert "function taskFailedDuringScan" in app_js
+    assert 'startsWith("材料扫描失败：")' in app_js
+    recommended_start = app_js.index("function recommendedAction")
+    recommended_end = app_js.index("function canRunStepAction", recommended_start)
+    recommended = app_js[recommended_start:recommended_end]
+    assert 'if (status === "created" || taskFailedDuringScan(selectedTask)) return "scan";' in recommended
+    assert 'if (taskFailedDuringMetrics(selectedTask)) return "metrics";' in recommended
+    assert 'if (taskFailedDuringReport(selectedTask)) return "report";' in recommended
+    assert 'if (taskFailedDuringNotebook(selectedTask)) return "notebook";' in recommended
+
+    can_run_start = app_js.index("function canRunStepAction")
+    can_run_end = app_js.index("function stepActionButtonHtml", can_run_start)
+    can_run = app_js[can_run_start:can_run_end]
+    assert 'return ["created", "scanned", "failed", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status);' in can_run
+    assert 'case "notebook":' in can_run
+    assert 'if (taskFailedDuringScan(selectedTask)) return false;' in can_run
+    assert 'return ["scanned", "configured", "executed", "writing_artifacts", "succeeded", "review_required"].includes(status)' in can_run
+    assert "|| taskFailedDuringNotebook(selectedTask);" in can_run
+    assert 'case "metrics":' in can_run
+    assert 'return status === "executed" || taskFailedDuringMetrics(selectedTask);' in can_run
+    assert 'case "report":' in can_run
+    assert 'return ["writing_artifacts", "review_required"].includes(status) || taskFailedDuringReport(selectedTask);' in can_run
+
+    renderer_start = app_js.index("function stepActionButtonHtml")
+    renderer_end = app_js.index("function notebookStepTone", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+    assert "const canRunAction = isStopAction || canRunStepAction(step.action);" in renderer
+    assert "|| !canRunAction" in renderer
+    assert "请先完成上一步" in renderer
+
+
+def test_workflow_step_status_separates_next_action_from_running_action():
+    app_js = _read_static("app.js")
+
+    status_start = app_js.index("function workflowStepStatus")
+    status_end = app_js.index("function workflowStepStatusLabel", status_start)
+    status_renderer = app_js[status_start:status_end]
+    running_start = app_js.index("function taskRunningStepId")
+    running_end = app_js.index("function workflowStepStatus", running_start)
+    running_helper = app_js[running_start:running_end]
+
+    assert "function taskRunningStepId" in app_js
+    assert 'return "notebook";' in running_helper
+    assert 'status === "executed"' in status_renderer
+    assert 'return index < 2 ? "succeeded" : "pending";' in status_renderer
+    assert 'status === "computing_metrics"' in status_renderer
+    assert 'return index < 2 ? "succeeded" : index === 2 ? "running" : "pending";' in status_renderer
+    assert 'taskServerBusyAction() === "report"' in status_renderer
+    assert 'return index < 3 ? "succeeded" : index === 3 && taskServerBusyAction() === "report" ? "running" : "pending";' in status_renderer
+    assert 'if (status === "review_required") return "succeeded";' in status_renderer
+    assert 'if (runningStepId && step.id === runningStepId) return "running";' in status_renderer
+    assert "if (index === activeIndex) return \"running\";" not in status_renderer
+
+
+def test_algorithm_selector_was_removed_from_create_dialog():
+    index_html = _read_static("index.html")
+
+    assert 'id="modelAlgorithm"' not in index_html
+    assert "模型算法" not in index_html
+
+
+def test_stage_failures_keep_completed_previous_steps_green():
+    app_js = _read_static("app.js")
+
+    status_start = app_js.index("function workflowStepStatus")
+    status_end = app_js.index("function workflowStepStatusLabel", status_start)
+    status_renderer = app_js[status_start:status_end]
+    helper_start = app_js.index("function taskFailureStage")
+    helper_end = app_js.index("function taskFailureActionStatusTitle", helper_start)
+    helper_renderer = app_js[helper_start:helper_end]
+
+    assert "function taskFailureStage" in app_js
+    assert "function normalizedFailureStage" in app_js
+    assert "const structuredStage = normalizedFailureStage(task.failure_stage);" in helper_renderer
+    assert "模型效果&稳定性验证失败" in helper_renderer
+    assert 'return "metrics";' in helper_renderer
+    assert "const failedIndex = workflowSteps.findIndex((candidate) => candidate.id === failedStepId);" in status_renderer
+    assert 'if (step.id === failedStepId) return "failed";' in status_renderer
+    assert 'if (failedIndex >= 0) return index < failedIndex ? "succeeded" : "pending";' in status_renderer
+
+
+def test_review_required_marks_all_workflow_steps_as_completed():
+    assert _workflow_step_statuses_for(
+        {
+            "status": "review_required",
+            "status_message": "验证已完成，需人工复核报告",
+            "active_job_kind": None,
+        },
+        [],
+    ) == ["succeeded", "succeeded", "succeeded", "succeeded"]
+
+
+def test_structured_failure_stage_overrides_legacy_status_message():
+    assert _workflow_step_statuses_for(
+        {
+            "status": "failed",
+            "status_message": "模型可复现性验证失败：notebook failed",
+            "active_job_kind": None,
+            "failure_stage": "report",
+        },
+        [],
+    ) == ["succeeded", "succeeded", "succeeded", "failed"]
+
+
+def test_restart_reclaimed_task_keeps_completed_notebook_and_metrics_steps_green():
+    notebook_steps = [
+        {"id": "notebook-load", "status": "succeeded"},
+        {"id": "system-repro-pmml", "status": "succeeded"},
+        {"id": "system-repro-compare", "status": "succeeded"},
+        {"id": "system-metrics-prepare", "status": "succeeded"},
+        {"id": "system-metrics-score", "status": "succeeded"},
+        {"id": "system-metrics-basic", "status": "succeeded"},
+        {"id": "system-metrics-ks", "status": "succeeded"},
+        {"id": "system-metrics-psi", "status": "succeeded"},
+        {"id": "system-metrics-binning", "status": "succeeded"},
+        {"id": "system-metrics-stress", "status": "succeeded"},
+        {"id": "system-metrics-output", "status": "succeeded"},
+    ]
+
+    assert _workflow_step_statuses_for(
+        {
+            "status": "failed",
+            "status_message": "reclaimed: server restart while running",
+            "active_job_kind": None,
+        },
+        notebook_steps,
+    ) == ["succeeded", "succeeded", "succeeded", "pending"]
+
+
+def test_legacy_metrics_failures_stay_on_metrics_step():
+    app_js = _read_static("app.js")
+
+    helper_start = app_js.index("function taskFailureStage")
+    helper_end = app_js.index("function taskFailedDuringMetrics", helper_start)
+    helper_renderer = app_js[helper_start:helper_end]
+    index_start = app_js.index("function workflowIndex")
+    index_end = app_js.index("function taskFailureStepId", index_start)
+    index_renderer = app_js[index_start:index_end]
+
+    assert "sample column check failed" in helper_renderer
+    assert "data dictionary missing columns" in helper_renderer
+    assert "notebook metrics failed" in helper_renderer
+    assert "live notebook kernel is not available" in helper_renderer
+    assert 'if (taskFailedDuringMetrics(selectedTask)) return 2;' in index_renderer
+    assert 'if (taskFailedDuringReport(selectedTask)) return 3;' in index_renderer
+
+
+def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
+    app_js = _read_static("app.js")
+
+    renderer_start = app_js.index("function renderWorkflowStepper")
+    renderer_end = app_js.index("function formatDate", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "const renderTaskId = selectedTaskId || \"\";" in renderer
+    assert "const previousScrollTop = stepper.dataset.taskId === renderTaskId ? stepper.scrollTop : 0;" in renderer
+    assert "stepper.dataset.taskId = renderTaskId;" in renderer
+    assert "stepper.scrollTop = previousScrollTop;" in renderer
+    assert "stepper.scrollTop = 0;" not in renderer
+
+
+def test_result_workspace_preserves_scroll_position_per_task_switch():
+    app_js = _read_static("app.js")
+
+    assert "const resultScrollPositionsByTask = new Map();" in app_js
+    assert "function rememberResultScrollPosition" in app_js
+    assert "function prepareResultScrollRestoreForTask" in app_js
+    assert "function applyResultScrollPosition" in app_js
+    assert "function scheduleResultScrollRestore" in app_js
+    assert 'addEventListener("scroll", handleResultScroll' in app_js
+
+    select_start = app_js.index("function selectTask")
+    select_end = app_js.index("function deselectCurrentTask", select_start)
+    select_renderer = app_js[select_start:select_end]
+    assert "rememberResultScrollPosition();" in select_renderer
+    assert "prepareResultScrollRestoreForTask(task.id);" in select_renderer
+    assert "applyResultScrollPosition(task.id);" in select_renderer
+    assert "scheduleResultScrollRestore(task.id);" in select_renderer
+
+    agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
+    agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
+    agent_scroll_renderer = app_js[agent_scroll_start:agent_scroll_end]
+    assert "if (suppressAgentAutoScrollTaskId === selectedTaskId) return;" in agent_scroll_renderer
+    assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in agent_scroll_renderer
+
+
+def test_workspace_blank_area_wheel_scrolls_center_result_only():
+    app_js = _read_static("app.js")
+
+    assert "function routeWorkspaceWheelToResult" in app_js
+    handler_start = app_js.index("function routeWorkspaceWheelToResult")
+    handler_end = app_js.index("function scrollTargetIsWithin", handler_start)
+    handler = app_js[handler_start:handler_end]
+
+    assert "if (event.defaultPrevented || event.ctrlKey) return;" in handler
+    assert 'scrollTargetIsWithin(target, "#taskSidebar, #progressRail, #workflowStepper")' in handler
+    assert 'scrollTargetIsWithin(target, "#resultScrollContent")' in handler
+    assert 'scrollTargetIsWithin(target, "dialog, textarea, select, input, .metric-table-scroll")' in handler
+    assert "scrollContent.scrollTop += event.deltaY;" in handler
+    assert "if (scrollContent.scrollTop !== previousTop" in handler
+    assert "event.preventDefault();" in handler
+    assert 'document.addEventListener("wheel", routeWorkspaceWheelToResult, { passive: false });' in app_js
+
+
+def test_scan_failure_sets_top_status_instead_of_success_message():
+    app_js = _read_static("app.js")
+
+    scan_start = app_js.index("async function scanCurrentTask")
+    scan_end = app_js.index("async function createTaskAndScan", scan_start)
+    scanner = app_js[scan_start:scan_end]
+
+    assert 'selectedTaskIsAgentMode(selectedTask) ? "材料完备性识别完成。" : "材料扫描完成。"' in scanner
+    assert "if (selectedTask?.status === \"failed\")" in scanner
+    assert "setTaskFailureActionStatus(selectedTask)" in scanner
+    assert "return;" in scanner
+
+
+def test_create_task_auto_scans_materials_after_creation():
+    app_js = _read_static("app.js")
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_renderer = app_js[create_start:create_end]
+    assert "return task" in create_renderer
+
+    handler_start = app_js.index("function createTaskAndScan")
+    handler_end = app_js.index("function handleTaskListKeydown", handler_start)
+    handler_renderer = app_js[handler_start:handler_end]
+    assert "await createTask()" in handler_renderer
+    assert "await scanCurrentTask()" in handler_renderer
+    assert "await loadTaskEvidence(task.id)" in handler_renderer
+
+
+def test_initial_load_restores_task_evidence_for_selected_task():
+    app_js = _read_static("app.js")
+    bootstrap_start = app_js.index("restoreTheme();")
+    bootstrap = app_js[bootstrap_start:]
+
+    assert "await refreshTasks()" in bootstrap
+    assert "await loadReportFields()" in bootstrap
+    assert "await loadTaskEvidence()" in bootstrap
+
+
+def test_sort_group_and_theme_live_in_sidebar_settings():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    for row in ["sort", "group", "appearance", "environment"]:
+        assert f'data-settings-row="{row}"' in settings_markup
+
+    assert 'id="settingsSortSelect"' in settings_markup
+    assert 'id="settingsGroupSelect"' in settings_markup
+    assert 'id="settingsThemeSelect"' in settings_markup
+
+    for sort_value in ["created_desc", "created_asc", "name_asc", "name_desc"]:
+        assert f'value="{sort_value}"' in settings_markup
+
+    for group_value in ["none", "validator", "created_month"]:
+        assert f'value="{group_value}"' in settings_markup
+
+    for theme_value in ["light", "dark", "system"]:
+        assert f'value="{theme_value}"' in settings_markup
+
+    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
+    assert 'class="settings-environment-button"' in settings_markup
+
+    assert 'id="taskSortSelect"' not in settings_markup
+    assert 'id="taskGroupSelect"' not in settings_markup
+    assert 'id="themeToggle"' not in settings_markup
+    assert 'data-sort-value=' not in settings_markup
+    assert 'data-group-value=' not in settings_markup
+    assert 'data-theme-choice=' not in settings_markup
+    assert 'data-settings-panel=' not in settings_markup
+    assert 'class="task-controls"' not in index_html
+
+    assert 'const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);' in app_js
+    assert 'const taskGroupModes = new Set(["none", "validator", "created_month"]);' in app_js
+    assert "function restoreTaskListSettings" in app_js
+    assert "function saveTaskListSettings" in app_js
+    assert 'localStorage.getItem("riskmodel_checker_task_list_settings")' in app_js
+    assert 'localStorage.setItem("riskmodel_checker_task_list_settings"' in app_js
+    assert "taskSortMode = normalizeTaskSortMode(stored.sort);" in app_js
+    assert "taskGroupMode = normalizeTaskGroupMode(stored.group);" in app_js
+
+    change_start = app_js.index("function handleSettingsMenuChange")
+    change_end = app_js.index("async function loadExecutionEnvironmentSettings", change_start)
+    change_renderer = app_js[change_start:change_end]
+    assert "saveTaskListSettings();" in change_renderer
+
+    bootstrap_start = app_js.index("restoreTheme();")
+    bootstrap = app_js[bootstrap_start:]
+    assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("renderSettingsState();")
+    assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("await refreshTasks();")
+
+
+def test_task_group_setting_supports_created_month():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    assert '<option value="created_month">按创建月份</option>' in settings_markup
+    assert 'taskGroupMode === "created_month"' in app_js
+    assert "function taskCreatedMonth" in app_js
+    assert "task.created_at || task.updated_at" in app_js
+    assert "未知创建月份" in app_js
+    assert "sortMonthGroups" in app_js
+
+
+def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    assert 'class="settings-tabs"' not in index_html
+    assert 'class="settings-content"' not in index_html
+    assert 'class="settings-panel"' not in index_html
+    assert 'class="settings-row"' in index_html
+    assert 'class="settings-row-title"' in index_html
+    assert 'class="settings-select"' in index_html
+    assert 'class="settings-option"' not in index_html
+
+    assert ".settings-menu {" in styles_css
+    menu_start = styles_css.index(".settings-menu {")
+    menu_end = styles_css.index("}", menu_start)
+    menu_rule = styles_css[menu_start:menu_end]
+    assert "width: 100%" in menu_rule
+    assert "max-width: 100%" in menu_rule
+    assert "right: 0" in menu_rule
+    assert "width: min(520px" not in menu_rule
+    assert ".settings-row {" in styles_css
+    row_start = styles_css.index(".settings-row {")
+    row_end = styles_css.index("}", row_start)
+    row_rule = styles_css[row_start:row_end]
+    assert "grid-template-columns: 72px minmax(0, 1fr)" in row_rule
+    assert ".task-sidebar {" in styles_css
+    sidebar_start = styles_css.index(".task-sidebar {\n  display: flex")
+    sidebar_end = styles_css.index("}", sidebar_start)
+    sidebar_rule = styles_css[sidebar_start:sidebar_end]
+    # The rail clips by default (clean slide animation) but reveals popovers when open.
+    assert "overflow: hidden" in sidebar_rule
+    overflow_rule_start = styles_css.index(".task-sidebar:has(.sidebar-settings[open])")
+    overflow_rule_end = styles_css.index("}", overflow_rule_start)
+    assert "overflow: visible" in styles_css[overflow_rule_start:overflow_rule_end]
+
+    collapsed_menu_start = styles_css.index(
+        ".app-shell.sidebar-collapsed .sidebar-settings[open] .settings-menu"
+    )
+    collapsed_menu_end = styles_css.index("}", collapsed_menu_start)
+    collapsed_menu_rule = styles_css[collapsed_menu_start:collapsed_menu_end]
+    assert "position: fixed" in collapsed_menu_rule
+    assert "left: var(--collapsed-popover-left)" in collapsed_menu_rule
+    assert "right: auto" in collapsed_menu_rule
+    assert "bottom: 12px" in collapsed_menu_rule
+
+    assert "function renderSettingsState" in app_js
+    assert "function handleSettingsMenuChange" in app_js
+    assert "function setActiveSettingsSection" not in app_js
+    assert "function markSettingsOptions" not in app_js
+    assert '$("settingsMenu").onchange = handleSettingsMenuChange' in app_js
+    assert "data-settings-section" not in app_js
+    assert "data-settings-panel" not in app_js
+
+
+def test_appearance_setting_supports_light_dark_and_system_modes():
+    app_js = _read_static("app.js")
+
+    assert 'let themePreference = "light"' in app_js
+    assert "function systemTheme" in app_js
+    assert "function watchSystemTheme" in app_js
+    assert 'themePreference === "system"' in app_js
+    assert 'localStorage.setItem("riskmodel_checker_theme", themePreference)' in app_js
+    assert 'id="settingsThemeSelect"' in _read_static("index.html")
+    assert 'value="system"' in _read_static("index.html")
+    assert "跟随系统" in _read_static("index.html")
+
+
+def test_sidebar_settings_closes_on_outside_click_only():
+    app_js = _read_static("app.js")
+
+    assert "function closeSidebarSettingsOnOutsideClick" in app_js
+    assert 'document.addEventListener("click", closeSidebarSettingsOnOutsideClick)' in app_js
+
+    handler_start = app_js.index("function closeSidebarSettingsOnOutsideClick")
+    handler_end = app_js.index("function workflowActionConfig", handler_start)
+    handler = app_js[handler_start:handler_end]
+    assert '$("sidebarSettings")' in handler
+    assert "settings.open" in handler
+    assert 'target.closest("#sidebarSettings")' in handler
+    assert "settings.open = false" in handler
+
+
+def test_sidebar_settings_exposes_execution_environment_dialog():
+    index_html = _read_static("index.html")
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    assert 'id="openExecutionEnvironmentButton"' in settings_markup
+    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
+    assert "执行环境" in settings_markup
+    assert 'id="executionEnvironmentDialog"' in index_html
+
+    for element_id in [
+        "executionEnvironmentSelect",
+        "refreshExecutionEnvironmentOptionsButton",
+        "executionEnvironmentStatus",
+        "saveExecutionEnvironmentButton",
+    ]:
+        assert f'id="{element_id}"' in index_html
+
+
+def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    assert 'data-settings-row="pet"' in settings_markup
+    assert 'id="settingsPetSelect"' in settings_markup
+    assert '<option value="none">不显示</option>' in settings_markup
+    assert '<option value="naitang">蛋黄</option>' in settings_markup
+    assert '<option value="xiaojiu">小九</option>' in settings_markup
+    assert 'id="petCompanion"' in index_html
+    assert 'class="pet-companion hidden"' in index_html
+    assert 'id="petSticker"' in index_html
+    assert 'id="petCompanionLabel"' not in index_html
+    assert 'class="pet-companion-label"' not in index_html
+    assert 'aria-live="polite"' in index_html
+
+    for removed_pet in [
+        "buou",
+        "danhuang",
+        "pixel-talisman-cat",
+        "ragdoll-cat",
+        "viola",
+        "布偶猫",
+        "Pixel Talisman Cat",
+        "Viola",
+        "Naitang",
+        "/static/pets/buou.svg",
+        "/static/pets/danhuang.svg",
+        "/static/pets/pixel-talisman-cat/spritesheet.webp",
+        "/static/pets/ragdoll-cat/spritesheet.webp",
+        "/static/pets/viola/spritesheet.webp",
+    ]:
+        assert removed_pet not in settings_markup
+
+    for removed_asset in [
+        "/static/pets/buou.svg",
+        "/static/pets/danhuang.svg",
+        "/static/pets/pixel-talisman-cat/spritesheet.webp",
+        "/static/pets/ragdoll-cat/spritesheet.webp",
+        "/static/pets/viola/spritesheet.webp",
+        "布偶猫",
+        "Pixel Talisman Cat",
+        "Viola",
+        "Naitang",
+    ]:
+        assert removed_asset not in app_js
+
+    assert 'const defaultPetPreference = "naitang";' in app_js
+    assert "let petPreference = defaultPetPreference" in app_js
+    assert 'naitang: {' in app_js
+    assert 'name: "蛋黄"' in app_js
+    assert 'kind: "spritesheet"' in app_js
+    assert 'asset: "static/pets/naitang/spritesheet.webp"' in app_js
+    assert 'xiaojiu: {' in app_js
+    assert 'name: "小九"' in app_js
+    assert 'asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f"' in app_js
+    assert 'pet-sprite' in app_js
+    assert "sprite.style.backgroundImage" in app_js
+    assert "petCompanionLabel" not in app_js
+    assert "label.textContent" not in app_js
+    pet_definitions = app_js[app_js.index("const petDefinitions") : app_js.index("const legacyPetPreferences")]
+    assert "svg:" not in pet_definitions
+    assert "ragdoll-cat" not in pet_definitions
+    assert "sticker.innerHTML = definition.svg" not in app_js
+    assert "document.createElement(\"img\")" in app_js
+    assert "image.className = \"pet-image\"" in app_js
+    assert "function restorePetPreference" in app_js
+    assert "function applyPetPreference" in app_js
+    assert "function renderPetState" in app_js
+    assert "riskmodel_checker_pet" in app_js
+    assert '$("settingsPetSelect").value = petPreference' in app_js
+
+    assert ".pet-companion {" in styles_css
+    assert ".pet-image" in styles_css
+    assert ".pet-sprite" in styles_css
+    assert "--pet-sheet-y" in styles_css
+    assert "--pet-frame-count" in styles_css
+    assert ".pet-companion-label" not in styles_css
+    assert '[data-pet-id="pixel-talisman-cat"]' not in styles_css
+    assert ".pet-svg" not in styles_css
+    assert ".pet-buou" not in styles_css
+    assert ".pet-danhuang" not in styles_css
+    assert "@keyframes pet-float" not in styles_css
+    assert "@keyframes pet-soft-breathe" not in styles_css
+    assert "@keyframes pet-playful-bounce" in styles_css
+    assert '[data-pet-mood="success"]' in styles_css
+    assert '[data-pet-mood="failed"]' in styles_css
+    assert '[data-pet-mood="running"]' in styles_css
+    assert '[data-pet-mood="complete"]' in styles_css
+    assert "@media (prefers-reduced-motion: reduce)" in styles_css
+
+
+def test_pet_preference_restores_legacy_local_storage_ids():
+    app_js = _read_static("app.js")
+
+    assert "const legacyPetPreferences" in app_js
+    assert 'danhuang: "naitang"' in app_js
+    assert '"ragdoll-cat": "xiaojiu"' in app_js
+    assert 'buou: "xiaojiu"' in app_js
+    assert 'buou: "ragdoll-cat"' not in app_js
+    assert "function normalizePetPreference" in app_js
+    assert "const normalized = normalizePetPreference(value);" in app_js
+    assert 'petPreference = normalized;' in app_js
+
+    preference_start = app_js.index("const petDefinitions")
+    preference_end = app_js.index("const defaultExecutionEnvironment", preference_start)
+    normalize_start = app_js.index("function normalizePetPreference")
+    normalize_end = app_js.index("function persistPetPreference", normalize_start)
+    script = "\n".join(
+        [
+            'const defaultPetPreference = "naitang";',
+            app_js[preference_start:preference_end],
+            app_js[normalize_start:normalize_end],
+            "const values = ['danhuang', 'buou', 'ragdoll-cat', 'unknown', 'none'].map(normalizePetPreference);",
+            "process.stdout.write(JSON.stringify(values));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "naitang", "none"]
+
+    restore_start = app_js.index("function restorePetPreference")
+    restore_end = app_js.index("function applyPetPosition", restore_start)
+    restore_renderer = app_js[restore_start:restore_end]
+    assert "const stored = localStorage.getItem(\"riskmodel_checker_pet\");" in restore_renderer
+    assert "const normalized = normalizePetPreference(stored);" in restore_renderer
+    assert "applyPetPreference(normalized, { persist: normalized !== stored });" in restore_renderer
+
+
+def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
+    app_js = _read_static("app.js")
+
+    assert 'const defaultPetPreference = "naitang";' in app_js
+    assert 'const explicitPetNoneStorageKey = "riskmodel_checker_pet_none_explicit";' in app_js
+    assert "function persistPetPreference" in app_js
+    assert 'if (value === "none" && explicitNone) {' in app_js
+    assert "localStorage.setItem(explicitPetNoneStorageKey, \"1\");" in app_js
+    assert "localStorage.removeItem(explicitPetNoneStorageKey);" in app_js
+
+    restore_start = app_js.index("function restorePetPreference")
+    restore_end = app_js.index("function applyPetPosition", restore_start)
+    restore_renderer = app_js[restore_start:restore_end]
+    assert 'const explicitNone = localStorage.getItem(explicitPetNoneStorageKey) === "1";' in restore_renderer
+    assert 'if (!stored || (stored === "none" && !explicitNone)) {' in restore_renderer
+    assert 'applyPetPreference(defaultPetPreference, { persist: stored === "none" });' in restore_renderer
+    assert 'if (stored === "none") {' in restore_renderer
+    assert 'applyPetPreference("none", { persist: false });' in restore_renderer
+
+    settings_start = app_js.index("function handleSettingsMenuChange")
+    settings_end = app_js.index("async function loadExecutionEnvironmentSettings", settings_start)
+    settings_renderer = app_js[settings_start:settings_end]
+    assert 'applyPetPreference(target.value, { explicit: true });' in settings_renderer
+
+
+def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
+    app_js = _read_static("app.js")
+
+    assert "function clampPetPosition" in app_js
+    assert "function ensurePetWithinViewport" in app_js
+    assert "ensurePetWithinViewport({ persist });" in app_js
+
+    restore_start = app_js.index("function restorePetPosition")
+    restore_end = app_js.index("function petDragBounds", restore_start)
+    restore_renderer = app_js[restore_start:restore_end]
+    assert "const next = clampPetPosition(stored.left, stored.top);" in restore_renderer
+    assert "applyPetPosition(next.left, next.top);" in restore_renderer
+    assert "savePetPosition(next.left, next.top);" in restore_renderer
+
+    drag_start = app_js.index("function startPetDrag")
+    drag_end = app_js.index("function renderSettingsState", drag_start)
+    drag_renderer = app_js[drag_start:drag_end]
+    assert "const next = clampPetPosition(" in drag_renderer
+    assert "applyPetPosition(next.left, next.top);" in drag_renderer
+
+
+def test_only_selected_pet_assets_are_bundled():
+    pets_dir = STATIC_DIR / "pets"
+    assert (pets_dir / "naitang" / "pet.json").exists()
+    assert (pets_dir / "naitang" / "spritesheet.webp").exists()
+    assert '"displayName": "蛋黄"' in (pets_dir / "naitang" / "pet.json").read_text(encoding="utf-8")
+    assert (pets_dir / "xiaojiu" / "pet.json").exists()
+    assert (pets_dir / "xiaojiu" / "spritesheet.webp").exists()
+    assert '"displayName": "小九"' in (pets_dir / "xiaojiu" / "pet.json").read_text(encoding="utf-8")
+    assert not (pets_dir / "ragdoll-cat").exists()
+    bundled_files = sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file())
+    assert bundled_files == [
+        "naitang/pet.json",
+        "naitang/spritesheet.webp",
+        "xiaojiu/pet.json",
+        "xiaojiu/spritesheet.webp",
+    ]
+
+
+def test_naitang_uses_codex_pet_atlas_rows_and_drag_directions():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+    pyproject = (STATIC_DIR.parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'static/pets/naitang/*' in pyproject
+    assert 'static/pets/xiaojiu/*' in pyproject
+    assert 'static/pets/ragdoll-cat/*' not in pyproject
+
+    assert 'return "success";' in app_js
+    assert 'return "failed";' in app_js
+    assert 'return "running";' in app_js
+    assert 'return "complete";' in app_js
+    assert 'return "review";' in app_js
+    assert 'pet.dataset.petMood = next.left >= current.left ? "running-right" : "running-left";' in app_js
+    assert "renderPetState();" in app_js[app_js.index("function startPetDrag") : app_js.index("function renderSettingsState")]
+
+    expected_rows = {
+        'data-pet-mood="idle"': ("0%", "6", "85.7143%"),
+        'data-pet-mood="running-right"': ("12.5%", "8", "114.2857%"),
+        'data-pet-mood="running-left"': ("25%", "8", "114.2857%"),
+        'data-pet-mood="complete"': ("37.5%", "4", "57.1429%"),
+        'data-pet-mood="success"': ("50%", "5", "71.4286%"),
+        'data-pet-mood="failed"': ("62.5%", "8", "114.2857%"),
+        'data-pet-mood="review"': ("100%", "6", "85.7143%"),
+        'data-pet-mood="running"': ("87.5%", "6", "85.7143%"),
+    }
+    for selector, (row, frames, x_end) in expected_rows.items():
+        start = styles_css.index(f'[{selector}] .pet-sprite')
+        end = styles_css.index("}", start)
+        rule = styles_css[start:end]
+        assert f"--pet-sheet-y: {row}" in rule
+        assert f"--pet-frame-count: {frames}" in rule
+        assert f"--pet-sheet-x-end: {x_end}" in rule
+
+    assert "animation: pet-sprite-frames" in styles_css
+    assert "steps(var(--pet-frame-count))" in styles_css
+    assert "var(--pet-sheet-x-end) var(--pet-sheet-y)" in styles_css
+    assert "to { background-position: 100% var(--pet-sheet-y); }" not in styles_css
+
+
+def test_naitang_sprite_animation_uses_slower_frame_timing():
+    styles_css = _read_static("styles.css")
+
+    def css_rule(selector: str) -> str:
+        start = styles_css.index(selector)
+        end = styles_css.index("}", start)
+        return styles_css[start:end]
+
+    sprite_rule = css_rule(".pet-sprite {")
+    assert "animation: pet-sprite-frames 5s steps(var(--pet-frame-count)) infinite;" in sprite_rule
+
+    expected_durations = {
+        '[data-pet-mood="idle"] .pet-sprite': "5s",
+        '[data-pet-mood="running"] .pet-sprite': "4.2s",
+        '[data-pet-mood="running-right"] .pet-sprite': "4.4s",
+        '[data-pet-mood="running-left"] .pet-sprite': "4.4s",
+        '[data-pet-mood="complete"] .pet-sprite': "5s",
+        '[data-pet-mood="success"] .pet-sprite': "5.5s",
+        '[data-pet-mood="failed"] .pet-sprite': "7.5s",
+        '[data-pet-mood="waiting"] .pet-sprite': "5s",
+        '[data-pet-mood="review"] .pet-sprite': "5s",
+    }
+    for selector, duration in expected_durations.items():
+        assert f"animation-duration: {duration}" in css_rule(selector)
+
+
+def test_pet_companion_does_not_auto_float_vertically():
+    styles_css = _read_static("styles.css")
+
+    sticker_start = styles_css.index(".pet-sticker {")
+    sticker_end = styles_css.index("}", sticker_start)
+    sticker_rule = styles_css[sticker_start:sticker_end]
+    assert "animation: none" in sticker_rule
+    assert "pet-float" not in sticker_rule
+    assert "@keyframes pet-float" not in styles_css
+    assert "@keyframes pet-soft-breathe" not in styles_css
+
+    pet_block_start = styles_css.index(".pet-companion {")
+    pet_block_end = styles_css.index(".resize-handle", pet_block_start)
+    pet_block = styles_css[pet_block_start:pet_block_end]
+    assert "translateY" not in pet_block
+
+    running_start = styles_css.index('[data-pet-mood="running"] .pet-image {')
+    running_end = styles_css.index("}", running_start)
+    running_rule = styles_css[running_start:running_end]
+    assert '[data-pet-mood="running"] .pet-sticker' not in running_rule
+    assert "pet-playful-bounce" in running_rule
+
+
+def test_pet_reaction_moods_return_to_idle_after_feedback_window():
+    app_js = _read_static("app.js")
+
+    assert "const PET_REACTION_DURATION_MS = 6500;" in app_js
+    assert 'const petReactionMoods = new Set(["success", "failed", "complete", "review"]);' in app_js
+    assert "let petReactionMood = null;" in app_js
+    assert "let petReactionKey = \"\";" in app_js
+    assert "let petReactionTimer = null;" in app_js
+    assert "function basePetMoodFromTask()" in app_js
+    assert "function petReactionKeyForMood(mood)" in app_js
+    assert "function schedulePetReactionReset(key)" in app_js
+    assert "clearTimeout(petReactionTimer);" in app_js
+    assert "petReactionMood = null;" in app_js
+    assert 'return petReactionMood || "idle";' in app_js
+    assert "petReactionMoods.has(mood)" in app_js
+    assert "task?.updated_at" in app_js
+
+
+def test_pet_companion_is_draggable_and_reacts_to_task_status():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert "function petMoodFromTask" in app_js
+    assert "function startPetDrag" in app_js
+    assert "function restorePetPosition" in app_js
+    assert "function savePetPosition" in app_js
+    assert "riskmodel_checker_pet_position" in app_js
+    assert 'selectedTask?.status || ""' in app_js
+    assert 'if (selectedTaskIsBusy()) return "running";' in app_js
+    assert 'if (status === "succeeded") return "success";' in app_js
+    assert 'if (status === "failed") return "failed";' in app_js
+    assert 'if (status === "review_required") return "review";' in app_js
+    assert '["running", "computing_metrics"].includes(status)' in app_js
+    assert '["scanned", "executed", "writing_artifacts"].includes(status)' in app_js
+    assert 'target.id === "settingsPetSelect"' in app_js
+    assert 'pet.addEventListener("pointerdown", startPetDrag)' in app_js
+    assert 'window.addEventListener("pointermove", onPointerMove)' in app_js
+    assert 'window.addEventListener("pointerup", onPointerUp)' in app_js
+    assert "clamp(" in app_js
+    assert "renderPetState();" in app_js
+
+    for removed_element_id in [
+        "executionModeJupyterKernel",
+        "executionModeCondaEnv",
+        "executionModePythonExecutable",
+        "kernelName",
+        "condaEnvName",
+        "pythonExecutable",
+    ]:
+        assert f'id="{removed_element_id}"' not in index_html
+
+
+def test_execution_environment_summary_and_dialog_are_compact():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert "executionEnvironmentSettingsLabel" in app_js
+    assert "renderExecutionEnvironmentSummary" in app_js
+    assert "settingsExecutionEnvironmentValue" in app_js
+
+    dialog_start = styles_css.index(".environment-dialog {")
+    dialog_end = styles_css.index("}", dialog_start)
+    dialog_rule = styles_css[dialog_start:dialog_end]
+    assert "width: min(520px, calc(100vw - 32px))" in dialog_rule
+
+    section_start = styles_css.index(".environment-dialog .execution-environment-section {")
+    section_end = styles_css.index("}", section_start)
+    section_rule = styles_css[section_start:section_end]
+    assert "grid-template-columns: 1fr" in section_rule
+
+
+def test_execution_environment_api_fields_are_wired():
+    app_js = _read_static("app.js")
+
+    assert "/api/settings/execution-environment/options" in app_js
+    assert "loadExecutionEnvironmentSettings" in app_js
+    assert "saveExecutionEnvironmentSettings" in app_js
+    assert "renderExecutionEnvironmentOptions" in app_js
+
+    for field in [
+        "execution_mode",
+        "jupyter_kernel",
+        "conda_env",
+        "python_executable",
+        "kernel_name",
+        "conda_env_name",
+        "python_executable",
+    ]:
+        assert field in app_js
+
+
+def test_realtime_panel_keeps_only_reproducibility_evidence_in_center():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="reproducibilitySummary"' in index_html
+    assert 'id="notebookSummary"' not in index_html
+    assert 'id="notebookStepsSummary"' not in index_html
+    assert 'id="contractSummary"' not in index_html
+
+    assert "api/tasks/${taskId}/evidence" in app_js
+    assert "renderEvidence" in app_js
+    assert "notebook_steps" in app_js
+    assert "reproducibility" in app_js
+    assert "renderNotebookSteps(result.notebook_steps || [], result.notebook_cells || notebookCells)" in app_js
+    assert "暂无分数一致性证据，运行完建模代码后展示结果" in index_html
+    assert "暂无分数一致性证据，运行完建模代码后展示结果" in app_js
+    assert "暂无 Notebook 契约证据" not in index_html
+    assert "还没运行验证。扫描材料后运行当前任务验证。" not in index_html
+
+
+def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    renderer_start = app_js.index("function renderReproducibilityEvidence")
+    renderer_end = app_js.index("function renderEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "const rows = Array.isArray(reproducibility?.rows) ? reproducibility.rows : [];" in renderer
+    assert "score-compare-list" in renderer
+    assert "score-diff-bar" in renderer
+    assert "score_code_model" in renderer
+    assert "score_submitted_pmml" in renderer
+    assert "abs_diff" in renderer
+    assert "const rowLimit = 10;" in renderer
+    assert '"<strong>分数一致性</strong>"' not in renderer
+    assert ".score-compare-list" in styles_css
+    assert ".score-diff-bar" in styles_css
+
+
+def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_tone():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    renderer_start = app_js.index("function renderReproducibilityEvidence")
+    renderer_end = app_js.index("function renderEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "<span>6位小数一致条数</span>" not in renderer
+    assert "match_count: summary.match_count" not in app_js
+    assert "<span>6位小数不一致条数</span>" in renderer
+    assert "reproducibilityStatusClass(summary.status)" in renderer
+    assert "function reproducibilityStatusClass" in app_js
+    assert ".summary-item.repro-status-pass" in styles_css
+    assert ".summary-item.repro-status-fail" in styles_css
+
+
+def test_reproducibility_panel_renders_precision_consistency_chart():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    renderer_start = app_js.index("function renderReproducibilityEvidence")
+    renderer_end = app_js.index("function renderEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "function buildPrecisionConsistencyBars" in app_js
+    assert "function renderPrecisionConsistencyChart" in app_js
+    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in app_js
+    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in app_js
+    assert "renderPrecisionConsistencyChart(rows, {" in renderer
+    assert ".score-precision-chart" in styles_css
+    assert ".score-precision-bars" in styles_css
+    assert ".score-precision-bar" in styles_css
+    assert '.score-precision-chart[data-animation="none"] .score-precision-bar' in styles_css
+
+
+# Reproducibility chart structural / animation behavior is now covered by
+# the renderSignatures-based tests further down in this file:
+#   - test_reproducibility_guard_lives_in_render_signatures
+#   - test_reproducibility_animation_replays_only_on_first_render_per_task
+#   - test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild
+# Those replace an earlier suite that grepped for the now-removed
+# element.dataset.reproducibility* fields and that recreated only narrow
+# slices of app.js. The new suite runs the real renderReproducibilityEvidence
+# under stubbed browser globals, so it catches behavioral regressions, not
+# just text-pattern drift.
+
+
+def test_reproducibility_panel_formats_null_scores_as_missing_values():
+    app_js = _read_static("app.js")
+
+    formatter_start = app_js.index("function formatScoreValue")
+    formatter_end = app_js.index("function reproducibilityStatusLabel", formatter_start)
+    formatter = app_js[formatter_start:formatter_end]
+    renderer_start = app_js.index("function renderReproducibilityEvidence")
+    renderer_end = app_js.index("function renderEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "value === null || value === undefined || value === \"\"" in formatter
+    assert "row.abs_diff === null || row.abs_diff === undefined" in renderer
+
+
+def test_reproducibility_card_is_hidden_until_notebook_success():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="notebookSection" class="progress-panel hidden"' in index_html
+    assert ".progress-panel.hidden" in styles_css
+    assert "function shouldShowReproducibilitySection" in app_js
+    assert "const notebookReproducibilityCompleteStatuses = new Set([" in app_js
+    for status in ["executed", "computing_metrics", "writing_artifacts", "succeeded", "review_required"]:
+        assert f'"{status}"' in app_js
+    assert "notebookReproducibilityCompleteStatuses.has(task?.status || \"\")" in app_js
+    assert '$("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection())' in app_js
+
+
+def test_metric_card_is_hidden_until_metric_validation_success():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="metricSection" class="progress-panel hidden"' in index_html
+    assert ".progress-panel.hidden" in styles_css
+    assert "function shouldShowMetricSection" in app_js
+    assert "const metricOverviewCompleteStatuses = new Set([" in app_js
+    for status in ["writing_artifacts", "succeeded"]:
+        assert f'"{status}"' in app_js
+    helper_start = app_js.index("const metricOverviewCompleteStatuses = new Set([")
+    helper_end = app_js.index("const workflowSteps = [", helper_start)
+    helper_block = app_js[helper_start:helper_end]
+    assert '"computing_metrics"' not in helper_block
+    assert '"executed"' not in helper_block
+    assert "metricOverviewCompleteStatuses.has(task?.status || \"\")" in app_js
+    assert '$("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection())' in app_js
+
+
+def test_metric_kpi_footer_values_are_centered_in_each_column():
+    styles_css = _read_static("styles.css")
+
+    cell_start = styles_css.index(".kpi-card-footer-cell {")
+    cell_end = styles_css.index("}", cell_start)
+    cell_rule = styles_css[cell_start:cell_end]
+
+    assert "align-items: center" in cell_rule
+    assert "text-align: center" in cell_rule
+
+
+def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    for selector in [
+        'body[data-theme="dark"] .metric-table-section',
+        'body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"]',
+        'body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"]',
+        'body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"]',
+        'body[data-theme="dark"] .metric-table-section[data-theme="warning-red"]',
+        'body[data-theme="dark"] .metric-table-section[data-theme="heatmap"]',
+    ]:
+        rule_vars = _css_vars(_css_rule(styles_css, selector))
+        assert "--accent-soft" in rule_vars
+        assert _contrast_ratio(rule_vars["--accent-soft"], dark_vars["--surface"]) >= 1.12
+
+    hover_rule = _css_rule(
+        styles_css,
+        'body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) tr:hover',
+    )
+    assert "background: color-mix(in srgb, var(--accent-soft) 76%, var(--surface))" in hover_rule
+    assert "color: var(--text)" in hover_rule
+
+    assert (
+        'body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) '
+        "tr:hover :is(.databar-label, .period-text, .psi-value)"
+    ) in styles_css
+    assert 'body[data-theme="dark"] .roc-axis-label' in styles_css
+    assert 'class="roc-axis-label"' in app_js
+    assert 'fill="#6B7280"' not in app_js
+
+
+def test_agent_progress_refreshes_metric_preview_before_streaming_analysis_messages():
+    app_js = _read_static("app.js")
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_body = app_js[poll_start:poll_end]
+
+    assert "metricOverviewComplete(polledTask)" in poll_body
+    assert "await loadReportFields(taskId);" in poll_body
+    assert poll_body.index("await loadReportFields(taskId);") < poll_body.index("await loadAgentMessages(taskId);")
+
+
+def test_evidence_restore_renders_persisted_scan_result():
+    app_js = _read_static("app.js")
+    renderer_start = app_js.index("function renderEvidence")
+    renderer_end = app_js.index("async function loadTaskEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "evidence.scan" in renderer
+    assert "renderScanResult(evidence.scan, evidence.notebook_cells || [])" in renderer
+
+
+def test_scan_result_renders_structured_preflight_checks():
+    app_js = _read_static("app.js")
+    renderer_start = app_js.index("function renderScanResult")
+    renderer_end = app_js.index("function renderValidationResult", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert "result.checks" in renderer
+    assert "preflight-check-list" in renderer
+    assert "notebook_contract" in app_js
+    assert "file-list" not in renderer
+    assert "ambiguity-list" not in renderer
+
+
+def test_validate_action_polls_task_status_and_evidence_until_terminal():
+    app_js = _read_static("app.js")
+
+    assert "pollValidationProgress" in app_js
+    assert "terminalTaskStatuses" in app_js
+    assert "activeValidationStatuses" in app_js
+    assert 'await pollValidationProgress(new Set(["executed", "failed", "scanned"]), taskId)' in app_js
+    assert 'await pollValidationProgress(new Set(["executed", "writing_artifacts", "failed"]), taskId)' in app_js
+    assert "await pollValidationProgress(terminalTaskStatuses, taskId)" in app_js
+    assert "await loadTaskEvidence(taskId)" in app_js
+    assert "验证进行中" in app_js
+
+
+def test_validate_action_reloads_notebook_evidence_after_completion():
+    app_js = _read_static("app.js")
+    validate_start = app_js.index("async function validateCurrentTask")
+    validate_end = app_js.index("async function cancelCurrentNotebook", validate_start)
+    validate_renderer = app_js[validate_start:validate_end]
+
+    assert "await loadReportFields(taskId);\n  await loadTaskEvidence(taskId);" in validate_renderer
+
+
+def test_evidence_fetch_failure_preserves_completed_notebook_evidence():
+    app_js = _read_static("app.js")
+    loader_start = app_js.index("async function loadTaskEvidence")
+    loader_end = app_js.index("function renderActionError", loader_start)
+    loader = app_js[loader_start:loader_end]
+
+    assert "notebookReproducibilityComplete(selectedTask)" in loader
+    assert "resetEvidenceSummaries();" in loader
+
+
+def test_notebook_step_renderer_does_not_cap_steps_at_eight():
+    app_js = _read_static("app.js")
+    renderer_start = app_js.index("function renderNotebookSteps")
+    renderer_end = app_js.index("function renderReproducibilityEvidence", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert ".slice(0, 8)" not in renderer
+    assert "notebookSteps.map" not in renderer
+    assert "latestNotebookSteps = mergePendingSystemSteps(normalizeNotebookSteps(notebookSteps, notebookCells))" in renderer
+    assert "renderWorkflowStepper()" in renderer
+    assert "Notebook 步骤（共" not in app_js
+
+
+def test_notebook_step_renderer_uses_latest_retried_system_cell_status():
+    steps = [
+        {
+            "id": "system-metrics-prepare",
+            "title": "指标数据准备",
+            "status": "failed",
+            "started_at": "2026-05-28T06:30:14+00:00",
+            "ended_at": "2026-05-28T06:37:22+00:00",
+            "elapsed_seconds": 428,
+            "cell_count": 2,
+            "cell_indexes": [40, 48],
+            "source_previews": ["prepare_old()", "prepare_new()"],
+            "system": True,
+        },
+        {
+            "id": "system-metrics-score",
+            "title": "RMC_SCORE_FN 全量打分",
+            "status": "pending",
+            "started_at": "2026-05-28T06:37:22+00:00",
+            "ended_at": "2026-05-28T06:37:24+00:00",
+            "elapsed_seconds": 2,
+            "cell_count": 2,
+            "cell_indexes": [41, 49],
+            "source_previews": ["score_old()", "score_new()"],
+            "system": True,
+        },
+    ]
+    cells = [
+        {"cell_index": 40, "step_id": "system-metrics-prepare", "status": "failed"},
+        {
+            "cell_index": 48,
+            "step_id": "system-metrics-prepare",
+            "status": "succeeded",
+            "started_at": "2026-05-28T06:37:21+00:00",
+            "ended_at": "2026-05-28T06:37:22+00:00",
+        },
+        {
+            "cell_index": 49,
+            "step_id": "system-metrics-score",
+            "status": "succeeded",
+            "started_at": "2026-05-28T06:37:22+00:00",
+            "ended_at": "2026-05-28T06:37:24+00:00",
+        },
+    ]
+
+    normalized = _normalized_notebook_steps_for(steps, cells)
+
+    assert normalized[0]["status"] == "succeeded"
+    assert normalized[0]["cell_indexes"] == [48]
+    assert normalized[0]["source_previews"] == ["prepare_new()"]
+    assert normalized[0]["started_at"] == "2026-05-28T06:37:21+00:00"
+    assert normalized[1]["status"] == "succeeded"
+    assert normalized[1]["cell_indexes"] == [49]
+
+
+def test_failed_task_error_detail_moves_to_current_status_only():
+    app_js = _read_static("app.js")
+
+    append_start = app_js.index("function appendTaskRow")
+    append_end = app_js.index("function renderTaskSnapshot", append_start)
+    append_renderer = app_js[append_start:append_end]
+    assert "task.status_message" not in append_renderer
+
+    snapshot_start = app_js.index("function renderTaskSnapshot")
+    snapshot_end = app_js.index("function snapshotItem", snapshot_start)
+    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+    assert "selectedTask.status_message" not in snapshot_renderer
+
+    step_start = app_js.index("function renderWorkflowStepper")
+    step_end = app_js.index("function formatDate", step_start)
+    step_renderer = app_js[step_start:step_end]
+    assert "selectedTask.status_message" not in step_renderer
+    assert "step-error" not in step_renderer
+
+    assert "function taskFailureActionStatusMessage" in app_js
+    assert "function taskFailureActionStatusTitle" in app_js
+    status_start = app_js.index("function taskFailureActionStatusMessage")
+    status_end = app_js.index("function clearStatus", status_start)
+    status_renderer = app_js[status_start:status_end]
+    assert "task.status_message" in status_renderer
+    assert 'const kind = task.status === "review_required" ? "success" : "error";' in status_renderer
+    assert "setActionStatus(taskFailureActionStatusTitle(task), kind, message)" in status_renderer
+
+
+def test_review_required_status_bar_uses_completed_green_copy_not_failure_detail():
+    result = _task_action_status_for(
+        {
+            "status": "review_required",
+            "status_message": "reproducibility failed; review required",
+            "active_job_kind": None,
+        }
+    )
+
+    assert result == {
+        "title": "验证已完成，需复核报告。",
+        "kind": "success",
+        "detail": "全部流程已完成，请查看右侧报告并进行人工复核。",
+    }
+    rendered = json.dumps(result, ensure_ascii=False).lower()
+    assert "failed" not in rendered
+    assert "unresolved" not in rendered
+
+    placeholder_result = _task_action_status_for(
+        {
+            "status": "review_required",
+            "status_message": "report has unresolved placeholders",
+            "active_job_kind": None,
+        }
+    )
+    assert placeholder_result == result
+
+    display = _task_display_status_for(
+        {
+            "status": "review_required",
+            "status_message": "report has unresolved placeholders",
+            "active_job_kind": None,
+        },
+        action_message="验证已完成，需复核报告。",
+        action_kind="success",
+    )
+    assert display == {
+        "rowLabel": "待复核",
+        "rowTone": "success",
+        "heroPill": {"label": "已完成", "tone": "ok"},
+    }
+
+
+def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
+    display = _task_display_status_for(
+        {
+            "status": "scanned",
+            "status_message": "已停止当前动作",
+            "active_job_kind": "agent",
+        }
+    )
+    result = _task_action_status_for(
+        {
+            "status": "scanned",
+            "status_message": "已停止当前动作",
+            "active_job_kind": "agent",
+        }
+    )
+
+    assert display == {
+        "rowLabel": "停止",
+        "rowTone": "",
+        "heroPill": {"label": "停止", "tone": "neutral"},
+    }
+    assert result == {
+        "title": "已停止当前动作。",
+        "kind": "stopped",
+        "detail": "已停止当前动作，请问有什么指示？",
+    }
+
+
+def test_stopped_agent_task_does_not_spin_running_substeps():
+    task = {
+        "status": "scanned",
+        "status_message": "已停止当前动作",
+        "active_job_kind": "agent",
+    }
+    notebook_steps = [
+        {"id": "system-repro-pmml", "status": "succeeded"},
+        {"id": "system-repro-compare", "status": "running"},
+    ]
+
+    assert _workflow_step_statuses_for(task, notebook_steps) == [
+        "succeeded",
+        "pending",
+        "pending",
+        "pending",
+    ]
+    assert _notebook_step_tones_for(task, notebook_steps) == ["succeeded", "stopped"]
+
+
+def test_stopped_step_checker_has_no_stop_square_mark():
+    app_js = _read_static("app.js")
+    start = app_js.index("function stepCheckerHtml")
+    end = app_js.index("function notebookStepTone", start)
+    source = app_js[start:end]
+    stopped_start = source.index('if (state === "stopped")')
+    stopped_end = source.index('if (state === "review")', stopped_start)
+    stopped_branch = source[stopped_start:stopped_end]
+
+    assert '<span class="check-icon stopped" aria-hidden="true"></span>' in stopped_branch
+    assert "<svg" not in stopped_branch
+    assert "<rect" not in stopped_branch
+
+
+def test_current_status_error_detail_is_always_visible_and_turns_red_for_failures():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="actionErrorDetail"' in index_html
+    assert 'class="action-error-detail"' in index_html
+    assert "暂无报错" in index_html
+    assert 'id="actionErrorDetail"\n                  class="action-error-detail"' in index_html
+    assert 'role="alert"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
+    assert 'aria-live="assertive"' not in index_html[index_html.index('id="actionErrorDetail"'):index_html.index('id="taskSnapshot"')]
+
+    status_start = app_js.index("function setActionErrorDetail")
+    status_end = app_js.index("function taskFailureActionStatusMessage", status_start)
+    status_renderer = app_js[status_start:status_end]
+    assert "function setActionErrorDetail" in status_renderer
+    assert 'detail.textContent = message || "";' in status_renderer
+    assert 'detail.setAttribute("role", kind === "error" ? "alert" : "status");' in status_renderer
+    assert 'detail.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");' in status_renderer
+    assert 'detail.className = `action-error-detail ${kind === "error" ? "error" : ""}`.trim();' in status_renderer
+    assert "setActionErrorDetail(describeActionStatus(message, kind, detail), kind)" in status_renderer
+    assert "actionErrorDetail" in status_renderer
+
+    # failures are signalled by a red status pill, not a red box
+    assert "function actionStatusPill" in app_js
+    assert 'tone: "fail"' in app_js
+    assert '? { label: "需复核", tone: "ok" }' in app_js
+    assert '.task-pill.fail' in styles_css
+
+    detail_start = styles_css.index(".action-error-detail {")
+    detail_end = styles_css.index("}", detail_start)
+    detail_rule = styles_css[detail_start:detail_end]
+    assert "color: var(--text-secondary)" in detail_rule
+    assert ".action-error-detail.error" in styles_css
+
+
+def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
+    styles_css = _read_static("styles.css")
+    index_html = _read_static("index.html")
+
+    workspace_start = styles_css.index(".result-workspace {")
+    workspace_end = styles_css.index("}", workspace_start)
+    workspace_rule = styles_css[workspace_start:workspace_end]
+    assert "overflow: hidden;" in workspace_rule
+    assert "display: grid;" in workspace_rule
+    assert "grid-template-rows: auto minmax(0, 1fr);" in workspace_rule
+    assert "--workspace-head-space:" in workspace_rule
+
+    scroll_start = styles_css.index(".result-scroll-content {")
+    scroll_end = styles_css.index("}", scroll_start)
+    scroll_rule = styles_css[scroll_start:scroll_end]
+    assert "grid-row: 1 / -1;" in scroll_rule
+    assert "position: relative;" in scroll_rule
+    assert "z-index: 1;" in scroll_rule
+    assert "height: 100%;" not in scroll_rule
+    assert "padding-top: calc(var(--workspace-head-space) + 12px);" in scroll_rule
+    assert "overflow-y: auto;" in scroll_rule
+    assert "overflow-x: hidden;" in scroll_rule
+    assert "scrollbar-width: none;" in scroll_rule
+    assert "-ms-overflow-style: none;" in scroll_rule
+    assert "scrollbar-gutter: auto;" in scroll_rule
+    assert "scrollbar-gutter: stable;" not in scroll_rule
+    assert "overscroll-behavior-y: none;" in scroll_rule
+    assert "overscroll-behavior-x: none;" in scroll_rule
+    target_offset_start = styles_css.index(".result-scroll-content > :is(")
+    target_offset_end = styles_css.index("}", target_offset_start)
+    target_offset_rule = styles_css[target_offset_start:target_offset_end]
+    assert ".progress-panel" in target_offset_rule
+    assert ".supporting-evidence" in target_offset_rule
+    assert ".agent-conversation" in target_offset_rule
+    assert "scroll-margin-top: calc(var(--workspace-head-space) + 12px);" in target_offset_rule
+    assert ".result-scroll-content::-webkit-scrollbar" in styles_css
+    webkit_scrollbar_start = styles_css.index(".result-scroll-content::-webkit-scrollbar {")
+    webkit_scrollbar_end = styles_css.index("}", webkit_scrollbar_start)
+    webkit_scrollbar_rule = styles_css[webkit_scrollbar_start:webkit_scrollbar_end]
+    assert "display: none;" in webkit_scrollbar_rule
+
+    head_start = styles_css.index(".workspace-head {")
+    head_end = styles_css.index("}", head_start)
+    head_rule = styles_css[head_start:head_end]
+    assert "position: relative;" in head_rule
+    assert "grid-column: 1;" in head_rule
+    assert "grid-row: 1;" in head_rule
+    assert "background: transparent;" in head_rule
+    assert "padding: 0;" in head_rule
+    assert "isolation: isolate;" in head_rule
+    assert ".workspace-head::before" not in styles_css
+    assert ".workspace-head::after" not in styles_css
+
+    hero_start = styles_css.index(".task-hero {")
+    hero_end = styles_css.index("}", hero_start)
+    hero_rule = styles_css[hero_start:hero_end]
+    assert "overflow: hidden;" in hero_rule
+    assert "isolation: isolate;" in hero_rule
+    assert "transform: translateZ(0);" in hero_rule
+    assert "contain: paint;" in hero_rule
+    assert "will-change: transform;" in hero_rule
+    assert "backdrop-filter: blur(18px) saturate(1.55);" in hero_rule
+    assert "background: linear-gradient" in hero_rule
+    assert "transition: border-color 140ms ease;" in hero_rule
+    assert "background 180ms" not in hero_rule
+    assert "box-shadow 180ms" not in hero_rule
+    assert "0 14px" not in hero_rule
+    assert ".task-hero.is-glass-active" in styles_css
+    assert ".task-hero.is-glass-active::after" in styles_css
+
+    after_start = styles_css.index(".task-hero::after {")
+    after_end = styles_css.index("}", after_start)
+    after_rule = styles_css[after_start:after_end]
+    assert "bottom: 0;" in after_rule
+    assert "bottom: -18px;" not in after_rule
+    assert "filter:" not in after_rule
+    assert "rgba(0, 113, 227" not in after_rule
+    assert "rgba(31, 122, 63" not in after_rule
+
+    active_start = styles_css.index(".task-hero.is-glass-active {")
+    active_end = styles_css.index("}", active_start)
+    active_rule = styles_css[active_start:active_end]
+    assert "var(--accent)" not in active_rule
+    assert "rgba(0, 113, 227" not in active_rule
+    assert "0 18px" not in active_rule
+    assert "0 10px" not in active_rule
+
+    dark_hero_start = styles_css.index('body[data-theme="dark"] .task-hero {')
+    dark_hero_end = styles_css.index("}", dark_hero_start)
+    dark_hero_rule = styles_css[dark_hero_start:dark_hero_end]
+    assert "0 16px 42px" not in dark_hero_rule
+    assert "rgba(0, 0, 0" not in dark_hero_rule
+    assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
+
+    assert 'id="resultScrollContent"' in index_html
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
+    assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
+    assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-neutral-fill" not in index_html
+    assert "static/styles.css?v=20260603-task-validator-icon" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-border" not in index_html
+    assert "static/styles.css?v=20260603-scan-env-add-style" not in index_html
+    assert "static/styles.css?v=20260603-brand-icon-buttons" not in index_html
+    assert "static/styles.css?v=20260603-run-mode-glow" not in index_html
+    assert "static/styles.css?v=20260603-dark-scrollbar" not in index_html
+    assert "static/styles.css?v=20260603-task-options" not in index_html
+    assert "static/styles.css?v=20260603-neutral-options" not in index_html
+    assert "static/styles.css?v=20260603-dark-masks" not in index_html
+    assert "static/app.js?v=20260603-zero-rail-collapse" in index_html
+    assert "static/app.js?v=20260603-task-validator-icon" not in index_html
+    assert "static/app.js?v=20260603-field-focus-ring" not in index_html
+    assert "static/app.js?v=20260603-dark-masks" not in index_html
+
+
+def test_status_card_glass_glow_tracks_inner_scroll_position():
+    app_js = _read_static("app.js")
+
+    assert "function updateTaskHeroGlassState" in app_js
+    assert "function scheduleTaskHeroGlassState" in app_js
+    assert "function syncTaskHeroGlassLayout" in app_js
+    assert "let taskHeroGlassActive = null;" in app_js
+    assert "let taskHeroCanScroll = false;" in app_js
+    assert "function setTaskHeroGlassActive" in app_js
+    assert "if (taskHeroGlassActive === glassActive) return;" in app_js
+    assert "updateTaskHeroGlassState({ measureScroll: true });" in app_js
+    state_start = app_js.index("function updateTaskHeroGlassState")
+    state_end = app_js.index("function scheduleTaskHeroGlassState", state_start)
+    state_body = app_js[state_start:state_end]
+    assert "if (measureScroll)" in state_body
+    assert "taskHeroCanScroll = scrollContent.scrollHeight > scrollContent.clientHeight + 1;" in state_body
+    assert "const glassActive = taskHeroCanScroll && scrollContent.scrollTop > 6;" in state_body
+    assert 'workspace.style.setProperty("--workspace-head-space"' in app_js
+    assert 'hero.classList.toggle("is-glass-active", glassActive)' in app_js
+    assert 'workspace.classList.toggle("is-glass-active", glassActive)' in app_js
+    assert "function handleResultScroll" in app_js
+    result_scroll_start = app_js.index("function handleResultScroll")
+    result_scroll_end = app_js.index("function syncTaskHeroGlassLayout", result_scroll_start)
+    result_scroll_body = app_js[result_scroll_start:result_scroll_end]
+    assert "if (pendingResultScrollRestoreTaskId !== selectedTaskId)" in result_scroll_body
+    assert "rememberResultScrollPosition();" in result_scroll_body
+    assert "scheduleTaskHeroGlassState();" in result_scroll_body
+    assert '$("resultScrollContent").addEventListener("scroll", handleResultScroll, { passive: true });' in app_js
+    assert 'window.addEventListener("resize", syncTaskHeroGlassLayout);' in app_js
+    assert "requestAnimationFrame(syncTaskHeroGlassLayout)" in app_js
+
+
+def test_validation_failure_writes_error_detail_to_global_action_status():
+    app_js = _read_static("app.js")
+
+    validate_start = app_js.index("async function validateCurrentTask")
+    validate_end = app_js.index("async function loadReportFields", validate_start)
+    validate_renderer = app_js[validate_start:validate_end]
+    assert "setTaskFailureActionStatus(selectedTask || finalTask)" in validate_renderer
+
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_renderer = app_js[poll_start:poll_end]
+    assert "setTaskFailureActionStatus(polledTask)" in poll_renderer
+    assert "setActionStatus(\"\")" not in poll_renderer
+
+
+def test_agent_mode_creation_and_stepper_hide_manual_buttons():
+    app_js = _read_static("app.js")
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_body = app_js[create_start:create_end]
+    assert "Agent 模式当前暂不支持创建任务" not in create_body
+    assert "run_mode: selectedRunMode" in create_body
+
+    assert "function selectedTaskIsAgentMode" in app_js
+    assert "if (selectedTaskIsAgentMode()) return \"\";" in app_js
+    assert "startAgentValidation" in app_js
+
+
+def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
+    app_js = _read_static("app.js")
+
+    create_scan_start = app_js.index("async function createTaskAndScan")
+    create_scan_end = app_js.index("async function pollValidationProgress", create_scan_start)
+    create_scan_body = app_js[create_scan_start:create_scan_end]
+    agent_branch_start = create_scan_body.index('if (task.run_mode === "agent")')
+    agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
+    agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
+
+    assert 'setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");' in agent_branch
+    assert "await dispatchAgentValidation(taskId);" not in agent_branch
+    assert "await scanCurrentTask();" not in agent_branch
+    assert "正在自动识别材料" not in agent_branch
+    assert "开始验证" not in agent_branch
+    assert "const taskId = task.id || selectedTaskId;" in agent_branch
+
+    assert "async function dispatchAgentValidation" in app_js
+    assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in app_js
+
+
+def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
+    app_js = _read_static("app.js")
+
+    api_start = app_js.index("async function api")
+    api_end = app_js.index("function sleep", api_start)
+    api_body = app_js[api_start:api_end]
+    assert 'endpoint.startsWith("/")' in api_body
+    assert '`/${endpoint}`' in api_body
+    assert "fetch(normalizedEndpoint" in api_body
+
+    dispatch_start = app_js.index("async function dispatchAgentValidation")
+    dispatch_end = app_js.index("async function waitForAgentValidation", dispatch_start)
+    dispatch_body = app_js[dispatch_start:dispatch_end]
+    assert 'requireTaskId(taskId || selectedTaskId, "Agent 初始化")' in dispatch_body
+    assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in dispatch_body
+    assert "api(`api/tasks/${taskId}/agent/start`" not in app_js
+
+
+def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
+    app_js = _read_static("app.js")
+
+    delete_start = app_js.index("async function deleteTask")
+    delete_end = app_js.index("async function runAction", delete_start)
+    delete_body = app_js[delete_start:delete_end]
+
+    assert "taskServerBusyAction(task)" in delete_body
+    assert 'task.status === "running"' not in delete_body
+
+
+def test_agent_stop_response_polls_until_active_agent_job_finishes():
+    app_js = _read_static("app.js")
+
+    start_agent_start = app_js.index("async function startAgentValidation")
+    start_agent_end = app_js.index("async function dispatchAgentValidation", start_agent_start)
+    start_agent_body = app_js[start_agent_start:start_agent_end]
+
+    assert 'result.status === "cancel_requested"' in start_agent_body
+    assert "await waitForAgentValidation(taskId, { stopping: true });" in start_agent_body
+
+    wait_start = app_js.index("async function waitForAgentValidation")
+    wait_end = app_js.index("function handleTaskListKeydown", wait_start)
+    wait_body = app_js[wait_start:wait_end]
+    assert '"scanned"' in wait_body
+    assert '"executed"' in wait_body
+    assert "{ stopping }" in wait_body
+    assert "agentValidationStopped(finalTask" in wait_body
+
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_body = app_js[poll_start:poll_end]
+    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "const serverBusyAction = taskServerBusyAction(polledTask);" in poll_body
+    assert "doneStatuses.has(status) && !serverBusyAction" in poll_body
+
+
+def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
+    app_js = _read_static("app.js")
+
+    stored_start = app_js.index("function renderStoredStateSummaries")
+    stored_end = app_js.index("function renderAll", stored_start)
+    stored_body = app_js[stored_start:stored_end]
+
+    assert "updateAgentScanSectionVisibility();" in stored_body
+    assert '"等待你输入“开始验证”后执行材料识别"' not in stored_body
+    assert '"材料完备性识别将自动开始"' not in stored_body
+
+    visibility_start = app_js.index("function updateAgentScanSectionVisibility")
+    visibility_end = app_js.index("function renderStoredStateSummaries", visibility_start)
+    visibility_body = app_js[visibility_start:visibility_end]
+    assert "selectedTaskIsAgentMode()" in visibility_body
+    assert 'const hasScanResult = scanSummaryHasResult();' in visibility_body
+    assert 'scanSection.classList.toggle("hidden", !hasScanResult);' in visibility_body
+
+    scan_start = app_js.index("function renderScanResult")
+    scan_end = app_js.index("function renderValidationResult", scan_start)
+    scan_body = app_js[scan_start:scan_end]
+    assert "updateAgentScanSectionVisibility();" in scan_body
+
+    timeline_start = app_js.index("function renderAgentTimeline")
+    timeline_end = app_js.index("function resetAgentTypingState", timeline_start)
+    timeline_body = app_js[timeline_start:timeline_end]
+    assert "agentTimelineVisibleStages()" in timeline_body
+    assert "agentTimelineItems(messages, visibleStages)" in timeline_body
+
+    report_visibility_start = app_js.index("function updateAgentReportSectionVisibility")
+    report_visibility_end = app_js.index(
+        "function renderStoredStateSummaries",
+        report_visibility_start,
+    )
+    report_visibility_body = app_js[report_visibility_start:report_visibility_end]
+    assert "selectedTaskIsAgentMode()" not in report_visibility_body
+    assert "reportSummary" not in report_visibility_body
+    assert "wordReportTitle" not in report_visibility_body
+    assert "reportFieldsForm" not in report_visibility_body
+    assert '"agentReportLeadMessages"' in report_visibility_body
+    assert '"agentReportMessages"' in report_visibility_body
+    assert 'reportSection.setAttribute("aria-hidden", hasReportMessages ? "false" : "true");' in report_visibility_body
+
+
+def test_llm_settings_dialog_and_agent_model_selector_exist():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="llmSettingsDialog"' in index_html
+    assert "模型引擎" in index_html
+    assert 'id="openLLMSettingsButton"' in index_html
+    assert 'id="llmModelProfiles"' in index_html
+    assert 'class="llm-model-profiles llm-engine-list"' in index_html
+    assert 'id="settingsLLMValue"' in index_html
+    assert 'id="agentModelSelect"' in index_html
+
+    # Connection details (incl. API key) are edited in a focused dialog; the
+    # settings area no longer picks a model — that happens in the composer.
+    assert 'id="llmEngineEditDialog"' in index_html
+    assert 'id="llmEngineModelName"' in index_html
+    assert 'id="llmEngineBaseUrl"' in index_html
+    assert 'id="llmEngineApiKey"' in index_html
+    assert 'id="addLLMModelButton"' in index_html
+    assert 'class="llm-engine-toolbar"' not in index_html
+    assert 'id="llmDefaultModelSelect"' not in index_html
+
+    assert "api/settings/llm" in app_js
+    assert "loadLLMSettings" in app_js
+    assert "saveLLMSettings" in app_js
+    assert "renderAgentModelOptions" in app_js
+    assert "openLLMEngineEdit" in app_js
+    assert "saveLLMEngineEdit" in app_js
+    assert "llm-engine-item" in app_js
+    assert ".llm-engine-item" in styles_css
+    assert ".llm-engine-add" in styles_css
+
+
+def test_agent_conversation_panel_layout_and_message_shapes():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    assert 'id="agentConversationPanel"' in index_html
+    assert 'id="agentScanLeadMessages"' in index_html
+    assert 'id="agentScanBeforeMessages"' in index_html
+    assert 'id="agentScanMessages"' in index_html
+    assert 'id="agentReproducibilityMessages"' in index_html
+    assert 'id="agentMetricMessages"' in index_html
+    assert 'id="agentReportMessages"' in index_html
+    assert 'id="agentComposer"' in index_html
+    panel_start = index_html.index('id="agentConversationPanel"')
+    panel_end = index_html.index("</section>", panel_start)
+    panel_markup = index_html[panel_start:panel_end]
+    assert index_html.index('id="agentComposer"') > panel_end
+    assert index_html.index('id="reportSection"') < index_html.index('id="agentConversationPanel"')
+    assert index_html.index('id="agentScanLeadMessages"') < index_html.index("<h3>材料识别</h3>")
+    assert index_html.index('id="agentScanBeforeMessages"') < index_html.index('id="scanSummary"')
+    assert index_html.index('id="scanSummary"') < index_html.index('id="agentScanMessages"')
+    assert "<h3>Agent</h3>" not in panel_markup
+    assert 'id="agentMessages"' in index_html
+    assert 'id="agentComposerInput"' in index_html
+    assert 'id="sendAgentMessageButton"' in index_html
+    assert 'placeholder="输入执行步骤或问题"' in index_html
+
+    # model + effort selectors live inside the input box's toolbar; effort is sent
+    assert 'class="agent-composer-toolbar"' in index_html
+    assert "agent-composer-chip" in index_html
+    assert 'id="agentEffortSelect"' in index_html
+    bar_open = index_html.index('class="agent-composer-bar"')
+    assert bar_open < index_html.index('id="agentModelSelect"')
+    assert bar_open < index_html.index('id="agentEffortSelect"')
+    assert "agentEffort" in app_js
+    assert ".agent-composer-chip" in styles_css
+    assert "agent-composer-active" in app_js
+    assert ".result-workspace.agent-composer-active .result-scroll-content" in styles_css
+    assert "--agent-composer-gap: 28px;" in styles_css
+    assert "--agent-composer-clearance: 118px;" in styles_css
+    assert "--agent-composer-clearance: 154px;" not in styles_css
+    assert "function syncAgentComposerClearance" in app_js
+    assert 'workspace.style.setProperty("--agent-composer-clearance"' in app_js
+    assert "composerHeight + composerGap" in app_js
+    assert ".agent-send:hover:not(:disabled)" in styles_css
+    assert ".agent-send:hover {" not in styles_css
+    send_start = styles_css.index(".agent-send {")
+    send_end = styles_css.index("}", send_start)
+    send_rule = styles_css[send_start:send_end]
+    assert "background: var(--brand-primary);" in send_rule
+    send_hover_start = styles_css.index(".agent-send:hover:not(:disabled) {")
+    send_hover_end = styles_css.index("}", send_hover_start)
+    send_hover_rule = styles_css[send_hover_start:send_hover_end]
+    assert "background: var(--brand-primary-hover);" in send_hover_rule
+    assert "background: #a91017;" not in send_hover_rule
+
+    disabled_start = styles_css.index(".agent-send:disabled {")
+    disabled_end = styles_css.index("}", disabled_start)
+    disabled_rule = styles_css[disabled_start:disabled_end]
+    assert "cursor: default;" in disabled_rule
+    assert "cursor: not-allowed;" not in disabled_rule
+
+    conversation_start = styles_css.index(".agent-conversation {")
+    conversation_end = styles_css.index("}", conversation_start)
+    conversation_rule = styles_css[conversation_start:conversation_end]
+    assert "margin-top: 0;" in conversation_rule
+    assert "min-height:" not in conversation_rule
+
+    messages_start = styles_css.index(".agent-messages {", styles_css.index(".agent-stage-messages.hidden"))
+    messages_end = styles_css.index("}", messages_start)
+    messages_rule = styles_css[messages_start:messages_end]
+    assert "padding: 8px 2px 0;" in messages_rule
+    assert "overflow-y:" not in messages_rule
+    assert "max-height:" not in messages_rule
+    assert ".agent-stage-messages" in styles_css
+    assert ".agent-stage-lead-messages" in styles_css
+    assert ".agent-stage-after-messages" in styles_css
+    stage_start = styles_css.index(".agent-stage-messages {")
+    stage_end = styles_css.index("}", stage_start)
+    stage_rule = styles_css[stage_start:stage_end]
+    assert "border-top" not in stage_rule
+    lead_start = styles_css.index(".agent-stage-lead-messages {")
+    lead_end = styles_css.index("}", lead_start)
+    lead_rule = styles_css[lead_start:lead_end]
+    assert "margin-bottom: 13px;" in lead_rule
+    assert "padding-bottom: 13px;" in lead_rule
+    assert "border-bottom" in lead_rule
+    assert "border-top" not in lead_rule
+    after_start = styles_css.index(".agent-stage-after-messages {")
+    after_end = styles_css.index("}", after_start)
+    after_rule = styles_css[after_start:after_end]
+    assert "margin-top: 13px;" in after_rule
+    assert "padding-top: 13px;" in after_rule
+    assert "border-top" in after_rule
+    adjacent_start = styles_css.index(".agent-stage-lead-messages:not(.hidden) + .agent-stage-after-messages:not(.hidden) {")
+    adjacent_end = styles_css.index("}", adjacent_start)
+    adjacent_rule = styles_css[adjacent_start:adjacent_end]
+    assert "border-top: 0;" in adjacent_rule
+    adjacent_lead_start = styles_css.index(".agent-stage-lead-messages:not(.hidden):has(+ .agent-stage-after-messages:not(.hidden)) {")
+    adjacent_lead_end = styles_css.index("}", adjacent_lead_start)
+    adjacent_lead_rule = styles_css[adjacent_lead_start:adjacent_lead_end]
+    assert "border-bottom: 0;" in adjacent_lead_rule
+
+    composer_start = styles_css.index(".agent-composer {")
+    composer_end = styles_css.index("}", composer_start)
+    composer_rule = styles_css[composer_start:composer_end]
+    assert "position: absolute;" in composer_rule
+    assert "bottom: 0;" in composer_rule
+    assert "left: 0;" in composer_rule
+    assert "right: 0;" in composer_rule
+    assert "margin-top: -94px;" not in composer_rule
+    assert ".agent-composer::before" in styles_css
+    # The composer bar carries only an inset hairline highlight — no heavy
+    # drop shadow at rest or on focus (the box-shadow was the visual
+    # clutter the user explicitly asked to remove).
+    bar_start = styles_css.index(".agent-composer-bar {")
+    bar_end = styles_css.index("}", bar_start)
+    bar_rule = styles_css[bar_start:bar_end]
+    assert "inset 0 1px 0" in bar_rule
+    assert "0 16px 44px" not in bar_rule
+    assert "0 4px 14px" not in bar_rule
+
+    focus_start = styles_css.index(".agent-composer-bar:focus-within {")
+    focus_end = styles_css.index("}", focus_start)
+    focus_rule = styles_css[focus_start:focus_end]
+    assert "var(--accent)" not in focus_rule
+    assert "0 0 0 3px" not in focus_rule
+    assert "0 18px 48px" not in focus_rule
+    assert "0 6px 18px" not in focus_rule
+
+    assert ".agent-message.user" in styles_css
+    assert ".agent-message.user .agent-message-content" in styles_css
+    assert "margin-left: auto;" in styles_css
+    assert ".agent-message.assistant .agent-message-content" in styles_css
+    assert ".agent-message:last-child" not in styles_css
+    assert "agent-message-rise" not in styles_css
+    assistant_start = styles_css.index(".agent-message.assistant .agent-message-content")
+    assistant_end = styles_css.index("}", assistant_start)
+    assistant_rule = styles_css[assistant_start:assistant_end]
+    assert "background:" not in assistant_rule
+    assert "border:" not in assistant_rule
+
+    assert "renderAgentConversation" in app_js
+    assert "agentTypingState" in app_js
+    assert "function agentMessageIsStreaming" in app_js
+    assert "function agentMessageIsThinking" in app_js
+    assert "function agentThinkingHtml" in app_js
+    assert "function agentVisibleContent" in app_js
+    assert "function tickAgentTyping" in app_js
+    assert "const AGENT_STREAM_POLL_INTERVAL_MS = 180;" in app_js
+    assert "const AGENT_TYPEWRITER_INTERVAL_MS = 12;" in app_js
+    assert "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;" in app_js
+    assert "const AGENT_TYPEWRITER_CATCHUP_TICKS" in app_js
+    assert "metadata.streaming === true" in app_js
+    assert "data-agent-streaming" in app_js
+    assert "data-agent-thinking" in app_js
+    assert "正在思考" in app_js
+    assert "agent-thinking" in app_js
+    assert ".agent-thinking" in styles_css
+    assert "agent-thinking-icon" not in app_js
+    assert ".agent-thinking-icon" not in styles_css
+    assert "agent-thinking-pulse" in styles_css
+    assert "agent-thinking-dot" in styles_css
+    assert "agent-typing-cursor" not in app_js
+    assert ".agent-typing-cursor" not in styles_css
+    assert "agent-typing-cursor-blink" not in styles_css
+    assert "function requestAgentConversationScrollToLatest" in app_js
+    assert "scrollContent.scrollTo({ top: scrollContent.scrollHeight, behavior: \"auto\" });" in app_js
+    assert "agent/report-draft/confirm" not in app_js
+    assert "confirmAgentDraft" not in app_js
+    assert "confirmDraft" not in app_js
+    assert "确认写入" not in app_js
+    assert "agent-empty" not in app_js
+    assert "Agent 将按流程自动执行" not in app_js
+    assert "agent-message user" in app_js
+    assert "agent-message assistant" in app_js
+    assert "renderAgentTimeline" in app_js
+    render_start = app_js.index("function renderAgentConversation")
+    render_end = app_js.index("function agentTimelineStageDefinitions", render_start)
+    render_body = app_js[render_start:render_end]
+    # v2 wiring: renderAgentTimeline must be fed via agentReportMessagesForDisplay.
+    assert "agentReportMessagesForDisplay(agentMessages)" in render_body
+    assert "renderAgentTimeline(" in render_body
+    assert "agentMessages.filter((message, index) => !agentMessageTargetId(message, index, agentMessages))" not in render_body
+    assert "requestAgentConversationScrollToLatest();" in render_body
+    assert "function agentTimelineItems" in app_js
+    assert "function agentTimelineInsertionIndex" in app_js
+    assert "function agentReportMessagesForDisplay" in app_js
+    assert "function agentMessagesHtml" in app_js
+    assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
+    assert "agentMessagesHtml(item.messages)" in app_js
+    assert "agentStageLabel(labelStage)" in app_js
+    alias_start = app_js.index("function agentValidatorAlias")
+    stage_label_start = app_js.index("function agentStageLabel", alias_start)
+    stage_label_end = app_js.index("function formatAgentMessageContent", stage_label_start)
+    alias_and_stage_label_body = app_js[alias_start:stage_label_end]
+    stage_label_body = app_js[stage_label_start:stage_label_end]
+    assert "function agentValidatorAlias" in alias_and_stage_label_body
+    assert 'return agentValidatorAlias(selectedTask?.validator) || "Agent";' in stage_label_body
+    assert '"于添": "蛋黄"' in alias_and_stage_label_body
+    assert '"张雯萱": "小九"' in alias_and_stage_label_body
+    assert "材料完备性" not in stage_label_body
+    assert "分数一致性" not in stage_label_body
+    assert "效果与稳定性" not in stage_label_body
+    assert 'metadata.tool_call?.name === "scan_materials"' in app_js
+    assert "function agentMessageIsAdvanceIntent" in app_js
+    assert 'metadata.intent === "advance"' in app_js
+    assert "agentTimelineVisibleStages" in app_js
+    assert "restoreResultScrollDefaultOrder" in app_js
+    assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
+    assert 'if (message.stage === "chat" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
+
+
+def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs():
+    messages = [
+        {"role": "user", "stage": "chat", "content": "开始验证", "metadata": {"intent": "advance"}},
+        {"role": "assistant", "stage": "chat", "content": "我将先检查本次验证材料的完备性。", "metadata": {}},
+        {
+            "role": "assistant",
+            "stage": "scan",
+            "content": "正在调用材料识别工具 scan_materials：读取材料目录。",
+            "metadata": {"tool_call": {"name": "scan_materials", "stage": "scan"}},
+        },
+        {"role": "assistant", "stage": "scan", "content": "材料完备性检查已完成。", "metadata": {}},
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "是否继续执行【模型可复现性验证】？",
+            "metadata": {"awaiting_next_stage": "reproducibility"},
+        },
+        {"role": "user", "stage": "chat", "content": "这些样本来自哪里？", "metadata": {}},
+        {"role": "assistant", "stage": "chat", "content": "样本来自材料目录中的建模样本。", "metadata": {}},
+        {"role": "user", "stage": "chat", "content": "先继续吧", "metadata": {}},
+        {"role": "assistant", "stage": "chat", "content": "收到，我将继续执行模型可复现性验证。", "metadata": {}},
+        {"role": "assistant", "stage": "reproducibility", "content": "正在执行 Notebook。", "metadata": {}},
+    ]
+
+    assert _agent_timeline_items_for(messages, ["scan", "reproducibility"]) == [
+        {
+            "type": "messages",
+            "contents": [
+                "开始验证",
+                "我将先检查本次验证材料的完备性。",
+                "正在调用材料识别工具 scan_materials：读取材料目录。",
+            ],
+        },
+        {"type": "stage", "stage": "scan"},
+        {
+            "type": "messages",
+            "contents": [
+                "材料完备性检查已完成。",
+                "是否继续执行【模型可复现性验证】？",
+                "这些样本来自哪里？",
+                "样本来自材料目录中的建模样本。",
+                "先继续吧",
+                "收到，我将继续执行模型可复现性验证。",
+            ],
+        },
+        {"type": "stage", "stage": "reproducibility"},
+        {"type": "messages", "contents": ["正在执行 Notebook。"]},
+    ]
+
+
+def test_agent_timeline_places_metric_output_before_metric_analysis_after_chat():
+    messages = [
+        {"role": "assistant", "stage": "reproducibility", "content": "分数一致性检查完成。", "metadata": {}},
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "是否继续执行【模型效果&稳定性验证】？",
+            "metadata": {"awaiting_next_stage": "metrics"},
+        },
+        {"role": "user", "stage": "chat", "content": "这个问题严重吗？", "metadata": {}},
+        {"role": "assistant", "stage": "chat", "content": "分数不一致会影响上线决策。", "metadata": {}},
+        {"role": "user", "stage": "chat", "content": "先继续吧", "metadata": {}},
+        {"role": "assistant", "stage": "chat", "content": "收到，我将继续执行模型效果与稳定性验证。", "metadata": {}},
+        {"role": "assistant", "stage": "metrics", "content": "效果与稳定性验证已完成。", "metadata": {}},
+    ]
+
+    assert _agent_timeline_items_for(messages, ["reproducibility", "metrics"]) == [
+        {"type": "stage", "stage": "reproducibility"},
+        {
+            "type": "messages",
+            "contents": [
+                "分数一致性检查完成。",
+                "是否继续执行【模型效果&稳定性验证】？",
+                "这个问题严重吗？",
+                "分数不一致会影响上线决策。",
+                "先继续吧",
+                "收到，我将继续执行模型效果与稳定性验证。",
+            ],
+        },
+        {"type": "stage", "stage": "metrics"},
+        {"type": "messages", "contents": ["效果与稳定性验证已完成。"]},
+    ]
+
+
+def test_agent_timeline_keeps_rerun_and_later_outputs_at_the_rerun_position():
+    messages = [
+        {"role": "assistant", "stage": "word_report_ready", "content": "报告已生成。", "metadata": {}},
+        {
+            "role": "user",
+            "stage": "chat",
+            "content": "重新执行一下完备性验证",
+            "metadata": {"intent": "rerun_stage", "target_stage": "scan"},
+        },
+        {
+            "role": "assistant",
+            "stage": "scan",
+            "content": "正在调用材料识别工具 scan_materials：读取材料目录。",
+            "metadata": {"tool_call": {"name": "scan_materials", "stage": "scan"}},
+        },
+        {"role": "assistant", "stage": "scan", "content": "材料完备性检查已完成。", "metadata": {}},
+        {"role": "user", "stage": "chat", "content": "继续", "metadata": {"intent": "advance"}},
+        {"role": "assistant", "stage": "reproducibility", "content": "正在执行 Notebook。", "metadata": {}},
+    ]
+
+    assert _agent_timeline_items_for(messages, ["scan", "reproducibility"]) == [
+        {
+            "type": "messages",
+            "contents": [
+                "报告已生成。",
+                "重新执行一下完备性验证",
+                "正在调用材料识别工具 scan_materials：读取材料目录。",
+            ],
+        },
+        {"type": "stage", "stage": "scan"},
+        {"type": "messages", "contents": ["材料完备性检查已完成。", "继续"]},
+        {"type": "stage", "stage": "reproducibility"},
+        {"type": "messages", "contents": ["正在执行 Notebook。"]},
+    ]
+
+
+def test_agent_timeline_inserts_frozen_snapshot_before_rerun_trigger_message():
+    # A rerun captures the current preview as a frozen snapshot; that snapshot
+    # must land right before the user message that triggered the rerun so the
+    # chart history sits chronologically next to its narration.
+    rerun_message_id = "user-rerun-metrics-1"
+    messages = [
+        {
+            "id": "asst-metrics-old",
+            "role": "assistant",
+            "stage": "metrics",
+            "content": "上一次的效果与稳定性分析。",
+            "metadata": {},
+        },
+        {
+            "id": rerun_message_id,
+            "role": "user",
+            "stage": "chat",
+            "content": "重新执行第三步",
+            "metadata": {"intent": "rerun_stage", "target_stage": "metrics"},
+        },
+        {
+            "id": "asst-metrics-new",
+            "role": "assistant",
+            "stage": "metrics",
+            "content": "新一轮效果与稳定性分析。",
+            "metadata": {},
+        },
+    ]
+    snapshots = [
+        {
+            "triggerMessageId": rerun_message_id,
+            "triggerFingerprint": "rerun_stage|metrics|重新执行第三步",
+            "stage": "metrics",
+            "sectionId": "metricSection",
+            "headingHtml": "<h3>指标概览</h3>",
+            "label": "指标概览（历史）",
+            "contentClassName": "metric-preview",
+            "contentHtml": "<div>old chart</div>",
+        }
+    ]
+
+    items = _agent_timeline_items_for(
+        messages,
+        ["metrics"],
+        frozen_snapshots=snapshots,
+        selected_task_id="task-1",
+    )
+
+    assert items == [
+        {"type": "messages", "contents": ["上一次的效果与稳定性分析。"]},
+        {"type": "frozen", "triggerMessageId": rerun_message_id, "stage": "metrics"},
+        {"type": "messages", "contents": ["重新执行第三步"]},
+        {"type": "stage", "stage": "metrics"},
+        {"type": "messages", "contents": ["新一轮效果与稳定性分析。"]},
+    ]
+
+
+def test_agent_timeline_re_anchors_frozen_snapshot_when_optimistic_id_becomes_real():
+    # The optimistic rerun message's transient id is replaced by the server id
+    # on the next poll. The fingerprint-based fallback must re-anchor the
+    # snapshot to the new id so it still renders at the right position.
+    real_id = "server-assigned-rerun-id"
+    messages = [
+        {
+            "id": real_id,
+            "role": "user",
+            "stage": "chat",
+            "content": "重新执行第三步",
+            "metadata": {"intent": "rerun_stage", "target_stage": "metrics"},
+        },
+        {
+            "id": "asst-metrics-new",
+            "role": "assistant",
+            "stage": "metrics",
+            "content": "新一轮效果与稳定性分析。",
+            "metadata": {},
+        },
+    ]
+    snapshots = [
+        {
+            "triggerMessageId": "optimistic-1234",
+            "triggerFingerprint": "rerun_stage|metrics|重新执行第三步",
+            "stage": "metrics",
+            "sectionId": "metricSection",
+            "headingHtml": "<h3>指标概览</h3>",
+            "label": "指标概览（历史）",
+            "contentClassName": "metric-preview",
+            "contentHtml": "<div>old chart</div>",
+        }
+    ]
+
+    items = _agent_timeline_items_for(
+        messages,
+        ["metrics"],
+        frozen_snapshots=snapshots,
+        selected_task_id="task-1",
+    )
+
+    # Snapshot is re-anchored to the real message id and inserted right
+    # before the rerun message.
+    assert items[0] == {"type": "frozen", "triggerMessageId": real_id, "stage": "metrics"}
+    assert items[1] == {"type": "messages", "contents": ["重新执行第三步"]}
+
+
+def test_agent_report_draft_messages_render_in_visible_report_section():
+    messages = [
+        {"role": "assistant", "stage": "metrics", "content": "效果与稳定性验证完成。", "metadata": {}},
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "是否继续执行【报告结论草稿生成】？",
+            "metadata": {"awaiting_next_stage": "word_conclusion_draft"},
+        },
+        {"role": "user", "stage": "chat", "content": "先继续吧", "metadata": {}},
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "收到，我将基于已完成的验证结果起草 Word 报告中的三段结论，完成后会等你确认。",
+            "metadata": {},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_draft",
+            "content": "",
+            "metadata": {"streaming": True},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_draft",
+            "content": "压力测试总结\n压力测试显示模型整体稳定。",
+            "metadata": {"draft_values": {"TEXT:pressure_test_summary": "压力测试显示模型整体稳定。"}},
+        },
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+            "metadata": {"awaiting_confirmation": True},
+        },
+    ]
+
+    assert _agent_timeline_items_for(messages, ["metrics"]) == [
+        {"type": "stage", "stage": "metrics"},
+        {
+            "type": "messages",
+            "contents": [
+                "效果与稳定性验证完成。",
+                "是否继续执行【报告结论草稿生成】？",
+                "先继续吧",
+                "收到，我将基于已完成的验证结果起草 Word 报告中的三段结论，完成后会等你确认。",
+                "",
+                "压力测试总结\n压力测试显示模型整体稳定。",
+                "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+            ],
+        },
+    ]
+
+
+def test_agent_report_confirmation_keeps_draft_visible_and_hides_stale_prompt():
+    messages = [
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_draft",
+            "content": "压力测试总结\n旧草稿。",
+            "metadata": {"draft_values": {"TEXT:pressure_test_summary": "旧草稿。"}},
+        },
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+            "metadata": {"awaiting_confirmation": True},
+        },
+        {
+            "role": "user",
+            "stage": "chat",
+            "content": "确认",
+            "metadata": {"intent": "confirm_report"},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_confirmed",
+            "content": "三段报告结论已确认，将开始生成最终 Word 报告。",
+            "metadata": {},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_report_ready",
+            "content": "报告已生成。右侧步骤里的“预览”可以在线查看 Word，“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。",
+            "metadata": {"report_ready": True},
+        },
+    ]
+
+    visible_messages = _agent_report_messages_for_display(messages)
+    assert [message["content"] for message in visible_messages] == [
+        "压力测试总结\n旧草稿。",
+        "确认",
+        "三段报告结论已确认，将开始生成最终 Word 报告。",
+        "报告已生成。右侧步骤里的“预览”可以在线查看 Word，“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。",
+    ]
+
+
+def test_agent_report_regenerated_draft_after_confirmation_keeps_history_visible():
+    messages = [
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_draft",
+            "content": "压力测试总结\n旧草稿。",
+            "metadata": {"draft_values": {"TEXT:pressure_test_summary": "旧草稿。"}},
+        },
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+            "metadata": {"awaiting_confirmation": True},
+        },
+        {
+            "role": "user",
+            "stage": "chat",
+            "content": "确认",
+            "metadata": {"intent": "confirm_report"},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_confirmed",
+            "content": "三段报告结论已确认，将开始生成最终 Word 报告。",
+            "metadata": {},
+        },
+        {
+            "role": "user",
+            "stage": "chat",
+            "content": "重新生成报告",
+            "metadata": {"intent": "regenerate_report_draft"},
+        },
+        {
+            "role": "assistant",
+            "stage": "word_conclusion_draft",
+            "content": "压力测试总结\n新草稿。",
+            "metadata": {"draft_values": {"TEXT:pressure_test_summary": "新草稿。"}},
+        },
+        {
+            "role": "assistant",
+            "stage": "chat",
+            "content": "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+            "metadata": {"awaiting_confirmation": True},
+        },
+    ]
+
+    visible_messages = _agent_report_messages_for_display(messages)
+
+    assert [message["content"] for message in visible_messages] == [
+        "压力测试总结\n旧草稿。",
+        "确认",
+        "三段报告结论已确认，将开始生成最终 Word 报告。",
+        "重新生成报告",
+        "压力测试总结\n新草稿。",
+        "三段 Word 结论草稿已生成。请先查看；需要写入 Word 时，请直接回复“确认”。",
+    ]
+
+
+def test_agent_stage_messages_merge_consecutive_duplicate_titles():
+    html = _agent_messages_html_for(
+        [
+            {"role": "assistant", "stage": "chat", "content": "我将先检查材料。", "metadata": {}},
+            {"role": "assistant", "stage": "scan", "content": "正在调用材料识别工具。", "metadata": {}},
+            {"role": "assistant", "stage": "scan", "content": "材料检查完成。", "metadata": {}},
+        ],
+        "scan",
+    )
+
+    assert html.count("<meta>Agent</meta>") == 1
+    assert "<body>我将先检查材料。</body>" in html
+    assert "<body>正在调用材料识别工具。</body>" in html
+    assert "<body>材料检查完成。</body>" in html
+
+
+def test_agent_label_uses_validator_easter_egg_aliases():
+    app_js = _read_static("app.js")
+    alias_start = app_js.index("function agentValidatorAlias")
+    alias_end = app_js.index("function formatAgentMessageContent", alias_start)
+    script = "\n".join(
+        [
+            "let selectedTask = { validator: '于添' };",
+            app_js[alias_start:alias_end],
+            "const labels = [];",
+            "labels.push(agentStageLabel('chat'));",
+            "selectedTask = { validator: '张雯萱' };",
+            "labels.push(agentStageLabel('chat'));",
+            "selectedTask = { validator: '其他人' };",
+            "labels.push(agentStageLabel('chat'));",
+            "selectedTask = { validator: '  于添  ' };",
+            "labels.push(agentStageLabel('chat'));",
+            "process.stdout.write(JSON.stringify(labels));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["蛋黄", "小九", "Agent", "蛋黄"]
+
+
+def test_agent_send_clears_composer_and_renders_user_message_before_network_wait():
+    app_js = _read_static("app.js")
+
+    assert "function appendOptimisticAgentUserMessage" in app_js
+    assert "function appendOptimisticAgentThinkingMessage" in app_js
+    assert "function removeOptimisticAgentMessage" in app_js
+
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    send_body = app_js[send_start:send_end]
+    post_call = 'api(`api/tasks/${taskId}/agent/messages`'
+    assert "const originalValue = input.value;" in send_body
+    assert "const optimisticMessage = appendOptimisticAgentUserMessage(content, modelId);" in send_body
+    assert "const optimisticThinkingMessage = appendOptimisticAgentThinkingMessage(modelId);" in send_body
+    assert "const requestPromise = api(" in send_body
+    assert "pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true })" in send_body
+    assert send_body.index('input.value = "";') < send_body.index(post_call)
+    assert send_body.index("autoGrowComposerInput();") < send_body.index(post_call)
+    assert send_body.index("updateAgentSendDisabled();") < send_body.index(post_call)
+    assert send_body.index("appendOptimisticAgentUserMessage(content, modelId)") < send_body.index(post_call)
+    assert send_body.index("appendOptimisticAgentThinkingMessage(modelId)") < send_body.index(post_call)
+    assert "removeOptimisticAgentMessage(optimisticMessage.id);" in send_body
+    assert "removeOptimisticAgentMessage(optimisticThinkingMessage.id);" in send_body
+    assert "input.value = originalValue;" in send_body
+
+
+def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'data-agent-send-state="send"' in index_html
+    assert 'class="agent-send-icon agent-send-icon-send"' in index_html
+    assert 'class="agent-send-icon agent-send-icon-stop"' in index_html
+    assert '<rect x="4" y="4" width="16" height="16" rx="3.4" fill="currentColor" />' in index_html
+
+    assert "function agentSendIsStopMode" in app_js
+    assert "function renderAgentSendButtonState" in app_js
+    assert "function stopAgentValidation" in app_js
+    assert 'api(`api/tasks/${normalizedTaskId}/agent/stop`' in app_js
+    assert 'button.dataset.agentSendState = stopMode ? "stop" : "send";' in app_js
+    assert 'button.setAttribute("aria-label", stopMode ? "停止当前 Agent 动作" : "发送消息");' in app_js
+    assert "button.disabled = stopMode ? false : !input.value.trim();" in app_js
+
+    click_start = app_js.index('$("sendAgentMessageButton").onclick')
+    click_end = app_js.index('$("agentComposerInput").addEventListener("keydown"', click_start)
+    click_handler = app_js[click_start:click_end]
+    assert "if (agentSendIsStopMode())" in click_handler
+    assert 'runAction(stopAgentValidation, { actionId: "agent", busyText: "Agent 正在停止..." });' in click_handler
+    assert 'runAction(startAgentValidation, { actionId: "agent", busyText: "Agent 正在处理..." });' in click_handler
+
+    keydown_start = app_js.index('$("agentComposerInput").addEventListener("keydown"')
+    keydown_end = app_js.index('$("agentComposerInput").addEventListener("input"', keydown_start)
+    keydown_handler = app_js[keydown_start:keydown_end]
+    assert "if (agentSendIsStopMode()) return;" in keydown_handler
+
+    assert '.agent-send[data-agent-send-state="stop"]' in styles_css
+    assert ".agent-send-icon-stop" in styles_css
+    assert ".agent-send[data-agent-send-state=\"stop\"] svg" in styles_css
+
+
+def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
+    app_js = _read_static("app.js")
+    poll_start = app_js.index("async function pollValidationProgress")
+    poll_end = app_js.index("async function validateCurrentTask", poll_start)
+    poll_body = app_js[poll_start:poll_end]
+
+    assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "if (stopping && !serverBusyAction)" in poll_body
+    assert "return polledTask;" in poll_body
+
+
+def test_agent_send_shows_thinking_message_before_network_wait():
+    app_js = _read_static("app.js")
+    helpers_start = app_js.index("function agentMessageContent")
+    helpers_end = app_js.index("function renderAgentTimeline", helpers_start)
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-1';",
+            "let agentMessages = [];",
+            "let lastAgentRenderSignature = null;",
+            "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
+            "const modelSelect = { value: 'model-1' };",
+            "const renderSnapshots = [];",
+            "function $(id) { return id === 'agentComposerInput' ? input : modelSelect; }",
+            "function autoGrowComposerInput() {}",
+            "function updateAgentSendDisabled() {}",
+            "function setActionStatus() {}",
+            "function renderAgentConversation() { renderSnapshots.push(agentMessages.map((message) => ({ role: message.role, content: message.content, metadata: message.metadata || {} }))); }",
+            "function agentEffort() { return 'high'; }",
+            "function agentAcceptanceModeValue() { return 'normal'; }",
+            "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
+            "let resolveApi;",
+            "async function api() { return await new Promise((resolve) => { resolveApi = resolve; }); }",
+            app_js[helpers_start:helpers_end],
+            app_js[send_start:send_end],
+            "const sendPromise = startAgentValidation();",
+            "await new Promise((resolve) => setTimeout(resolve, 0));",
+            "const pendingMessages = agentMessages.map((message) => ({ role: message.role, content: message.content, metadata: message.metadata || {} }));",
+            "resolveApi({ status: 'message_saved', messages: [{ role: 'user', stage: 'chat', content: '开始', metadata: {} }, { role: 'assistant', stage: 'chat', content: '收到。', metadata: { streaming: false } }] });",
+            "await sendPromise;",
+            "process.stdout.write(JSON.stringify({ inputValue: input.value, pendingMessages, finalMessages: agentMessages, renderSnapshots }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["inputValue"] == ""
+    assert payload["pendingMessages"][0]["role"] == "user"
+    assert payload["pendingMessages"][0]["content"] == "开始"
+    assert payload["pendingMessages"][1]["role"] == "assistant"
+    assert payload["pendingMessages"][1]["content"] == ""
+    assert payload["pendingMessages"][1]["metadata"]["streaming"] is True
+    assert payload["pendingMessages"][1]["metadata"]["optimistic"] is True
+    assert payload["finalMessages"][-1]["content"] == "收到。"
+
+
+def test_agent_send_polls_streaming_messages_before_network_response_finishes():
+    app_js = _read_static("app.js")
+    helpers_start = app_js.index("async function pollAgentMessagesUntilSettled")
+    helpers_end = app_js.index("async function startAgentValidation", helpers_start)
+    message_helpers_start = app_js.index("function agentMessageContent")
+    message_helpers_end = app_js.index("function renderAgentTimeline", message_helpers_start)
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    script = "\n".join(
+        [
+            "const AGENT_STREAM_POLL_INTERVAL_MS = 1;",
+            "let selectedTaskId = 'task-1';",
+            "let agentMessages = [];",
+            "let lastAgentRenderSignature = null;",
+            "let pollCount = 0;",
+            "let firstPollOptions = null;",
+            "const input = { value: '解释一下', style: {}, classList: { toggle() {} } };",
+            "const modelSelect = { value: 'model-1' };",
+            "function $(id) { return id === 'agentComposerInput' ? input : modelSelect; }",
+            "function autoGrowComposerInput() {}",
+            "function updateAgentSendDisabled() {}",
+            "function setActionStatus() {}",
+            "function renderAgentConversation() {}",
+            "function agentEffort() { return 'high'; }",
+            "function agentAcceptanceModeValue() { return 'normal'; }",
+            "function sleep() { return new Promise((resolve) => setTimeout(resolve, 0)); }",
+            "async function loadAgentMessages(_taskId, options = {}) { pollCount += 1; firstPollOptions ||= options; }",
+            "let resolveApi;",
+            "async function api() { return await new Promise((resolve) => { resolveApi = resolve; }); }",
+            app_js[message_helpers_start:message_helpers_end],
+            app_js[helpers_start:helpers_end],
+            app_js[send_start:send_end],
+            "const sendPromise = startAgentValidation();",
+            "await new Promise((resolve) => setTimeout(resolve, 10));",
+            "const polledBeforeResponse = pollCount > 0;",
+            "resolveApi({ status: 'message_saved', messages: [{ role: 'user', stage: 'chat', content: '解释一下', metadata: {} }, { role: 'assistant', stage: 'chat', content: '收到。', metadata: { streaming: false } }] });",
+            "await sendPromise;",
+            "process.stdout.write(JSON.stringify({ polledBeforeResponse, pollCount, firstPollOptions }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["polledBeforeResponse"] is True
+    assert payload["pollCount"] >= 1
+    assert payload["firstPollOptions"] == {"preserveOptimistic": True}
+
+
+def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_changes_them():
+    app_js = _read_static("app.js")
+
+    assert 'const agentComposerPreferenceStorageKey = "riskmodel_checker_agent_composer_preferences";' in app_js
+    assert "const agentComposerPreferences = restoreAgentComposerPreferences();" in app_js
+    assert 'let agentSelectedModelId = agentComposerPreferences.model_id || "";' in app_js
+    assert 'let agentSelectedEffort = agentComposerPreferences.effort || "high";' in app_js
+    assert 'localStorage.getItem(agentComposerPreferenceStorageKey)' in app_js
+    assert 'localStorage.setItem(agentComposerPreferenceStorageKey' in app_js
+    assert "function normalizeAgentEffort" in app_js
+    assert "function renderAgentEffortPreference" in app_js
+
+    model_options_start = app_js.index("function renderAgentModelOptions")
+    model_options_end = app_js.index("function renderAgentConversation", model_options_start)
+    model_options = app_js[model_options_start:model_options_end]
+    assert "saveAgentComposerPreferences()" not in model_options
+    assert 'agentSelectedModelId = "";' not in model_options
+    assert "agentSelectedModelId = select.value;" not in model_options
+    assert "renderAgentEffortPreference()" in app_js
+
+    conversation_start = app_js.index("function renderAgentConversation")
+    conversation_end = app_js.index("function agentTimelineStageDefinitions", conversation_start)
+    conversation = app_js[conversation_start:conversation_end]
+    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!isAgent)")
+    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!isAgent)")
+
+    model_change_start = app_js.index('$("agentModelSelect").onchange')
+    model_change_end = app_js.index('$("sendAgentMessageButton").onclick', model_change_start)
+    model_change = app_js[model_change_start:model_change_end]
+    assert "agentSelectedModelId = event.target.value;" in model_change
+    # Changes are persisted via the per-task dispatcher; the global save call
+    # is reserved for the fallback path when no task is selected.
+    assert "persistCurrentAgentComposerPreference({ model_id: agentSelectedModelId });" in model_change
+
+    assert '$("agentEffortSelect").onchange = (event) =>' in app_js
+    effort_change_start = app_js.index('$("agentEffortSelect").onchange')
+    effort_change_end = app_js.index('$("sendAgentMessageButton").onclick', effort_change_start)
+    effort_change = app_js[effort_change_start:effort_change_end]
+    assert "agentSelectedEffort = normalizeAgentEffort(event.target.value);" in effort_change
+    assert "persistCurrentAgentComposerPreference({ effort: agentSelectedEffort });" in effort_change
+
+
+def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
+    # Mode / model / effort must persist per task so that two tasks can
+    # remember different configurations. The global preference acts as the
+    # seed when a task is opened for the first time.
+    app_js = _read_static("app.js")
+
+    assert 'const agentTaskComposerStorageKey = "riskmodel_checker_agent_task_composer_preferences";' in app_js
+    assert "function loadAgentTaskComposerOverrides" in app_js
+    assert "function persistAgentTaskComposerOverrides" in app_js
+    assert "function getAgentTaskComposerOverride" in app_js
+    assert "function updateAgentTaskComposerOverride" in app_js
+    assert "function applyAgentTaskComposerPreferences" in app_js
+    assert "function resetAgentComposerToGlobalDefaults" in app_js
+
+    # selectTask wires the per-task overrides into the live composer state.
+    select_start = app_js.index("function selectTask(task)")
+    select_end = app_js.index("function deselectCurrentTask", select_start)
+    select_body = app_js[select_start:select_end]
+    assert "applyAgentTaskComposerPreferences(task.id);" in select_body
+
+    # Deselecting a task falls back to the global seed so the composer
+    # state is coherent if a fresh task is selected next.
+    deselect_start = app_js.index("function deselectCurrentTask()")
+    deselect_end = app_js.index("function renderMetricPreview", deselect_start)
+    deselect_body = app_js[deselect_start:deselect_end]
+    assert "resetAgentComposerToGlobalDefaults();" in deselect_body
+
+    # Dispatcher: persist to per-task override when a task is selected;
+    # only fall back to the legacy global save when no task is active.
+    dispatcher_start = app_js.index("function persistCurrentAgentComposerPreference")
+    dispatcher_end = dispatcher_start + 400
+    dispatcher = app_js[dispatcher_start:dispatcher_end]
+    assert "updateAgentTaskComposerOverride(selectedTaskId, patch);" in dispatcher
+    assert "saveAgentComposerPreferences();" in dispatcher
+
+    # Acceptance mode change handler must also route through the per-task
+    # dispatcher rather than the global-only saver.
+    accept_change_start = app_js.index('$("agentAcceptanceModeSelect").onchange')
+    accept_change_end = app_js.index("function blurChipSelectIfFocused", accept_change_start)
+    accept_change = app_js[accept_change_start:accept_change_end]
+    assert "persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });" in accept_change
+
+
+def test_agent_composer_acceptance_mode_selector_controls_auto_accept_payload():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="agentAcceptanceModeSelect"' in index_html
+    assert 'class="agent-composer-chip-icon agent-acceptance-icon-default"' in index_html
+    assert 'class="agent-composer-chip-icon agent-acceptance-icon-auto"' in index_html
+    assert 'value="normal">默认权限</option>' in index_html
+    assert 'value="auto_accept">自动审查</option>' in index_html
+    assert index_html.index('id="agentAcceptanceModeSelect"') < index_html.index('id="agentModelSelect"')
+
+    assert "function normalizeAgentAcceptanceMode" in app_js
+    assert 'let agentAcceptanceMode = agentComposerPreferences.acceptance_mode || "normal";' in app_js
+    assert "acceptance_mode: normalizeAgentAcceptanceMode(agentAcceptanceMode)" in app_js
+    assert "function renderAgentAcceptanceModePreference" in app_js
+    assert "function agentAcceptanceModeValue" in app_js
+    assert "renderAgentAcceptanceModePreference();" in app_js
+    assert '$("agentAcceptanceModeSelect").onchange = (event) =>' in app_js
+    assert '"agentAcceptanceModeSelect"' in app_js
+    assert "acceptance_mode: agentAcceptanceModeValue()" in app_js
+
+    mode_rule_start = styles_css.index(".agent-composer-acceptance")
+    mode_rule_end = styles_css.index(".agent-composer-model", mode_rule_start)
+    mode_rules = styles_css[mode_rule_start:mode_rule_end]
+    assert "var(--danger)" in mode_rules
+    assert '[data-acceptance-mode="normal"]' in mode_rules
+    assert '[data-acceptance-mode="normal"] select' in mode_rules
+    assert '[data-acceptance-mode="auto_accept"]' in mode_rules
+    assert ".agent-acceptance-icon-default" in mode_rules
+    assert ".agent-acceptance-icon-auto" in mode_rules
+
+    toolbar_start = styles_css.index(".agent-composer-toolbar {")
+    toolbar_end = styles_css.index("}", toolbar_start)
+    toolbar_rules = styles_css[toolbar_start:toolbar_end]
+    assert "flex-wrap: nowrap;" in toolbar_rules
+
+
+def test_agent_composer_select_accent_does_not_stick_after_native_dropdown_closes():
+    styles_css = _read_static("styles.css")
+
+    accent_start = styles_css.index("/* Agent execution mode chip.")
+    accent_end = styles_css.index("\n.agent-composer-chip-caret {", accent_start)
+    accent_rules = styles_css[accent_start:accent_end]
+
+    sticky_focus_selectors = [
+        ".agent-composer-acceptance:focus-within",
+        ".agent-composer-model:focus-within",
+        ".agent-composer-effort:focus-within",
+        'body[data-theme="dark"] .agent-composer-model:focus-within',
+        'body[data-theme="dark"] .agent-composer-effort:focus-within',
+    ]
+    for selector in sticky_focus_selectors:
+        assert selector not in accent_rules
+
+    assert ".agent-composer-model:hover" in accent_rules
+    assert ".agent-composer-effort:hover" in accent_rules
+    assert ".agent-composer-acceptance:hover" in accent_rules
+    focus_start = styles_css.index(".agent-composer-chip select:focus-visible {")
+    focus_end = styles_css.index("}", focus_start)
+    focus_rule = styles_css[focus_start:focus_end]
+    assert "outline: none;" in focus_rule
+    assert "outline-offset" not in focus_rule
+    assert "#8b5cf6" not in focus_rule
+    assert "#eab308" not in focus_rule
+    assert "var(--danger)" not in focus_rule
+
+
+def test_agent_composer_selects_are_not_rebuilt_on_every_poll_render():
+    app_js = _read_static("app.js")
+
+    model_options_start = app_js.index("function renderAgentModelOptions")
+    model_options_end = app_js.index("function renderAgentEffortPreference", model_options_start)
+    model_options = app_js[model_options_start:model_options_end]
+
+    assert "agentModelOptionsSignature" in model_options
+    assert "const preferred = agentPreferredModelId(enabledModels);" in model_options
+    assert "agentSelectedModelId || llmSettings.default_model_id" not in model_options
+    assert "preferredStillAvailable" in model_options
+    assert "select.dataset.agentModelOptionsSignature === signature" in model_options
+    assert "select.innerHTML = \"\";" in model_options
+    assert (
+        model_options.index("select.dataset.agentModelOptionsSignature === signature")
+        < model_options.index("select.innerHTML = \"\";")
+    )
+
+    effort_start = app_js.index("function renderAgentEffortPreference")
+    effort_end = app_js.index("function requestAgentConversationScrollToLatest", effort_start)
+    effort_renderer = app_js[effort_start:effort_end]
+    assert "if (select.value !== agentSelectedEffort)" in effort_renderer
+
+
+def test_agent_model_preference_ignores_disabled_saved_model():
+    app_js = _read_static("app.js")
+    preference_start = app_js.index("function agentPreferredModelId")
+    preference_end = app_js.index("function renderAgentEffortPreference", preference_start)
+    script = "\n".join(
+        [
+            "let agentSelectedModelId = 'disabled-model';",
+            "let llmSettings = { default_model_id: 'enabled-default', enabled_models: [] };",
+            app_js[preference_start:preference_end],
+            "const enabledModels = [{ model_id: 'enabled-default' }, { model_id: 'other-model' }];",
+            "const first = agentPreferredModelId(enabledModels);",
+            "llmSettings.default_model_id = 'also-disabled';",
+            "const second = agentPreferredModelId(enabledModels);",
+            "agentSelectedModelId = 'other-model';",
+            "const third = agentPreferredModelId(enabledModels);",
+            "process.stdout.write(JSON.stringify([first, second, third]));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["enabled-default", "enabled-default", "other-model"]
+
+
+def test_agent_assistant_messages_render_markdown_safely():
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert "function renderAgentMarkdown" in app_js
+    assert "function renderMarkdownInline" in app_js
+    assert "function renderMarkdownInlineText" in app_js
+    assert 'formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" })' in app_js
+    assert "escapeHtml" in app_js[
+        app_js.index("function renderAgentMarkdown"):app_js.index("function shouldPreserveOptimisticAgentMessages")
+    ]
+    assert ".agent-markdown" in styles_css
+    assert ".agent-markdown ul" in styles_css
+    assert ".agent-markdown code" in styles_css
+    code_start = styles_css.index(".agent-markdown code {")
+    code_end = styles_css.index("}", code_start)
+    code_rule = styles_css[code_start:code_end]
+    assert "color: var(--text);" in code_rule
+    assert "color: var(--accent);" not in code_rule
+    em_start = styles_css.index(".agent-markdown em {")
+    em_end = styles_css.index("}", em_start)
+    em_rule = styles_css[em_start:em_end]
+    assert "color: inherit;" in em_rule
+    assert "color: var(--text-secondary);" not in em_rule
+    assert ".agent-markdown a" in styles_css
+    assert "renderMarkdownInlineText(segment)" in app_js
+    assert "|#[^)]*" in app_js
+    assert ".replace(/_([^_]+)_/g" not in app_js
+    assert "isMarkdownBoundary" in app_js
+
+
+def test_agent_markdown_renders_highlighted_code_blocks():
+    styles_css = _read_static("styles.css")
+    html = _render_agent_markdown(
+        "\n".join(
+            [
+                "```python",
+                "def score(df):",
+                "    threshold = 0.5",
+                "    return df[\"prob\"] > threshold  # pass",
+                "```",
+            ]
+        )
+    )
+
+    assert '<code class="language-python">' in html
+    assert '<span class="agent-code-token keyword">def</span>' in html
+    assert '<span class="agent-code-token function">score</span>' in html
+    assert '<span class="agent-code-token number">0.5</span>' in html
+    assert '<span class="agent-code-token string">&quot;prob&quot;</span>' in html
+    assert '<span class="agent-code-token comment"># pass</span>' in html
+    assert "&gt; threshold" in html
+    assert ".agent-code-token.keyword" in styles_css
+    assert ".agent-code-token.string" in styles_css
+    assert ".agent-code-token.comment" in styles_css
+    assert ".agent-code-token.number" in styles_css
+    assert ".agent-code-token.function" in styles_css
+
+
+def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():
+    app_js = _read_static("app.js")
+
+    renderer_start = app_js.index("function renderAgentMarkdown")
+    renderer_end = app_js.index("function renderMarkdownInline", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+
+    assert r"^\s*(\d+)\.\s+(.+)$" in renderer
+    assert 'openList("ol", ordered[1])' in renderer
+    assert "startAttr" in renderer
+    assert 'html.push(`<${type}${startAttr}>`);' in renderer
+    assert "renderMarkdownInline(ordered[2])" in renderer
+
+
+def test_agent_markdown_renders_pipe_tables():
+    styles_css = _read_static("styles.css")
+    html = _render_agent_markdown(
+        "\n".join(
+            [
+                "| 文件类型 | 描述 | 信贷风控适用性 |",
+                "|:---|:---|:---|",
+                "| **PFA** | 基于 JSON/YAML 的模型交换标准 | 在部分场景中可被审计 |",
+                "| Pickle (.pkl) | Python 原生序列化格式 | **不推荐上线部署** |",
+            ]
+        )
+    )
+
+    assert "<table>" in html
+    assert "<thead><tr>" in html
+    assert "<tbody>" in html
+    assert "<th>文件类型</th>" in html
+    assert "<td><strong>PFA</strong></td>" in html
+    assert "<strong>不推荐上线部署</strong>" in html
+    assert "|:---|:---|:---|" not in html
+    assert ".agent-markdown table" in styles_css
+    assert ".agent-markdown th" in styles_css
+    assert ".agent-markdown td" in styles_css
+
+
+def test_step_rail_bottom_padding_is_visually_balanced():
+    styles_css = _read_static("styles.css")
+
+    rail_start = styles_css.index(".progress-rail {")
+    rail_end = styles_css.index("}", rail_start)
+    rail_rule = styles_css[rail_start:rail_end]
+
+    assert "padding: 12px 12px 8px;" in rail_rule
+
+
+# ====== Polling render signature guards ======
+
+
+def _slice_function(app_js: str, signature: str) -> str:
+    """Return the source of a top-level function declared with `signature`.
+
+    All top-level functions in app.js close with a `}` at column 0, so we
+    find the next column-0 `}` line after the signature. This is robust
+    against destructured default params (which would confuse naive brace
+    counting started at the first `{`).
+    """
+    start = app_js.index(signature)
+    needle = "\n}"
+    end = app_js.index(needle, start)
+    return app_js[start : end + len(needle)]
+
+
+def test_poll_validation_progress_does_not_call_render_all_in_loop():
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "async function pollValidationProgress")
+    assert "renderAll();" not in body, (
+        "pollValidationProgress() must not call renderAll() in its steady-state "
+        "loop; use renderChangedValidationViews() instead so unchanged regions "
+        "are not repainted every second."
+    )
+    assert "renderChangedValidationViews" in body
+
+
+def test_action_status_writer_is_idempotent():
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function setActionStatus")
+    assert "renderSignatures.actionStatus" in body, (
+        "setActionStatus() must short-circuit on identical (message, kind, "
+        "detail) writes so the top status pill does not flicker during polling."
+    )
+    # The guard must be an early return before the DOM is touched.
+    guard_index = body.index("renderSignatures.actionStatus")
+    pill_write_index = body.index('$("actionStatus")')
+    assert guard_index < pill_write_index
+
+
+def test_metric_preview_skips_unchanged_payload():
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function renderMetricPreview")
+    guard_index = body.index("renderSignatures.metricPreview")
+    html_index = body.index('"metricPreview").innerHTML')
+    assert guard_index < html_index, (
+        "renderMetricPreview() must short-circuit on identical payloads before "
+        "any innerHTML assignment so animated metric cards do not replay every "
+        "polling tick."
+    )
+
+
+def test_workflow_stepper_guard_refreshes_elapsed_time():
+    """The skip-path must still tick elapsed seconds on running steps."""
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function renderWorkflowStepper")
+    assert "refreshWorkflowStepperElapsedTimes" in body, (
+        "renderWorkflowStepper() must call refreshWorkflowStepperElapsedTimes() "
+        "so running steps' elapsed seconds tick even when the structural "
+        "signature guard skips a rebuild."
+    )
+    guard_idx = body.index("renderSignatures.workflowStepper === nextSignature")
+    refresh_idx = body.index("refreshWorkflowStepperElapsedTimes")
+    assert guard_idx < refresh_idx, (
+        "The elapsed-time refresher must be reachable from the skip branch "
+        "(i.e. positioned after the signature comparison)."
+    )
+
+
+def test_step_fingerprint_excludes_clock_time():
+    """stepFingerprint must NOT include Date.now() or it defeats the guard."""
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function stepFingerprint")
+    assert "Date.now()" not in body, (
+        "stepFingerprint() must not bake clock time into the structural "
+        "signature; otherwise every poll tick triggers a full rebuild and "
+        "replays animations."
+    )
+
+
+def test_reproducibility_guard_lives_in_render_signatures():
+    """The reproducibility chart's structural guard must be unified into the
+    renderSignatures cache (not dropped onto element.dataset where evidenceEmpty
+    would wipe it). This is the structural piece of the fix."""
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function renderReproducibilityEvidence")
+    assert "renderSignatures.reproducibilityEvidence" in body
+    assert "renderSignatures.reproducibilityTaskId" in body
+    assert "renderSignatures.reproducibilityAnimatedTaskId" in body
+    # The OLD dataset-based guard must be gone — it was wipe-prone by design.
+    assert "element.dataset.reproducibilitySignature" not in body
+    assert "element.dataset.reproducibilityTaskId" not in body
+    # And the empty branch must not gate on notebookReproducibilityComplete,
+    # which was the original regression vector during running notebook steps.
+    empty_branch_start = body.index("Object.keys(summary).length === 0")
+    empty_branch_end = body.index("evidenceEmpty(", empty_branch_start)
+    empty_branch = body[empty_branch_start:empty_branch_end]
+    assert "notebookReproducibilityComplete" not in empty_branch
+
+
+def test_reproducibility_animation_replays_only_on_first_render_per_task():
+    """Animation policy: shouldAnimatePrecisionChart is true only when the
+    per-task animated marker doesn't match — never on every rebuild."""
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function renderReproducibilityEvidence")
+    assert (
+        "shouldAnimatePrecisionChart = renderSignatures.reproducibilityAnimatedTaskId !== taskId"
+        in body
+    )
+    # And the marker must be set after a render that actually animated, so the
+    # next rebuild for the same task uses data-animation="none".
+    assert "renderSignatures.reproducibilityAnimatedTaskId = taskId" in body
+
+
+def _run_node_capture_json(script: str) -> dict:
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
+    return json.loads(result.stdout)
+
+
+_BROWSER_STUBS = """
+// ---- Browser environment stubs for Node-side execution ----
+// app.js is written for the browser; under Node we stub the minimum surface
+// the module-level code touches (localStorage, document, window, RAF, etc).
+// The reproducibilitySummary element is wrapped in a Proxy so every
+// innerHTML write is captured for assertion.
+
+globalThis.__writes = [];
+const __storageBacking = new Map();
+globalThis.localStorage = {
+  getItem(key) { return __storageBacking.has(key) ? __storageBacking.get(key) : null; },
+  setItem(key, value) { __storageBacking.set(key, String(value)); },
+  removeItem(key) { __storageBacking.delete(key); },
+  clear() { __storageBacking.clear(); },
+};
+
+const __elements = new Map();
+function __makeMockElement() {
+  const inner = {
+    dataset: {},
+    className: '',
+    innerHTML: '',
+    textContent: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    hidden: false,
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    children: [],
+    childNodes: [],
+    style: new Proxy({}, { get: () => () => {}, set: () => true }),
+    classList: { add() {}, remove() {}, toggle() { return false; }, contains() { return false; } },
+  };
+  return new Proxy(inner, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      // Any other access (querySelector, addEventListener, appendChild, ...)
+      // returns a no-op function. Returning null for non-call sites would
+      // crash callers that immediately .invoke() the result.
+      return (...args) => {
+        if (prop === 'querySelector' || prop === 'closest') return null;
+        if (prop === 'querySelectorAll' || prop === 'getElementsByTagName') return [];
+        if (prop === 'getBoundingClientRect') return { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+        return undefined;
+      };
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      return true;
+    },
+  });
+}
+
+function __getOrMakeElement(id) {
+  if (!__elements.has(id)) {
+    const base = __makeMockElement();
+    if (id === 'reproducibilitySummary') {
+      const wrapped = new Proxy(base, {
+        get(target, prop) { return target[prop]; },
+        set(target, prop, value) {
+          if (prop === 'innerHTML') globalThis.__writes.push(value);
+          target[prop] = value;
+          return true;
+        },
+      });
+      __elements.set(id, wrapped);
+    } else {
+      __elements.set(id, base);
+    }
+  }
+  return __elements.get(id);
+}
+
+globalThis.document = new Proxy({
+  getElementById: __getOrMakeElement,
+  querySelector(sel) {
+    if (sel && sel.startsWith('#')) return __getOrMakeElement(sel.slice(1));
+    return null;
+  },
+  querySelectorAll() { return []; },
+  addEventListener() {},
+  removeEventListener() {},
+  body: __makeMockElement(),
+  activeElement: null,
+}, {
+  get(target, prop) {
+    if (prop in target) return target[prop];
+    return () => undefined;
+  },
+});
+
+globalThis.window = new Proxy({
+  addEventListener() {},
+  removeEventListener() {},
+  matchMedia() { return { matches: false, addEventListener() {}, removeEventListener() {} }; },
+}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
+
+globalThis.requestAnimationFrame = () => 0;
+globalThis.cancelAnimationFrame = () => {};
+globalThis.getComputedStyle = () => ({ getPropertyValue: () => '' });
+globalThis.MutationObserver = class { observe() {} disconnect() {} };
+globalThis.AbortController = globalThis.AbortController || class { constructor() { this.signal = {}; } abort() {} };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({}), text: async () => '' });
+"""
+
+
+def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild():
+    """End-to-end behavioral test: drive populated_A → empty → populated_B
+    through the real renderReproducibilityEvidence + signature cache and
+    confirm:
+
+    1. First populated render writes innerHTML with an animated chart.
+    2. Empty payload is preserved — NO additional innerHTML write.
+    3. Second populated render (different rows) rebuilds, but the chart now
+       carries data-animation="none" so the bars don't visually replay.
+    """
+    app_js = _read_static("app.js")
+    # Cut the module-level boot block (DOM listeners, restorePet*, etc.). The
+    # marker is the first `document.addEventListener("mousedown", ...)` block
+    # bound to the agent-composer-chip blur logic.
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    boot_idx = app_js.index(boot_marker)
+    app_js = app_js[:boot_idx]
+
+    populated_a = {
+        "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
+        "sample_size": 100,
+        "seed": 42,
+        "rows": [
+            {
+                "row_index": 1,
+                "score_code_model": 0.5,
+                "score_submitted_pmml": 0.5,
+                "abs_diff": 0.0,
+                "matched": True,
+            },
+        ],
+    }
+    populated_b = {
+        "summary": {"status": "ok", "mismatch_count": 1, "max_abs_diff": 0.00009},
+        "sample_size": 100,
+        "seed": 42,
+        "rows": [
+            {
+                "row_index": 1,
+                "score_code_model": 0.6,
+                "score_submitted_pmml": 0.6000001,
+                "abs_diff": 0.0000001,
+                "matched": False,
+            },
+        ],
+    }
+    empty = {"summary": {}, "rows": []}
+
+    test_driver = "\n".join(
+        [
+            "selectedTaskId = 'task-A';",
+            "selectedTask = { id: 'task-A', status: 'running', active_job_kind: 'pipeline' };",
+            f"renderReproducibilityEvidence({json.dumps(populated_a)});",
+            "const writesAfter1 = globalThis.__writes.length;",
+            f"renderReproducibilityEvidence({json.dumps(empty)});",
+            "const writesAfter2 = globalThis.__writes.length;",
+            f"renderReproducibilityEvidence({json.dumps(populated_b)});",
+            "const writesAfter3 = globalThis.__writes.length;",
+            "const writes = globalThis.__writes;",
+            "process.stdout.write(JSON.stringify({",
+            "  writesAfter1,",
+            "  writesAfter2,",
+            "  writesAfter3,",
+            "  firstWriteHadAnimation: writes[0] ? !writes[0].includes('data-animation=\"none\"') : null,",
+            "  lastWriteHasNoAnimation: writes.length >= 2 ? writes[writes.length - 1].includes('data-animation=\"none\"') : null,",
+            "  animatedTaskAfter: renderSignatures.reproducibilityAnimatedTaskId,",
+            "  signatureTaskAfter: renderSignatures.reproducibilityTaskId,",
+            "}));",
+        ]
+    )
+
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    data = _run_node_capture_json(script)
+
+    assert data["writesAfter1"] == 1, data
+    assert data["firstWriteHadAnimation"] is True, data
+    assert data["writesAfter2"] == 1, data
+    assert data["writesAfter3"] == 2, data
+    assert data["lastWriteHasNoAnimation"] is True, data
+    assert data["animatedTaskAfter"] == "task-A", data
+    assert data["signatureTaskAfter"] == "task-A", data
+
+
+def test_reproducibility_render_handles_task_switch_animation_policy():
+    """Task switching covers two doc-mandated policies in one flow:
+
+    - Switching to a different task re-allows the entry animation.
+    - Empty evidence on a NEW task (no prior populated render for that task)
+      falls through to the placeholder — it does NOT preserve the previous
+      task's chart.
+    """
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)]
+
+    populated = {
+        "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
+        "sample_size": 100,
+        "seed": 42,
+        "rows": [
+            {
+                "row_index": 1,
+                "score_code_model": 0.5,
+                "score_submitted_pmml": 0.5,
+                "abs_diff": 0.0,
+                "matched": True,
+            },
+        ],
+    }
+    empty = {"summary": {}, "rows": []}
+
+    test_driver = "\n".join(
+        [
+            "selectedTaskId = 'task-A';",
+            "selectedTask = { id: 'task-A', status: 'running' };",
+            f"renderReproducibilityEvidence({json.dumps(populated)});",
+            "const writesAfter_A_populated = globalThis.__writes.length;",
+            "const animatedTaskAfter_A = renderSignatures.reproducibilityAnimatedTaskId;",
+            # Switch to task B and render the SAME evidence shape — should
+            # rebuild (different task) AND re-enable animation.
+            "selectedTaskId = 'task-B';",
+            "selectedTask = { id: 'task-B', status: 'running' };",
+            f"renderReproducibilityEvidence({json.dumps(populated)});",
+            "const writesAfter_B_populated = globalThis.__writes.length;",
+            "const animatedTaskAfter_B = renderSignatures.reproducibilityAnimatedTaskId;",
+            "const writeForB = globalThis.__writes[writesAfter_B_populated - 1];",
+            # Switch to task C and feed empty evidence — placeholder should
+            # appear; previous chart must not be preserved across tasks.
+            "selectedTaskId = 'task-C';",
+            "selectedTask = { id: 'task-C', status: 'running' };",
+            f"renderReproducibilityEvidence({json.dumps(empty)});",
+            "const reproElText = document.getElementById('reproducibilitySummary').textContent;",
+            "const signatureAfter_C = renderSignatures.reproducibilityEvidence;",
+            "process.stdout.write(JSON.stringify({",
+            "  writesAfter_A_populated,",
+            "  writesAfter_B_populated,",
+            "  animatedTaskAfter_A,",
+            "  animatedTaskAfter_B,",
+            "  bWriteHadAnimation: writeForB ? !writeForB.includes('data-animation=\"none\"') : null,",
+            "  reproElText,",
+            "  signatureAfter_C,",
+            "}));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    data = _run_node_capture_json(script)
+
+    assert data["writesAfter_A_populated"] == 1, data
+    assert data["animatedTaskAfter_A"] == "task-A", data
+    # Switching to task-B with same payload still rebuilds (signature carries
+    # taskId) AND plays the animation again for the new task.
+    assert data["writesAfter_B_populated"] == 2, data
+    assert data["animatedTaskAfter_B"] == "task-B", data
+    assert data["bWriteHadAnimation"] is True, data
+    # Empty evidence on a brand-new task clears to placeholder text.
+    assert "暂无分数一致性证据" in data["reproElText"], data
+    assert data["signatureAfter_C"] == "", data
+
+
+def test_substep_elapsed_text_lives_in_its_own_span():
+    """Substep elapsed text needs a stable key so the refresher can target it."""
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function renderNotebookStepRail")
+    assert "data-step-elapsed-key" in body, (
+        "Notebook substeps must render elapsed text in a span with a stable "
+        "data-step-elapsed-key so refreshWorkflowStepperElapsedTimes() can "
+        "update it in place without rebuilding the substep DOM."
+    )
+
+
+def test_computing_metrics_has_one_status_phrase():
+    app_js = _read_static("app.js")
+    poll_body = _slice_function(app_js, "async function pollValidationProgress")
+    assert "验证进行中：" not in poll_body, (
+        "pollValidationProgress() must not write its own 验证进行中：... copy; "
+        "taskActionStatusSnapshot() owns the per-status phrase."
+    )
+    snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
+    assert "指标概览进行中" in snapshot_body
+
+
+def test_writing_artifacts_idle_shows_metrics_complete():
+    """writing_artifacts is a dual-meaning state.
+
+    Backend sets task.status=writing_artifacts the moment metrics finishes,
+    BEFORE any report job is dispatched. The top status bar must therefore
+    distinguish "metrics done, awaiting next step" from "report job running"
+    using task.active_job_kind. Showing 报告输出进行中 while the user has not
+    started the report yet misrepresents stage 3 as still in progress.
+    """
+    app_js = _read_static("app.js")
+    stopped_body = _slice_function(app_js, "function taskStopped")
+    snapshot_body = _slice_function(app_js, "function taskActionStatusSnapshot")
+    script = "\n".join(
+        [
+            "let selectedTask = null;",
+            stopped_body,
+            snapshot_body,
+            "const idle = taskActionStatusSnapshot({"
+            " status: 'writing_artifacts', active_job_kind: null });",
+            "const reportBusy = taskActionStatusSnapshot({"
+            " status: 'writing_artifacts', active_job_kind: 'report' });",
+            "const metricsRunning = taskActionStatusSnapshot({"
+            " status: 'computing_metrics', active_job_kind: 'metrics' });",
+            "process.stdout.write(JSON.stringify({ idle, reportBusy, metricsRunning }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    snapshots = json.loads(result.stdout)
+    assert snapshots["idle"]["kind"] == "success", (
+        "writing_artifacts with no active report job means metrics just "
+        "finished; the top status must read as a completion, not 进行中."
+    )
+    assert "完成" in snapshots["idle"]["message"]
+    assert "进行中" not in snapshots["idle"]["message"]
+    assert snapshots["reportBusy"] == {
+        "message": "报告输出进行中。",
+        "kind": "busy",
+    }
+    assert snapshots["metricsRunning"] == {
+        "message": "指标概览进行中。",
+        "kind": "busy",
+    }
+
+
+def test_writing_artifacts_status_tone_idle_vs_report_busy():
+    """taskStatusTone must mirror taskActionStatusSnapshot's idle/busy split.
+
+    The sidebar pill colors writing_artifacts as if it were running even when
+    no report job is dispatched, repeating the same dual-meaning confusion.
+    """
+    app_js = _read_static("app.js")
+    stopped_body = _slice_function(app_js, "function taskStopped")
+    tone_body = _slice_function(app_js, "function statusTone")
+    task_tone_body = _slice_function(app_js, "function taskStatusTone")
+    script = "\n".join(
+        [
+            "let selectedTask = null;",
+            stopped_body,
+            tone_body,
+            task_tone_body,
+            "const idle = taskStatusTone({"
+            " status: 'writing_artifacts', active_job_kind: null });",
+            "const reportBusy = taskStatusTone({"
+            " status: 'writing_artifacts', active_job_kind: 'report' });",
+            "process.stdout.write(JSON.stringify({ idle, reportBusy }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    tones = json.loads(result.stdout)
+    assert tones["idle"] == "success", (
+        "writing_artifacts with no active report job should color the pill "
+        "as a completion, not as a running task."
+    )
+    assert tones["reportBusy"] == "run"
+
+
+def test_manual_stage_finish_scrolls_to_section_top():
+    """In manual mode each stage handler must jump to the top of the
+    newly-rendered section once execution succeeds, matching the behavior
+    of clicking the corresponding row in the right-side workflow stepper.
+    The helper is gated to manual mode so agent-mode runs do not fight the
+    agent auto-scroll-to-bottom behavior.
+    """
+    app_js = _read_static("app.js")
+
+    helper_body = _slice_function(app_js, "function scrollToManualWorkflowSection")
+    assert "selectedTaskIsAgentMode()" in helper_body, (
+        "scrollToManualWorkflowSection must short-circuit in agent mode."
+    )
+    assert "workflowSteps.find" in helper_body, (
+        "Helper must resolve the section id via workflowSteps so it stays "
+        "in sync with the stepper definition."
+    )
+    assert "scrollStepTarget" in helper_body, (
+        "Helper must reuse scrollStepTarget so manual-finish scroll uses the "
+        "same scrollIntoView call as the stepper click."
+    )
+
+    scan_body = _slice_function(app_js, "async function scanCurrentTask")
+    assert 'scrollToManualWorkflowSection("scan")' in scan_body
+
+    notebook_body = _slice_function(app_js, "async function validateCurrentTask")
+    assert 'scrollToManualWorkflowSection("notebook")' in notebook_body
+
+    metrics_body = _slice_function(app_js, "async function generateMetrics")
+    assert 'scrollToManualWorkflowSection("metrics")' in metrics_body
+
+    report_body = _slice_function(app_js, "async function generateReport")
+    assert 'scrollToManualWorkflowSection("report")' in report_body
+
+
+def test_agent_auto_scroll_drops_distance_threshold():
+    """The follow-mode rewrite must replace the old 120px sticky window with
+    a strict at-bottom check. The threshold made tiny upward scrolls feel
+    glued to the bottom because the typewriter kept yanking the viewport
+    back down.
+    """
+    app_js = _read_static("app.js")
+    assert "AGENT_AUTO_SCROLL_STICKY_PX" not in app_js, (
+        "The 120px sticky threshold must be removed so any upward scroll "
+        "disengages auto-follow."
+    )
+    body = _slice_function(app_js, "function requestAgentConversationScrollToLatest")
+    assert "distanceFromBottom" not in body
+    assert "agentAutoScrollFollows" in body, (
+        "requestAgentConversationScrollToLatest must consult the follow-mode "
+        "state instead of a distance threshold."
+    )
+
+
+def test_task_switch_resets_agent_follow_and_typing_state():
+    """Both agentAutoScrollFollows and agentTypingState are module-level
+    globals. Without an explicit reset on task switch, a stale `false` flag
+    from task A would stop task B's typewriter from auto-following, and a
+    lingering typing entry from A could re-reveal (or contaminate via a
+    shared messageId) on B's panel.
+    """
+    app_js = _read_static("app.js")
+    prep = _slice_function(app_js, "function prepareResultScrollRestoreForTask")
+    assert "agentAutoScrollFollows = true;" in prep, (
+        "Task switch must reset agentAutoScrollFollows so a stale `false` "
+        "from the previous task does not freeze the next task's follow-mode."
+    )
+    select = _slice_function(app_js, "function selectTask")
+    assert "resetAgentTypingState();" in select, (
+        "Task identity change must wipe typewriter state so a still-revealing "
+        "message from the previous task can't re-reveal on the new task."
+    )
+
+
+def test_agent_typewriter_resume_after_completion_seeds_visible():
+    """If the server flips a message id back to streaming=true after it had
+    already finished, the next render must NOT clear the visible content and
+    re-type from byte 0. The seeded-visible path must engage instead.
+    """
+    app_js = _read_static("app.js")
+    streaming_body = _slice_function(app_js, "function agentMessageIsStreaming")
+    visible_body = _slice_function(app_js, "function agentVisibleContent")
+    sched_body = _slice_function(app_js, "function scheduleAgentTyping")
+
+    script = "\n".join(
+        [
+            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
+            "const agentTypingState = new Map();",
+            "const agentTypingCompleted = new Map();",
+            "let agentTypingTimer = null;",
+            "let lastAgentRenderSignature = null;",
+            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
+            "function renderAgentConversation() {}",
+            "function tickAgentTyping() {}",
+            streaming_body,
+            sched_body,
+            visible_body,
+            # Phase 1: streaming completes naturally.
+            "agentTypingState.set('m1', { visible: 'hello world', target: 'hello world' });",
+            "const settled = { id: 'm1', role: 'assistant',"
+            " content: 'hello world', metadata: { streaming: false } };",
+            "agentVisibleContent(settled);",
+            "const completedAfterSettle = agentTypingCompleted.get('m1');",
+            # Phase 2: same id resumes streaming with more content.
+            "const resumed = { id: 'm1', role: 'assistant',"
+            " content: 'hello world and then some', metadata: { streaming: true } };",
+            "const visibleOnResume = agentVisibleContent(resumed);",
+            "const typingOnResume = agentTypingState.get('m1');",
+            "process.stdout.write(JSON.stringify({"
+            " completedAfterSettle,"
+            " visibleOnResume,"
+            " seededVisible: typingOnResume ? typingOnResume.visible : null,"
+            " targetOnResume: typingOnResume ? typingOnResume.target : null,"
+            "}));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    out = json.loads(result.stdout)
+    assert out["completedAfterSettle"] == "hello world", (
+        "A naturally-settled streaming message must store the content it "
+        "settled with so a later resume can seed visible with the already-"
+        "shown bytes."
+    )
+    assert out["seededVisible"] == "hello world", (
+        "Resume-after-completion must seed visible with the already-shown "
+        "content; otherwise the rendered text clears to empty and re-types "
+        "from byte 0."
+    )
+    assert out["targetOnResume"] == "hello world and then some"
+    assert out["visibleOnResume"] == "hello world", (
+        "First render after resume returns the seeded visible (not empty), "
+        "so the user sees the existing text plus a typewriter tail."
+    )
+
+
+def test_user_scroll_input_required_to_flip_follow_mode():
+    """Without a recent wheel/touch input, recomputeAgentAutoScrollFollow must
+    be a no-op. This is what stops the typewriter's own scrollTo from flipping
+    follow-mode back on the frame after the user disengaged it.
+    """
+    app_js = _read_static("app.js")
+    recompute_body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
+    note_body = _slice_function(app_js, "function noteAgentUserScrollInput")
+    assert "lastUserScrollInputAt" in recompute_body, (
+        "recomputeAgentAutoScrollFollow must consult the last user-input "
+        "timestamp so it ignores programmatic typewriter/restore scrolls."
+    )
+    assert "AGENT_USER_SCROLL_INPUT_WINDOW_MS" in recompute_body
+    assert "lastUserScrollInputAt = performance.now();" in note_body
+    assert 'document.addEventListener("wheel", noteAgentUserScrollInput' in app_js
+    assert 'document.addEventListener("touchstart", noteAgentUserScrollInput' in app_js
+    assert 'document.addEventListener("touchmove", noteAgentUserScrollInput' in app_js
+
+
+def test_recompute_agent_auto_scroll_follow_ignores_negative_distance():
+    """Overscroll bounce and mid-mount panels can produce a negative or zero
+    distance value. `distance <= 2` alone is trivially true in those cases
+    and would spuriously re-engage follow-mode.
+    """
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
+    assert "scrollHeight <= scrollContent.clientHeight" in body, (
+        "When the panel cannot scroll yet (content fits within viewport), "
+        "recompute must short-circuit instead of flipping follow-mode."
+    )
+    assert "if (distance < 0) return;" in body, (
+        "Negative distance (overscroll bounce, sub-pixel rounding past max) "
+        "must not flip follow-mode to true."
+    )
+
+
+def test_scroll_to_manual_workflow_section_captures_task_id():
+    """The rAF inside scrollToManualWorkflowSection runs one frame after
+    scheduling; the user may have switched tasks in between. Capturing
+    selectedTaskId at scheduling time and bailing on mismatch prevents the
+    panel from jumping to the wrong section.
+    """
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function scrollToManualWorkflowSection")
+    assert "const targetTaskId = selectedTaskId;" in body
+    assert "if (selectedTaskId !== targetTaskId) return;" in body
+
+
+def test_recompute_agent_auto_scroll_follow_toggles_on_position():
+    """Any wheel that leaves the bottom must drop follow-mode to false, even
+    if the user only nudged up by a few pixels. Returning to the bottom (or
+    within sub-pixel rounding of it) must re-engage follow-mode so the next
+    typewriter tick resumes streaming.
+    """
+    app_js = _read_static("app.js")
+    recompute_body = _slice_function(app_js, "function recomputeAgentAutoScrollFollow")
+
+    script = "\n".join(
+        [
+            "let scrollContent = { scrollHeight: 1000, clientHeight: 400, scrollTop: 0 };",
+            "function $(id) { return id === 'resultScrollContent' ? scrollContent : null; }",
+            "let isAgent = true;",
+            "function selectedTaskIsAgentMode() { return isAgent; }",
+            "let agentAutoScrollFollows = true;",
+            "const AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX = 2;",
+            "const AGENT_USER_SCROLL_INPUT_WINDOW_MS = 250;",
+            "let lastUserScrollInputAt = 0;",
+            "const performance = { now: () => 100 };",
+            recompute_body,
+            "lastUserScrollInputAt = 100;",  # pretend wheel just fired
+            "scrollContent.scrollTop = 600;",
+            "recomputeAgentAutoScrollFollow();",
+            "const atBottom = agentAutoScrollFollows;",
+            "scrollContent.scrollTop = 590;",
+            "recomputeAgentAutoScrollFollow();",
+            "const slightlyAbove = agentAutoScrollFollows;",
+            "scrollContent.scrollTop = 200;",
+            "recomputeAgentAutoScrollFollow();",
+            "const farAbove = agentAutoScrollFollows;",
+            "scrollContent.scrollTop = 599.4;",
+            "recomputeAgentAutoScrollFollow();",
+            "const subpixelRounding = agentAutoScrollFollows;",
+            "isAgent = false;",
+            "scrollContent.scrollTop = 0;",
+            "recomputeAgentAutoScrollFollow();",
+            "const nonAgentLeft = agentAutoScrollFollows;",
+            "process.stdout.write(JSON.stringify({"
+            " atBottom, slightlyAbove, farAbove, subpixelRounding, nonAgentLeft"
+            " }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    out = json.loads(result.stdout)
+    assert out["atBottom"] is True
+    assert out["slightlyAbove"] is False, (
+        "Even a small upward scroll must disengage follow-mode — the user "
+        "explicitly asked for 'even a tiny bit up' to stop the auto-pull."
+    )
+    assert out["farAbove"] is False
+    assert out["subpixelRounding"] is True, (
+        "Sub-pixel rounding (<= 2px) must still count as at-bottom so the "
+        "typewriter's own scroll-to-bottom does not flip follow-mode off."
+    )
+    assert out["nonAgentLeft"] is True, (
+        "recompute must be a no-op outside agent mode; otherwise switching "
+        "tasks would wipe agent follow state."
+    )
+
+
+def test_handle_result_scroll_recomputes_follow_mode():
+    """The follow-mode toggle must hang off the existing scroll listener so
+    both user wheels and the typewriter's own scrollTo land in the same
+    recompute path.
+    """
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function handleResultScroll")
+    assert "recomputeAgentAutoScrollFollow();" in body
+
+
+def test_agent_typewriter_continues_after_stream_ends():
+    """The agent typewriter must not dump remaining content when the server
+    flips metadata.streaming to false. Short messages caught up before the
+    flag flipped, so the dump only showed on long replies — exactly the
+    "一开始一个字一个字浮现，后面一大段突然全部蹦出来" symptom.
+    """
+    app_js = _read_static("app.js")
+    streaming_body = _slice_function(app_js, "function agentMessageIsStreaming")
+    visible_body = _slice_function(app_js, "function agentVisibleContent")
+    sched_body = _slice_function(app_js, "function scheduleAgentTyping")
+    tick_body = _slice_function(app_js, "function tickAgentTyping")
+
+    script = "\n".join(
+        [
+            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
+            "const agentTypingState = new Map();",
+            "const agentTypingCompleted = new Map();",
+            "let agentTypingTimer = null;",
+            "let lastAgentRenderSignature = null;",
+            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
+            "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;",
+            "const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;",
+            "function renderAgentConversation() {}",
+            streaming_body,
+            sched_body,
+            tick_body,
+            visible_body,
+            "const longContent = 'A'.repeat(200);",
+            "const streaming = { id: 'm1', role: 'assistant',"
+            " content: longContent.slice(0, 10),"
+            " metadata: { streaming: true } };",
+            "const first = agentVisibleContent(streaming);",
+            "agentTypingState.get('m1').visible = longContent.slice(0, 5);",
+            "const settled = { id: 'm1', role: 'assistant',"
+            " content: longContent,"
+            " metadata: { streaming: false } };",
+            "const afterStreamEnd = agentVisibleContent(settled);",
+            "const stateAfterStreamEnd = agentTypingState.has('m1');",
+            "tickAgentTyping();",
+            "const afterTick = agentTypingState.get('m1');",
+            "process.stdout.write(JSON.stringify({"
+            " first,"
+            " afterStreamEnd,"
+            " stateAfterStreamEnd,"
+            " visibleAfterTick: afterTick ? afterTick.visible : null,"
+            " targetAfterTick: afterTick ? afterTick.target : null,"
+            "}));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    out = json.loads(result.stdout)
+    assert out["stateAfterStreamEnd"] is True, (
+        "Typing state must survive metadata.streaming flipping to false "
+        "until the visible cursor catches up to the full content."
+    )
+    assert out["afterStreamEnd"] == "A" * 5, (
+        "When streaming ends while the typewriter still has content left "
+        "to reveal, agentVisibleContent must return the partial visible "
+        "string, not the full content."
+    )
+    assert out["targetAfterTick"] == "A" * 200
+    assert out["visibleAfterTick"] is not None
+    assert 5 < len(out["visibleAfterTick"]) < 200, (
+        "Tick after stream end must advance the typewriter — not jump "
+        "straight to the end and not stay frozen."
+    )
+
+
+def test_agent_typewriter_catches_up_long_backlog_quickly():
+    """The typewriter must accelerate when far behind so a multi-thousand
+    character backlog still finishes in a fraction of a second instead of
+    taking 30+ seconds at one-char-per-tick.
+    """
+    app_js = _read_static("app.js")
+    streaming_body = _slice_function(app_js, "function agentMessageIsStreaming")
+    visible_body = _slice_function(app_js, "function agentVisibleContent")
+    sched_body = _slice_function(app_js, "function scheduleAgentTyping")
+    tick_body = _slice_function(app_js, "function tickAgentTyping")
+
+    script = "\n".join(
+        [
+            "const window = { setTimeout: () => 1, clearTimeout: () => {} };",
+            "const agentTypingState = new Map();",
+            "const agentTypingCompleted = new Map();",
+            "let agentTypingTimer = null;",
+            "let lastAgentRenderSignature = null;",
+            "const AGENT_TYPEWRITER_INTERVAL_MS = 12;",
+            "const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;",
+            "const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;",
+            "function renderAgentConversation() {}",
+            streaming_body,
+            sched_body,
+            tick_body,
+            visible_body,
+            "const bigContent = 'B'.repeat(3000);",
+            "const message = { id: 'm1', role: 'assistant',"
+            " content: bigContent,"
+            " metadata: { streaming: true } };",
+            "agentVisibleContent(message);",
+            "let ticks = 0;",
+            "while (agentTypingState.get('m1').visible.length"
+            " < agentTypingState.get('m1').target.length) {",
+            "  tickAgentTyping();",
+            "  ticks += 1;",
+            "  if (ticks > 500) break;",
+            "}",
+            "process.stdout.write(JSON.stringify({ ticks }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    out = json.loads(result.stdout)
+    assert out["ticks"] <= 100, (
+        "A 3000-char backlog must drain in roughly a second; the catch-up "
+        "branch should consume a fraction of the backlog per tick instead "
+        "of advancing by AGENT_TYPEWRITER_CHARS_PER_TICK alone."
+    )
+    assert out["ticks"] >= 30, (
+        "The catch-up must not collapse to a single-tick dump — that would "
+        "reproduce the original bug."
+    )
+
+
+def test_base_pet_mood_writing_artifacts_idle_is_complete():
+    """basePetMoodFromTask reads writing_artifacts as running even when the
+    report job has not started yet, leaving the pet in the running animation
+    after stage 3 finishes.
+    """
+    app_js = _read_static("app.js")
+    mood_body = _slice_function(app_js, "function basePetMoodFromTask")
+
+    # Drop the writing_artifacts entry from the running fallback so the test
+    # cleanly captures the regression we want to prevent.
+    assert (
+        '["running", "computing_metrics", "writing_artifacts"].includes(status)'
+        not in mood_body
+    ), (
+        "basePetMoodFromTask must not classify writing_artifacts as running "
+        "based on status alone; the busy check on active_job_kind already "
+        "covers the genuinely-running case."
+    )
+    assert (
+        '["scanned", "executed", "writing_artifacts"].includes(status)'
+        in mood_body
+    ), (
+        "writing_artifacts without an active job must fall into the same "
+        "complete bucket as scanned and executed."
+    )

@@ -1,0 +1,255 @@
+import ast
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from riskmodel_checker.validation.config import ValidationConfig
+from riskmodel_checker.validation.effectiveness import (
+    build_effectiveness_result,
+    compute_bin_tables,
+    compute_monthly_ks,
+    compute_monthly_psi,
+    compute_overall_ks,
+    compute_overall_psi,
+    compute_psi_stability_table,
+    compute_roc_ks_curves,
+    prepare_effectiveness_context,
+    run_effectiveness,
+)
+
+
+def test_metrics_imported_effectiveness_postpones_annotations():
+    source = Path("riskmodel_checker/validation/effectiveness.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    first_statement_index = 0
+    if (
+        module.body
+        and isinstance(module.body[0], ast.Expr)
+        and isinstance(module.body[0].value, ast.Constant)
+        and isinstance(module.body[0].value.value, str)
+    ):
+        first_statement_index = 1
+    future_import = module.body[first_statement_index]
+
+    assert isinstance(future_import, ast.ImportFrom)
+    assert future_import.module == "__future__"
+    assert any(alias.name == "annotations" for alias in future_import.names)
+
+
+def _config(bin_count: int = 10) -> ValidationConfig:
+    return ValidationConfig(
+        target_col="y",
+        score_col="sample_score",
+        split_col="split",
+        time_col="apply_month",
+        feature_columns=["x1"],
+        bin_count=bin_count,
+    )
+
+
+def _build_sample(seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    n_per_split = 200
+    rows = []
+    for split, month_start in [("train", 3), ("test", 5), ("oot", 7)]:
+        scores = rng.uniform(0, 1, size=n_per_split)
+        y = (rng.uniform(0, 1, size=n_per_split) < scores * 0.5).astype(int)
+        for s, label in zip(scores, y):
+            rows.append({
+                "x1": 0.0,
+                "sample_score": float(s),
+                "y": int(label),
+                "split": split,
+                "apply_month": f"20250{month_start}",
+            })
+    return pd.DataFrame(rows)
+
+
+def _build_ranked_sample() -> pd.DataFrame:
+    rows = []
+    for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
+        for index in range(100):
+            rows.append({
+                "x1": 0.0,
+                "sample_score": index / 99,
+                "y": int(index >= 80),
+                "split": split,
+                "apply_month": month,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_overall_metrics_cover_all_three_splits():
+    sample = _build_sample()
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    by_split = {row.split: row for row in result.overall}
+    assert set(by_split.keys()) == {"train", "test", "oot"}
+    assert set(result.roc_ks_curves.keys()) == {"train", "test", "oot"}
+    assert result.roc_ks_curves["train"].ks == pytest.approx(by_split["train"].ks)
+    assert by_split["train"].psi_vs_train == pytest.approx(0.0, abs=1e-9)
+    assert by_split["test"].psi_vs_train >= 0
+    assert all(0.0 <= row.ks <= 1.0 for row in result.overall)
+
+
+def test_effectiveness_rejects_empty_required_split():
+    sample = _build_sample()
+    sample = sample[sample["split"] != "test"]
+
+    with pytest.raises(ValueError, match="test"):
+        run_effectiveness(sample=sample, config=_config(bin_count=5))
+
+
+def test_overall_metrics_match_model_analysis_auc_lift_columns():
+    sample = _build_ranked_sample()
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    by_split = {row.split: row for row in result.overall}
+
+    train = by_split["train"]
+    assert train.bad_count == 20
+    assert train.auc == pytest.approx(1.0)
+    assert train.head_lift_5pct == pytest.approx(5.0)
+    assert train.tail_lift_5pct == pytest.approx(0.0)
+
+
+def test_overall_auc_keeps_declared_positive_score_direction():
+    rows = []
+    for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
+        for index in range(100):
+            rows.append({
+                "x1": 0.0,
+                "sample_score": index / 99,
+                "y": int(index < 20),
+                "split": split,
+                "apply_month": month,
+            })
+    sample = pd.DataFrame(rows)
+
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    train = {row.split: row for row in result.overall}["train"]
+
+    assert train.auc == pytest.approx(0.0)
+    assert train.head_lift_5pct == pytest.approx(0.0)
+    assert train.tail_lift_5pct == pytest.approx(5.0)
+
+
+def test_split_bin_tables_follow_model_analysis_auto_sort_direction():
+    rows = []
+    for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
+        for index in range(100):
+            rows.append({
+                "x1": 0.0,
+                "sample_score": index / 99,
+                "y": int(index < 20),
+                "split": split,
+                "apply_month": month,
+            })
+    sample = pd.DataFrame(rows)
+
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    train_bins = result.bin_tables["train"]
+
+    assert train_bins[0].score_lower > train_bins[-1].score_lower
+    assert train_bins[0].bad_rate < train_bins[-1].bad_rate
+
+
+def test_bin_table_uses_each_split_edges():
+    sample = _build_sample()
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    assert set(result.bin_tables.keys()) == {"train", "test", "oot"}
+    edges_train = [row.score_upper for row in result.bin_tables["train"]]
+    edges_test = [row.score_upper for row in result.bin_tables["test"]]
+    assert edges_train != edges_test
+    assert len(edges_train) == 5
+    assert len(edges_test) == 5
+
+
+def test_psi_stability_uses_train_test_bins_against_oot_distribution():
+    rows = []
+    for split, scores in {
+        "train": [0.1, 0.2, 0.3, 0.4, 0.5],
+        "test": [0.15, 0.25, 0.35, 0.45, 0.55],
+        "oot": [0.2, 0.4, 0.6, 0.8, 1.0],
+    }.items():
+        for score in scores:
+            rows.append({
+                "x1": 0.0,
+                "sample_score": score,
+                "y": int(score >= 0.5),
+                "split": split,
+                "apply_month": "202503",
+            })
+    sample = pd.DataFrame(rows)
+
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+
+    psi_rows = result.psi_stability_table
+    assert len(psi_rows) == 5
+    assert sum(row.expected_count for row in psi_rows) == 10
+    assert sum(row.actual_count for row in psi_rows) == 5
+    assert sum(row.psi for row in psi_rows) > 0
+
+
+def test_monthly_metrics_present_for_each_month():
+    sample = _build_sample()
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    monthly_months = {row.month for row in result.monthly_ks}
+    psi_months = {row.month for row in result.monthly_psi}
+    assert monthly_months == {"202503", "202505", "202507"}
+    assert psi_months == monthly_months
+
+
+def test_monthly_metrics_include_model_analysis_psi_variants():
+    sample = _build_ranked_sample()
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+    by_month = {row.month: row for row in result.monthly_psi}
+
+    assert by_month["202503"].psi_first_month == pytest.approx(0.0)
+    assert by_month["202503"].psi_mom is None
+    assert by_month["202507"].psi_last_month == pytest.approx(0.0)
+    assert by_month["202507"].psi_mom is not None
+
+
+def test_monthly_metrics_derive_month_from_datetime_time_col():
+    sample = _build_sample()
+    sample.loc[sample["split"] == "train", "apply_month"] = "2025/03/15"
+    sample.loc[sample["split"] == "test", "apply_month"] = "20250520"
+    sample.loc[sample["split"] == "oot", "apply_month"] = "2025-07-01 12:00:00"
+
+    result = run_effectiveness(sample=sample, config=_config(bin_count=5))
+
+    monthly_months = {row.month for row in result.monthly_ks}
+    psi_months = {row.month for row in result.monthly_psi}
+    assert monthly_months == {"202503", "202505", "202507"}
+    assert psi_months == monthly_months
+
+
+def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
+    sample = _build_sample()
+    config = _config(bin_count=5)
+    context = prepare_effectiveness_context(sample=sample, config=config)
+
+    overall = compute_overall_ks(sample=sample, config=config)
+    monthly_ks = compute_monthly_ks(sample=sample, config=config)
+    overall = compute_overall_psi(
+        sample=sample,
+        config=config,
+        context=context,
+        overall=overall,
+    )
+    monthly_psi = compute_monthly_psi(sample=sample, config=config, context=context)
+    bin_tables = compute_bin_tables(sample=sample, config=config, context=context)
+    psi_stability_table = compute_psi_stability_table(sample=sample, config=config)
+    roc_ks_curves = compute_roc_ks_curves(sample=sample, config=config)
+    separate = build_effectiveness_result(
+        overall=overall,
+        monthly_ks=monthly_ks,
+        monthly_psi=monthly_psi,
+        bin_tables=bin_tables,
+        psi_stability_table=psi_stability_table,
+        roc_ks_curves=roc_ks_curves,
+    )
+
+    combined = run_effectiveness(sample=sample, config=config)
+    assert separate == combined

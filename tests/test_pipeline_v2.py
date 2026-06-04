@@ -1,0 +1,1236 @@
+import json
+import math
+import shutil
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import nbformat
+import pandas as pd
+from docx import Document
+
+from riskmodel_checker.db import TaskRepository, init_db
+from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskStatus
+from riskmodel_checker.notebook_contract import RuntimeContract
+from riskmodel_checker.notebook_cancellation import request_notebook_cancellation
+from riskmodel_checker.notebooks import close_live_notebook_session, register_live_notebook_session
+from riskmodel_checker.pipeline import (
+    REPORT_STAGE_FAILURE_PREFIX,
+    PipelineError,
+    PipelineSettings,
+    _build_metrics_cell_source,
+    _clear_generated_artifacts,
+    _feature_columns,
+    _load_sample,
+    _required_path,
+    _write_metrics_results_in_session,
+    _write_reproducibility_result_in_session,
+    run_metrics_stage,
+    run_notebook_stage,
+    run_pipeline,
+    run_report_stage,
+)
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_stage_artifact_cleanup_invalidates_downstream_outputs(tmp_path: Path):
+    task_dir = tmp_path / "tasks" / "t1"
+    execution_dir = task_dir / "execution"
+    outputs_dir = task_dir / "outputs"
+    images_dir = task_dir / "images"
+    for directory in (execution_dir, outputs_dir, images_dir):
+        directory.mkdir(parents=True)
+    (execution_dir / "scan_result.json").write_text("{}", encoding="utf-8")
+    (execution_dir / "runtime_contract.json").write_text("{}", encoding="utf-8")
+    (outputs_dir / "reproducibility_result.json").write_text("{}", encoding="utf-8")
+    (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
+    (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
+    (outputs_dir / "validation_report.docx").write_bytes(b"docx")
+    (images_dir / "chart.png").write_bytes(b"png")
+
+    _clear_generated_artifacts(task_dir, stage="notebook")
+
+    assert (execution_dir / "scan_result.json").exists()
+    assert not (execution_dir / "runtime_contract.json").exists()
+    assert not (outputs_dir / "reproducibility_result.json").exists()
+    assert not (outputs_dir / "validation_results.json").exists()
+    assert not (outputs_dir / "validation.xlsx").exists()
+    assert not (outputs_dir / "validation_report.docx").exists()
+    assert not images_dir.exists()
+
+
+def _sigmoid(value: float) -> float:
+    return 1 / (1 + math.exp(-value))
+
+
+def _write_contract_notebook(path: Path) -> None:
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "\n".join(
+                    [
+                        "import pandas as pd",
+                        "RMC_SAMPLE_DF = pd.read_csv('sample.csv')",
+                        "RMC_TARGET_COL = 'y'",
+                        "RMC_ALGORITHM = 'lgb'",
+                        "RMC_SPLIT_COL = 'split'",
+                        "RMC_TIME_COL = 'apply_month'",
+                        "def RMC_SCORE_FN(df):",
+                        "    return df['pred']",
+                        "RMC_FEATURE_IMPORTANCE = pd.DataFrame({",
+                        "    'feature': ['x1', 'x2'],",
+                        "    'importance': [0.8, 0.2],",
+                        "})",
+                        "RMC_MODEL_PARAMS = {'learning_rate': 0.05, 'max_depth': 5}",
+                    ]
+                )
+            )
+        ]
+    )
+    nbformat.write(notebook, path)
+
+
+def _write_live_sample_contract_notebook(path: Path) -> None:
+    rows_source = repr(
+        [
+            {
+                "x1": (index + 1) / 41,
+                "x2": 0.0,
+                "pred": _sigmoid((index + 1) / 41),
+                "y": int(index >= 20),
+                "split": split,
+                "apply_month": "202503" if split == "train" else "202505",
+            }
+            for split in ("train", "test", "oot")
+            for index in range(40)
+        ]
+    )
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        "import pandas as pd",
+                        "counter = Path('notebook_run_count.txt')",
+                        "counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))",
+                        f"RMC_SAMPLE_DF = pd.DataFrame({rows_source})",
+                        "RMC_TARGET_COL = 'y'",
+                        "RMC_ALGORITHM = 'lgb'",
+                        "RMC_SPLIT_COL = 'split'",
+                        "RMC_TIME_COL = 'apply_month'",
+                        "def RMC_SCORE_FN(df):",
+                        "    return df['pred']",
+                        "RMC_FEATURE_IMPORTANCE = pd.DataFrame({",
+                        "    'feature': ['x1', 'x2'],",
+                        "    'importance': [0.8, 0.2],",
+                        "})",
+                        "RMC_MODEL_PARAMS = {'learning_rate': 0.05, 'max_depth': 5}",
+                    ]
+                )
+            )
+        ]
+    )
+    nbformat.write(notebook, path)
+
+
+def _build_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    project.mkdir()
+    rows = []
+    for split in ("train", "test", "oot"):
+        for index in range(40):
+            x1 = (index + 1) / 41
+            x2 = 0.0
+            rows.append(
+                {
+                    "x1": x1,
+                    "x2": x2,
+                    "pred": _sigmoid(x1),
+                    "y": int(index >= 20),
+                    "split": split,
+                    "apply_month": "202503" if split == "train" else "202505",
+                }
+            )
+    pd.DataFrame(rows).to_csv(project / "sample.csv", index=False)
+    shutil.copy(FIXTURES / "min_lr.pmml", project / "fr_final.pmml")
+    pd.DataFrame(
+        {
+            "特征名": ["x1", "x2"],
+            "类别": ["征信", "基础信息"],
+        }
+    ).to_excel(project / "data_dictionary.xlsx", index=False)
+    _write_contract_notebook(project / "dev.ipynb")
+    return project
+
+
+def _write_template(path: Path) -> Path:
+    document = Document()
+    document.add_paragraph("{{TEXT:report_title}}")
+    document.add_paragraph("OOT KS：{{TEXT:oot_ks}}")
+    document.add_paragraph("{{TEXT:reproducibility_summary}}")
+    document.add_paragraph("{{IMAGE:overall_model_effect}}")
+    document.add_paragraph("{{IMAGE:pressure_ks_table}}")
+    document.save(path)
+    return path
+
+
+class _PredColumnScorer:
+    def score(self, df: pd.DataFrame) -> list[float]:
+        return df["pred"].astype(float).tolist()
+
+
+def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    source = _build_metrics_cell_source(
+        package_root=tmp_path,
+        task=task,
+        settings=PipelineSettings(
+            workspace=tmp_path,
+            db_path=repo.db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        dictionary_path=tmp_path / "dictionary.csv",
+        input_pmml_path=tmp_path / "model.pmml",
+        contract=RuntimeContract(
+            target_col="y",
+            split_col="split",
+            time_col="apply_month",
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "code_model_scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="lgb",
+        ),
+        model_meta_path=tmp_path / "model_meta.json",
+        reproducibility_json_path=tmp_path / "reproducibility_result.json",
+        results_json_path=tmp_path / "validation_results.json",
+        results_pickle_path=tmp_path / "validation_results.pkl",
+        excel_path=tmp_path / "validation.xlsx",
+    )
+
+    assert "class _RmcNotebookScorer" in source
+    assert "RMC_SCORE_FN" in source
+    assert "reproducibility_json_path" in source
+    assert "load_pmml_scorer" not in source
+    assert "def _rmc_raise_if_metrics_cancelled()" in source
+    assert "cancellation_check=_rmc_raise_if_metrics_cancelled" in source
+
+
+def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholder(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+            algorithm="",
+        )
+    )
+
+    source = _build_metrics_cell_source(
+        package_root=tmp_path,
+        task=task,
+        settings=PipelineSettings(
+            workspace=tmp_path,
+            db_path=repo.db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        dictionary_path=tmp_path / "dictionary.csv",
+        input_pmml_path=tmp_path / "model.pmml",
+        contract=RuntimeContract(
+            target_col="y",
+            split_col="split",
+            time_col="apply_month",
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "code_model_scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="CatBoostClassifier",
+        ),
+        model_meta_path=tmp_path / "model_meta.json",
+        reproducibility_json_path=tmp_path / "reproducibility_result.json",
+        results_json_path=tmp_path / "validation_results.json",
+        results_pickle_path=tmp_path / "validation_results.pkl",
+        excel_path=tmp_path / "validation.xlsx",
+    )
+
+    assert '"algorithm": "catboost"' in source
+
+
+def test_reproducibility_stage_shows_pmml_scoring_and_compare_progress(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    contract_path = tmp_path / "runtime_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                "target_col": "y",
+                "split_col": "split",
+                "time_col": "apply_month",
+                "pmml_output_field": "probability_1",
+                "score_decimal_places": 6,
+                "code_model_scores_path": str(tmp_path / "code_scores.csv"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "reproducibility_result.json"
+    calls = []
+
+    class FakeSession:
+        def append_code_cell(self, source, **kwargs):
+            calls.append(("append", kwargs["metadata"]["riskmodel_checker"]))
+            return len(calls) - 1
+
+        def execute_existing_code_cell(self, cell_index, **kwargs):
+            calls.append(("execute", cell_index))
+            if cell_index == 1:
+                output_path.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(succeeded=True, cancelled=False)
+
+    _write_reproducibility_result_in_session(
+        session=FakeSession(),
+        task=task,
+        settings=PipelineSettings(
+            workspace=tmp_path,
+            db_path=repo.db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        input_pmml_path=tmp_path / "model.pmml",
+        contract_meta_path=contract_path,
+        output_path=output_path,
+    )
+
+    assert calls == [
+        ("append", "repro-pmml"),
+        ("append", "repro-compare"),
+        ("execute", 0),
+        ("execute", 1),
+    ]
+
+
+def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    calls = []
+
+    class FakeSession:
+        def append_code_cell(self, source, **kwargs):
+            calls.append(("append", kwargs["metadata"]["riskmodel_checker"]))
+            return len(calls) - 1
+
+        def execute_existing_code_cell(self, cell_index, **kwargs):
+            calls.append(("execute", cell_index))
+            if cell_index == 7:
+                (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
+                (outputs_dir / "validation_results.pkl").write_bytes(b"pickle")
+                (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
+            return SimpleNamespace(succeeded=True, cancelled=False)
+
+    _write_metrics_results_in_session(
+        session=FakeSession(),
+        task=task,
+        settings=PipelineSettings(
+            workspace=tmp_path,
+            db_path=repo.db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        dictionary_path=tmp_path / "dictionary.csv",
+        input_pmml_path=tmp_path / "model.pmml",
+        contract=RuntimeContract(
+            target_col="y",
+            split_col="split",
+            time_col="apply_month",
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "code_model_scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="lgb",
+        ),
+        model_meta_path=tmp_path / "model_meta.json",
+        outputs_dir=outputs_dir,
+    )
+
+    assert calls == [
+        ("append", "metrics-prepare"),
+        ("append", "metrics-score"),
+        ("append", "metrics-basic"),
+        ("append", "metrics-ks"),
+        ("append", "metrics-psi"),
+        ("append", "metrics-binning"),
+        ("append", "metrics-stress"),
+        ("append", "metrics-output"),
+        ("execute", 0),
+        ("execute", 1),
+        ("execute", 2),
+        ("execute", 3),
+        ("execute", 4),
+        ("execute", 5),
+        ("execute", 6),
+        ("execute", 7),
+    ]
+
+
+def test_pipeline_end_to_end(tmp_path: Path):
+    project = _build_project(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    template = _write_template(tmp_path / "template.docx")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+            report_values={"TEXT:report_title": "人工确认标题"},
+        )
+    )
+
+    run_pipeline(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=template,
+            feature_columns=["x1", "x2"],
+            random_sample_size=12,
+        ),
+    )
+
+    final = repo.get_task(task.id)
+    task_dir = workspace / "tasks" / task.id
+    assert final.status == TaskStatus.SUCCEEDED
+    assert (task_dir / "execution" / "code_model_scores.csv").exists()
+    assert (task_dir / "execution" / "runtime_contract.json").exists()
+    assert (task_dir / "execution" / "notebook_steps.json").exists()
+    assert (task_dir / "execution" / "model_meta.json").exists()
+    assert (task_dir / "outputs" / "validation.xlsx").exists()
+    report_path = task_dir / "outputs" / "validation_report.docx"
+    assert report_path.exists()
+    assert Document(report_path).paragraphs[0].text == "人工确认标题"
+    result_json = json.loads(
+        (task_dir / "outputs" / "validation_results.json").read_text(encoding="utf-8")
+    )
+    assert result_json["reproducibility"]["summary"]["status"] == "pass"
+
+
+def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = _build_project(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+
+    def fake_notebook_step_v3(
+        *,
+        repo,
+        task,
+        contract_meta_path,
+        code_scores_path,
+        **_kwargs,
+    ):
+        assert _kwargs["mark_executed"] is False
+        sample = pd.read_csv(project / "sample.csv")
+        pd.DataFrame(
+            {
+                "row_index": sample.index,
+                "code_model_score": sample["pred"],
+            }
+        ).to_csv(
+            code_scores_path,
+            index=False,
+        )
+        contract_meta_path.write_text(
+            json.dumps(
+                {
+                    "target_col": "y",
+                    "split_col": "split",
+                    "time_col": "apply_month",
+                    "pmml_output_field": "probability_1",
+                    "score_decimal_places": 6,
+                    "code_model_scores_path": str(code_scores_path),
+                    "feature_importance_path": None,
+                    "model_params_path": None,
+                    "algorithm": "lgb",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(closed=False, close=lambda: None)
+
+    monkeypatch.setattr("riskmodel_checker.pipeline._notebook_step_v3", fake_notebook_step_v3)
+
+    def fake_write_reproducibility_result_in_session(*, output_path, settings, **_kwargs):
+        assert repo.get_task(task.id).status is TaskStatus.RUNNING
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(
+                {
+                    "sample_size": settings.random_sample_size,
+                    "seed": settings.random_seed,
+                    "rows": [
+                        {
+                            "row_index": 0,
+                            "score_code_model": 0.1,
+                            "score_submitted_pmml": 0.1,
+                            "abs_diff": 0.0,
+                            "matched": True,
+                        }
+                    ],
+                    "summary": {
+                        "match_count": 1,
+                        "mismatch_count": 0,
+                        "max_abs_diff": 0.0,
+                        "status": "pass",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline._write_reproducibility_result_in_session",
+        fake_write_reproducibility_result_in_session,
+    )
+
+    run_notebook_stage(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=tmp_path / "template.docx",
+            random_sample_size=2,
+        ),
+        stage_claimed=True,
+    )
+
+    evidence_path = workspace / "tasks" / task.id / "outputs" / "reproducibility_result.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["summary"]["status"] == "pass"
+    assert evidence["sample_size"] == 2
+    assert evidence["rows"][0]["score_code_model"] == evidence["rows"][0]["score_submitted_pmml"]
+    assert repo.get_task(task.id).status is TaskStatus.EXECUTED
+
+
+def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    sample_path = project / "sample.csv"
+    pmml_path = project / "model.pmml"
+    dictionary_path = project / "dictionary.csv"
+    sample_path.write_text(
+        "y,split,apply_month,pred\n0,train,202501,0.1\n",
+        encoding="utf-8",
+    )
+    pmml_path.write_text("<PMML />", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,数值\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            sample_path=str(sample_path),
+            pmml_path=str(pmml_path),
+            dictionary_path=str(dictionary_path),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    execution_dir = workspace / "tasks" / task.id / "execution"
+    execution_dir.mkdir(parents=True)
+    code_scores_path = execution_dir / "code_model_scores.csv"
+    code_scores_path.write_text("row_index,code_model_score\n0,0.1\n", encoding="utf-8")
+    (execution_dir / "runtime_contract.json").write_text(
+        json.dumps(
+            {
+                "target_col": "y",
+                "split_col": "new_flag",
+                "time_col": "apply_month",
+                "pmml_output_field": "probability_1",
+                "score_decimal_places": 6,
+                "code_model_scores_path": str(code_scores_path),
+                "feature_importance_path": None,
+                "model_params_path": None,
+                "algorithm": "lgb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_session = SimpleNamespace(
+        closed=False,
+        execute_code_cell=lambda source, **_kwargs: SimpleNamespace(
+            succeeded=False,
+            failed_cell_index=14,
+            error_name="ValueError",
+            error_value="sample column check failed: split_col='new_flag'",
+        ),
+        close=lambda: None,
+    )
+    register_live_notebook_session(task.id, fake_session)
+
+    try:
+        run_metrics_stage(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+            ),
+            stage_claimed=True,
+        )
+    except PipelineError as exc:
+        assert "sample column check failed" in str(exc)
+    else:
+        raise AssertionError("metrics stage should fail when split column is missing")
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.FAILED
+    assert final.status_message.startswith("模型效果&稳定性验证失败：")
+    assert "split_col='new_flag'" in final.status_message
+    close_live_notebook_session(task.id)
+
+
+def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    sample_path = project / "sample.csv"
+    pmml_path = project / "model.pmml"
+    dictionary_path = project / "dictionary.csv"
+    sample_path.write_text(
+        "y,split,apply_month,pred\n0,oot,202501,0.1\n",
+        encoding="utf-8",
+    )
+    pmml_path.write_text("<PMML />", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,数值\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            sample_path=str(sample_path),
+            pmml_path=str(pmml_path),
+            dictionary_path=str(dictionary_path),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    execution_dir = workspace / "tasks" / task.id / "execution"
+    execution_dir.mkdir(parents=True)
+    code_scores_path = execution_dir / "code_model_scores.csv"
+    code_scores_path.write_text("row_index,code_model_score\n0,0.1\n", encoding="utf-8")
+    (execution_dir / "runtime_contract.json").write_text(
+        json.dumps(
+            {
+                "target_col": "y",
+                "split_col": "split",
+                "time_col": "apply_month",
+                "pmml_output_field": "probability_1",
+                "score_decimal_places": 6,
+                "code_model_scores_path": str(code_scores_path),
+                "feature_importance_path": None,
+                "model_params_path": None,
+                "algorithm": "lgb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_session = SimpleNamespace(
+        closed=False,
+        cancellation_token=None,
+        client=SimpleNamespace(),
+        execute_code_cell=lambda source, **_kwargs: SimpleNamespace(
+            succeeded=False,
+            failed_cell_index=14,
+            error_name="NotebookCancelled",
+            error_value="notebook execution cancelled",
+            cancelled=True,
+        ),
+        close=lambda: None,
+    )
+    register_live_notebook_session(task.id, fake_session)
+
+    run_metrics_stage(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        stage_claimed=True,
+    )
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.EXECUTED
+    assert final.status_message == "metrics cancelled"
+    close_live_notebook_session(task.id)
+
+
+def test_report_stage_cancel_returns_to_review_required_status(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    repo.update_status(
+        task.id,
+        TaskStatus.WRITING_ARTIFACTS,
+        message="metrics and excel generated",
+    )
+    request_notebook_cancellation(task.id)
+
+    run_report_stage(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+    )
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.REVIEW_REQUIRED
+    assert final.status_message == "report cancelled"
+
+
+def test_report_stage_cancel_during_word_write_does_not_promote_partial_docx(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    repo.update_status(
+        task.id,
+        TaskStatus.WRITING_ARTIFACTS,
+        message="metrics and excel generated",
+    )
+    outputs_dir = workspace / "tasks" / task.id / "outputs"
+    outputs_dir.mkdir(parents=True)
+    report_path = outputs_dir / "validation_report.docx"
+    report_path.write_bytes(b"previous-docx")
+
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline._load_validation_results",
+        lambda _outputs_dir: SimpleNamespace(),
+    )
+
+    def fake_word_writer(*_args, output_path, **_kwargs):
+        Path(output_path).write_bytes(b"partial-docx")
+        request_notebook_cancellation(task.id)
+        return SimpleNamespace(unresolved_placeholders=[])
+
+    monkeypatch.setattr("riskmodel_checker.pipeline.write_validation_word", fake_word_writer)
+
+    run_report_stage(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+    )
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.REVIEW_REQUIRED
+    assert final.status_message == "report cancelled"
+    assert report_path.read_bytes() == b"previous-docx"
+    assert not (outputs_dir / ".validation_report.docx.tmp").exists()
+
+
+def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(
+    tmp_path: Path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sample.csv").write_text("placeholder\n1\n", encoding="utf-8")
+    shutil.copy(FIXTURES / "min_lr.pmml", project / "fr_final.pmml")
+    pd.DataFrame(
+        {
+            "特征名": ["x1", "x2"],
+            "类别": ["征信", "基础信息"],
+        }
+    ).to_csv(project / "data_dictionary.csv", index=False)
+    _write_live_sample_contract_notebook(project / "dev.ipynb")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+    settings = PipelineSettings(
+        workspace=workspace,
+        db_path=db_path,
+        report_template_path=tmp_path / "template.docx",
+        random_sample_size=12,
+    )
+
+    run_notebook_stage(task_id=task.id, settings=settings)
+    run_metrics_stage(task_id=task.id, settings=settings)
+
+    assert repo.get_task(task.id).status == TaskStatus.WRITING_ARTIFACTS
+    assert (project / "notebook_run_count.txt").read_text(encoding="utf-8") == "1"
+    task_dir = workspace / "tasks" / task.id
+    assert (task_dir / "outputs" / "validation_results.json").exists()
+    result_json = json.loads(
+        (task_dir / "outputs" / "validation_results.json").read_text(encoding="utf-8")
+    )
+    assert result_json["reproducibility"]["summary"]["status"] == "pass"
+
+
+def test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed(
+    tmp_path: Path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sample.csv").write_text("placeholder\n1\n", encoding="utf-8")
+    shutil.copy(FIXTURES / "min_lr.pmml", project / "fr_final.pmml")
+    pd.DataFrame(
+        {
+            "特征名": ["x1", "x2"],
+            "类别": ["征信", "基础信息"],
+        }
+    ).to_csv(project / "data_dictionary.csv", index=False)
+    _write_live_sample_contract_notebook(project / "dev.ipynb")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+    settings = PipelineSettings(
+        workspace=workspace,
+        db_path=db_path,
+        report_template_path=tmp_path / "template.docx",
+        random_sample_size=12,
+    )
+
+    run_notebook_stage(task_id=task.id, settings=settings)
+    run_metrics_stage(task_id=task.id, settings=settings)
+    repo.update_status(task.id, TaskStatus.SUCCEEDED, message="pipeline succeeded")
+    task_dir = workspace / "tasks" / task.id
+    report_path = task_dir / "outputs" / "validation_report.docx"
+    report_path.write_bytes(b"generated report")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    try:
+        run_metrics_stage(task_id=task.id, settings=settings, stage_claimed=True)
+    except PipelineError as exc:
+        assert "live notebook kernel is not available" in str(exc)
+    else:
+        raise AssertionError("metrics should fail when the live notebook session is gone")
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.FAILED
+    assert final.status_message.startswith("模型效果&稳定性验证失败：")
+    assert (project / "notebook_run_count.txt").read_text(encoding="utf-8") == "1"
+    assert (task_dir / "outputs" / "validation_results.json").exists()
+    assert report_path.read_bytes() == b"generated report"
+
+
+def test_full_pipeline_marks_word_failures_as_report_stage_failures(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+        )
+    )
+    artifact_paths = {
+        FileRole.NOTEBOOK: project / "model.ipynb",
+        FileRole.SAMPLE: project / "sample.csv",
+        FileRole.MODEL_PMML: project / "model.pmml",
+        FileRole.DATA_DICTIONARY: project / "dictionary.csv",
+    }
+    artifacts = [
+        FileArtifact(role, path, 1, None)
+        for role, path in artifact_paths.items()
+    ]
+
+    def fake_scan_step(repo_arg, task_arg):
+        repo_arg.update_status(
+            task_arg.id,
+            TaskStatus.SCANNED,
+            "source scanned",
+            expected={TaskStatus.CREATED, TaskStatus.SCANNED, TaskStatus.FAILED},
+        )
+        return artifacts
+
+    class FakeSession:
+        def close(self):
+            pass
+
+    def fake_notebook_step_v3(*, repo, task, **_kwargs):
+        repo.update_status(task.id, TaskStatus.RUNNING, "notebook running")
+        repo.update_status(task.id, TaskStatus.EXECUTED, "notebook executed")
+        return FakeSession()
+
+    def fake_metrics_writer(*, outputs_dir, **_kwargs):
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
+
+    monkeypatch.setattr("riskmodel_checker.pipeline._scan_step", fake_scan_step)
+    monkeypatch.setattr("riskmodel_checker.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr("riskmodel_checker.pipeline._write_reproducibility_result_in_session", lambda **_kwargs: None)
+    monkeypatch.setattr("riskmodel_checker.pipeline._write_metrics_results_in_session", fake_metrics_writer)
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline.load_runtime_contract",
+        lambda _path: RuntimeContract(
+            target_col="y",
+            split_col="split",
+            time_col="apply_month",
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="lgb",
+        ),
+    )
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline._load_validation_results",
+        lambda _outputs_dir: SimpleNamespace(
+            reproducibility=SimpleNamespace(
+                summary=SimpleNamespace(status=None)
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline.write_validation_word",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("docx failed")),
+    )
+
+    try:
+        run_pipeline(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+            ),
+        )
+    except RuntimeError as exc:
+        assert "docx failed" in str(exc)
+    else:
+        raise AssertionError("word generation failure should bubble to the job runner")
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.FAILED
+    assert final.status_message == f"{REPORT_STAGE_FAILURE_PREFIX}RuntimeError: docx failed"
+    assert (workspace / "tasks" / task.id / "outputs" / "validation.xlsx").exists()
+
+
+def test_pipeline_marks_missing_required_input_failed(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    pd.DataFrame({"x1": [0.1], "pred": [0.1], "y": [0], "split": ["train"], "apply_month": ["202503"]}).to_csv(
+        project / "sample.csv",
+        index=False,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+        )
+    )
+
+    try:
+        run_pipeline(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "missing.docx",
+                feature_columns=["x1"],
+            ),
+        )
+    except Exception as exc:
+        assert "missing required input" in str(exc)
+    else:
+        raise AssertionError("pipeline should fail when required input is missing")
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.FAILED
+    assert "missing required input" in final.status_message
+
+
+def test_pipeline_rejects_ambiguous_notebooks_without_explicit_path(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    first = project / "first.ipynb"
+    second = project / "second.ipynb"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    task = SimpleNamespace(source_dir=str(project), notebook_path=None)
+    artifacts = [
+        FileArtifact(FileRole.NOTEBOOK, first, 2, None),
+        FileArtifact(FileRole.NOTEBOOK, second, 2, None),
+    ]
+
+    try:
+        _required_path(task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path")
+    except PipelineError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("ambiguous notebook candidates should fail")
+
+    assert "notebook role ambiguous" in message
+    assert str(first) in message
+    assert str(second) in message
+    assert "configure notebook_path" in message
+
+
+def test_pipeline_uses_explicit_notebook_path_when_multiple_exist(tmp_path: Path):
+    project = tmp_path / "project"
+    project.mkdir()
+    first = project / "first.ipynb"
+    chosen = project / "chosen.ipynb"
+    first.write_text("{}", encoding="utf-8")
+    chosen.write_text("{}", encoding="utf-8")
+    task = SimpleNamespace(source_dir=str(project), notebook_path="chosen.ipynb")
+    artifacts = [
+        FileArtifact(FileRole.NOTEBOOK, first, 2, None),
+        FileArtifact(FileRole.NOTEBOOK, chosen, 2, None),
+    ]
+
+    result = _required_path(
+        task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
+    )
+
+    assert result == chosen.resolve()
+
+
+def test_pipeline_rejects_completed_task_without_marking_failed(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path / "project"),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook running")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.SUCCEEDED, message="pipeline succeeded")
+
+    try:
+        run_pipeline(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+                feature_columns=["x1"],
+            ),
+        )
+    except PipelineError as exc:
+        assert "already succeeded" in str(exc)
+    else:
+        raise AssertionError("completed tasks should not rerun")
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.SUCCEEDED
+    assert final.status_message == "pipeline succeeded"
+
+
+def test_pipeline_feature_columns_fall_back_to_task_when_settings_empty(
+    tmp_path: Path,
+):
+    settings = PipelineSettings(
+        workspace=tmp_path / "workspace",
+        db_path=tmp_path / "db.sqlite",
+        report_template_path=tmp_path / "template.docx",
+        feature_columns=[],
+    )
+    task = SimpleNamespace(feature_columns=("x1", "x2"))
+
+    assert _feature_columns(settings, task) == ["x1", "x2"]
+
+
+def test_load_sample_falls_back_to_selected_python_for_arrow_files(
+    tmp_path: Path,
+    monkeypatch,
+):
+    sample_path = tmp_path / "sample.feather"
+    sample_path.write_bytes(b"not used by fake fallback")
+    fallback_python = tmp_path / "selected-python"
+    fallback_python.write_text(
+        "\n".join(
+            [
+                f"#!{sys.executable}",
+                "import sys",
+                "import pandas as pd",
+                "pd.DataFrame({'x1': [1, 2], 'y': [0, 1]}).to_pickle(sys.argv[4])",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fallback_python.chmod(0o755)
+
+    def fake_read_feather(path):
+        raise ImportError("pyarrow is unavailable in platform env")
+
+    monkeypatch.setattr("riskmodel_checker.pipeline.pd.read_feather", fake_read_feather)
+
+    sample = _load_sample(sample_path, fallback_python=fallback_python)
+
+    assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}

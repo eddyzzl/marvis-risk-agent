@@ -1,0 +1,1078 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+import json
+import re
+
+from riskmodel_checker.agent.prompts import (
+    AGENT_SYSTEM_PROMPT,
+    RISK_METRIC_INTERPRETATION_GUIDANCE,
+    WORD_CONCLUSION_SYSTEM_PROMPT,
+)
+from riskmodel_checker.db import AGENT_REPORT_CONCLUSION_KEYS
+from riskmodel_checker.domain import TaskRecord
+from riskmodel_checker.llm_client import LLMClientError, OpenAICompatibleLLMClient
+
+
+REQUIRED_AGENT_REPORT_KEYS = tuple(sorted(AGENT_REPORT_CONCLUSION_KEYS))
+GLOBAL_AGENT_EVIDENCE_KEYS = frozenset(
+    {
+        "scan",
+        "notebook_steps",
+        "contract",
+        "reproducibility",
+        "validation_results",
+        "report_fields",
+        "visible_stage_summaries",
+    }
+)
+STAGE_EVIDENCE_KEYS = {
+    "scan": ("scan", "contract", "notebook_steps"),
+    "reproducibility": ("notebook_steps", "contract", "reproducibility"),
+    "report": ("report_fields",),
+}
+SCAN_REQUIRED_CHECK_LABELS = (
+    "Notebook 文件",
+    "样本数据",
+    "PMML 模型",
+    "数据字典",
+    "Notebook RMC 契约",
+)
+SCAN_SUCCESS_STATUSES = {"success", "passed", "pass", "ok", "通过", "已通过"}
+METRICS_VALIDATION_RESULT_KEYS = (
+    "model_name",
+    "model_version",
+    "algorithm",
+    "target_type",
+    "basic_info",
+    "effectiveness",
+    "overfitting_check",
+    "stress_test",
+)
+# Raw chart series that balloon the prompt without helping LLM reasoning
+# (each curve carries thousands of (x, y) samples — easily 10+ MB total).
+# AUC/KS summary numbers used in image-1's analysis already live in
+# effectiveness.overall, so dropping the raw curves keeps the analysis honest
+# while shrinking the prompt by >99%.
+OVERSIZED_EFFECTIVENESS_KEYS = frozenset({"roc_ks_curves"})
+START_VALIDATION_GUIDANCE_FRAGMENTS = (
+    "可以协助启动验证",
+    "需要开始时，请输入",
+    "请输入“开始验证”",
+    '请输入"开始验证"',
+    "输入“开始验证”",
+    '输入"开始验证"',
+)
+CONVERSATION_MEMORY_MAX_MESSAGES = 48
+CONVERSATION_MEMORY_MAX_CHARS = 32000
+CONVERSATION_MEMORY_MESSAGE_MAX_CHARS = 2400
+GREETING_CHAT_FALLBACK = (
+    "你好，我在。你可以直接问我验证结果、指标含义、PMML 或报告结论，"
+    "也可以告诉我下一步想处理什么。"
+)
+AGENT_RESPONSE_PREAMBLE_PATTERNS = (
+    r"^(?:好的|好|收到|明白|可以)[，,。！!\s]*",
+    r"^(?:我会|我将)?(?:遵照|根据|按照)(?:您|你)?的?(?:指示|要求)[，,。！!\s]*",
+    r"^以下是(?:针对|关于|基于)[^\n]{0,160}?(?:验证分析|阶段分析|分析说明|验证总结|分析|总结)[。:：\s]*",
+)
+AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN = re.compile(r"^(?:[-*_]\s*){3,}\s*")
+
+
+def is_start_validation_intent(content: str) -> bool:
+    text = content.strip().lower()
+    if not text:
+        return False
+    compact = "".join(text.split())
+    direct_phrases = (
+        "开始验证",
+        "启动验证",
+        "执行验证",
+        "运行验证",
+        "跑验证",
+        "开始执行",
+        "开始运行",
+        "开始跑",
+        "跑一下",
+        "跑一遍",
+        "跑起来",
+        "启动任务",
+        "开始任务",
+        "startvalidation",
+        "runvalidation",
+        "validatethistask",
+    )
+    if any(phrase in compact for phrase in direct_phrases):
+        return True
+    direct_commands = {
+        "开始",
+        "开始吧",
+        "启动",
+        "启动吧",
+        "运行",
+        "运行吧",
+        "执行",
+        "执行吧",
+        "跑吧",
+        "start",
+        "run",
+        "validate",
+    }
+    return compact.strip("。.!！?？") in direct_commands
+
+
+def is_continue_validation_intent(content: str) -> bool:
+    text = content.strip().lower()
+    if not text:
+        return False
+    compact = "".join(text.split()).strip("。.!！?？")
+    # Drop interior punctuation so acknowledged-continue phrasings like
+    # "明白了，继续验证吧" share a normal form with "继续验证吧". Without
+    # this, the Chinese comma blocks affix stripping and the matcher
+    # routes the user's intent into the chat-question branch.
+    for ch in "，。、；：,;:":
+        compact = compact.replace(ch, "")
+    negation_markers = (
+        "不继续",
+        "不要继续",
+        "先不继续",
+        "暂不继续",
+        "暂时不继续",
+        "不用继续",
+        "别继续",
+        "无需继续",
+        "不需要继续",
+        "不想继续",
+        "没必要继续",
+        "不打算继续",
+        "不会继续",
+    )
+    if any(marker in compact for marker in negation_markers):
+        return False
+    direct_phrases = {
+        "继续",
+        "继续吧",
+        "请继续",
+        "下一步",
+        "继续下一步",
+        "执行下一步",
+        "继续执行",
+        "继续验证",
+        "往下走",
+        "可以继续",
+        "确认继续",
+        "goon",
+        "continue",
+        "next",
+    }
+    if compact in direct_phrases:
+        return True
+    if _is_continue_report_draft_intent(compact):
+        return True
+    # Substring fallback for unambiguous continue fragments. After the
+    # negation markers above were ruled out, finding any of these inside
+    # the compacted message means the user wants to advance even though
+    # they prefixed an acknowledgment.
+    unambiguous_continue_fragments = (
+        "继续验证",
+        "继续执行",
+        "继续下一步",
+        "执行下一步",
+    )
+    if any(fragment in compact for fragment in unambiguous_continue_fragments):
+        return True
+    normalized = _strip_continue_command_affixes(compact)
+    return normalized in direct_phrases or _is_continue_report_draft_intent(normalized)
+
+
+def _is_continue_report_draft_intent(value: str) -> bool:
+    if "继续" not in value and "下一步" not in value and "执行" not in value:
+        return False
+    report_actions = (
+        "继续生成报告",
+        "继续生成word",
+        "继续写报告",
+        "继续起草报告",
+        "继续生成草稿",
+        "继续起草草稿",
+        "继续生成结论",
+        "继续起草结论",
+        "继续生成三段",
+        "继续起草三段",
+        "下一步生成报告",
+        "下一步生成word",
+        "执行报告",
+        "执行报告结论",
+    )
+    return any(action in value for action in report_actions)
+
+
+def _strip_continue_command_affixes(value: str) -> str:
+    text = value
+    # Sorted longest-first so multi-char acknowledgments ("明白了") strip
+    # cleanly before the shorter overlap ("明白") gets a chance to leave a
+    # trailing "了" stuck on the front of the remaining phrase.
+    prefixes = (
+        "明白了",
+        "了解了",
+        "知道了",
+        "懂了",
+        "收到",
+        "了解",
+        "知道",
+        "明白",
+        "好的",
+        "麻烦",
+        "帮我",
+        "确认",
+        "可以",
+        "请",
+        "那",
+        "先",
+        "好",
+        "嗯",
+        "ok",
+    )
+    suffixes = ("一下", "下", "吧", "了")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix) :]
+                changed = True
+        for suffix in suffixes:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[: -len(suffix)]
+                changed = True
+    return text
+
+
+def is_agent_advance_intent(content: str) -> bool:
+    return is_start_validation_intent(content) or is_continue_validation_intent(content)
+
+
+def agent_rerun_stage(content: str) -> str | None:
+    compact = "".join(str(content or "").strip().lower().split()).strip("。.!！?？")
+    if not compact:
+        return None
+    rerun_markers = (
+        "重新",
+        "重跑",
+        "重做",
+        "重来",
+        "重写",
+        "再跑",
+        "再执行",
+        "再生成",
+        "再写",
+        "从头",
+    )
+    if not any(marker in compact for marker in rerun_markers):
+        return None
+    if _matches_rerun_stage(
+        compact,
+        (
+            "从头",
+            "从第一步",
+            "从第1步",
+            "从步骤1",
+            "从步骤一",
+            "全流程",
+            "全部流程",
+            "完整流程",
+            "完整执行",
+            "完整重跑",
+            "全量",
+            "全部重新",
+            "全部重跑",
+            "重新执行全部",
+            "重新执行一遍全部",
+            "重新跑全部",
+            "整体重跑",
+        ),
+    ):
+        return "scan"
+    if _matches_rerun_stage(
+        compact,
+        (
+            "第四步",
+            "第4步",
+            "4步",
+            "步骤4",
+            "步骤四",
+            "第四阶段",
+            "第4阶段",
+            "阶段4",
+            "阶段四",
+            "step4",
+            "第4个步骤",
+            "第四个步骤",
+            "报告",
+            "word",
+            "草稿",
+            "结论",
+            "三段",
+            "三段总结",
+            "三段结论",
+            "写报告",
+            "生成报告",
+            "报告生成",
+            "word报告",
+            "最终报告",
+        ),
+    ):
+        return "word_conclusion_draft"
+    if _matches_rerun_stage(
+        compact,
+        (
+            "第三步",
+            "第3步",
+            "3步",
+            "步骤3",
+            "步骤三",
+            "第三阶段",
+            "第3阶段",
+            "阶段3",
+            "阶段三",
+            "step3",
+            "第3个步骤",
+            "第三个步骤",
+            "效果",
+            "稳定性",
+            "效果稳定性",
+            "效果与稳定性",
+            "模型效果",
+            "模型效果&稳定性",
+            "指标",
+            "指标概览",
+            "ks",
+            "psi",
+            "auc",
+            "分箱",
+            "压力测试",
+            "过拟合",
+            "oot",
+        ),
+    ):
+        return "metrics"
+    if _matches_rerun_stage(
+        compact,
+        (
+            "第二步",
+            "第2步",
+            "2步",
+            "步骤2",
+            "步骤二",
+            "第二阶段",
+            "第2阶段",
+            "阶段2",
+            "阶段二",
+            "step2",
+            "第2个步骤",
+            "第二个步骤",
+            "复现",
+            "复现性",
+            "可复现",
+            "可复现性",
+            "模型复现",
+            "模型可复现",
+            "复现验证",
+            "可复现性验证",
+            "notebook",
+            "分数一致",
+            "分数一致性",
+            "建模代码",
+            "pmml打分",
+            "部署一致性",
+        ),
+    ):
+        return "reproducibility"
+    if _matches_rerun_stage(
+        compact,
+        (
+            "第一步",
+            "第1步",
+            "1步",
+            "步骤1",
+            "步骤一",
+            "第一阶段",
+            "第1阶段",
+            "阶段1",
+            "阶段一",
+            "step1",
+            "第1个步骤",
+            "第一个步骤",
+            "材料",
+            "完备",
+            "完备性",
+            "材料完备性",
+            "完备性验证",
+            "完备性检查",
+            "材料完备性验证",
+            "材料识别",
+            "材料扫描",
+            "读取",
+            "识别",
+            "扫描",
+            "目录",
+            "文件",
+            "rmc契约",
+        ),
+    ):
+        return "scan"
+    return None
+
+
+def _matches_rerun_stage(compact: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in compact for marker in markers)
+
+
+def is_stop_validation_intent(content: str) -> bool:
+    text = content.strip().lower()
+    if not text:
+        return False
+    negated_phrases = ("不要停止", "不用停止", "无需停止", "别停止")
+    if any(phrase in text for phrase in negated_phrases):
+        return False
+    keywords = (
+        "停止",
+        "停下",
+        "终止",
+        "中止",
+        "取消",
+        "别跑",
+        "不用跑",
+        "stop",
+        "cancel",
+        "abort",
+        "terminate",
+    )
+    return any(keyword in text for keyword in keywords)
+
+
+def _is_greeting_message(content: str) -> bool:
+    compact = "".join(content.strip().lower().split()).strip("。.!！?？~～")
+    return compact in {
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "hey",
+        "嗨",
+        "在吗",
+        "在不在",
+    }
+
+
+def _chat_fallback_for_message(user_message: str) -> str:
+    if _is_greeting_message(user_message):
+        return GREETING_CHAT_FALLBACK
+    return "我现在无法调用大模型完成这次回答。请检查大模型 API 配置、网络连通性或稍后重试。"
+
+
+def _looks_like_start_validation_guidance(content: str) -> bool:
+    return any(fragment in content for fragment in START_VALIDATION_GUIDANCE_FRAGMENTS)
+
+
+def agent_conclusions_confirmed(values: dict[str, str]) -> bool:
+    return all(str(values.get(key) or "").strip() for key in REQUIRED_AGENT_REPORT_KEYS)
+
+
+def summarize_stage(
+    *,
+    task: TaskRecord,
+    stage: str,
+    evidence: dict,
+    model_profile: dict,
+    fallback: str,
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, dict]:
+    prompt = _stage_prompt(task=task, stage=stage, evidence=evidence)
+    try:
+        content = _client(model_profile).complete(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2,
+            on_delta=on_delta,
+        )
+    except LLMClientError as exc:
+        return fallback, {"llm_error": str(exc), "fallback": True}
+    cleaned = _strip_agent_response_preamble(content or fallback)
+    guarded = _guard_stage_summary(stage=stage, evidence=evidence, content=cleaned)
+    metadata = {"fallback": False}
+    if guarded != cleaned:
+        metadata["guarded_scan_summary"] = True
+    return guarded, metadata
+
+
+def compose_agent_start_message(
+    *,
+    task: TaskRecord,
+    model_profile: dict,
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, dict]:
+    prompt = _stage_prompt(
+        task=task,
+        stage="agent_start",
+        evidence={
+            "next_tool": "scan_materials",
+            "tool_purpose": "识别 Notebook、样本数据、PMML 模型、数据字典并检查 Notebook RMC 契约",
+        },
+    )
+    fallback = (
+        "我将先以信贷风控模型验证专家身份检查本次验证材料的完备性，"
+        "随后调用材料识别工具读取目录、识别关键文件并检查 Notebook RMC 契约。"
+    )
+    try:
+        content = _client(model_profile).complete(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2,
+            on_delta=on_delta,
+        )
+    except LLMClientError as exc:
+        return fallback, {"llm_error": str(exc), "fallback": True}
+    return _strip_agent_response_preamble(content or fallback), {"fallback": False}
+
+
+def failure_summary(
+    *,
+    task: TaskRecord,
+    stage: str,
+    error: str,
+    model_profile: dict,
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, dict]:
+    prompt = _stage_prompt(
+        task=task,
+        stage="failure",
+        evidence={"failed_stage": stage, "error": error},
+    )
+    fallback = f"失败阶段：{stage}\n直接原因：{error}\n可能原因：请检查该阶段输入材料、执行环境和上游产物。\n下一步：修正后重新从失败阶段执行。"
+    try:
+        content = _client(model_profile).complete(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.1,
+            on_delta=on_delta,
+        )
+    except LLMClientError as exc:
+        return fallback, {"llm_error": str(exc), "fallback": True}
+    return _strip_agent_response_preamble(content or fallback), {"fallback": False}
+
+
+def answer_chat_message(
+    *,
+    task: TaskRecord,
+    user_message: str,
+    conversation: list[dict],
+    evidence: dict,
+    model_profile: dict,
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, dict]:
+    prompt = _chat_prompt(
+        task=task,
+        user_message=user_message,
+        conversation=conversation,
+        evidence=evidence,
+    )
+    fallback = _chat_fallback_for_message(user_message)
+    try:
+        raw_content = _client(model_profile).complete(
+            system_prompt=AGENT_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2,
+            on_delta=on_delta,
+        )
+        content = (raw_content or "").strip()
+    except LLMClientError as exc:
+        return fallback, {"llm_error": str(exc), "fallback": True}
+    if not content:
+        return fallback, {"fallback": True, "empty_llm_response": True}
+    if _is_greeting_message(user_message) and _looks_like_start_validation_guidance(
+        content
+    ):
+        return fallback, {"fallback": True, "llm_response_replaced": True}
+    return _strip_agent_response_preamble(content), {"fallback": False}
+
+
+def _strip_agent_response_preamble(content: str) -> str:
+    original = str(content or "").strip()
+    if not original:
+        return ""
+    text = original
+    for _ in range(6):
+        before = text
+        text = AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN.sub("", text).lstrip()
+        for pattern in AGENT_RESPONSE_PREAMBLE_PATTERNS:
+            text = re.sub(pattern, "", text, count=1).lstrip()
+            text = AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN.sub("", text).lstrip()
+        if text == before:
+            break
+    return text.strip() or original
+
+
+def generate_word_conclusions(
+    *,
+    task: TaskRecord,
+    evidence: dict,
+    model_profile: dict,
+    user_instruction: str | None = None,
+) -> tuple[dict[str, str], dict]:
+    prompt = _stage_prompt(
+        task=task,
+        stage="word_conclusion_draft",
+        evidence=evidence,
+        user_instruction=user_instruction,
+    )
+    try:
+        content = _client(model_profile).complete(
+            system_prompt=WORD_CONCLUSION_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        values = _parse_conclusion_json(content)
+    except (LLMClientError, ValueError) as exc:
+        return {}, {"llm_error": str(exc), "fallback": True, "confirmable": False}
+    return values, {"fallback": False}
+
+
+def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
+    name = task.model_name or "本模型"
+    return {
+        "TEXT:pressure_test_summary": (
+            "平台已完成压力测试相关指标产出。由于当前未能生成更细的模型解释文本，"
+            "建议验证人员结合 Excel 明细复核各压力场景下 KS、PSI 和打分分布变化。"
+        ),
+        "TEXT:pressure_impact_recommendation": (
+            "建议对压力测试中影响较大的数据源和特征类别设置上线后监控阈值；"
+            "如出现显著稳定性或区分能力下降，应先复核信源质量和样本分布后再继续使用。"
+        ),
+        "TEXT:final_validation_conclusion": (
+            f"本次验证已围绕{name}开展材料完备性、Notebook 可复现性、模型效果、稳定性和压力测试检查。"
+            "从当前平台产物看，核心验证流程已执行至报告结论候选生成阶段；最终是否符合要求仍应以结构化指标、"
+            "压力测试明细和验证人员复核意见为准。建议在确认 Word 结论前重点核对 OOT 区分效果、PSI 稳定性和关键变量压力表现。"
+        ),
+    }
+
+
+def _client(model_profile: dict) -> OpenAICompatibleLLMClient:
+    return OpenAICompatibleLLMClient(model_profile)
+
+
+def _stage_prompt(
+    *,
+    task: TaskRecord,
+    stage: str,
+    evidence: dict,
+    user_instruction: str | None = None,
+) -> str:
+    instructions = _stage_instructions(stage)
+    payload = {
+        "stage": stage,
+        "task": _llm_task_meta(task),
+        "evidence": _sanitize_llm_payload(
+            _stage_scoped_evidence(stage, evidence), task
+        ),
+        "instructions": instructions,
+    }
+    if user_instruction:
+        payload["user_instruction"] = _sanitize_llm_text(user_instruction, task)
+        payload["instructions"] = (
+            instructions
+            + "本次是用户要求重新生成该阶段内容，必须优先满足 user_instruction 中的修改要求；"
+            "不得因为已有旧草稿而复用旧措辞。"
+        )
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _stage_scoped_evidence(stage: str, evidence: dict) -> dict:
+    if not isinstance(evidence, dict):
+        return evidence
+    if stage == "scan":
+        return _scan_stage_evidence(evidence)
+    if stage == "metrics":
+        return _metrics_stage_evidence(evidence)
+    keys = STAGE_EVIDENCE_KEYS.get(stage)
+    if not keys or not _looks_like_global_agent_evidence(evidence):
+        return _slim_evidence_for_llm(evidence)
+    return _slim_evidence_for_llm(
+        {
+            key: evidence.get(key)
+            for key in keys
+            if evidence.get(key) is not None
+        }
+    )
+
+
+def _metrics_stage_evidence(evidence: dict) -> dict:
+    if not _looks_like_global_agent_evidence(evidence):
+        return _slim_evidence_for_llm(evidence)
+    validation_results = evidence.get("validation_results")
+    if not isinstance(validation_results, dict):
+        return {"validation_results": validation_results}
+    return {
+        "validation_results": _slim_validation_results_for_llm(
+            {
+                key: validation_results.get(key)
+                for key in METRICS_VALIDATION_RESULT_KEYS
+                if key in validation_results
+            }
+        )
+    }
+
+
+def _slim_evidence_for_llm(evidence: dict) -> dict:
+    if not isinstance(evidence, dict):
+        return evidence
+    slim = dict(evidence)
+    validation_results = slim.get("validation_results")
+    if isinstance(validation_results, dict):
+        slim["validation_results"] = _slim_validation_results_for_llm(validation_results)
+    return slim
+
+
+def _slim_validation_results_for_llm(validation_results: dict) -> dict:
+    if not isinstance(validation_results, dict):
+        return validation_results
+    slim = dict(validation_results)
+    effectiveness = slim.get("effectiveness")
+    if isinstance(effectiveness, dict):
+        slim["effectiveness"] = {
+            key: value
+            for key, value in effectiveness.items()
+            if key not in OVERSIZED_EFFECTIVENESS_KEYS
+        }
+    return slim
+
+
+def _scan_stage_evidence(evidence: dict) -> dict:
+    scoped = dict(evidence)
+    checks = scoped.get("checks")
+    if not isinstance(checks, list) and isinstance(scoped.get("scan"), dict):
+        checks = scoped["scan"].get("checks")
+    scoped["scan_interpretation"] = _scan_interpretation(
+        checks if isinstance(checks, list) else []
+    )
+    return scoped
+
+
+def _scan_interpretation(checks: list[dict]) -> dict:
+    checks_by_label = {
+        str(check.get("label") or check.get("name") or ""): check
+        for check in checks
+        if isinstance(check, dict)
+    }
+    detected: list[str] = []
+    missing: list[str] = []
+    for label in SCAN_REQUIRED_CHECK_LABELS:
+        check = checks_by_label.get(label)
+        if check and _scan_check_passed(check):
+            detected.append(label)
+        else:
+            missing.append(label)
+    return {
+        "required_materials": list(SCAN_REQUIRED_CHECK_LABELS),
+        "detected_required_materials": detected,
+        "missing_required_materials": missing,
+        "required_materials_complete": not missing,
+        "not_required_in_scan_stage": [
+            "pickle/pkl 模型",
+            "验证样本与评分输出中间结果",
+            "KS/PSI/AUC 等效果指标产物",
+        ],
+        "interpretation_rule": (
+            "checks 中 success/passed/通过 表示对应材料或契约已经满足，"
+            "不得再描述为缺失。pickle/pkl、评分输出和 KS/PSI/AUC 是可选材料或后续阶段结果，"
+            "不属于材料扫描阶段的必需输入。"
+        ),
+    }
+
+
+def _scan_check_passed(check: dict) -> bool:
+    status = str(check.get("status") or "").strip().lower()
+    message = str(check.get("message") or "")
+    return (
+        status in SCAN_SUCCESS_STATUSES
+        or message.startswith("已识别")
+        or message.startswith("已定义")
+    )
+
+
+def _guard_stage_summary(*, stage: str, evidence: dict, content: str) -> str:
+    if stage != "scan" or not isinstance(evidence, dict):
+        return content
+    interpretation = _scan_stage_evidence(evidence).get("scan_interpretation", {})
+    if not interpretation.get("required_materials_complete"):
+        return content
+    if not _scan_summary_claims_missing_complete_materials(content):
+        return content
+    return (
+        "材料完备性检查已完成，Notebook、样本数据、PMML 模型、数据字典和 "
+        "Notebook RMC 契约均已通过；当前未发现必需材料缺失。"
+    )
+
+
+def _scan_summary_claims_missing_complete_materials(content: str) -> bool:
+    text = str(content or "")
+    if not text:
+        return False
+    if re.search(r"(未发现|无).{0,12}(缺少|缺失|缺乏)", text):
+        return False
+    return bool(
+        re.search(
+            r"缺少|缺乏|未提供|没有|未识别|未检测到|未检出|建议补充|补充.{0,12}(文件|材料|输出|结果)|缺失",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _looks_like_global_agent_evidence(evidence: dict) -> bool:
+    return any(key in evidence for key in GLOBAL_AGENT_EVIDENCE_KEYS)
+
+
+def _chat_prompt(
+    *,
+    task: TaskRecord,
+    user_message: str,
+    conversation: list[dict],
+    evidence: dict,
+) -> str:
+    conversation_memory = _conversation_memory(
+        conversation=conversation,
+        task=task,
+        current_user_message=user_message,
+    )
+    return json.dumps(
+        {
+            "stage": "chat",
+            "task": _llm_task_meta(task),
+            "user_message": _sanitize_llm_text(user_message, task),
+            "conversation_memory": conversation_memory,
+            "available_evidence": _sanitize_llm_payload(evidence, task),
+            "instructions": _chat_instructions(user_message),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _conversation_memory(
+    *,
+    conversation: list[dict],
+    task: TaskRecord,
+    current_user_message: str,
+) -> dict:
+    messages = _conversation_memory_messages(conversation, task)
+    previous_messages = messages
+    if messages and messages[-1]["role"] == "user" and messages[-1]["content"] == _sanitize_llm_text(
+        current_user_message, task
+    ):
+        previous_messages = messages[:-1]
+    previous_user_question = _last_message_content(previous_messages, role="user")
+    previous_assistant_answer = _last_message_content(previous_messages, role="assistant")
+    kept_messages, omitted_count = _fit_conversation_memory(messages)
+    return {
+        "scope": "same_agent_task",
+        "description": "同一个验证任务内的用户问题、Agent 回复和阶段输出历史，用于理解后续追问。",
+        "messages": kept_messages,
+        "omitted_message_count": omitted_count,
+        "previous_user_question": previous_user_question,
+        "previous_assistant_answer": previous_assistant_answer,
+        "follow_up_guidance": (
+            "如果当前 user_message 是省略主语、承接上一轮或只问“有什么影响/为什么/继续说”的追问，"
+            "必须优先按 previous_user_question 和 previous_assistant_answer 中的主题补全问题，"
+            "不要扩展到无关验证阶段或泛化成整体验证分析。"
+        ),
+    }
+
+
+def _conversation_memory_messages(conversation: list[dict], task: TaskRecord) -> list[dict]:
+    messages = []
+    for message in conversation:
+        content = _truncate_llm_text(
+            _sanitize_llm_text(str(message.get("content") or ""), task),
+            CONVERSATION_MEMORY_MESSAGE_MAX_CHARS,
+        )
+        if not content:
+            continue
+        messages.append(
+            {
+                "role": str(message.get("role") or ""),
+                "stage": str(message.get("stage") or ""),
+                "content": content,
+            }
+        )
+    return messages
+
+
+def _fit_conversation_memory(messages: list[dict]) -> tuple[list[dict], int]:
+    kept: list[dict] = []
+    total_chars = 0
+    for message in reversed(messages):
+        content_length = len(message["content"])
+        if kept and (
+            len(kept) >= CONVERSATION_MEMORY_MAX_MESSAGES
+            or total_chars + content_length > CONVERSATION_MEMORY_MAX_CHARS
+        ):
+            break
+        kept.append(message)
+        total_chars += content_length
+    kept.reverse()
+    return kept, max(0, len(messages) - len(kept))
+
+
+def _last_message_content(messages: list[dict], *, role: str) -> str:
+    for message in reversed(messages):
+        if message["role"] == role and message["content"]:
+            return message["content"]
+    return ""
+
+
+def _truncate_llm_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    return value[: max(0, max_chars - 8)].rstrip() + "…[截断]"
+
+
+def _chat_instructions(user_message: str) -> str:
+    instructions = (
+        _llm_task_reference_instruction()
+        + "直接回答用户当前问题。若用户只是问候、寒暄或普通对话，应自然、简短回应，"
+        "不要给出固定启动口令或流程引导。若 conversation 显示用户连续多轮明显偏离当前模型验证任务，"
+        "可以简短回答后提醒你主要用于解释验证结果、PMML、指标含义和报告结论。"
+        "若问题是 PMML、验证流程、指标含义或当前任务结果解释，"
+        "请以信贷风控模型验证专家身份给出清晰中文说明；能引用平台证据时引用证据，"
+        "没有证据时明确说明这是通用解释。若用户提到界面里的图、表、阶段文字或结论，"
+        "优先使用 available_evidence.validation_results、report_fields.metric_values、"
+        "report_fields.text_values 和 visible_stage_summaries 作答；图表应按其底层结构化数据解释，"
+        "不要假装直接看到了像素图。"
+        "同一验证任务内的 conversation_memory 是任务内会话记忆。若当前 user_message 是承接式追问、"
+        "省略主语或只问影响/原因/继续说明，必须先根据 conversation_memory.previous_user_question "
+        "和 previous_assistant_answer 补全主题；回答时要围绕上一轮用户问题的主题，不要自动扩展到"
+        "无关验证阶段或整体验证结论。"
+        "如果回答涉及 KS、PSI、AUC、稳定性或区分能力等指标，必须按以下业务口径解释，不能脱离模型场景："
+        + RISK_METRIC_INTERPRETATION_GUIDANCE
+    )
+    if _is_greeting_message(user_message):
+        instructions += "当前 user_message 是问候或寒暄，直接打招呼并表示可以继续回答即可。"
+    return instructions
+
+
+def _llm_task_meta(task: TaskRecord) -> dict:
+    status_message = task.status_message
+    if status_message is not None:
+        status_message = _sanitize_llm_text(status_message, task)
+    return {
+        "model_display_name": _model_display_name(task),
+        "model_name": task.model_name or "当前模型",
+        "model_version": task.model_version,
+        "algorithm": task.algorithm,
+        "status": task.status.value,
+        "status_message": status_message,
+    }
+
+
+def _model_display_name(task: TaskRecord) -> str:
+    name = task.model_name or "当前模型"
+    version = str(task.model_version or "").strip()
+    return f"{name}（{version}）" if version else name
+
+
+def _llm_task_reference_instruction() -> str:
+    return (
+        "涉及当前任务或当前模型时，必须使用 task.model_display_name / 模型名称来称呼，"
+        "不要输出、复述或引用内部任务 ID。"
+    )
+
+
+def _sanitize_llm_payload(value: object, task: TaskRecord) -> object:
+    if isinstance(value, str):
+        return _sanitize_llm_text(value, task)
+    if isinstance(value, list):
+        return [_sanitize_llm_payload(item, task) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_llm_payload(item, task) for item in value]
+    if isinstance(value, dict):
+        return {
+            _sanitize_llm_text(key, task)
+            if isinstance(key, str)
+            else key: _sanitize_llm_payload(item, task)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _sanitize_llm_text(value: str, task: TaskRecord) -> str:
+    task_id = str(task.id or "")
+    if not task_id:
+        return value
+    return value.replace(task_id, _model_display_name(task))
+
+
+def _stage_instructions(stage: str) -> str:
+    reference_instruction = _llm_task_reference_instruction()
+    if stage == "agent_start":
+        return (
+            reference_instruction
+            + "最多 2 句。先说明你将以信贷风控模型验证专家身份启动任务，"
+            "再说明下一步会调用材料识别工具；不要声称材料已经完成识别。"
+        )
+    if stage == "scan":
+        return (
+            reference_instruction
+            + "只针对当前材料完备性阶段，最多 2 句，说明材料识别、材料缺失或 Notebook RMC 契约检查状况。"
+            "必须以 evidence.scan_interpretation.required_materials_complete 和 "
+            "missing_required_materials 为准；当 required_materials_complete=true 时，"
+            "只能说明 Notebook、样本数据、PMML 模型、数据字典和 Notebook RMC 契约均已满足，"
+            "不得说缺少、未检测到模型文件、PMML、pickle/pkl、验证样本与评分输出或 KS/PSI/AUC 中间结果，"
+            "也不要建议补充这些已满足或非必需材料。"
+            "pickle/pkl 不是当前扫描必需材料；KS/PSI/AUC 是后续效果稳定性阶段计算结果，"
+            "不是材料扫描阶段的输入文件。"
+            "不要分析分数一致性、AUC、KS、PSI、压力测试或最终报告结论。"
+        )
+    if stage == "reproducibility":
+        return (
+            reference_instruction
+            + "只针对当前模型可复现性/分数一致性阶段，分为“结论、证据、风险含义、建议”。"
+            "只使用 evidence.reproducibility、contract 和 notebook_steps 中的证据。"
+            "不要分析材料完备性，不要分析 AUC、KS、PSI、分箱、逐月稳定性、压力测试或报告输出，"
+            "不要给出整体验证结论，也不要输出整份验证工作底稿结构。"
+        )
+    if stage == "metrics":
+        return (
+            reference_instruction
+            + "只针对当前效果与稳定性阶段，分为“总体判断、效果表现、稳定性表现、压力测试风险、建议”。"
+            "不要回顾材料完备性或分数一致性的执行过程，不要生成最终报告综合结论。"
+            "解释 KS、PSI、AUC、稳定性或区分能力时必须按以下业务口径判断，不能脱离模型场景："
+            + RISK_METRIC_INTERPRETATION_GUIDANCE
+        )
+    if stage == "report":
+        return (
+            reference_instruction
+            + "只针对当前报告输出阶段，最多 2 句，说明报告产物生成、预览或下载状态。"
+            "不要重新分析材料完备性、分数一致性或效果稳定性指标。"
+        )
+    if stage == "failure":
+        return reference_instruction + "分为“失败阶段、直接原因、可能原因、下一步”。"
+    return reference_instruction + "生成审慎、专业、基于证据的中文说明。"
+
+
+def _parse_conclusion_json(content: str) -> dict[str, str]:
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        raise ValueError("word conclusion response must be a JSON object")
+    values = {
+        key: str(payload.get(key) or "").strip()
+        for key in REQUIRED_AGENT_REPORT_KEYS
+    }
+    missing = [key for key, value in values.items() if not value]
+    if missing:
+        raise ValueError("word conclusion response missing keys: " + ", ".join(missing))
+    return values

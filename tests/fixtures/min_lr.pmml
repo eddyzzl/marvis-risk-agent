@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PMML xmlns="http://www.dmg.org/PMML-4_4" version="4.4">
+  <Header copyright="test"/>
+  <DataDictionary numberOfFields="3">
+    <DataField name="x1" optype="continuous" dataType="double"/>
+    <DataField name="x2" optype="continuous" dataType="double"/>
+    <DataField name="y"  optype="categorical" dataType="integer">
+      <Value value="0"/>
+      <Value value="1"/>
+    </DataField>
+  </DataDictionary>
+  <RegressionModel functionName="classification" normalizationMethod="logit" algorithmName="logisticRegression">
+    <MiningSchema>
+      <MiningField name="x1"/>
+      <MiningField name="x2"/>
+      <MiningField name="y" usageType="target"/>
+    </MiningSchema>
+    <Output>
+      <OutputField name="probability_1" feature="probability" value="1"/>
+    </Output>
+    <RegressionTable intercept="0.0" targetCategory="1">
+      <NumericPredictor name="x1" coefficient="1.0"/>
+      <NumericPredictor name="x2" coefficient="-1.0"/>
+    </RegressionTable>
+    <RegressionTable intercept="0.0" targetCategory="0"/>
+  </RegressionModel>
+</PMML>

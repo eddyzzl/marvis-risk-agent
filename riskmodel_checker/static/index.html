@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MARVIS-全能风控智能体</title>
+    <link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png" />
+    <link rel="stylesheet" href="static/styles.css?v=20260603-sidebar-icon-controls" />
+  </head>
+  <body data-theme="light">
+    <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
+      <form class="task-dialog-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="taskDialogTitle">创建验证任务</h2>
+          <button id="closeTaskDialogButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form">
+          <section class="task-form-section run-mode-section">
+            <h3>执行模式</h3>
+            <div class="run-mode-cards" aria-label="选择执行模式">
+              <label class="run-mode-card selected-tone-amber">
+                <input id="runModeManual" name="runMode" type="radio" value="manual" />
+                <span class="run-mode-icon" aria-hidden="true">
+                  <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="6" y="8" width="8.5" height="8.5" rx="2.4" />
+                    <rect x="6" y="19.75" width="8.5" height="8.5" rx="2.4" />
+                    <rect x="6" y="31.5" width="8.5" height="8.5" rx="2.4" />
+                    <path d="M18.5 12.25h12" />
+                    <path d="M18.5 24h9" />
+                    <path d="M18.5 35.75h6" />
+                    <g class="manual-checks">
+                      <path class="manual-check" d="M8 12.4l1.6 1.6 3-3.4" />
+                      <path class="manual-check" d="M8 24.15l1.6 1.6 3-3.4" />
+                      <path class="manual-check" d="M8 35.9l1.6 1.6 3-3.4" />
+                    </g>
+                    <g class="manual-pen">
+                      <path d="M28 30l12-12 4 4-12 12z" />
+                      <path d="M28 30l-2.2 6.2 6.2-2.2z" />
+                      <path d="M37 21l4 4" />
+                    </g>
+                  </svg>
+                </span>
+                <span class="run-mode-copy">
+                  <strong>手动模式</strong>
+                  <small>由验证人员逐步执行材料扫描、Notebook 验证与报告生成</small>
+                </span>
+              </label>
+              <label class="run-mode-card selected-tone-green">
+                <input id="runModeAgent" name="runMode" type="radio" value="agent" />
+                <span class="run-mode-icon" aria-hidden="true">
+                  <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M24 4v3" />
+                    <circle class="robot-signal" cx="24" cy="2.4" r="1.9" fill="currentColor" stroke="none" />
+                    <rect x="12" y="7" width="24" height="15" rx="6" />
+                    <circle class="robot-eye" cx="19" cy="13.5" r="2.3" fill="currentColor" stroke="none" />
+                    <circle class="robot-eye" cx="29" cy="13.5" r="2.3" fill="currentColor" stroke="none" />
+                    <path d="M20 18q4 2.2 8 0" />
+                    <path d="M24 22v2.6" />
+                    <rect x="13.5" y="24.6" width="21" height="16" rx="5" />
+                    <!-- left hand: holds a tablet/panel -->
+                    <g class="robot-tablet">
+                      <path d="M13.5 30l-4 1.4" />
+                      <g transform="rotate(-10 6.5 37)">
+                        <rect x="2" y="33.4" width="9.5" height="7.2" rx="1.6" />
+                        <path d="M4.4 36.5h5" />
+                        <path d="M4.4 39h3" />
+                      </g>
+                    </g>
+                    <!-- right hand: cranks an open-end wrench gripping a nut -->
+                    <g class="robot-wrench">
+                      <path d="M34.5 30l4-2" />
+                      <g transform="translate(38.5 28) rotate(33)" stroke-width="2">
+                        <path d="M0 0v-7" />
+                        <path d="M-2.7 -7.2L-2.7 -12.8M2.7 -7.2L2.7 -12.8M-2.7 -7.2 2.7 -7.2" />
+                        <circle cx="0" cy="-11.6" r="1.6" fill="currentColor" stroke="none" />
+                      </g>
+                    </g>
+                  </svg>
+                </span>
+                <span class="run-mode-copy">
+                  <strong>Agent 模式</strong>
+                  <small>智能解析材料、规划验证步骤并辅助生成验证报告</small>
+                </span>
+              </label>
+            </div>
+          </section>
+          <section class="task-form-section">
+            <h3>任务信息</h3>
+            <label>
+              <span>模型名称</span>
+              <input id="modelName" placeholder="例如：贷前评分卡 MOB3 v202604" autocomplete="off" />
+            </label>
+            <label>
+              <span>验证人员</span>
+              <input id="validator" placeholder="填写验证人员姓名" autocomplete="off" />
+            </label>
+            <label class="wide-field">
+              <span>材料目录</span>
+              <input id="sourceDir" placeholder="/path/to/project" autocomplete="off" />
+            </label>
+          </section>
+          <section id="createTaskReportFields" class="task-form-section">
+            <h3>报告初始内容</h3>
+            <label class="wide-field">
+              <span>模型概述</span>
+              <textarea id="createModelOverview" data-create-report-key="TEXT:model_overview"></textarea>
+            </label>
+            <label class="wide-field">
+              <span>适用范围</span>
+              <input id="createModelScope" data-create-report-key="TEXT:model_scope" autocomplete="off" />
+            </label>
+            <label>
+              <span>坏样本定义</span>
+              <input id="createBadSampleDefinition" data-create-report-key="TEXT:bad_sample_definition" autocomplete="off" />
+            </label>
+            <label>
+              <span>好样本定义</span>
+              <input id="createGoodSampleDefinition" data-create-report-key="TEXT:good_sample_definition" autocomplete="off" />
+            </label>
+          </section>
+          <button id="createTaskButton" class="button primary full" type="button">
+            创建任务
+          </button>
+          <div id="statusMessage" class="status" role="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="executionEnvironmentDialog" class="task-dialog environment-dialog" aria-labelledby="executionEnvironmentTitle">
+      <form class="task-dialog-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="executionEnvironmentTitle">执行环境</h2>
+          <button id="closeExecutionEnvironmentButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form">
+          <section class="task-form-section execution-environment-section">
+            <label class="wide-field">
+              <span>Python 环境</span>
+              <select id="executionEnvironmentSelect"></select>
+            </label>
+            <button id="refreshExecutionEnvironmentOptionsButton" class="button secondary" type="button">
+              扫描环境
+            </button>
+            <p class="environment-help">
+              只显示自动识别结果。Notebook 执行需要该 Python 环境已注册可用的 Jupyter Kernel。
+            </p>
+          </section>
+          <div id="executionEnvironmentStatus" class="status" role="status" aria-live="polite"></div>
+          <button id="saveExecutionEnvironmentButton" class="button primary full" type="button">
+            保存执行环境
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="llmSettingsDialog" class="task-dialog environment-dialog llm-settings-dialog" aria-labelledby="llmSettingsTitle">
+      <form class="task-dialog-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="llmSettingsTitle">模型引擎</h2>
+          <button id="closeLLMSettingsButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form">
+          <section class="task-form-section llm-settings-section">
+            <div id="llmModelProfiles" class="llm-model-profiles llm-engine-list"></div>
+            <button id="addLLMModelButton" class="llm-engine-add" type="button">+ 添加模型</button>
+            <p class="llm-engine-hint">在这里只配置连接信息，对话时在输入框选择要用的模型。</p>
+          </section>
+          <div id="llmSettingsStatus" class="status" role="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="llmEngineEditDialog" class="task-dialog environment-dialog llm-engine-edit-dialog" aria-labelledby="llmEngineEditTitle">
+      <form class="task-dialog-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="llmEngineEditTitle">添加模型</h2>
+          <button id="closeLLMEngineEditButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form">
+          <section class="task-form-section llm-engine-edit-section">
+            <label class="wide-field">
+              <span>显示名称</span>
+              <input id="llmEngineDisplayName" placeholder="例如：DeepSeek-V3" autocomplete="off" />
+            </label>
+            <label class="wide-field">
+              <span>模型名称（API 参数）</span>
+              <input id="llmEngineModelName" placeholder="deepseek-chat" autocomplete="off" />
+            </label>
+            <label class="wide-field">
+              <span>API 地址</span>
+              <input id="llmEngineBaseUrl" placeholder="https://api.openai.com/v1" autocomplete="off" />
+            </label>
+            <label class="wide-field">
+              <span>API 密钥</span>
+              <input id="llmEngineApiKey" type="password" placeholder="sk-..." autocomplete="new-password" />
+            </label>
+          </section>
+          <div id="llmEngineEditStatus" class="status" role="status" aria-live="polite"></div>
+          <div class="llm-engine-edit-actions">
+            <button id="cancelLLMEngineEditButton" class="button secondary" type="button">取消</button>
+            <button id="saveLLMEngineEditButton" class="button primary" type="button">保存</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="wordPreviewDialog" class="task-dialog word-preview-dialog" aria-labelledby="wordPreviewTitle">
+      <div class="task-dialog-panel word-preview-panel">
+        <header class="dialog-head">
+          <h2 id="wordPreviewTitle">Word 报告预览</h2>
+          <button id="closeWordPreviewButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <iframe id="wordPreviewFrame" class="word-preview-frame" title="Word 报告预览"></iframe>
+      </div>
+    </dialog>
+
+    <div id="appShell" class="app-shell">
+      <aside id="taskSidebar" class="task-sidebar region" aria-label="任务导航">
+        <header class="sidebar-head">
+          <div id="sidebarBrandTrigger" class="brand-logo">
+            <img
+              id="brandLogo"
+              class="brand-mark"
+              src="static/brand/marvis-logo.png"
+              alt="MARVIS-全能风控智能体 logo"
+            />
+            <h1 id="platformName">MARVIS-全能风控智能体</h1>
+          </div>
+        </header>
+
+        <section class="task-list-wrap" aria-label="任务列表">
+          <div class="list-head">
+            <span>任务列表</span>
+            <button
+              id="taskSearchToggle"
+              class="list-search-toggle"
+              type="button"
+              aria-label="搜索任务"
+              aria-expanded="false"
+              title="搜索任务"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="10.5" cy="10.5" r="6"></circle>
+                <path d="m14.85 14.85 4.15 4.15"></path>
+              </svg>
+            </button>
+            <label class="task-search">
+              <span class="visually-hidden">搜索任务</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <circle cx="10.5" cy="10.5" r="6"></circle>
+                <path d="m14.85 14.85 4.15 4.15"></path>
+              </svg>
+              <input id="taskSearchInput" placeholder="搜索任务" autocomplete="off" />
+              <button
+                id="taskSearchClose"
+                class="task-search-close"
+                type="button"
+                aria-label="关闭搜索"
+                title="关闭搜索"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M7 7l10 10"></path>
+                  <path d="M17 7 7 17"></path>
+                </svg>
+              </button>
+            </label>
+          </div>
+          <div class="list-toolbar">
+            <button id="createTaskOpenButton" class="nav-action" type="button">
+              <svg id="createTaskIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <rect x="4" y="4" width="16" height="16" rx="5"></rect>
+                <path d="M12 9.2v5.6"></path>
+                <path d="M9.2 12h5.6"></path>
+              </svg>
+              <span>创建任务</span>
+            </button>
+          </div>
+          <div id="taskList" class="task-list" role="list"></div>
+        </section>
+
+        <footer class="sidebar-footer">
+          <details id="sidebarSettings" class="sidebar-settings">
+            <summary>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M21.26 10.7 21.26 13.3 18.47 13.73 17.8 15.35 19.47 17.63 17.63 19.47 15.35 17.8 13.73 18.47 13.3 21.26 10.7 21.26 10.27 18.47 8.65 17.8 6.37 19.47 4.53 17.63 6.2 15.35 5.53 13.73 2.74 13.3 2.74 10.7 5.53 10.27 6.2 8.65 4.53 6.37 6.37 4.53 8.65 6.2 10.27 5.53 10.7 2.74 13.3 2.74 13.73 5.53 15.35 6.2 17.63 4.53 19.47 6.37 17.8 8.65 18.47 10.27Z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              <span id="themeModeLabel">设置</span>
+            </summary>
+            <div id="settingsMenu" class="settings-menu">
+              <div class="settings-row" data-settings-row="sort">
+                <label for="settingsSortSelect" class="settings-row-title">排序</label>
+                <select id="settingsSortSelect" class="settings-select">
+                  <option value="created_desc">创建日期 新到旧</option>
+                  <option value="created_asc">创建日期 旧到新</option>
+                  <option value="name_asc">名称 A-Z</option>
+                  <option value="name_desc">名称 Z-A</option>
+                </select>
+              </div>
+              <div class="settings-row" data-settings-row="group">
+                <label for="settingsGroupSelect" class="settings-row-title">分组</label>
+                <select id="settingsGroupSelect" class="settings-select">
+                  <option value="none">不分组</option>
+                  <option value="validator">按验证人员</option>
+                  <option value="created_month">按创建月份</option>
+                </select>
+              </div>
+              <div class="settings-row" data-settings-row="appearance">
+                <label for="settingsThemeSelect" class="settings-row-title">外观</label>
+                <select id="settingsThemeSelect" class="settings-select">
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                  <option value="system">跟随系统</option>
+                </select>
+              </div>
+              <div class="settings-row" data-settings-row="pet">
+                <label for="settingsPetSelect" class="settings-row-title">宠物</label>
+                <select id="settingsPetSelect" class="settings-select">
+                  <option value="none">不显示</option>
+                  <option value="naitang">蛋黄</option>
+                  <option value="xiaojiu">小九</option>
+                </select>
+              </div>
+              <div class="settings-row" data-settings-row="environment">
+                <span class="settings-row-title">执行环境</span>
+                <button id="openExecutionEnvironmentButton" class="settings-environment-button" type="button">
+                  <span id="settingsExecutionEnvironmentValue">Jupyter Kernel · python3</span>
+                </button>
+              </div>
+              <div class="settings-row" data-settings-row="llm">
+                <span class="settings-row-title">大模型</span>
+                <button id="openLLMSettingsButton" class="settings-environment-button" type="button">
+                  <span id="settingsLLMValue">未配置</span>
+                </button>
+              </div>
+            </div>
+          </details>
+        </footer>
+      </aside>
+      <div
+        id="leftResizeHandle"
+        class="resize-handle resize-handle-left"
+        role="separator"
+        aria-label="调整左侧栏宽度"
+        aria-orientation="vertical"
+        tabindex="0"
+      ></div>
+
+      <main id="validationWorkspace" class="validation-workspace region is-empty">
+        <button
+          id="sidebarCollapseButton"
+          class="sidebar-collapse-button"
+          type="button"
+          aria-label="收起侧栏"
+          aria-expanded="true"
+          title="收起侧栏"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect class="collapse-panel" x="4" y="5" width="16" height="14" rx="4.5"></rect>
+            <path class="collapse-divider" d="M9.5 5v14"></path>
+            <path class="collapse-chevron" d="M15.5 9.5 13 12l2.5 2.5"></path>
+          </svg>
+        </button>
+        <section id="workspaceWelcome" class="workspace-welcome" aria-label="欢迎">
+          <img
+            id="workspaceBrandLogo"
+            class="workspace-brand-logo"
+            src="static/brand/marvis-logo.png"
+            alt="MARVIS-全能风控智能体 logo"
+          />
+          <h2 id="workspaceGreetingTitle">
+            <span id="workspaceGreetingText" class="workspace-greeting-nowrap">早上好，开启活力一天</span><span>，我来帮您完成信贷风控工作</span>
+          </h2>
+          <p>创建任务或从左侧选择已有任务</p>
+        </section>
+        <div class="workspace-body">
+          <section id="resultWorkspace" class="result-workspace" aria-label="验证输出">
+            <header class="workspace-head">
+              <div class="task-hero" id="taskHero">
+                <div class="task-hero-top">
+                  <h2 id="currentTaskTitle" class="task-hero-name">验证任务</h2>
+                  <span id="actionStatus" class="task-pill" role="status" aria-live="polite"></span>
+                </div>
+                <p id="currentTaskSubtitle" class="workspace-subtitle">
+                  创建任务或从左侧选择已有任务
+                </p>
+                <p
+                  id="actionErrorDetail"
+                  class="action-error-detail"
+                >暂无报错</p>
+                <div id="taskSnapshot" class="workspace-task-meta empty">
+                  核心任务信息
+                </div>
+              </div>
+            </header>
+            <div id="resultScrollContent" class="result-scroll-content" aria-label="验证结果明细">
+              <section id="scanSection" class="progress-panel">
+                <div id="agentScanLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
+                <h3>材料识别</h3>
+                <div id="agentScanBeforeMessages" class="agent-stage-messages" aria-live="polite"></div>
+                <div id="scanSummary" class="result-summary empty">
+                  选择任务后点击"扫描材料"开始
+                </div>
+                <div id="agentScanMessages" class="agent-stage-messages agent-stage-after-messages" aria-live="polite"></div>
+              </section>
+              <section id="notebookSection" class="progress-panel hidden">
+                <div id="agentReproducibilityLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
+                <h3>分数一致性</h3>
+                <div id="reproducibilitySummary" class="result-summary empty">
+                  暂无分数一致性证据，运行完建模代码后展示结果
+                </div>
+                <div id="agentReproducibilityMessages" class="agent-stage-messages agent-stage-after-messages" aria-live="polite"></div>
+              </section>
+              <section id="metricSection" class="progress-panel hidden">
+                <div id="agentMetricLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
+                <h3>指标概览</h3>
+                <div id="metricPreview" class="metric-preview"></div>
+                <div id="agentMetricMessages" class="agent-stage-messages agent-stage-after-messages" aria-live="polite"></div>
+              </section>
+              <section id="reportSection" class="supporting-evidence" aria-hidden="true">
+                <div id="agentReportLeadMessages" class="agent-stage-messages agent-stage-lead-messages" aria-live="polite"></div>
+                <div id="agentReportMessages" class="agent-stage-messages agent-stage-after-messages" aria-live="polite"></div>
+              </section>
+              <section id="agentConversationPanel" class="agent-conversation hidden" aria-label="Agent 对话" aria-hidden="true">
+                <div id="agentMessages" class="agent-messages"></div>
+              </section>
+            </div>
+            <div id="agentComposer" class="agent-composer hidden" aria-hidden="true">
+              <div class="agent-composer-bar">
+                <textarea id="agentComposerInput" rows="1" placeholder="输入执行步骤或问题"></textarea>
+                <div class="agent-composer-toolbar">
+                  <div class="agent-composer-controls agent-composer-mode-controls">
+                    <div class="agent-composer-chip agent-composer-acceptance" data-acceptance-mode="normal">
+                      <svg class="agent-composer-chip-icon agent-acceptance-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <rect x="4" y="10.5" width="16" height="10.5" rx="2.2" />
+                        <path d="M7.5 10.5V7.5a4.5 4.5 0 0 1 9 0V10.5" />
+                      </svg>
+                      <svg class="agent-composer-chip-icon agent-acceptance-icon-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                        <path d="M20 12c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 19.5 4 17 4 12V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+                        <path d="m9 12 2 2 4-4" />
+                      </svg>
+                      <select id="agentAcceptanceModeSelect" aria-label="选择 Agent 执行模式">
+                        <option value="normal">默认权限</option>
+                        <option value="auto_accept">自动审查</option>
+                      </select>
+                      <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </div>
+                  </div>
+                  <div class="agent-composer-right-controls">
+                    <div class="agent-composer-controls">
+                      <div class="agent-composer-chip agent-composer-model">
+                        <svg class="agent-composer-chip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                          <rect x="6" y="6" width="12" height="12" rx="1.6" />
+                          <rect x="9.25" y="9.25" width="5.5" height="5.5" rx="0.6" />
+                          <path d="M9 3v3" />
+                          <path d="M15 3v3" />
+                          <path d="M9 18v3" />
+                          <path d="M15 18v3" />
+                          <path d="M3 9h3" />
+                          <path d="M3 15h3" />
+                          <path d="M18 9h3" />
+                          <path d="M18 15h3" />
+                        </svg>
+                        <select id="agentModelSelect" aria-label="选择大模型"></select>
+                        <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </div>
+                      <div class="agent-composer-chip agent-composer-effort">
+                        <svg class="agent-composer-chip-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                          <path d="M9 18h6" />
+                          <path d="M10 21h4" />
+                          <path d="M5 9a7 7 0 0 1 14 0c0 2-1 4-2.5 5.2-.9.7-1.4 1.6-1.5 2.3h-7c-.1-.7-.6-1.6-1.5-2.3C6 13 5 11 5 9z" />
+                        </svg>
+                        <select id="agentEffortSelect" aria-label="推理强度">
+                          <option value="low">低</option>
+                          <option value="medium">中</option>
+                          <option value="high" selected>高</option>
+                        </select>
+                        <svg class="agent-composer-chip-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </div>
+                    </div>
+                    <button id="sendAgentMessageButton" class="agent-send" type="button" aria-label="发送消息" data-agent-send-state="send">
+                      <span class="agent-send-icon agent-send-icon-send" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </span>
+                      <span class="agent-send-icon agent-send-icon-stop" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <rect x="4" y="4" width="16" height="16" rx="3.4" fill="currentColor" />
+                        </svg>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <div
+            id="rightResizeHandle"
+            class="resize-handle resize-handle-right"
+            role="separator"
+            aria-label="调整右侧步骤栏宽度"
+            aria-orientation="vertical"
+            tabindex="0"
+          ></div>
+          <section id="progressRail" class="progress-rail step-rail" aria-label="验证步骤">
+            <header class="step-rail-head">
+              <h3>验证步骤</h3>
+            </header>
+            <nav id="workflowStepper" class="workflow-stepper" aria-label="验证流程"></nav>
+          </section>
+        </div>
+      </main>
+      <div
+        id="petCompanion"
+        class="pet-companion hidden"
+        data-pet-id="none"
+        data-pet-mood="idle"
+        role="img"
+        aria-live="polite"
+        aria-label="宠物未显示"
+        tabindex="0"
+      >
+        <div id="petSticker" class="pet-sticker" aria-hidden="true"></div>
+      </div>
+    </div>
+    <div id="searchScrim" class="search-scrim" aria-hidden="true"></div>
+    <div id="metricTooltip" class="metric-tooltip" hidden></div>
+    <script src="static/app.js?v=20260603-zero-rail-collapse"></script>
+  </body>
+</html>
