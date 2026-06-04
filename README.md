@@ -18,7 +18,7 @@
 
 MARVIS Risk Agent is built for governed credit-risk work that should stay close to local files, local runtimes, and auditable evidence. The long-term product direction is an all-purpose credit-risk agent for model building, portfolio analysis, strategy evaluation, monitoring, validation, and governed task automation.
 
-The current V1.0.1 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
+The current V1.0.2 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
 
 ## What You Get
 
