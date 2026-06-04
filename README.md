@@ -81,6 +81,16 @@ ruff check riskmodel_checker tests --extend-exclude '*.ipynb'
 node --check riskmodel_checker/static/app.js
 ```
 
+## Release Push
+
+Use the release helper instead of raw `git push` when publishing a new public version:
+
+```bash
+python scripts/release_push.py --bump patch
+```
+
+The helper updates release metadata, creates a release commit, creates an annotated `Vx.y.z` tag, and pushes `main` plus the tag. See `docs/versioning.md` for the versioning rules.
+
 ## License
 
 This project is released under the MIT License. See `LICENSE` for details.

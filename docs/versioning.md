@@ -53,10 +53,56 @@ V<MAJOR>.<MINOR>.<PATCH>
 ```bash
 git status --short
 git diff --check
-git tag V1.0.1
+python scripts/release_push.py --bump patch
 ```
 
 如后续增加 `CHANGELOG.md` 或包内 `__version__`，发布前应同步更新。
+
+## 发布推送与 tag 自动更新
+
+对外发布不要使用裸 `git push` 手工移动 tag。发布时统一使用 `scripts/release_push.py`，让版本元数据、release commit、annotated tag 和远端推送保持一致。
+
+默认 patch 发布：
+
+```bash
+python scripts/release_push.py --bump patch
+```
+
+指定 minor / major：
+
+```bash
+python scripts/release_push.py --bump minor
+python scripts/release_push.py --bump major
+```
+
+指定明确版本：
+
+```bash
+python scripts/release_push.py --version V1.1.0
+```
+
+脚本会执行以下动作：
+
+1. 要求工作区干净，避免把未提交业务改动混进版本 bump。
+2. 从最新 `V<MAJOR>.<MINOR>.<PATCH>` tag 计算下一个版本，或使用 `--version` 指定值。
+3. 自动更新 `pyproject.toml`、README、runbook 和 Notebook 要求文档中的当前发布版本。
+4. 创建一个版本 bump commit。
+5. 创建 annotated tag。
+6. push `main` 和新 tag 到远端。
+
+发布前可先预览：
+
+```bash
+python scripts/release_push.py --bump patch --dry-run
+```
+
+如果只想在本地生成版本 commit 和 tag、不推送远端：
+
+```bash
+python scripts/release_push.py --bump patch --no-push
+```
+
+发布 tag 视为不可变。发布后发现问题时，不要移动旧 tag；修复后创建下一个 patch 版本。
 
 ## V1/V2 并行维护与 forward-port 规则
 

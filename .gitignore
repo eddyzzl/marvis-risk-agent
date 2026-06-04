@@ -1,6 +1,7 @@
 .omx/
 .superpowers/
 workspace/
+workspace-*/
 .pytest_cache/
 .ruff_cache/
 __pycache__/
