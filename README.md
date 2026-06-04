@@ -20,6 +20,8 @@ MARVIS Risk Agent is built for governed credit-risk work that should stay close 
 
 The current V1.0.2 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
 
+Planned next steps are documented in [docs/roadmap.md](docs/roadmap.md): V1.1 adds Agent Memory Foundation for historical validation metric comparison, V2 adds the Agent Plugin/Tool Runtime, and later releases build modeling and strategy capability packs on that runtime.
+
 ## What You Get
 
 - **Local-first execution**: serve the platform from your own machine or server workspace.
@@ -27,6 +29,13 @@ The current V1.0.2 release ships model validation as the first stable built-in w
 - **Notebook validation runtime**: execute validation notebooks and downstream metrics with reproducible artifacts.
 - **Configurable branding**: keep private customer or institution branding outside source code.
 - **OSS-friendly defaults**: remove local branding config and the app falls back to the public MARVIS brand.
+
+## Core Docs
+
+- [Roadmap](docs/roadmap.md): V1/V1.1/V2/V3/V4 phases and Plugin/Tool/Hook/Workflow terminology.
+- [Versioning](docs/versioning.md): release helper, tags, version bumps, and forward-port rules.
+- [Notebook contract](docs/notebook_contract.md): the current model-validation notebook runtime contract.
+- [Design](DESIGN.md): product experience and UI/UX decision source of truth.
 
 ## Public Default Brand
 
