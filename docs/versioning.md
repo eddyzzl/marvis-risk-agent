@@ -85,6 +85,17 @@ python scripts/release_push.py --bump patch --dry-run
 python scripts/release_push.py --bump patch --no-push
 ```
 
+执行时机：先完成并验证普通功能、修复或文档改动，使用普通 commit 提交这些改动；确认 `main` 工作区干净后，再运行 release helper。不要在有未提交改动时运行 release helper，也不要先创建 release commit 再回头补业务 commit。
+
+推荐顺序：
+
+```bash
+git status --short
+git diff --check
+git log -1 --oneline
+python scripts/release_push.py --version V1.1.0
+```
+
 脚本会执行：
 
 1. 要求工作区干净。
