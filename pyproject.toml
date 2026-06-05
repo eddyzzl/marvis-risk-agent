@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 riskmodel-checker = "riskmodel_checker.__main__:main"
+marvis = "riskmodel_checker.__main__:main"
 marvis-risk-agent = "riskmodel_checker.__main__:main"
 
 [project.optional-dependencies]

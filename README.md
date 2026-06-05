@@ -74,9 +74,13 @@ See `docs/branding.md` for details.
 - A Java runtime compatible with `pypmml` if you need PMML scoring.
 - Node.js is only needed for frontend syntax checks; the app itself serves static HTML/CSS/JS through FastAPI.
 
-Create an environment with any name you prefer. For example, with `venv`:
+## Install From GitHub
+
+Clone the repository, then install from the checkout. Create an environment with any name you prefer. For example, with `venv`:
 
 ```bash
+git clone https://github.com/eddyzzl/marvis-risk-agent.git
+cd marvis-risk-agent
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -86,6 +90,8 @@ python -m pip install -e ".[dev]"
 Or with conda:
 
 ```bash
+git clone https://github.com/eddyzzl/marvis-risk-agent.git
+cd marvis-risk-agent
 conda create -n marvis python=3.12
 conda activate marvis
 python -m pip install -U pip
@@ -94,17 +100,71 @@ python -m pip install -e ".[dev]"
 
 ## Local Run
 
+After installation, start MARVIS with:
+
 ```bash
-python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis
 ```
 
-The Python module name `riskmodel_checker` is retained in V1 for compatibility with the current validation runtime. If installed in editable mode, the product-facing command alias is also available:
+By default, this is equivalent to:
 
 ```bash
-marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
 Then open `http://127.0.0.1:8000/`.
+
+The Python module name `riskmodel_checker` is retained in V1 for compatibility with the current validation runtime. The older entrypoints still work:
+
+```bash
+python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+```
+
+## Multiple Worktrees / Versions
+
+When running multiple worktrees at the same time, use different ports and different workspaces. Profiles choose safe defaults:
+
+```bash
+# Stable main demo
+marvis serve --profile main
+# http://127.0.0.1:8000, workspace ./workspace-main
+
+# V1.1 development or comparison
+marvis serve --profile v1-1
+# http://127.0.0.1:8001, workspace ./workspace-v1-1
+```
+
+Explicit options override profile defaults:
+
+```bash
+marvis serve --profile v1-1 --port 8017 --workspace ./custom-workspace
+```
+
+## Update
+
+If MARVIS was installed from a GitHub clone and the checkout is on a clean `main` branch, run:
+
+```bash
+marvis update
+```
+
+The command runs `git fetch origin`, `git pull --ff-only origin main`, then refreshes the editable install:
+
+```bash
+python -m pip install -e .
+```
+
+If local changes exist, `marvis update` refuses to continue. Commit, stash, or back up local changes before updating.
+
+If your current older install does not have `marvis update` yet, run one manual upgrade from the repository directory:
+
+```bash
+git pull --ff-only origin main
+python -m pip install -e .
+```
+
+After that, future upgrades can use `marvis update`.
 
 ## Tests
 

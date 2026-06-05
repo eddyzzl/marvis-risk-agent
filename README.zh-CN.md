@@ -74,9 +74,13 @@ workspace/branding/brand.json
 - 如果需要 PMML 打分，需要安装与 `pypmml` 兼容的 Java 运行时。
 - Node.js 只用于前端语法检查；应用本身通过 FastAPI 提供静态 HTML/CSS/JS。
 
-可以使用任意环境名称。例如使用 `venv`：
+## 从 GitHub 安装
+
+用户从 GitHub clone 后，在仓库目录内安装。可以使用任意环境名称。例如使用 `venv`：
 
 ```bash
+git clone https://github.com/eddyzzl/marvis-risk-agent.git
+cd marvis-risk-agent
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -86,6 +90,8 @@ python -m pip install -e ".[dev]"
 或者使用 conda：
 
 ```bash
+git clone https://github.com/eddyzzl/marvis-risk-agent.git
+cd marvis-risk-agent
 conda create -n marvis python=3.12
 conda activate marvis
 python -m pip install -U pip
@@ -94,17 +100,71 @@ python -m pip install -e ".[dev]"
 
 ## 本地启动
 
+安装后可以直接运行：
+
 ```bash
-python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis
 ```
 
-V1 中仍保留 Python 模块名 `riskmodel_checker`，用于兼容当前验证运行时。如果已经以 editable 模式安装，也可以使用面向产品的命令别名：
+默认等价于：
 
 ```bash
-marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
 然后打开 `http://127.0.0.1:8000/`。
+
+V1 中仍保留 Python 模块名 `riskmodel_checker`，用于兼容当前验证运行时。以下旧入口仍可用：
+
+```bash
+python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+```
+
+## 多 worktree / 多版本同时启动
+
+多个 worktree 同时启动时必须使用不同端口和不同 workspace。可以使用 profile 自动选择默认值：
+
+```bash
+# 稳定 main 演示
+marvis serve --profile main
+# http://127.0.0.1:8000, workspace ./workspace-main
+
+# V1.1 开发或对比
+marvis serve --profile v1-1
+# http://127.0.0.1:8001, workspace ./workspace-v1-1
+```
+
+显式参数优先级更高：
+
+```bash
+marvis serve --profile v1-1 --port 8017 --workspace ./custom-workspace
+```
+
+## 升级
+
+如果安装来源是 GitHub clone，并且当前在干净的 `main` 分支上，可以运行：
+
+```bash
+marvis update
+```
+
+该命令会执行 `git fetch origin`、`git pull --ff-only origin main`，然后刷新 editable 安装：
+
+```bash
+python -m pip install -e .
+```
+
+如果本地有未提交改动，`marvis update` 会拒绝继续。请先 `git commit`、`git stash` 或备份改动后再升级。
+
+如果当前安装的旧版本还没有 `marvis update`，第一次升级需要在仓库目录手动执行一次：
+
+```bash
+git pull --ff-only origin main
+python -m pip install -e .
+```
+
+完成后，后续升级就可以使用 `marvis update`。
 
 ## 测试
 
