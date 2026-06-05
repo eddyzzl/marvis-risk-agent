@@ -1365,7 +1365,7 @@ body.is-resizing {
 }
 
 .task-dialog:not(.environment-dialog) {
-  height: min(785px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
   overflow: hidden;
 }
 
@@ -1381,12 +1381,14 @@ body.is-resizing {
 
 .task-dialog:not(.environment-dialog) .task-dialog-panel {
   display: flex;
-  height: 100%;
+  max-height: calc(100dvh - 32px);
+  min-height: 0;
   flex-direction: column;
 }
 
 .dialog-head {
   display: flex;
+  flex: 0 0 auto;
   height: 55px;
   align-items: center;
   justify-content: space-between;
@@ -1400,6 +1402,96 @@ body.is-resizing {
   font-size: 17px;
 }
 
+.agent-memory-dialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.agent-memory-dialog-body {
+  gap: 12px;
+}
+
+.agent-memory-toolbar {
+  align-items: end;
+}
+
+.agent-memory-toolbar .button {
+  min-height: 39px;
+}
+
+.agent-memory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-memory-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.agent-memory-item:first-child {
+  border-top: 0;
+}
+
+.agent-memory-item-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-memory-item-main strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.agent-memory-item-main span,
+.agent-memory-item-main p,
+.agent-memory-detail-meta,
+.agent-memory-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.agent-memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.button.danger {
+  color: var(--danger);
+}
+
+.agent-memory-detail-inner {
+  display: grid;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.agent-memory-detail-inner h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.agent-memory-detail-inner p,
+.agent-memory-detail-inner ol {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.agent-memory-detail-inner ol {
+  padding-left: 1.2em;
+}
+
 .task-form {
   display: grid;
   gap: 14px;
@@ -1409,12 +1501,15 @@ body.is-resizing {
 }
 
 .task-dialog:not(.environment-dialog) .task-form {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: none;
-  grid-template-rows: auto auto auto auto minmax(19px, auto);
+  grid-template-rows: auto auto auto auto minmax(0, auto);
   align-content: start;
   gap: 12px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 14px 16px 16px;
 }
 
@@ -1615,6 +1710,10 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .task-dialog:not(.environment-dialog) .status {
   margin-top: 0;
+}
+
+.task-dialog:not(.environment-dialog) #statusMessage:empty {
+  min-height: 0;
 }
 
 .run-mode-copy strong {
@@ -3307,6 +3406,72 @@ body[data-theme="dark"] .progress-rail {
   color: var(--text);
   font-size: 15px;
   line-height: 1.78;
+}
+
+.agent-memory-references {
+  max-width: min(680px, 100%);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-memory-references summary {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.agent-memory-references ul {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-memory-reference {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
+}
+
+.agent-memory-reference-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-memory-reference-main strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-memory-reference-main small,
+.agent-memory-reference-main span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.agent-memory-reference-action {
+  flex: 0 0 auto;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .agent-thinking {

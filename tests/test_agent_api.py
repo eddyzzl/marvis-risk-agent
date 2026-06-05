@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from riskmodel_checker.app import create_app
+from riskmodel_checker.agent_memory.models import MemoryCandidate
+from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.db import TaskRepository
 from riskmodel_checker.domain import TaskStatus
 from riskmodel_checker.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX
@@ -71,6 +73,28 @@ def _advance_to_writing_artifacts(repo: TaskRepository, task_id: str) -> None:
     )
 
 
+def _configure_llm(client: TestClient) -> None:
+    response = client.put(
+        "/api/settings/llm",
+        json={
+            "default_model_id": "m1",
+            "models": [
+                {
+                    "model_id": "m1",
+                    "enabled": True,
+                    "display_name": "主模型",
+                    "provider": "OpenAI Compatible",
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "credit-risk-gpt",
+                    "api_key": "secret",
+                    "timeout_seconds": 45,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_llm_settings_api_masks_keys_and_lists_enabled_models(tmp_path):
     client = _client(tmp_path)
 
@@ -126,6 +150,90 @@ def test_agent_message_without_llm_config_returns_guidance(tmp_path):
 
     assert response.status_code == 409
     assert "请先在设置中配置至少一个启用的大模型" in response.json()["detail"]
+
+
+def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
+    observed: dict = {}
+
+    def fake_answer_chat_message(**kwargs):
+        observed.update(kwargs)
+        return "上一版A卡模型KS为20，当前版本KS为30，效果更好。", {
+            "fallback": False,
+            "memory_references": [
+                {
+                    "id": kwargs["memory_context"]["memories"][0]["id"],
+                    "memory_type": "model_experience",
+                    "source_task_id": "task-history",
+                    "confidence": "high",
+                    "use_reason": "chat",
+                }
+            ],
+        }
+
+    monkeypatch.setattr("riskmodel_checker.api.answer_chat_message", fake_answer_chat_message)
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    memory = store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="上一版A卡模型V2025在202601自营渠道KS为20。",
+            payload={
+                "ks": 20,
+                "auc": 0.68,
+                "psi": 0.06,
+                "month": "202601",
+                "channel": "自营",
+                "model_name": "A卡",
+                "model_version": "V2025",
+                "scope": "贷前A卡",
+                "source_task_id": "task-history",
+                "important_feature_sources": ["征信"],
+            },
+            source_task_id="task-history",
+            confidence="high",
+        )
+    )
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "和上一版A卡模型比怎么样？", "model_id": "m1"},
+    )
+
+    assert response.status_code == 202, response.text
+    assert observed["memory_context"]["memories"][0]["id"] == memory.id
+    assistant = response.json()["messages"][-1]
+    assert assistant["metadata"]["memory_references"][0]["id"] == memory.id
+    events = store.list_events(memory.id)
+    assert [event["event_type"] for event in events] == ["create", "retrieve", "use"]
+    assert events[-1]["task_id"] == task_id
+    assert events[-1]["message_id"] == assistant["id"]
+
+
+def test_agent_chat_persists_explicit_user_preference_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "riskmodel_checker.api.answer_chat_message",
+        lambda **kwargs: ("已记住。", {"fallback": False}),
+    )
+    client = _client(tmp_path)
+    _configure_llm(client)
+    task_id = _create_task(client, tmp_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "请记住：回答时先写核心风险，再写补充说明", "model_id": "m1"},
+    )
+
+    assert response.status_code == 202, response.text
+    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    memories = store.list_entries(memory_type="user_preference")
+    assert len(memories) == 1
+    memory = memories[0]
+    assert memory.summary == "回答时先写核心风险，再写补充说明"
+    assert memory.payload == {"preference": "回答时先写核心风险，再写补充说明"}
+    assert memory.source_task_id == task_id
+    assert memory.source_message_id == response.json()["messages"][-2]["id"]
 
 
 def test_agent_start_queues_streaming_opening_before_background_scan(

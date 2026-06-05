@@ -12,6 +12,10 @@ from riskmodel_checker.agent.prompts import (
 from riskmodel_checker.db import AGENT_REPORT_CONCLUSION_KEYS
 from riskmodel_checker.domain import TaskRecord
 from riskmodel_checker.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from riskmodel_checker.agent_memory.prompting import (
+    add_memory_to_prompt_payload,
+    attach_memory_metadata,
+)
 
 
 REQUIRED_AGENT_REPORT_KEYS = tuple(sorted(AGENT_REPORT_CONCLUSION_KEYS))
@@ -483,11 +487,17 @@ def summarize_stage(
     task: TaskRecord,
     stage: str,
     evidence: dict,
+    memory_context: dict | None = None,
     model_profile: dict,
     fallback: str,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
-    prompt = _stage_prompt(task=task, stage=stage, evidence=evidence)
+    prompt = _stage_prompt(
+        task=task,
+        stage=stage,
+        evidence=evidence,
+        memory_context=memory_context,
+    )
     try:
         content = _client(model_profile).complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
@@ -502,7 +512,7 @@ def summarize_stage(
     metadata = {"fallback": False}
     if guarded != cleaned:
         metadata["guarded_scan_summary"] = True
-    return guarded, metadata
+    return guarded, attach_memory_metadata(metadata, memory_context, use_reason=stage)
 
 
 def compose_agent_start_message(
@@ -540,6 +550,7 @@ def failure_summary(
     task: TaskRecord,
     stage: str,
     error: str,
+    memory_context: dict | None = None,
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
@@ -547,6 +558,7 @@ def failure_summary(
         task=task,
         stage="failure",
         evidence={"failed_stage": stage, "error": error},
+        memory_context=memory_context,
     )
     fallback = f"失败阶段：{stage}\n直接原因：{error}\n可能原因：请检查该阶段输入材料、执行环境和上游产物。\n下一步：修正后重新从失败阶段执行。"
     try:
@@ -558,7 +570,11 @@ def failure_summary(
         )
     except LLMClientError as exc:
         return fallback, {"llm_error": str(exc), "fallback": True}
-    return _strip_agent_response_preamble(content or fallback), {"fallback": False}
+    return _strip_agent_response_preamble(content or fallback), attach_memory_metadata(
+        {"fallback": False},
+        memory_context,
+        use_reason="failure",
+    )
 
 
 def answer_chat_message(
@@ -567,6 +583,7 @@ def answer_chat_message(
     user_message: str,
     conversation: list[dict],
     evidence: dict,
+    memory_context: dict | None = None,
     model_profile: dict,
     on_delta: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
@@ -575,6 +592,7 @@ def answer_chat_message(
         user_message=user_message,
         conversation=conversation,
         evidence=evidence,
+        memory_context=memory_context,
     )
     fallback = _chat_fallback_for_message(user_message)
     try:
@@ -593,7 +611,11 @@ def answer_chat_message(
         content
     ):
         return fallback, {"fallback": True, "llm_response_replaced": True}
-    return _strip_agent_response_preamble(content), {"fallback": False}
+    return _strip_agent_response_preamble(content), attach_memory_metadata(
+        {"fallback": False},
+        memory_context,
+        use_reason="chat",
+    )
 
 
 def _strip_agent_response_preamble(content: str) -> str:
@@ -616,6 +638,7 @@ def generate_word_conclusions(
     *,
     task: TaskRecord,
     evidence: dict,
+    memory_context: dict | None = None,
     model_profile: dict,
     user_instruction: str | None = None,
 ) -> tuple[dict[str, str], dict]:
@@ -623,6 +646,7 @@ def generate_word_conclusions(
         task=task,
         stage="word_conclusion_draft",
         evidence=evidence,
+        memory_context=memory_context,
         user_instruction=user_instruction,
     )
     try:
@@ -635,7 +659,11 @@ def generate_word_conclusions(
         values = _parse_conclusion_json(content)
     except (LLMClientError, ValueError) as exc:
         return {}, {"llm_error": str(exc), "fallback": True, "confirmable": False}
-    return values, {"fallback": False}
+    return values, attach_memory_metadata(
+        {"fallback": False},
+        memory_context,
+        use_reason="word_conclusion_draft",
+    )
 
 
 def fallback_word_conclusions(*, task: TaskRecord) -> dict[str, str]:
@@ -666,6 +694,7 @@ def _stage_prompt(
     task: TaskRecord,
     stage: str,
     evidence: dict,
+    memory_context: dict | None = None,
     user_instruction: str | None = None,
 ) -> str:
     instructions = _stage_instructions(stage)
@@ -684,6 +713,7 @@ def _stage_prompt(
             + "本次是用户要求重新生成该阶段内容，必须优先满足 user_instruction 中的修改要求；"
             "不得因为已有旧草稿而复用旧措辞。"
         )
+    payload = add_memory_to_prompt_payload(payload, memory_context)
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -843,21 +873,24 @@ def _chat_prompt(
     user_message: str,
     conversation: list[dict],
     evidence: dict,
+    memory_context: dict | None = None,
 ) -> str:
     conversation_memory = _conversation_memory(
         conversation=conversation,
         task=task,
         current_user_message=user_message,
     )
-    return json.dumps(
-        {
+    payload = {
             "stage": "chat",
             "task": _llm_task_meta(task),
             "user_message": _sanitize_llm_text(user_message, task),
             "conversation_memory": conversation_memory,
             "available_evidence": _sanitize_llm_payload(evidence, task),
             "instructions": _chat_instructions(user_message),
-        },
+        }
+    payload = add_memory_to_prompt_payload(payload, memory_context)
+    return json.dumps(
+        payload,
         ensure_ascii=False,
         indent=2,
     )

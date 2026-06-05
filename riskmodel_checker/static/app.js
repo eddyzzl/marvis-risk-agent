@@ -35,6 +35,8 @@ let executionEnvironmentSettings = null;
 let llmSettings = { default_model_id: "", models: [], enabled_models: [] };
 let llmEditingIndex = null;
 let agentMessages = [];
+let agentMemoryItems = [];
+let selectedAgentMemoryId = "";
 const agentComposerPreferences = restoreAgentComposerPreferences();
 let agentSelectedModelId = agentComposerPreferences.model_id || "";
 let agentSelectedEffort = agentComposerPreferences.effort || "high";
@@ -466,6 +468,15 @@ function openLLMSettingsDialog() {
 
 function closeLLMSettingsDialog() {
   $("llmSettingsDialog").close();
+}
+
+function openAgentMemoryDialog() {
+  $("agentMemoryDialog").showModal();
+  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+}
+
+function closeAgentMemoryDialog() {
+  $("agentMemoryDialog").close();
 }
 
 function openWordPreviewDialog() {
@@ -1520,6 +1531,189 @@ async function api(endpoint, options = {}) {
     return null;
   }
   return response.json();
+}
+
+function setAgentMemoryStatus(message = "", kind = "") {
+  const status = $("agentMemoryStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.className = ["status", kind].filter(Boolean).join(" ");
+}
+
+function agentMemoryFilterParams() {
+  const params = new URLSearchParams();
+  const filters = [
+    ["memory_type", $("agentMemoryTypeFilter")?.value],
+    ["status", $("agentMemoryStatusFilter")?.value],
+    ["source_task_id", $("agentMemorySourceTaskFilter")?.value],
+    ["model_name", $("agentMemoryModelFilter")?.value],
+  ];
+  for (const [key, value] of filters) {
+    const normalized = String(value || "").trim();
+    if (normalized) params.set(key, normalized);
+  }
+  return params.toString();
+}
+
+function agentMemoryTitle(memory = {}) {
+  return memory.title || memory.summary || memory.key || memory.memory_type || memory.id || "未命名记忆";
+}
+
+function agentMemorySummary(memory = {}) {
+  return memory.summary || memory.content || memory.value || memory.use_reason || "";
+}
+
+function agentMemoryMetaParts(memory = {}) {
+  return [
+    memory.memory_type,
+    memory.status,
+    memory.source_task_id ? `来源 ${memory.source_task_id}` : "",
+    memory.model_name,
+    memory.confidence !== undefined ? `置信度 ${formatMemoryConfidence(memory.confidence)}` : "",
+  ].filter(Boolean);
+}
+
+function formatMemoryConfidence(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value ?? "");
+  if (number <= 1) return `${Math.round(number * 100)}%`;
+  return `${Math.round(number)}%`;
+}
+
+function renderAgentMemoryItems() {
+  const list = $("agentMemoryList");
+  if (!list) return;
+  if (!agentMemoryItems.length) {
+    list.innerHTML = '<div class="agent-memory-empty">暂无匹配记忆。</div>';
+    return;
+  }
+  list.innerHTML = agentMemoryItems.map((memory) => {
+    const memoryId = String(memory.id || memory.memory_id || "");
+    const memoryStatus = String(memory.status || "").toLowerCase();
+    const isDisabled = memoryStatus === "disabled";
+    const isTerminal = memoryStatus === "deleted" || memoryStatus === "rejected";
+    const title = agentMemoryTitle(memory);
+    const summary = agentMemorySummary(memory);
+    const meta = agentMemoryMetaParts(memory).map(escapeHtml).join(" · ");
+    return [
+      `<article class="agent-memory-item" data-agent-memory-id="${escapeHtml(memoryId)}">`,
+      '<div class="agent-memory-item-main">',
+      `<strong>${escapeHtml(title)}</strong>`,
+      meta ? `<span>${meta}</span>` : "",
+      summary ? `<p>${escapeHtml(summary)}</p>` : "",
+      "</div>",
+      '<div class="agent-memory-actions">',
+      `<button class="button compact secondary" type="button" data-agent-memory-action="inspect" data-agent-memory-id="${escapeHtml(memoryId)}">查看</button>`,
+      isTerminal
+        ? ""
+        : isDisabled
+          ? `<button class="button compact secondary" type="button" data-agent-memory-action="enable" data-agent-memory-id="${escapeHtml(memoryId)}">启用</button>`
+          : `<button class="button compact secondary" type="button" data-agent-memory-action="disable" data-agent-memory-id="${escapeHtml(memoryId)}">停用</button>`,
+      isTerminal
+        ? ""
+        : `<button class="button compact secondary danger" type="button" data-agent-memory-action="delete" data-agent-memory-id="${escapeHtml(memoryId)}">删除</button>`,
+      "</div>",
+      "</article>",
+    ].join("");
+  }).join("");
+}
+
+function renderAgentMemoryDetail(memory = null, events = []) {
+  const detail = $("agentMemoryDetail");
+  if (!detail) return;
+  if (!memory) {
+    detail.innerHTML = "";
+    selectedAgentMemoryId = "";
+    return;
+  }
+  selectedAgentMemoryId = String(memory.id || memory.memory_id || "");
+  const meta = agentMemoryMetaParts(memory).map(escapeHtml).join(" · ");
+  const eventList = Array.isArray(events) ? events : [];
+  detail.innerHTML = [
+    '<section class="agent-memory-detail-inner">',
+    `<h3>${escapeHtml(agentMemoryTitle(memory))}</h3>`,
+    meta ? `<div class="agent-memory-detail-meta">${meta}</div>` : "",
+    agentMemorySummary(memory) ? `<p>${escapeHtml(agentMemorySummary(memory))}</p>` : "",
+    eventList.length
+      ? `<ol>${eventList.map((event) => `<li>${escapeHtml(event.action || event.event_type || "event")} ${escapeHtml(event.created_at || "")}</li>`).join("")}</ol>`
+      : '<div class="agent-memory-empty">暂无审计事件。</div>',
+    "</section>",
+  ].join("");
+}
+
+async function loadAgentMemoryItems() {
+  const query = agentMemoryFilterParams();
+  setAgentMemoryStatus("正在读取记忆...");
+  const payload = await api("api/agent-memory" + (query ? `?${query}` : ""));
+  agentMemoryItems = Array.isArray(payload?.items) ? payload.items : [];
+  renderAgentMemoryItems();
+  renderAgentMemoryDetail(null);
+  setAgentMemoryStatus(`已读取 ${agentMemoryItems.length} 条记忆。`, "success");
+}
+
+async function inspectAgentMemory(memoryId) {
+  if (!memoryId) return;
+  setAgentMemoryStatus("正在读取记忆详情...");
+  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`);
+  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
+  setAgentMemoryStatus("记忆详情已更新。", "success");
+}
+
+async function disableAgentMemory(memoryId) {
+  if (!memoryId) return;
+  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" });
+  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
+  await loadAgentMemoryItems();
+}
+
+async function enableAgentMemory(memoryId) {
+  if (!memoryId) return;
+  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" });
+  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
+  await loadAgentMemoryItems();
+}
+
+async function deleteAgentMemory(memoryId) {
+  if (!memoryId) return;
+  if (!window.confirm("删除后将从 Agent 记忆库移除，确定删除？")) return;
+  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
+  agentMemoryItems = agentMemoryItems.filter((memory) => String(memory.id || memory.memory_id || "") !== memoryId);
+  renderAgentMemoryItems();
+  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
+}
+
+async function loadAgentMessageMemoryReferences(taskId, messageId) {
+  if (!taskId || !messageId) return [];
+  const payload = await api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`);
+  return Array.isArray(payload?.memory_references) ? payload.memory_references : [];
+}
+
+function handleAgentMemoryListClick(event) {
+  const button = event.target.closest("[data-agent-memory-action]");
+  if (!button) return;
+  event.preventDefault();
+  const memoryId = button.dataset.agentMemoryId || selectedAgentMemoryId;
+  const action = button.dataset.agentMemoryAction;
+  const actions = {
+    inspect: inspectAgentMemory,
+    disable: disableAgentMemory,
+    enable: enableAgentMemory,
+    delete: deleteAgentMemory,
+  };
+  const handler = actions[action];
+  if (handler) {
+    runAction(() => handler(memoryId), { actionId: "agentMemory", busyText: "正在更新 Agent 记忆..." });
+  }
+}
+
+function handleAgentMemoryInlineInspect(event) {
+  const button = event.target.closest("[data-agent-memory-inline-inspect]");
+  if (!button) return;
+  event.preventDefault();
+  const memoryId = button.dataset.agentMemoryInlineInspect || "";
+  if (!memoryId) return;
+  $("agentMemoryDialog").showModal();
+  runAction(() => inspectAgentMemory(memoryId), { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
 }
 
 function requireTaskId(taskId, actionName = "当前操作") {
@@ -4308,6 +4502,15 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        memory_references: Array.isArray(metadata.memory_references)
+          ? metadata.memory_references.map((reference) => [
+            reference.id || "",
+            reference.memory_type || "",
+            reference.source_task_id || "",
+            reference.confidence ?? "",
+            reference.use_reason || "",
+          ])
+          : [],
       },
     };
   });
@@ -4339,6 +4542,14 @@ function updateAgentMessageContentsInPlace(messages = []) {
     if (contentNode.innerHTML !== nextHtml) contentNode.innerHTML = nextHtml;
     contentNode.dataset.agentStreaming = streaming ? "true" : "false";
     contentNode.dataset.agentThinking = thinking ? "true" : "false";
+    const referencesNode = article.querySelector(".agent-memory-references");
+    const referencesHtml = message?.role === "user" ? "" : agentMemoryReferencesHtml(message?.metadata?.memory_references);
+    if (referencesNode) {
+      if (referencesHtml) referencesNode.outerHTML = referencesHtml;
+      else referencesNode.remove();
+    } else if (referencesHtml) {
+      contentNode.insertAdjacentHTML("afterend", referencesHtml);
+    }
   }
   return true;
 }
@@ -4902,6 +5113,40 @@ function tickAgentTyping() {
   if (pending) scheduleAgentTyping();
 }
 
+function agentMemoryReferencesHtml(references = []) {
+  if (!Array.isArray(references) || references.length === 0) return "";
+  const rows = references.map((reference) => {
+    const memoryId = String(reference.id || reference.memory_id || "");
+    const type = reference.memory_type || "memory";
+    const sourceTask = reference.source_task_id || "";
+    const confidence = reference.confidence !== undefined ? formatMemoryConfidence(reference.confidence) : "";
+    const reason = reference.use_reason || reference.reason || "";
+    const meta = [
+      type,
+      sourceTask ? `来源 ${sourceTask}` : "",
+      confidence ? `置信度 ${confidence}` : "",
+    ].filter(Boolean).map(escapeHtml).join(" · ");
+    return [
+      '<li class="agent-memory-reference">',
+      '<span class="agent-memory-reference-main">',
+      `<strong>${escapeHtml(memoryId || type)}</strong>`,
+      meta ? `<small>${meta}</small>` : "",
+      reason ? `<span>${escapeHtml(reason)}</span>` : "",
+      "</span>",
+      memoryId
+        ? `<button class="agent-memory-reference-action" type="button" data-agent-memory-inline-inspect="${escapeHtml(memoryId)}">查看</button>`
+        : "",
+      "</li>",
+    ].join("");
+  }).join("");
+  return [
+    '<details class="agent-memory-references">',
+    `<summary>引用记忆 ${references.length}</summary>`,
+    `<ul>${rows}</ul>`,
+    "</details>",
+  ].join("");
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
   const className = role === "user" ? "agent-message user" : "agent-message assistant";
@@ -4910,12 +5155,16 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const contentHtml = thinking
     ? agentThinkingHtml()
     : formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" });
+  const memoryReferencesHtml = role === "assistant"
+    ? agentMemoryReferencesHtml(message?.metadata?.memory_references)
+    : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
   return [
     `<article class="${className}"${idAttr}>`,
     role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentStageLabel(labelStage))}</div>` : "",
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    memoryReferencesHtml,
     "</article>",
   ].join("");
 }
@@ -5730,6 +5979,7 @@ async function runAction(action, options = {}) {
       }
     }
     const message = error.message || "操作失败";
+    if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");
     if (actionId) renderActionError(actionId, message);
     if (actionId) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
     else setCreateStatus(message, "error");
@@ -5853,9 +6103,13 @@ $("openExecutionEnvironmentButton").onclick = openExecutionEnvironmentDialog;
 $("closeExecutionEnvironmentButton").onclick = closeExecutionEnvironmentDialog;
 $("openLLMSettingsButton").onclick = openLLMSettingsDialog;
 $("closeLLMSettingsButton").onclick = closeLLMSettingsDialog;
+$("openAgentMemoryButton").onclick = openAgentMemoryDialog;
+$("closeAgentMemoryButton").onclick = closeAgentMemoryDialog;
 $("closeWordPreviewButton").onclick = closeWordPreviewDialog;
 $("refreshExecutionEnvironmentOptionsButton").onclick = refreshExecutionEnvironmentOptions;
 $("saveExecutionEnvironmentButton").onclick = saveExecutionEnvironmentSettings;
+$("refreshAgentMemoryButton").onclick = () =>
+  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
 $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
@@ -5877,6 +6131,8 @@ $("taskSearchClose").onclick = () => closeTaskSearch({ focusToggle: true });
 $("searchScrim").onclick = () => closeTaskSearch({ focusToggle: true });
 $("taskList").addEventListener("click", () => closeTaskSearch());
 $("settingsMenu").onchange = handleSettingsMenuChange;
+$("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
+document.addEventListener("click", handleAgentMemoryInlineInspect);
 $("llmModelProfiles").addEventListener("click", (event) => {
   const removeButton = event.target.closest("[data-llm-remove]");
   if (removeButton) {

@@ -180,6 +180,9 @@ def init_db(db_path: Path) -> None:
                 ON agent_messages(task_id, created_at, id)
             """
         )
+        from riskmodel_checker.agent_memory.store import ensure_agent_memory_schema
+
+        ensure_agent_memory_schema(conn)
         conn.commit()
 
 

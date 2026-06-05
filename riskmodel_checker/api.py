@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 import json
 import math
@@ -33,6 +33,12 @@ from riskmodel_checker.agent.service import (
     is_stop_validation_intent,
     summarize_stage,
 )
+from riskmodel_checker.agent_memory.retrieval import (
+    MemoryQuery,
+    retrieve_relevant_memories,
+)
+from riskmodel_checker.agent_memory.extractors import extract_user_preference
+from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.branding import load_branding
 from riskmodel_checker.db import TaskRepository
 from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskRecord, TaskStatus
@@ -674,24 +680,26 @@ def post_agent_message(
     if not content:
         raise HTTPException(status_code=422, detail="message content is required")
     if is_stop_validation_intent(content):
-        repo.add_agent_message(
+        user_message = repo.add_agent_message(
             task_id,
             role="user",
             stage="chat",
             content=content,
             metadata={"intent": "stop"},
         )
+        _capture_user_preference_memory(request, task_id, user_message)
         return _handle_agent_stop_message(repo, task)
     conversation = repo.list_agent_messages(task_id)
     pending_report_draft = _latest_pending_agent_report_draft(conversation)
     if _is_agent_report_confirm_intent(content) and pending_report_draft:
-        repo.add_agent_message(
+        user_message = repo.add_agent_message(
             task_id,
             role="user",
             stage="chat",
             content=content,
             metadata={"intent": "confirm_report"},
         )
+        _capture_user_preference_memory(request, task_id, user_message)
         return _confirm_agent_report_conclusions(
             repo=repo,
             task=task,
@@ -712,7 +720,7 @@ def post_agent_message(
             and _is_agent_report_regenerate_intent(content)
             else "rerun_stage"
         )
-        repo.add_agent_message(
+        user_message = repo.add_agent_message(
             task_id,
             role="user",
             stage="chat",
@@ -723,6 +731,7 @@ def post_agent_message(
                 "target_stage": rerun_stage,
             },
         )
+        _capture_user_preference_memory(request, task_id, user_message)
         task = _reset_agent_task_for_rerun(repo, task_id, rerun_stage)
         return _dispatch_agent_validation_job(
             repo=repo,
@@ -736,13 +745,14 @@ def post_agent_message(
         )
     if _is_agent_report_regenerate_intent(content) and pending_report_draft:
         _reject_if_task_has_active_job(repo, task_id)
-        repo.add_agent_message(
+        user_message = repo.add_agent_message(
             task_id,
             role="user",
             stage="chat",
             content=content,
             metadata={**_model_metadata(model_profile), "intent": "regenerate_report_draft"},
         )
+        _capture_user_preference_memory(request, task_id, user_message)
         return _dispatch_agent_validation_job(
             repo=repo,
             task=task,
@@ -752,15 +762,24 @@ def post_agent_message(
             background_tasks=background_tasks,
         )
     if not is_agent_advance_intent(content):
-        repo.add_agent_message(
+        user_message = repo.add_agent_message(
             task_id,
             role="user",
             stage="chat",
             content=content,
             metadata=_model_metadata(model_profile),
         )
+        _capture_user_preference_memory(request, task_id, user_message)
         conversation = repo.list_agent_messages(task_id)
-        _add_and_stream_agent_message(
+        evidence = _agent_chat_evidence(request, repo, task, conversation)
+        memory_context = _agent_memory_context(
+            request,
+            task,
+            stage="chat",
+            user_message=content,
+            evidence=evidence,
+        )
+        message = _add_and_stream_agent_message(
             repo,
             task_id,
             stage="chat",
@@ -769,19 +788,22 @@ def post_agent_message(
                 task=task,
                 user_message=content,
                 conversation=conversation,
-                evidence=_agent_chat_evidence(request, repo, task, conversation),
+                evidence=evidence,
+                memory_context=memory_context,
                 model_profile=model_profile,
                 on_delta=on_delta,
             ),
         )
+        _audit_agent_memory_use(request, message, task_id=task_id)
         return {"task_id": task_id, "status": "message_saved", "messages": repo.list_agent_messages(task_id)}
-    repo.add_agent_message(
+    user_message = repo.add_agent_message(
         task_id,
         role="user",
         stage="chat",
         content=content,
         metadata={**_model_metadata(model_profile), "intent": "advance"},
     )
+    _capture_user_preference_memory(request, task_id, user_message)
     return _dispatch_agent_validation_job(
         repo=repo,
         task=task,
@@ -800,6 +822,88 @@ def stop_agent_action(task_id: str, request: Request) -> dict:
     return _handle_agent_stop_message(repo, task)
 
 
+@router.get("/agent-memory")
+def list_agent_memory(
+    request: Request,
+    memory_type: str | None = None,
+    status: str | None = None,
+    source_task_id: str | None = None,
+    model_name: str | None = None,
+    channel: str | None = None,
+    month: str | None = None,
+) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        entries = store.list_entries(status=status, memory_type=memory_type, limit=500)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid memory filter: {exc}") from exc
+    items = [_memory_entry_payload(entry) for entry in entries]
+    items = [
+        item
+        for item in items
+        if _memory_api_filter_match(
+            item,
+            source_task_id=source_task_id,
+            model_name=model_name,
+            channel=channel,
+            month=month,
+        )
+    ]
+    return {"items": items}
+
+
+@router.get("/agent-memory/{memory_id}")
+def get_agent_memory(memory_id: str, request: Request) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        entry = store.get_entry(memory_id, include_deleted=True, audit=True)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    return {
+        "memory": _memory_entry_payload(entry),
+        "events": store.list_events(memory_id),
+    }
+
+
+@router.post("/agent-memory/{memory_id}/disable")
+def disable_agent_memory(memory_id: str, request: Request) -> dict:
+    return _set_agent_memory_status(request, memory_id, "disabled")
+
+
+@router.post("/agent-memory/{memory_id}/enable")
+def enable_agent_memory(memory_id: str, request: Request) -> dict:
+    return _set_agent_memory_status(request, memory_id, "active")
+
+
+@router.delete("/agent-memory/{memory_id}")
+def delete_agent_memory(memory_id: str, request: Request) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        entry = store.delete(memory_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    return {"memory": _memory_entry_payload(entry), "events": store.list_events(memory_id)}
+
+
+@router.get("/tasks/{task_id}/agent/messages/{message_id}/memory-references")
+def get_agent_message_memory_references(
+    task_id: str,
+    message_id: str,
+    request: Request,
+) -> dict:
+    repo = _repo(request)
+    _get_task_or_404(repo, task_id)
+    for message in repo.list_agent_messages(task_id):
+        if message.get("id") == message_id:
+            references = (message.get("metadata") or {}).get("memory_references")
+            return {
+                "task_id": task_id,
+                "message_id": message_id,
+                "memory_references": references if isinstance(references, list) else [],
+            }
+    raise HTTPException(status_code=404, detail="Agent message not found")
+
+
 @router.post("/tasks/{task_id}/agent/summarize")
 def summarize_agent_task(
     task_id: str,
@@ -811,10 +915,17 @@ def summarize_agent_task(
     _require_agent_task(task)
     model_profile = _resolve_agent_model(request, payload.model_id, payload.effort)
     evidence = _agent_evidence(request, task_id)
+    memory_context = _agent_memory_context(
+        request,
+        task,
+        stage="metrics",
+        evidence=evidence,
+    )
     content, metadata = summarize_stage(
         task=task,
         stage="metrics",
         evidence=evidence,
+        memory_context=memory_context,
         model_profile=model_profile,
         fallback="已读取当前验证证据。请结合分数一致性、效果稳定性和压力测试明细复核模型表现。",
     )
@@ -826,6 +937,7 @@ def summarize_agent_task(
         content=content,
         metadata=metadata,
     )
+    _audit_agent_memory_use(request, message, task_id=task_id)
     return {"message": message, "messages": repo.list_agent_messages(task_id)}
 
 
@@ -839,9 +951,17 @@ def draft_agent_report_conclusions(
     task = _get_task_or_404(repo, task_id)
     _require_agent_task(task)
     model_profile = _resolve_agent_model(request, payload.model_id, payload.effort)
+    evidence = _agent_evidence(request, task_id)
+    memory_context = _agent_memory_context(
+        request,
+        task,
+        stage="word_conclusion_draft",
+        evidence=evidence,
+    )
     values, metadata = generate_word_conclusions(
         task=task,
-        evidence=_agent_evidence(request, task_id),
+        evidence=evidence,
+        memory_context=memory_context,
         model_profile=model_profile,
     )
     metadata.update(_model_metadata(model_profile))
@@ -853,6 +973,7 @@ def draft_agent_report_conclusions(
         content=_format_conclusion_values(values),
         metadata={**metadata, "draft_values": values, "report_revision": report_revision},
     )
+    _audit_agent_memory_use(request, message, task_id=task_id)
     return {
         "message": message,
         "text_values": values,
@@ -1763,7 +1884,15 @@ def _run_agent_reproducibility_stage(
             model_profile=model_profile,
         )
         return False
-    _add_and_stream_agent_message(
+    evidence = _agent_evidence_from_settings(settings, task_id)
+    memory_store = AgentMemoryStore(settings.db_path)
+    memory_context = _agent_memory_context_from_store(
+        memory_store,
+        task,
+        stage="reproducibility",
+        evidence=evidence,
+    )
+    message = _add_and_stream_agent_message(
         repo,
         task_id,
         stage="reproducibility",
@@ -1771,12 +1900,14 @@ def _run_agent_reproducibility_stage(
         producer=lambda on_delta: summarize_stage(
             task=task,
             stage="reproducibility",
-            evidence=_agent_evidence_from_settings(settings, task_id),
+            evidence=evidence,
+            memory_context=memory_context,
             model_profile=model_profile,
             fallback="分数一致性阶段已完成，请查看可复现性证据明细。",
             on_delta=on_delta,
         ),
     )
+    _audit_agent_memory_use_from_store(memory_store, message, task_id=task_id)
     _raise_if_agent_cancelled(task_id)
     if not auto_accept:
         _add_agent_continue_prompt(repo, task_id, model_profile, next_stage="metrics")
@@ -1832,7 +1963,14 @@ def _run_agent_metrics_stage(
         )
         return False
     evidence = _agent_evidence_from_settings(settings, task_id)
-    _add_and_stream_agent_message(
+    memory_store = AgentMemoryStore(settings.db_path)
+    memory_context = _agent_memory_context_from_store(
+        memory_store,
+        task,
+        stage="metrics",
+        evidence=evidence,
+    )
+    message = _add_and_stream_agent_message(
         repo,
         task_id,
         stage="metrics",
@@ -1841,11 +1979,13 @@ def _run_agent_metrics_stage(
             task=task,
             stage="metrics",
             evidence=evidence,
+            memory_context=memory_context,
             model_profile=model_profile,
             fallback="效果、稳定性和 Excel 指标产物已生成，请结合 OOT KS、PSI 和压力测试明细复核。",
             on_delta=on_delta,
         ),
     )
+    _audit_agent_memory_use_from_store(memory_store, message, task_id=task_id)
     _raise_if_agent_cancelled(task_id)
     if not auto_accept:
         _add_agent_continue_prompt(
@@ -1866,6 +2006,14 @@ def _run_agent_word_conclusion_stage(
 ) -> bool:
     task = repo.get_task(task_id)
     evidence = _agent_evidence_from_settings(settings, task_id)
+    memory_store = AgentMemoryStore(settings.db_path)
+    memory_context = _agent_memory_context_from_store(
+        memory_store,
+        task,
+        stage="word_conclusion_draft",
+        evidence=evidence,
+        user_message=rewrite_instruction or "",
+    )
     draft_result: dict[str, object] = {}
 
     def produce_draft(_on_delta):
@@ -1873,6 +2021,7 @@ def _run_agent_word_conclusion_stage(
         values, metadata = generate_word_conclusions(
             task=task,
             evidence=evidence,
+            memory_context=memory_context,
             model_profile=model_profile,
             user_instruction=rewrite_instruction,
         )
@@ -1884,7 +2033,7 @@ def _run_agent_word_conclusion_stage(
         )
 
     if draft_message_id:
-        _stream_agent_message(
+        message = _stream_agent_message(
             repo,
             draft_message_id,
             task_id=task_id,
@@ -1892,13 +2041,14 @@ def _run_agent_word_conclusion_stage(
             producer=produce_draft,
         )
     else:
-        _add_and_stream_agent_message(
+        message = _add_and_stream_agent_message(
             repo,
             task_id,
             stage="word_conclusion_draft",
             model_profile=model_profile,
             producer=produce_draft,
         )
+    _audit_agent_memory_use_from_store(memory_store, message, task_id=task_id)
     if auto_accept:
         return _auto_confirm_agent_report_conclusions(
             repo=repo,
@@ -2349,6 +2499,240 @@ def _agent_chat_evidence(
         and str(message.get("content") or "").strip()
     ]
     return evidence
+
+
+def _agent_memory_context(
+    request: Request,
+    task: TaskRecord,
+    *,
+    stage: str,
+    user_message: str = "",
+    evidence: dict | None = None,
+) -> dict | None:
+    return _agent_memory_context_from_store(
+        AgentMemoryStore(request.app.state.settings.db_path),
+        task,
+        stage=stage,
+        user_message=user_message,
+        evidence=evidence,
+    )
+
+
+def _capture_user_preference_memory(
+    request: Request,
+    task_id: str,
+    message: dict,
+) -> None:
+    candidate = extract_user_preference(
+        {
+            "content": message.get("content"),
+            "id": message.get("id"),
+        }
+    )
+    if candidate is None:
+        return
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        store.create(
+            replace(
+                candidate,
+                source_task_id=task_id,
+                source_message_id=str(message.get("id") or ""),
+            )
+        )
+    except Exception:
+        return
+
+
+def _set_agent_memory_status(request: Request, memory_id: str, status: str) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        entry = store.set_status(memory_id, status)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"memory": _memory_entry_payload(entry), "events": store.list_events(memory_id)}
+
+
+def _memory_entry_payload(entry) -> dict:
+    return {
+        "id": entry.id,
+        "memory_type": entry.memory_type,
+        "status": entry.status,
+        "summary": entry.summary,
+        "payload": entry.payload,
+        "source_task_id": entry.source_task_id,
+        "source_message_id": entry.source_message_id,
+        "confidence": entry.confidence,
+        "reason": entry.reason,
+        "created_at": entry.created_at,
+        "updated_at": entry.updated_at,
+        "deleted_at": entry.deleted_at,
+    }
+
+
+def _memory_api_filter_match(
+    item: dict,
+    *,
+    source_task_id: str | None,
+    model_name: str | None,
+    channel: str | None,
+    month: str | None,
+) -> bool:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    checks = (
+        (source_task_id, item.get("source_task_id")),
+        (model_name, payload.get("model_name")),
+        (channel, payload.get("channel")),
+        (month, payload.get("month")),
+    )
+    return all(
+        expected in (None, "") or str(actual or "") == str(expected)
+        for expected, actual in checks
+    )
+
+
+def _agent_memory_context_from_store(
+    store: AgentMemoryStore,
+    task: TaskRecord,
+    *,
+    stage: str,
+    user_message: str = "",
+    evidence: dict | None = None,
+) -> dict | None:
+    entries = store.list_entries(limit=200)
+    if not entries:
+        return None
+    query = _agent_memory_query(task, user_message=user_message, evidence=evidence)
+    results = retrieve_relevant_memories(entries, query, limit=6)
+    memories: list[dict] = []
+    for result in results:
+        memory_id = result.context_packet.get("id")
+        if not memory_id:
+            continue
+        try:
+            store.get_entry(str(memory_id), task_id=task.id, audit=True)
+        except KeyError:
+            continue
+        memories.append(result.context_packet)
+    if not memories:
+        return None
+    return {
+        "scope": "cross_task_agent_memory",
+        "stage": stage,
+        "memories": memories,
+    }
+
+
+def _agent_memory_query(
+    task: TaskRecord,
+    *,
+    user_message: str = "",
+    evidence: dict | None = None,
+) -> MemoryQuery:
+    validation_results = (evidence or {}).get("validation_results")
+    dimensions = _agent_memory_dimensions_from_validation_results(validation_results)
+    return MemoryQuery(
+        model_name=task.model_name or dimensions.get("model_name"),
+        scope=dimensions.get("scope"),
+        channel=dimensions.get("channel"),
+        month=dimensions.get("month"),
+        keywords=_agent_memory_keywords(task, user_message, dimensions),
+    )
+
+
+def _agent_memory_dimensions_from_validation_results(value) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    dimensions: dict[str, str] = {}
+    for key in ("model_name", "model_version", "scope", "channel", "month"):
+        item = value.get(key)
+        if item not in (None, ""):
+            dimensions[key] = str(item)
+    basic_info = value.get("basic_info")
+    if isinstance(basic_info, dict):
+        for source_key, target_key in (
+            ("model_name", "model_name"),
+            ("model_version", "model_version"),
+            ("model_scope", "scope"),
+            ("scope", "scope"),
+            ("channel", "channel"),
+            ("month", "month"),
+        ):
+            item = basic_info.get(source_key)
+            if target_key not in dimensions and item not in (None, ""):
+                dimensions[target_key] = str(item)
+    return dimensions
+
+
+def _agent_memory_keywords(
+    task: TaskRecord,
+    user_message: str,
+    dimensions: dict[str, str],
+) -> tuple[str, ...]:
+    values = [
+        task.model_name,
+        task.model_version,
+        task.algorithm,
+        dimensions.get("scope"),
+        dimensions.get("channel"),
+        dimensions.get("month"),
+    ]
+    compact_message = "".join(str(user_message or "").split())
+    for marker in (
+        "A卡",
+        "B卡",
+        "C卡",
+        "额度",
+        "利率",
+        "前筛",
+        "KS",
+        "AUC",
+        "PSI",
+        "bad_flag",
+        "RMC_SAMPLE_DF",
+    ):
+        if marker.lower() in compact_message.lower():
+            values.append(marker)
+    return tuple(
+        dict.fromkeys(str(value).strip() for value in values if str(value or "").strip())
+    )
+
+
+def _audit_agent_memory_use(request: Request, message: dict, *, task_id: str) -> None:
+    _audit_agent_memory_use_from_store(
+        AgentMemoryStore(request.app.state.settings.db_path),
+        message,
+        task_id=task_id,
+    )
+
+
+def _audit_agent_memory_use_from_store(
+    store: AgentMemoryStore,
+    message: dict,
+    *,
+    task_id: str,
+) -> None:
+    metadata = message.get("metadata") or {}
+    references = metadata.get("memory_references")
+    if not isinstance(references, list):
+        return
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        memory_id = reference.get("id")
+        if not memory_id:
+            continue
+        try:
+            store.record_use(
+                str(memory_id),
+                task_id=task_id,
+                message_id=message.get("id"),
+                use_reason=str(reference.get("use_reason") or "agent"),
+            )
+        except KeyError:
+            continue
 
 
 def _agent_evidence_from_settings(settings, task_id: str) -> dict:

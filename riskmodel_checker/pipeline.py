@@ -8,6 +8,13 @@ import tempfile
 
 import pandas as pd
 
+from riskmodel_checker.agent_memory.extractors import (
+    extract_field_convention,
+    extract_model_experience,
+    extract_task_experience,
+    extract_validation_pitfall,
+)
+from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.db import TaskRepository
 from riskmodel_checker.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
 from riskmodel_checker.files import scan_source_dir
@@ -155,20 +162,26 @@ def run_notebook_stage(
         _mark_cancelled(repo, task_id, exc.resume_status, str(exc))
         return
     except PipelineError as exc:
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(NOTEBOOK_STAGE_FAILURE_PREFIX, str(exc)),
+        message = _stage_failure_message(NOTEBOOK_STAGE_FAILURE_PREFIX, str(exc))
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind=_memory_failure_kind(str(exc), default="notebook"),
+            message=message,
         )
         raise
     except Exception as exc:
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(
-                NOTEBOOK_STAGE_FAILURE_PREFIX,
-                f"{exc.__class__.__name__}: {exc}",
-            ),
+        message = _stage_failure_message(
+            NOTEBOOK_STAGE_FAILURE_PREFIX,
+            f"{exc.__class__.__name__}: {exc}",
+        )
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind=_memory_failure_kind(str(exc), default="notebook"),
+            message=message,
         )
         raise
 
@@ -247,24 +260,35 @@ def run_metrics_stage(
             message="metrics and excel generated",
             expected=TaskStatus.COMPUTING_METRICS,
         )
+        _capture_agent_memory_for_metrics_success(
+            repo=repo,
+            task_id=task_id,
+            outputs_dir=outputs_dir,
+        )
     except PipelineCancelled as exc:
         _mark_cancelled(repo, task_id, exc.resume_status, str(exc))
         return
     except PipelineError as exc:
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(METRICS_STAGE_FAILURE_PREFIX, str(exc)),
+        message = _stage_failure_message(METRICS_STAGE_FAILURE_PREFIX, str(exc))
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind=_memory_failure_kind(str(exc), default="execution"),
+            message=message,
         )
         raise
     except Exception as exc:
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(
-                METRICS_STAGE_FAILURE_PREFIX,
-                f"{exc.__class__.__name__}: {exc}",
-            ),
+        message = _stage_failure_message(
+            METRICS_STAGE_FAILURE_PREFIX,
+            f"{exc.__class__.__name__}: {exc}",
+        )
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind=_memory_failure_kind(str(exc), default="execution"),
+            message=message,
         )
         raise
 
@@ -338,21 +362,27 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
         return
     except PipelineError as exc:
         _unlink_if_exists(temp_report_path)
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(REPORT_STAGE_FAILURE_PREFIX, str(exc)),
+        message = _stage_failure_message(REPORT_STAGE_FAILURE_PREFIX, str(exc))
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind="report",
+            message=message,
         )
         raise
     except Exception as exc:
         _unlink_if_exists(temp_report_path)
-        _mark_failed(
-            repo,
-            task_id,
-            _stage_failure_message(
-                REPORT_STAGE_FAILURE_PREFIX,
-                f"{exc.__class__.__name__}: {exc}",
-            ),
+        message = _stage_failure_message(
+            REPORT_STAGE_FAILURE_PREFIX,
+            f"{exc.__class__.__name__}: {exc}",
+        )
+        _mark_failed(repo, task_id, message)
+        _capture_agent_memory_for_failure(
+            repo=repo,
+            task_id=task_id,
+            failure_kind="report",
+            message=message,
         )
         raise
     finally:
@@ -1442,6 +1472,153 @@ def _load_validation_results(outputs_dir: Path):
     if not isinstance(payload, dict):
         raise PipelineError("metrics output invalid: validation_results.json")
     return validation_results_from_dict(payload)
+
+
+def _capture_agent_memory_for_metrics_success(
+    *,
+    repo: TaskRepository,
+    task_id: str,
+    outputs_dir: Path,
+) -> None:
+    try:
+        task = repo.get_task(task_id)
+        payload = _read_validation_results_payload(outputs_dir)
+        store = AgentMemoryStore(repo.db_path)
+        for candidate in (
+            extract_model_experience(
+                _memory_model_experience_payload(task=task, results=payload)
+            ),
+            extract_field_convention(_memory_field_convention_payload(task)),
+        ):
+            if candidate is not None:
+                store.create(candidate, task_id=task_id)
+    except Exception:
+        return
+
+
+def _capture_agent_memory_for_failure(
+    *,
+    repo: TaskRepository,
+    task_id: str,
+    failure_kind: str,
+    message: str,
+) -> None:
+    try:
+        store = AgentMemoryStore(repo.db_path)
+        payload = {
+            "task_id": task_id,
+            "status": "failed",
+            "summary": message,
+            "failures": [{"kind": failure_kind, "message": message}],
+        }
+        for candidate in [
+            *extract_validation_pitfall(payload),
+            extract_task_experience(payload),
+        ]:
+            if candidate is not None:
+                store.create(candidate, task_id=task_id)
+    except Exception:
+        return
+
+
+def _read_validation_results_payload(outputs_dir: Path) -> dict:
+    path = outputs_dir / "validation_results.json"
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _memory_model_experience_payload(
+    *,
+    task: TaskRecord,
+    results: dict,
+) -> dict:
+    metrics_row = _memory_preferred_overall_row(results)
+    return {
+        "task_id": task.id,
+        "source_task_id": task.id,
+        "model_name": results.get("model_name") or task.model_name,
+        "model_version": results.get("model_version") or task.model_version,
+        "scope": results.get("scope") or f"{task.model_name}验证任务",
+        "channel": results.get("channel") or "未标注",
+        "month": results.get("month") or _memory_latest_month(results) or "未标注",
+        "metrics": {
+            "ks": metrics_row.get("ks"),
+            "auc": metrics_row.get("auc"),
+            "psi": metrics_row.get("psi_vs_train") or metrics_row.get("psi"),
+        },
+        "important_feature_sources": _memory_important_feature_sources(results),
+    }
+
+
+def _memory_field_convention_payload(task: TaskRecord) -> dict:
+    return {
+        "task_id": task.id,
+        "target_col": task.target_col,
+        "score_col": task.score_col,
+        "split_col": task.split_col,
+        "time_col": task.time_col,
+    }
+
+
+def _memory_preferred_overall_row(results: dict) -> dict:
+    overall = ((results.get("effectiveness") or {}).get("overall") or [])
+    rows = [row for row in overall if isinstance(row, dict)]
+    for split_name in ("oot", "test", "train"):
+        for row in rows:
+            if str(row.get("split") or "").strip().lower() == split_name:
+                return row
+    return rows[0] if rows else {}
+
+
+def _memory_latest_month(results: dict) -> str:
+    monthly_sources = (
+        (results.get("effectiveness") or {}).get("monthly_ks") or [],
+        (results.get("basic_info") or {}).get("monthly_distribution") or [],
+    )
+    months: list[str] = []
+    for rows in monthly_sources:
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("month") not in (None, ""):
+                months.append(str(row["month"]))
+    return sorted(months)[-1] if months else ""
+
+
+def _memory_important_feature_sources(results: dict) -> list[str]:
+    feature_importance = (results.get("basic_info") or {}).get("feature_importance") or []
+    sources: list[str] = []
+    for row in feature_importance:
+        if not isinstance(row, dict):
+            continue
+        category = str(row.get("category") or row.get("类别") or "").strip()
+        if category:
+            sources.append(category)
+    return list(dict.fromkeys(sources)) or ["未标注"]
+
+
+def _memory_failure_kind(message: str, *, default: str) -> str:
+    text = str(message or "").lower()
+    if "pmml" in text:
+        return "pmml"
+    if (
+        "field" in text
+        or "column" in text
+        or "字段" in text
+        or "split_col" in text
+        or "target_col" in text
+        or "score_col" in text
+        or "time_col" in text
+    ):
+        return "field"
+    if "report" in text or "报告" in text or "word" in text:
+        return "report"
+    if "notebook" in text or "kernel" in text or "rmc_" in text:
+        return "notebook"
+    return default
 
 
 def _notebook_step_v3(

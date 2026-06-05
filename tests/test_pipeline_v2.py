@@ -9,6 +9,7 @@ import nbformat
 import pandas as pd
 from docx import Document
 
+from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.db import TaskRepository, init_db
 from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskStatus
 from riskmodel_checker.notebook_contract import RuntimeContract
@@ -658,7 +659,132 @@ def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(tmp_path: 
     assert final.status == TaskStatus.FAILED
     assert final.status_message.startswith("模型效果&稳定性验证失败：")
     assert "split_col='new_flag'" in final.status_message
+    store = AgentMemoryStore(db_path)
+    pitfalls = store.list_entries(memory_type="validation_pitfall")
+    assert len(pitfalls) == 1
+    assert pitfalls[0].payload["failure_kind"] == "field"
+    task_memories = store.list_entries(memory_type="task_experience")
+    assert len(task_memories) == 1
+    assert task_memories[0].payload["status"] == "failed"
     close_live_notebook_session(task.id)
+
+
+def test_metrics_stage_success_captures_model_experience_memory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "riskmodel_checker.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    sample_path = project / "sample.csv"
+    pmml_path = project / "model.pmml"
+    dictionary_path = project / "dictionary.csv"
+    sample_path.write_text("y,score,split,apply_month\n0,0.1,train,202601\n", encoding="utf-8")
+    pmml_path.write_text("<PMML/>", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,征信\n", encoding="utf-8")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(project),
+            sample_path=str(sample_path),
+            pmml_path=str(pmml_path),
+            dictionary_path=str(dictionary_path),
+            algorithm="lgb",
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    execution_dir = workspace / "tasks" / task.id / "execution"
+    outputs_dir = workspace / "tasks" / task.id / "outputs"
+    execution_dir.mkdir(parents=True)
+    outputs_dir.mkdir(parents=True)
+    code_scores_path = execution_dir / "code_model_scores.csv"
+    code_scores_path.write_text("row_index,code_model_score\n0,0.1\n", encoding="utf-8")
+    (execution_dir / "runtime_contract.json").write_text(
+        json.dumps(
+            {
+                "target_col": "y",
+                "split_col": "split",
+                "time_col": "apply_month",
+                "pmml_output_field": "probability_1",
+                "score_decimal_places": 6,
+                "code_model_scores_path": str(code_scores_path),
+                "feature_importance_path": None,
+                "model_params_path": None,
+                "algorithm": "lgb",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_write_metrics_results_in_session(*, outputs_dir, task, **_kwargs):
+        (outputs_dir / "validation_results.json").write_text(
+            json.dumps(
+                {
+                    "model_name": task.model_name,
+                    "model_version": task.model_version,
+                    "scope": "贷前A卡",
+                    "channel": "自营",
+                    "month": "202601",
+                    "effectiveness": {
+                        "overall": [
+                            {
+                                "split": "oot",
+                                "ks": 0.30,
+                                "auc": 0.72,
+                                "psi_vs_train": 0.08,
+                            }
+                        ],
+                        "monthly_ks": [{"month": "202601", "ks": 0.30}],
+                    },
+                    "basic_info": {
+                        "feature_importance": [
+                            {"rank": 1, "feature": "x1", "category": "征信"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (outputs_dir / "validation_results.pkl").write_bytes(b"pickle")
+        (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
+
+    monkeypatch.setattr(
+        "riskmodel_checker.pipeline._write_metrics_results_in_session",
+        fake_write_metrics_results_in_session,
+    )
+    register_live_notebook_session(
+        task.id,
+        SimpleNamespace(closed=False, close=lambda: None),
+    )
+
+    run_metrics_stage(
+        task_id=task.id,
+        settings=PipelineSettings(
+            workspace=workspace,
+            db_path=db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        stage_claimed=True,
+    )
+
+    memories = AgentMemoryStore(db_path).list_entries(memory_type="model_experience")
+    assert len(memories) == 1
+    assert memories[0].payload["ks"] == 0.30
+    assert memories[0].payload["auc"] == 0.72
+    assert memories[0].payload["psi"] == 0.08
+    assert memories[0].payload["month"] == "202601"
+    assert memories[0].payload["channel"] == "自营"
+    assert memories[0].payload["scope"] == "贷前A卡"
+    assert memories[0].payload["important_feature_sources"] == ["征信"]
 
 
 def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):

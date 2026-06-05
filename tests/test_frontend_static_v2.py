@@ -844,13 +844,14 @@ def test_create_dialog_sections_are_unframed():
     assert "padding: 0" in section_rule
 
 
-def test_create_dialog_uses_taller_desktop_height_without_stretching_environment_dialog():
+def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     styles_css = _read_static("styles.css")
 
     create_dialog_start = styles_css.index(".task-dialog:not(.environment-dialog) {")
     create_dialog_end = styles_css.index("}", create_dialog_start)
     create_dialog_rule = styles_css[create_dialog_start:create_dialog_end]
-    assert "height: min(785px, calc(100dvh - 32px))" in create_dialog_rule
+    assert "max-height: calc(100dvh - 32px)" in create_dialog_rule
+    assert "\n  height:" not in create_dialog_rule
     assert "overflow: hidden" in create_dialog_rule
 
     head_start = styles_css.index(".dialog-head {")
@@ -862,17 +863,23 @@ def test_create_dialog_uses_taller_desktop_height_without_stretching_environment
     panel_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-dialog-panel {")
     panel_end = styles_css.index("}", panel_start)
     panel_rule = styles_css[panel_start:panel_end]
-    assert "height: 100%" in panel_rule
+    assert "max-height: calc(100dvh - 32px)" in panel_rule
+    assert "height: 100%" not in panel_rule
+    assert "min-height: 0" in panel_rule
     assert "display: flex" in panel_rule
     assert "flex-direction: column" in panel_rule
 
     form_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-form {")
     form_end = styles_css.index("}", form_start)
     form_rule = styles_css[form_start:form_end]
-    assert "flex: 1 1 auto" in form_rule
+    assert "flex: 0 1 auto" in form_rule
+    assert "min-height: 0" in form_rule
     assert "max-height: none" in form_rule
-    assert "overflow: hidden" in form_rule
-    assert "grid-template-rows:" in form_rule
+    assert "overflow-x: hidden" in form_rule
+    assert "overflow-y: auto" in form_rule
+    assert "overscroll-behavior: contain" in form_rule
+    assert "grid-template-rows: auto auto auto auto minmax(0, auto)" in form_rule
+    assert "minmax(19px, auto)" not in form_rule
 
     environment_start = styles_css.index(".environment-dialog {")
     environment_end = styles_css.index("}", environment_start)
@@ -1074,7 +1081,9 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
-    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
     assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
     assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
@@ -1619,7 +1628,9 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "#182a3f" not in styles_css
     assert "#345b8a" not in styles_css
     assert "#172032" not in styles_css
-    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
     assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
     assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
@@ -3575,7 +3586,9 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
 
     assert 'id="resultScrollContent"' in index_html
-    assert "static/styles.css?v=20260603-sidebar-icon-controls" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
+    assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
     assert "static/styles.css?v=20260603-validator-icon-16" not in index_html
     assert "static/styles.css?v=20260603-settings-no-focus-frame" not in index_html
@@ -4021,6 +4034,114 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "restoreResultScrollDefaultOrder" in app_js
     assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
     assert 'if (message.stage === "chat" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
+
+
+def test_agent_memory_has_no_permanent_task_top_block():
+    """V1.1 memory may appear in the agent conversation and management UI,
+    but must not become a fixed gray task-level panel above the workflow.
+    """
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    result_area = index_html[index_html.index('id="resultWorkspace"') : index_html.index('id="agentComposer"')]
+
+    forbidden_names = [
+        "memoryPanel",
+        "memorySummary",
+        "memoryBlock",
+        "agentMemoryPanel",
+        "agentMemorySummary",
+        "agentMemoryBlock",
+    ]
+    for name in forbidden_names:
+        assert f'id="{name}"' not in result_area
+        assert f'class="{name}"' not in result_area
+        assert f"#{name}" not in styles_css
+        assert f".{name}" not in styles_css
+        assert f'$("${name}")' not in app_js
+
+    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="agentMemoryList"' in index_html
+
+
+def test_agent_message_renderer_outputs_inline_memory_references():
+    app_js = _read_static("app.js")
+    assert "function agentMemoryReferencesHtml" in app_js
+    assert "agentMemoryReferencesHtml(message?.metadata?.memory_references)" in app_js
+    assert "memory_references" in _slice_function(app_js, "function agentStructuralSignature")
+
+    references_start = app_js.index("function agentMemoryReferencesHtml")
+    references_end = app_js.index("function agentMessageHtml", references_start)
+    script = "\n".join(
+        [
+            "function escapeHtml(value) {",
+            "  return String(value || '').replace(/[&<>\"']/g, (char) => ({",
+            "    '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;',",
+            "  }[char]));",
+            "}",
+            "function formatMemoryConfidence(value) { return `${Math.round(Number(value) * 100)}%`; }",
+            app_js[references_start:references_end],
+            "const html = agentMemoryReferencesHtml([{",
+            "  id: 'mem-1',",
+            "  memory_type: 'field_profile',",
+            "  source_task_id: 'task-7',",
+            "  confidence: 0.86,",
+            "  use_reason: '沿用坏样本字段口径',",
+            "}]);",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    html = result.stdout
+    assert "<details" in html
+    assert "agent-memory-references" in html
+    assert "mem-1" in html
+    assert "field_profile" in html
+    assert "task-7" in html
+    assert "86%" in html
+    assert "沿用坏样本字段口径" in html
+
+
+def test_agent_memory_management_view_wires_actions_and_api_paths():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="openAgentMemoryButton"' in index_html
+    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="agentMemoryList"' in index_html
+    status_filter_start = index_html.index('id="agentMemoryStatusFilter"')
+    status_filter_end = index_html.index("</select>", status_filter_start)
+    status_filter = index_html[status_filter_start:status_filter_end]
+    assert '<option value="">全部</option>' not in status_filter
+    assert '<option value="active">启用</option>' in status_filter
+    assert '<option value="deleted">已删除</option>' in index_html
+    assert '<option value="rejected">已拒绝</option>' in index_html
+    assert 'data-agent-memory-action="inspect"' in app_js
+    assert 'data-agent-memory-action="disable"' in app_js
+    assert 'data-agent-memory-action="enable"' in app_js
+    assert 'data-agent-memory-action="delete"' in app_js
+
+    assert 'api("api/agent-memory' in app_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`)' in app_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in app_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in app_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in app_js
+    assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
+    assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
+    assert ".agent-memory-dialog" in styles_css
+    assert ".agent-memory-references" in styles_css
+
+
+def test_agent_memory_delete_keeps_audit_detail_visible():
+    app_js = _read_static("app.js")
+    delete_start = app_js.index("async function deleteAgentMemory")
+    delete_end = app_js.index("async function loadAgentMessageMemoryReferences", delete_start)
+    delete_body = app_js[delete_start:delete_end]
+
+    assert "renderAgentMemoryDetail(payload?.memory || null, payload?.events || [])" in delete_body
+    assert "await loadAgentMemoryItems()" not in delete_body
+    assert "renderAgentMemoryItems()" in delete_body
 
 
 def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs():

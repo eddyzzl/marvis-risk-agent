@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MARVIS-全能风控智能体</title>
     <link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png" />
-    <link rel="stylesheet" href="static/styles.css?v=20260603-sidebar-icon-controls" />
+    <link rel="stylesheet" href="static/styles.css?v=20260605-create-dialog-button-gap" />
   </head>
   <body data-theme="light">
     <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
@@ -224,6 +224,54 @@
       </div>
     </dialog>
 
+    <dialog id="agentMemoryDialog" class="task-dialog environment-dialog agent-memory-dialog" aria-labelledby="agentMemoryTitle">
+      <div class="task-dialog-panel">
+        <header class="dialog-head">
+          <h2 id="agentMemoryTitle">Agent 记忆</h2>
+          <button id="closeAgentMemoryButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form agent-memory-dialog-body">
+          <section class="task-form-section agent-memory-toolbar">
+            <label>
+              <span>类型</span>
+              <select id="agentMemoryTypeFilter">
+                <option value="">全部</option>
+                <option value="user_preference">用户偏好</option>
+                <option value="field_convention">字段口径</option>
+                <option value="validation_pitfall">验证坑点</option>
+                <option value="task_experience">任务经验</option>
+                <option value="model_experience">模型经验</option>
+                <option value="skill_experience_reserved">Skill 经验</option>
+              </select>
+            </label>
+            <label>
+              <span>状态</span>
+              <select id="agentMemoryStatusFilter">
+                <option value="active">启用</option>
+                <option value="disabled">停用</option>
+                <option value="deleted">已删除</option>
+                <option value="rejected">已拒绝</option>
+              </select>
+            </label>
+            <label>
+              <span>来源任务</span>
+              <input id="agentMemorySourceTaskFilter" placeholder="task_id" autocomplete="off" />
+            </label>
+            <label>
+              <span>模型</span>
+              <input id="agentMemoryModelFilter" placeholder="model_name" autocomplete="off" />
+            </label>
+            <button id="refreshAgentMemoryButton" class="button secondary" type="button">刷新</button>
+          </section>
+          <div id="agentMemoryStatus" class="status" role="status" aria-live="polite"></div>
+          <div id="agentMemoryList" class="agent-memory-list" aria-live="polite"></div>
+          <div id="agentMemoryDetail" class="agent-memory-detail"></div>
+        </div>
+      </div>
+    </dialog>
+
     <div id="appShell" class="app-shell">
       <aside id="taskSidebar" class="task-sidebar region" aria-label="任务导航">
         <header class="sidebar-head">
@@ -341,6 +389,12 @@
                 <span class="settings-row-title">大模型</span>
                 <button id="openLLMSettingsButton" class="settings-environment-button" type="button">
                   <span id="settingsLLMValue">未配置</span>
+                </button>
+              </div>
+              <div class="settings-row" data-settings-row="agent-memory">
+                <span class="settings-row-title">Agent 记忆</span>
+                <button id="openAgentMemoryButton" class="settings-environment-button" type="button">
+                  <span>管理与审计</span>
                 </button>
               </div>
             </div>
