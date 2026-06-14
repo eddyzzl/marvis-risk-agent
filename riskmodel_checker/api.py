@@ -1,8 +1,7 @@
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from datetime import datetime
 import json
-import math
+import logging
 import os
 from pathlib import Path
 import re
@@ -11,7 +10,6 @@ import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
 
 from riskmodel_checker.agent.orchestrator import (
     AgentValidationCancelled,
@@ -41,20 +39,35 @@ from riskmodel_checker.agent_memory.extractors import extract_user_preference
 from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.branding import load_branding
 from riskmodel_checker.db import TaskRepository
-from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskRecord, TaskStatus
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_USER_CANCELLED,
+    FileArtifact,
+    FileRole,
+    TaskCreate,
+    TaskRecord,
+    TaskStatus,
+)
 from riskmodel_checker.execution_environment import (
-    ExecutionEnvironmentSettings,
-    detect_execution_environment_options,
     load_execution_environment,
-    save_execution_environment,
-    validate_execution_environment,
 )
 from riskmodel_checker.files import scan_source_dir
 from riskmodel_checker.llm_settings import (
     LLMSettingsError,
-    load_llm_settings,
     resolve_llm_model,
-    save_llm_settings,
+)
+from riskmodel_checker.api_schemas import (
+    AgentMessageRequest,
+    AgentModelRequest,
+    AgentReportDraftConfirmRequest,
+    CreateTaskRequest,
+    ReportFieldsUpdateRequest,
+    ValidateRequest,
+)
+from riskmodel_checker.api_settings import router as settings_router
+from riskmodel_checker.api_task_payloads import (
+    normalized_status_reason as _normalized_status_reason,
+    task_payload as _task_payload,
+    task_report_download_filename as _task_report_download_filename,
 )
 from riskmodel_checker.notebook_contract import (
     NotebookContractError,
@@ -70,6 +83,7 @@ from riskmodel_checker.model_algorithms import normalize_algorithm
 from riskmodel_checker.pipeline import (
     NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
+    SCAN_STAGE_FAILURE_PREFIX,
     PipelineSettings,
     _clear_generated_artifacts,
     _metrics_cancel_marker_path,
@@ -81,74 +95,18 @@ from riskmodel_checker.pipeline import (
 from riskmodel_checker.metric_tables import metric_table_sections_from_payload
 from riskmodel_checker.report_fields import report_field_payload
 from riskmodel_checker.report_texts import computed_report_text_values_from_payload
-from riskmodel_checker.safe_paths import assert_within, safe_filename_component
+from riskmodel_checker.safe_paths import assert_within
 from riskmodel_checker.state_machine import ConflictError, IllegalTransition
 from riskmodel_checker.output.word_preview import docx_to_html_preview
+from riskmodel_checker.validation.overfitting import overfitting_check_from_validation_results
 
 
 router = APIRouter(prefix="/api")
+router.include_router(settings_router)
+logger = logging.getLogger(__name__)
 MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ]{1,64}$", re.UNICODE)
-OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD = 0.10
-OVERFITTING_TRAIN_OOT_ABS_THRESHOLD = 0.05
 AGENT_STOP_ACK_CONTENT = "已停止当前动作，请问有什么指示？"
 AGENT_STOP_STATUS_MESSAGE = "已停止当前动作"
-
-
-class CreateTaskRequest(BaseModel):
-    model_name: str
-    model_version: str = ""
-    validator: str
-    source_dir: str
-    algorithm: str = ""
-    target_col: str = "y"
-    score_col: str = "pred"
-    split_col: str = "split"
-    time_col: str = "apply_month"
-    run_mode: str = "manual"
-    feature_columns: list[str] = Field(default_factory=list)
-    notebook_path: str | None = None
-    sample_path: str | None = None
-    pmml_path: str | None = None
-    dictionary_path: str | None = None
-    report_values: dict[str, str] = Field(default_factory=dict)
-
-
-class ValidateRequest(BaseModel):
-    feature_columns: list[str] | None = None
-
-
-class ExecutionEnvironmentRequest(BaseModel):
-    execution_mode: str = "jupyter_kernel"
-    kernel_name: str = "python3"
-    conda_env_name: str = ""
-    python_executable: str = ""
-
-
-class LLMSettingsRequest(BaseModel):
-    default_model_id: str = ""
-    models: list[dict] = Field(default_factory=list)
-
-
-class ReportFieldsUpdateRequest(BaseModel):
-    text_values: dict[str, str] = Field(default_factory=dict)
-
-
-class AgentMessageRequest(BaseModel):
-    content: str
-    model_id: str | None = None
-    effort: str | None = None
-    acceptance_mode: str | None = None
-
-
-class AgentModelRequest(BaseModel):
-    model_id: str | None = None
-    effort: str | None = None
-    acceptance_mode: str | None = None
-
-
-class AgentReportDraftConfirmRequest(BaseModel):
-    revision: int
-    text_values: dict[str, str] = Field(default_factory=dict)
 
 
 REQUIRED_SCAN_MATERIALS = (
@@ -164,7 +122,7 @@ RMC_CONTRACT_NAME_LABELS = {
     "RMC_TARGET_COL": "RMC_TARGET_COL（目标列）",
     "RMC_ALGORITHM": "RMC_ALGORITHM（模型算法）",
 }
-SCAN_FAILURE_PREFIX = "材料扫描失败："
+SCAN_FAILURE_PREFIX = SCAN_STAGE_FAILURE_PREFIX
 ACTIVE_JOB_DETAIL = "task already has an active stage"
 AGENT_ACCEPTANCE_NORMAL = "normal"
 AGENT_ACCEPTANCE_AUTO = "auto_accept"
@@ -309,10 +267,12 @@ def _stage_returned_cancelled_task(repo: TaskRepository, task_id: str | None) ->
     if not task_id:
         return False
     try:
-        message = repo.get_task(task_id).status_message
+        task = repo.get_task(task_id)
     except Exception:
         return False
-    return "cancelled" in message.lower() or "已停止" in message or "已取消" in message
+    return _normalized_status_reason(task.status_reason_code) == (
+        TASK_STATUS_REASON_USER_CANCELLED
+    )
 
 
 def _get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:
@@ -323,76 +283,6 @@ def _get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:
             status_code=404,
             detail=f"Task not found: {task_id}",
         ) from exc
-
-
-def _task_payload(repo: TaskRepository, task: TaskRecord, tasks_dir: Path | None = None) -> dict:
-    return {
-        **asdict(task),
-        "active_job_kind": repo.get_active_job_kind(task.id),
-        "failure_stage": _task_failure_stage(repo, task),
-        "report_available": _task_report_available(tasks_dir, task.id),
-    }
-
-
-def _task_report_available(tasks_dir: Path | None, task_id: str) -> bool:
-    if tasks_dir is None:
-        return False
-    return (tasks_dir / task_id / "outputs" / "validation_report.docx").exists()
-
-
-def _task_report_download_filename(task: TaskRecord, suffix: str) -> str:
-    model_name = safe_filename_component(task.model_name, fallback="模型")
-    return f"{model_name}_模型验证报告_{_task_created_date_for_filename(task)}{suffix}"
-
-
-def _task_created_date_for_filename(task: TaskRecord) -> str:
-    raw_created_at = str(task.created_at or "").strip()
-    try:
-        parsed = datetime.fromisoformat(raw_created_at.replace("Z", "+00:00"))
-    except ValueError:
-        digits = re.sub(r"\D+", "", raw_created_at)[:8]
-        return digits or "unknown_date"
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone()
-    return parsed.strftime("%Y%m%d")
-
-
-def _task_failure_stage(repo: TaskRepository, task: TaskRecord) -> str | None:
-    if task.status != TaskStatus.FAILED:
-        return None
-    if _task_failed_during_scan(task):
-        return "scan"
-    stage = _failure_stage_from_job_kind(repo.get_latest_failed_job_kind(task.id))
-    if stage:
-        return stage
-    return _legacy_failure_stage_from_message(task.status_message)
-
-
-def _task_failed_during_scan(task: TaskRecord) -> bool:
-    return str(task.status_message or "").startswith("材料扫描失败：")
-
-
-def _failure_stage_from_job_kind(kind: str | None) -> str | None:
-    return {
-        "notebook": "notebook",
-        "metrics": "metrics",
-        "report": "report",
-    }.get(str(kind or ""))
-
-
-def _legacy_failure_stage_from_message(message: str) -> str | None:
-    text = str(message or "")
-    if re.search(
-        r"模型效果&稳定性验证失败|指标|metrics|notebook metrics failed|"
-        r"sample column check failed|data dictionary missing columns|"
-        r"live notebook kernel is not available",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        return "metrics"
-    if re.search(r"报告输出失败|报告|Word|report", text, flags=re.IGNORECASE):
-        return "report"
-    return "notebook"
 
 
 def _validate_model_identifier(field_name: str, value: str) -> None:
@@ -410,7 +300,10 @@ def _normalize_source_dir(source_dir: str, settings) -> Path:
         allowed = "、".join(str(root) for root in allowed_roots)
         raise HTTPException(
             status_code=422,
-            detail=f"source_dir must be under an allowed material root: {allowed}",
+            detail=(
+                f"source_dir must be under an allowed material root: {allowed}. "
+                "Set RMC_MATERIAL_ROOTS to allow another local material directory."
+            ),
         )
     return resolved
 
@@ -436,7 +329,7 @@ def _path_is_within(root: Path, candidate: Path) -> bool:
 
 
 @router.get("/branding")
-def get_branding(request: Request) -> dict[str, str]:
+def get_branding(request: Request) -> dict[str, object]:
     return load_branding(request.app.state.settings.workspace)
 
 
@@ -447,66 +340,6 @@ def list_tasks(request: Request) -> list[dict]:
         _task_payload(repo, task, request.app.state.settings.tasks_dir)
         for task in repo.list_tasks()
     ]
-
-
-@router.get("/settings/execution-environment")
-def get_execution_environment_settings(request: Request) -> dict:
-    settings = load_execution_environment(request.app.state.settings.workspace)
-    validation = validate_execution_environment(settings)
-    return {
-        "settings": asdict(settings),
-        "validation": asdict(validation),
-    }
-
-
-@router.get("/settings/execution-environment/options")
-def get_execution_environment_options(request: Request) -> dict:
-    settings = load_execution_environment(request.app.state.settings.workspace)
-    validation = validate_execution_environment(settings)
-    options = detect_execution_environment_options()
-    return {
-        "settings": asdict(settings),
-        "validation": asdict(validation),
-        "options": [asdict(option) for option in options],
-    }
-
-
-@router.put("/settings/execution-environment")
-def update_execution_environment_settings(
-    payload: ExecutionEnvironmentRequest,
-    request: Request,
-) -> dict:
-    settings = ExecutionEnvironmentSettings(
-        execution_mode=payload.execution_mode,
-        kernel_name=payload.kernel_name,
-        conda_env_name=payload.conda_env_name,
-        python_executable=payload.python_executable,
-    )
-    saved = save_execution_environment(request.app.state.settings.workspace, settings)
-    validation = validate_execution_environment(saved)
-    return {
-        "settings": asdict(saved),
-        "validation": asdict(validation),
-    }
-
-
-@router.get("/settings/llm")
-def get_llm_settings(request: Request) -> dict:
-    try:
-        return load_llm_settings(request.app.state.settings.workspace)
-    except LLMSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.put("/settings/llm")
-def update_llm_settings(payload: LLMSettingsRequest, request: Request) -> dict:
-    try:
-        return save_llm_settings(
-            request.app.state.settings.workspace,
-            _model_payload(payload),
-        )
-    except LLMSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/tasks")
@@ -526,6 +359,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
     repo = _repo(request)
     task = repo.create_task(
         TaskCreate(
+            task_type=payload.task_type,
             model_name=payload.model_name,
             model_version=payload.model_version,
             validator=payload.validator,
@@ -565,6 +399,7 @@ def delete_task(task_id: str, request: Request) -> None:
 
     settings = request.app.state.settings
     task_dir = assert_within(settings.tasks_dir, settings.tasks_dir / task_id)
+    close_live_notebook_session(task_id)
     try:
         repo.delete_task(task_id)
     except KeyError as exc:
@@ -572,9 +407,11 @@ def delete_task(task_id: str, request: Request) -> None:
             status_code=404,
             detail=f"Task not found: {task_id}",
         ) from exc
-    close_live_notebook_session(task_id)
-    if task_dir.exists():
-        shutil.rmtree(task_dir)
+    try:
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
+    except OSError as exc:
+        logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
 
 
 @router.post("/tasks/{task_id}/scan")
@@ -592,7 +429,10 @@ def scan_task(task_id: str, request: Request) -> dict:
         )
     try:
         return _perform_scan_task(repo, task, request.app.state.settings)
-    except (FileNotFoundError, NotADirectoryError) as exc:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        # ValueError covers scan-limit breaches (max_files / max_depth) from
+        # scan_source_dir; all three are client-side "bad source dir" conditions
+        # and must return 422 rather than crashing into a 500.
         raise HTTPException(status_code=422, detail=f"source dir invalid: {exc}") from exc
 
 
@@ -1104,12 +944,12 @@ def update_report_fields(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    payload = _validation_results_payload_for_task(request, task)
+    results_payload = _validation_results_payload_for_task(request, task)
     return report_field_payload(
         task,
         values,
         revision,
-        metric_values=_metric_values_from_payload(payload),
+        metric_values=_metric_values_from_payload(results_payload),
     )
 
 
@@ -1464,12 +1304,6 @@ def validate_task(
         "status": "accepted",
         "message": "pipeline dispatched; poll GET /api/tasks/{task_id} for terminal status",
     }
-
-
-def _model_payload(payload: BaseModel) -> dict:
-    if hasattr(payload, "model_dump"):
-        return payload.model_dump()
-    return payload.dict()
 
 
 def _perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
@@ -2262,17 +2096,22 @@ def _handle_agent_stop_message(repo: TaskRepository, task: TaskRecord) -> dict:
     _request_agent_cancellation(task.id)
     request_notebook_cancellation(task.id)
     _mark_agent_cancelled(repo, task.id)
-    message = repo.add_agent_message(
-        task.id,
-        role="assistant",
-        stage="chat",
-        content=AGENT_STOP_ACK_CONTENT,
-        metadata={"intent": "stop", "cancel_requested": True},
-    )
+    # Guard against a duplicate ack when stop is sent twice in quick succession
+    # (the background job cancel path already dedupes via the same check).
+    if _agent_has_stop_ack_message(repo, task.id):
+        ack_content = AGENT_STOP_ACK_CONTENT
+    else:
+        ack_content = repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=AGENT_STOP_ACK_CONTENT,
+            metadata={"intent": "stop", "cancel_requested": True},
+        )["content"]
     return {
         "task_id": task.id,
         "status": "cancel_requested",
-        "message": message["content"],
+        "message": ack_content,
         "messages": repo.list_agent_messages(task.id),
     }
 
@@ -2343,15 +2182,14 @@ def _agent_has_cancellable_work(repo: TaskRepository, task_id: str) -> bool:
 
 
 def _agent_has_stop_ack_message(repo: TaskRepository, task_id: str) -> bool:
-    for message in reversed(repo.list_agent_messages(task_id)):
-        if message.get("role") not in {"assistant", "user"}:
-            continue
+    for message in repo.list_agent_messages(task_id):
         metadata = message.get("metadata") or {}
-        return (
+        if (
             message.get("role") == "assistant"
             and metadata.get("intent") == "stop"
             and metadata.get("cancel_requested") is True
-        )
+        ):
+            return True
     return False
 
 
@@ -2452,13 +2290,18 @@ def _mark_agent_cancelled(repo: TaskRepository, task_id: str) -> None:
         if resume_status is None:
             return
         if task.status == resume_status:
-            repo.update_status_message(task_id, AGENT_STOP_STATUS_MESSAGE)
+            repo.update_status_message(
+                task_id,
+                AGENT_STOP_STATUS_MESSAGE,
+                reason_code=TASK_STATUS_REASON_USER_CANCELLED,
+            )
             return
         repo.update_status(
             task_id,
             resume_status,
             AGENT_STOP_STATUS_MESSAGE,
             expected=task.status,
+            reason_code=TASK_STATUS_REASON_USER_CANCELLED,
         )
     except Exception:
         pass
@@ -2540,7 +2383,12 @@ def _capture_user_preference_memory(
                 source_message_id=str(message.get("id") or ""),
             )
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "failed to save user preference memory for task %s: %s",
+            task_id,
+            exc,
+        )
         return
 
 
@@ -2606,16 +2454,17 @@ def _agent_memory_context_from_store(
         return None
     query = _agent_memory_query(task, user_message=user_message, evidence=evidence)
     results = retrieve_relevant_memories(entries, query, limit=6)
-    memories: list[dict] = []
+    memory_packets: list[tuple[str, dict]] = []
     for result in results:
         memory_id = result.context_packet.get("id")
         if not memory_id:
             continue
-        try:
-            store.get_entry(str(memory_id), task_id=task.id, audit=True)
-        except KeyError:
-            continue
-        memories.append(result.context_packet)
+        memory_packets.append((str(memory_id), result.context_packet))
+    found_ids = store.record_retrievals(
+        [memory_id for memory_id, _ in memory_packets],
+        task_id=task.id,
+    )
+    memories = [packet for memory_id, packet in memory_packets if memory_id in found_ids]
     if not memories:
         return None
     return {
@@ -2752,74 +2601,8 @@ def _agent_validation_results_with_overfitting_check(validation_results):
         return validation_results
     return {
         **validation_results,
-        "overfitting_check": _agent_overfitting_check(validation_results),
+        "overfitting_check": overfitting_check_from_validation_results(validation_results),
     }
-
-
-def _agent_overfitting_check(validation_results: dict) -> dict:
-    overall = (
-        (validation_results.get("effectiveness") or {})
-        .get("overall")
-        or []
-    )
-    by_split: dict[str, float] = {}
-    for row in overall:
-        if not isinstance(row, dict):
-            continue
-        split = str(row.get("split") or "").strip().lower()
-        ks = _agent_optional_float(row.get("ks"))
-        if split and ks is not None:
-            by_split[split] = ks
-    train_ks = by_split.get("train")
-    test_ks = by_split.get("test")
-    oot_ks = by_split.get("oot")
-    train_test_relative_diff = (
-        None
-        if train_ks is None or test_ks is None or abs(train_ks) <= 1e-12
-        else abs(train_ks - test_ks) / abs(train_ks)
-    )
-    train_oot_abs_diff = (
-        None
-        if train_ks is None or oot_ks is None
-        else abs(train_ks - oot_ks)
-    )
-    train_test_status = _agent_threshold_status(
-        train_test_relative_diff,
-        OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD,
-    )
-    train_oot_status = _agent_threshold_status(
-        train_oot_abs_diff,
-        OVERFITTING_TRAIN_OOT_ABS_THRESHOLD,
-    )
-    statuses = {train_test_status, train_oot_status}
-    status = "fail" if "fail" in statuses else "not_available" if "not_available" in statuses else "pass"
-    return {
-        "metric": "ks",
-        "status": status,
-        "train_ks": train_ks,
-        "test_ks": test_ks,
-        "oot_ks": oot_ks,
-        "train_test_relative_diff": train_test_relative_diff,
-        "train_test_threshold": OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD,
-        "train_test_status": train_test_status,
-        "train_oot_abs_diff": train_oot_abs_diff,
-        "train_oot_threshold": OVERFITTING_TRAIN_OOT_ABS_THRESHOLD,
-        "train_oot_status": train_oot_status,
-    }
-
-
-def _agent_threshold_status(value: float | None, threshold: float) -> str:
-    if value is None:
-        return "not_available"
-    return "fail" if value > threshold else "pass"
-
-
-def _agent_optional_float(value) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
 
 
 def _require_agent_task(task: TaskRecord) -> None:
@@ -2851,7 +2634,12 @@ def _resolve_agent_model(
         profile = resolve_llm_model(request.app.state.settings.workspace, model_id)
     except LLMSettingsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    profile["reasoning_effort"] = _normalize_effort(effort)
+    # An explicit per-request effort wins; otherwise fall back to the value
+    # persisted in the model profile (so the UI-configured effort is honored).
+    if effort is not None:
+        profile["reasoning_effort"] = _normalize_effort(effort)
+    else:
+        profile["reasoning_effort"] = _normalize_effort(profile.get("reasoning_effort"))
     return profile
 
 
@@ -3003,12 +2791,6 @@ def _pipeline_settings(
     )
 
 
-def _write_metrics_cancel_marker(task_dir: Path) -> None:
-    marker_path = _metrics_cancel_marker_path(task_dir)
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_text("cancelled\n", encoding="utf-8")
-
-
 def _artifact_payload(artifact) -> dict:
     return {
         "role": artifact.role.value,
@@ -3150,8 +2932,8 @@ def _resolve_scan_material(
         except FileNotFoundError:
             return None, f"配置的 {label} 路径不存在：{candidate}"
         try:
-            resolved.relative_to(source_dir)
-        except ValueError:
+            resolved = assert_within(source_dir, resolved)
+        except PermissionError:
             return None, f"配置的 {label} 必须位于材料目录内：{resolved}"
         return resolved, None
 

@@ -7,7 +7,7 @@ from PIL import Image
 from riskmodel_checker.output import image_render
 from riskmodel_checker.output.image_render import get_matplotlib_font, render_all_images
 from riskmodel_checker.output.styles import CJK_FONT_CANDIDATES
-from riskmodel_checker.validation.results import FeatureImportanceRow
+from riskmodel_checker.validation.results import FeatureImportanceRow, RocKsCurve
 from tests.output.test_excel import _make_results
 
 
@@ -123,22 +123,23 @@ def test_word_image_tables_use_reference_model_analysis_headers(monkeypatch, tmp
     ]
     assert captured["overall_model_effect.png"]["header"] == [
         "数据集", "时间范围", "样本量", "逾期率", "坏样本量",
-        "KS", "AUC", "5%头部lift", "5%尾部lift", "PSI",
+        "KS(%)", "AUC(%)", "5%头部lift", "5%尾部lift", "PSI",
     ]
     assert captured["loan_month_effect.png"]["header"] == [
-        "月份", "样本量", "逾期率", "坏样本量", "KS", "AUC",
-        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)", "PSI(环比)",
+        "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
+        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
+        "PSI(较上一有样本月)", "PSI参考月",
     ]
     assert captured["ks_discrimination_table.png"]["header"] == [
         "分箱", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
     assert captured["ranking_table_train.png"]["header"] == [
-        "train", "样本总数", "累计占比", "逾期数量", "逾期率",
+        "train(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
-    assert captured["ranking_table_test.png"]["header"][0] == "test"
-    assert captured["ranking_table_oot.png"]["header"][0] == "oot"
+    assert captured["ranking_table_test.png"]["header"][0] == "test(独立分箱)"
+    assert captured["ranking_table_oot.png"]["header"][0] == "oot(独立分箱)"
     assert captured["psi_stability_table.png"]["header"] == [
         "分箱", "train+test样本数", "train+test占比", "oot样本数", "oot占比", "PSI",
     ]
@@ -253,3 +254,89 @@ def test_feature_importance_table_caps_feature_column_width(monkeypatch, tmp_pat
     assert captured["top20_feature_ranking.png"]["max_column_widths"][1] <= 4.0
     assert captured["top20_feature_ranking.png"]["header"] == ["排名", "特征", "类别", "重要性"]
     assert captured["top20_feature_ranking.png"]["rows"][0][2] == "征信"
+
+
+def test_fpr_at_ks_anchors_marker_on_fpr_axis_not_population():
+    # |ks_curve| peaks at index 2, where fpr=0.10. The ROC KS marker must use that
+    # FPR, NOT population_at_ks=0.55 — they live on different axes and diverge on
+    # imbalanced credit data, which is the misplacement bug this guards against.
+    curve = RocKsCurve(
+        split="train",
+        fpr=[0.0, 0.05, 0.10, 0.40, 1.0],
+        tpr=[0.0, 0.30, 0.70, 0.85, 1.0],
+        ks_curve=[0.0, 0.25, 0.60, 0.45, 0.0],
+        ks=0.60,
+        population_at_ks=0.55,
+    )
+
+    assert image_render._fpr_at_ks(curve) == 0.10
+
+
+def test_fpr_at_ks_handles_degenerate_curve():
+    curve = RocKsCurve(
+        split="train",
+        fpr=[0.0, 1.0],
+        tpr=[0.0, 1.0],
+        ks_curve=[0.0, 0.0],
+        ks=0.0,
+        population_at_ks=0.0,
+    )
+
+    assert image_render._fpr_at_ks(curve) == 0.0
+
+
+def test_roc_ks_graph_closes_figure_when_savefig_fails(monkeypatch, tmp_path: Path):
+    closed = []
+
+    def fail_savefig(self, *args, **kwargs):
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr(image_render.matplotlib.figure.Figure, "savefig", fail_savefig)
+    monkeypatch.setattr(image_render.plt, "close", lambda fig: closed.append(fig))
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        image_render.render_roc_ks_graph(
+            RocKsCurve(
+                split="train",
+                fpr=[0.0, 1.0],
+                tpr=[0.0, 1.0],
+                ks_curve=[0.0, 0.0],
+                ks=0.0,
+                population_at_ks=0.0,
+            ),
+            tmp_path / "roc.png",
+        )
+
+    assert closed
+
+
+def test_cjk_font_path_must_match_candidate_family_name():
+    assert image_render._font_path_matches_family(
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "Noto Sans CJK SC",
+    )
+    assert not image_render._font_path_matches_family(
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "Microsoft YaHei",
+    )
+
+
+def test_model_effect_rows_preserves_zero_bad_count():
+    """A split with a genuine zero bad_count must render 0, not an estimate.
+
+    Mirrors test_excel.test_effectiveness_sheet_preserves_zero_bad_count so the
+    PNG/Word report stays consistent with the Excel report (the `or round(...)`
+    falsy trap previously estimated a non-zero value when bad_count was 0).
+    """
+    results = _make_results()
+    overall = list(results.effectiveness.overall)
+    overall[0] = replace(overall[0], bad_count=0, bad_rate=0.004)
+    results = replace(
+        results,
+        effectiveness=replace(results.effectiveness, overall=overall),
+    )
+
+    rows = image_render._model_effect_rows(results)
+
+    # column layout: split, period, sample_count, bad_rate, bad_count, ks, auc, ...
+    assert rows[0][4] == 0

@@ -170,6 +170,7 @@ def test_stress_test_rejects_non_finite_baseline_scores():
 
     oot = pd.DataFrame({
         "x1": [0.1, 0.2, 0.8, 0.9],
+        "x2": [0.2, 0.3, 0.7, 0.8],
         "sample_score": [0.1, 0.2, 0.8, 0.9],
         "y": [0, 0, 1, 1],
         "split": ["oot"] * 4,
@@ -194,6 +195,7 @@ def test_stress_test_records_non_finite_category_scores_as_error():
 
     oot = pd.DataFrame({
         "x1": [0.1, 0.2, 0.8, 0.9],
+        "x2": [0.2, 0.3, 0.7, 0.8],
         "sample_score": [0.1, 0.2, 0.8, 0.9],
         "y": [0, 0, 1, 1],
         "split": ["oot"] * 4,
@@ -203,9 +205,32 @@ def test_stress_test_records_non_finite_category_scores_as_error():
     result = run_stress_test(
         oot_sample=oot,
         config=_config(),
-        feature_categories={"征信": ["x1"]},
+        feature_categories={"征信": ["x1"], "支付": ["x2"]},
         input_scorer=BadCategoryScorer(),
     )
 
-    assert result.per_category[0].error is not None
-    assert "non-finite" in result.per_category[0].error
+    by_category = {row.category: row for row in result.per_category}
+    assert by_category["征信"].error is not None
+    assert "non-finite" in by_category["征信"].error
+    assert by_category["支付"].error is None
+    assert result.status == "partial"
+
+
+def test_stress_test_marks_all_missing_categories_as_skipped():
+    oot = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9],
+        "sample_score": [0.1, 0.2, 0.8, 0.9],
+        "y": [0, 0, 1, 1],
+        "split": ["oot"] * 4,
+        "apply_month": ["202507"] * 4,
+    })
+
+    result = run_stress_test(
+        oot_sample=oot,
+        config=_config(),
+        feature_categories={"支付": ["x_missing"]},
+        input_scorer=_ProportionalScorer(),
+    )
+
+    assert result.status == "skipped"
+    assert result.per_category[0].status == "skipped"

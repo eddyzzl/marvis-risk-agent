@@ -339,6 +339,7 @@ MODEL_HYPERPARAMETERS = RMC_MODEL_PARAMS
 import pandas as pd
 
 RMC_TARGET_COL = "target"
+RMC_SAMPLE_DF = modeling_sample
 RMC_ALGORITHM = "lgb"
 RMC_SPLIT_COL = "sample_type"
 RMC_TIME_COL = "apply_month"

@@ -1,7 +1,11 @@
 import pytest
 
-from riskmodel_checker.db import TaskRepository, init_db
-from riskmodel_checker.domain import TaskCreate, TaskStatus
+from riskmodel_checker.db import TaskRepository, _ensure_column, connect, init_db
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_USER_CANCELLED,
+    TaskCreate,
+    TaskStatus,
+)
 from riskmodel_checker.state_machine import ConflictError, IllegalTransition
 
 
@@ -72,6 +76,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     assert loaded.report_values_revision == 0
     assert loaded.status == TaskStatus.CREATED
     assert loaded.status_message == "created"
+    assert loaded.status_reason_code == ""
 
     values, revision = repo.get_report_values(task.id)
     assert values == {"TEXT:report_title": "自定义标题"}
@@ -382,6 +387,34 @@ def test_update_task_status_through_v2_pipeline_states(tmp_path):
     loaded = repo.get_task(task.id)
     assert loaded.status == TaskStatus.SUCCEEDED
     assert loaded.status_message == "done"
+    assert loaded.status_reason_code == ""
+
+
+def test_update_status_and_message_can_persist_structured_reason_code(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create())
+
+    repo.update_status(
+        task.id,
+        TaskStatus.SCANNED,
+        "stopped",
+        expected=TaskStatus.CREATED,
+        reason_code=TASK_STATUS_REASON_USER_CANCELLED,
+    )
+    assert repo.get_task(task.id).status_reason_code == TASK_STATUS_REASON_USER_CANCELLED
+
+    repo.update_status_message(task.id, "still stopped")
+    assert repo.get_task(task.id).status_reason_code == TASK_STATUS_REASON_USER_CANCELLED
+
+    repo.update_status(
+        task.id,
+        TaskStatus.RUNNING,
+        "running",
+        expected=TaskStatus.SCANNED,
+    )
+    assert repo.get_task(task.id).status_reason_code == ""
 
 
 def test_update_status_rejects_illegal_transition(tmp_path):
@@ -420,3 +453,14 @@ def test_update_task_status_missing_raises_key_error(tmp_path):
             message="执行中",
             expected=TaskStatus.SCANNED,
         )
+
+
+def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        with pytest.raises(ValueError, match="unsupported migration table"):
+            _ensure_column(conn, "tasks;DROP", "safe_column", "TEXT")
+        with pytest.raises(ValueError, match="unsafe SQL identifier"):
+            _ensure_column(conn, "tasks", "bad-column", "TEXT")

@@ -1,7 +1,7 @@
 import pytest
 
 from riskmodel_checker.agent_memory.store import AgentMemoryStore
-from riskmodel_checker.db import init_db
+from riskmodel_checker.db import connect, init_db
 from riskmodel_checker.agent_memory.models import (
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -165,6 +165,51 @@ def test_policy_allows_compact_structured_model_experience():
     assert decision.reasons == []
 
 
+def test_policy_rejects_long_report_text_hidden_in_payload():
+    candidate = MemoryCandidate(
+        memory_type="task_experience",
+        summary="用户要求记录报告结论。",
+        payload={"body": "模型验证报告" + "本报告包含完整验证说明。" * 80},
+        source_task_id="task-report",
+        confidence="medium",
+    )
+
+    decision = classify_memory_candidate(candidate)
+
+    assert decision.allowed is False
+    assert "long report text" in decision.reasons
+
+
+def test_policy_rejects_payload_fields_outside_memory_type_allowlist():
+    candidate = MemoryCandidate(
+        memory_type="task_experience",
+        summary="完成模型验证，报告已生成。",
+        payload={"status": "completed", "raw_report_body": "敏感报告段落"},
+        source_task_id="task-report",
+        confidence="medium",
+    )
+
+    decision = classify_memory_candidate(candidate)
+
+    assert decision.allowed is False
+    assert "unsupported payload fields" in decision.reasons
+
+
+def test_policy_rejects_generically_oversized_memory_candidate():
+    candidate = MemoryCandidate(
+        memory_type="task_experience",
+        summary="x" * 12001,
+        payload={},
+        source_task_id="task-large",
+        confidence="medium",
+    )
+
+    decision = classify_memory_candidate(candidate)
+
+    assert decision.allowed is False
+    assert "memory text too long" in decision.reasons
+
+
 def test_store_creates_active_memory_and_audits_create_and_retrieve(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -196,6 +241,60 @@ def test_store_creates_active_memory_and_audits_create_and_retrieve(tmp_path):
     assert [event["event_type"] for event in events] == ["create", "retrieve"]
     assert events[0]["details"]["memory_type"] == "model_experience"
     assert events[1]["task_id"] == "task-next"
+
+
+def test_store_batch_records_retrieval_audit_events(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    first = store.create(
+        MemoryCandidate(
+            memory_type="task_experience",
+            summary="Notebook 环境缺少 xgboost 时需要先检查依赖清单。",
+            payload={"failure_type": "dependency", "package": "xgboost"},
+            source_task_id="task-old",
+            source_message_id="msg-old",
+            confidence="medium",
+            reason="run failed",
+        )
+    )
+    second = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="申请月份字段通常命名为 apply_month。",
+            payload={"field": "apply_month", "meaning": "申请月份"},
+            source_task_id="task-old",
+            source_message_id="msg-field",
+            confidence="high",
+            reason="user confirmed",
+        )
+    )
+
+    found = store.record_retrievals(
+        [first.id, "missing-memory", second.id, first.id],
+        task_id="task-next",
+    )
+
+    assert found == {first.id, second.id}
+    first_events = store.list_events(first.id)
+    second_events = store.list_events(second.id)
+    assert [event["event_type"] for event in first_events] == ["create", "retrieve"]
+    assert [event["event_type"] for event in second_events] == ["create", "retrieve"]
+    assert first_events[1]["task_id"] == "task-next"
+
+
+def test_memory_audit_schema_keeps_events_without_delete_set_null(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_memory_events'"
+        ).fetchone()
+
+    assert row is not None
+    assert "ON DELETE SET NULL" not in row["sql"]
+    assert "REFERENCES agent_memory_entries(id)" in row["sql"]
 
 
 def test_store_audits_use_disable_enable_and_delete_with_redaction(tmp_path):
@@ -278,6 +377,15 @@ def test_store_rejects_candidate_with_audited_redacted_tombstone(tmp_path):
 
     with pytest.raises(ValueError, match="rejected memory entries are terminal"):
         store.set_status(rejected.id, "active")
+    with pytest.raises(ValueError, match="rejected memory entries are terminal"):
+        store.record_use(rejected.id, task_id="task-new")
+    # delete() (and set_status(..., "deleted") which routes into it) must not be
+    # able to overwrite a rejected entry — the rejection audit record is terminal.
+    with pytest.raises(ValueError, match="rejected memory entries are terminal"):
+        store.delete(rejected.id, task_id="task-new")
+    with pytest.raises(ValueError, match="rejected memory entries are terminal"):
+        store.set_status(rejected.id, "deleted", task_id="task-new")
+    assert [item.id for item in store.list_entries(status="rejected")] == [rejected.id]
 
 
 def test_store_create_enforces_policy_and_never_saves_unsafe_active_memory(tmp_path):

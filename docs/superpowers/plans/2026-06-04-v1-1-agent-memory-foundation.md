@@ -6,7 +6,7 @@
 
 **Architecture:** Store typed local memories in SQLite with append-only audit events. Retrieve bounded task-aware memory context before Agent analysis/chat, attach used memory references to Agent message metadata, and surface memory through inline Agent statements plus a management/audit view. Keep validation metrics and report evidence independent from memory.
 
-**Tech Stack:** Python 3.13 development environment, FastAPI, SQLite, Pydantic-style request models, plain HTML/CSS/JS frontend, pytest, existing MARVIS task/Agent architecture.
+**Tech Stack:** Python 3.11+ runtime boundary, FastAPI, SQLite, Pydantic-style request models, plain HTML/CSS/JS frontend, pytest, existing MARVIS task/Agent architecture.
 
 ---
 

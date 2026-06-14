@@ -179,6 +179,13 @@ class NotebookExecutionSession:
         if callable(cleanup):
             try:
                 cleanup()
+                return
+            except Exception:
+                pass
+        kernel_manager = getattr(self.client, "km", None)
+        if kernel_manager is not None:
+            try:
+                kernel_manager.shutdown_kernel(now=True)
             except Exception:
                 pass
 

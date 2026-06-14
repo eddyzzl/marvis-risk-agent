@@ -1,6 +1,9 @@
 import json
+from http.client import RemoteDisconnected
 
-from riskmodel_checker.llm_client import OpenAICompatibleLLMClient
+import pytest
+
+from riskmodel_checker.llm_client import LLMClientError, OpenAICompatibleLLMClient
 
 
 class _StreamingResponse:
@@ -20,7 +23,31 @@ class _StreamingResponse:
         return iter(event.encode("utf-8") for event in events)
 
 
-def test_openai_compatible_client_uses_streaming_reasoning_and_thinking(monkeypatch):
+class _JsonResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([
+            b'{"choices":[{"message":{"content":"plain json"}}]}',
+        ])
+
+
+class _InterruptedStreamingResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        raise RemoteDisconnected("stream dropped")
+
+
+def test_openai_compatible_client_defaults_to_portable_stream_payload(monkeypatch):
     captured = {}
     chunks = []
 
@@ -54,16 +81,12 @@ def test_openai_compatible_client_uses_streaming_reasoning_and_thinking(monkeypa
     assert captured["authorization"] == "Bearer secret"
     assert captured["payload"]["model"] == "deepseek-v4-pro"
     assert captured["payload"]["stream"] is True
-    assert captured["payload"]["reasoning_effort"] == "high"
-    assert captured["payload"]["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in captured["payload"]
+    assert "thinking" not in captured["payload"]
     assert captured["payload"]["response_format"] == {"type": "json_object"}
 
 
 def test_client_rejects_non_http_base_url():
-    import pytest
-
-    from riskmodel_checker.llm_client import LLMClientError
-
     with pytest.raises(LLMClientError):
         OpenAICompatibleLLMClient(
             {
@@ -88,8 +111,69 @@ def test_client_honors_reasoning_effort_from_profile(monkeypatch):
             "api_base_url": "https://api.deepseek.com",
             "model_name": "deepseek-v4-pro",
             "api_key": "secret",
+            "enable_thinking": True,
             "reasoning_effort": "low",
         }
     ).complete(system_prompt="s", user_prompt="u")
 
     assert captured["payload"]["reasoning_effort"] == "low"
+    assert captured["payload"]["thinking"] == {"type": "enabled"}
+
+
+def test_client_sends_extra_request_fields_when_configured(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _StreamingResponse()
+
+    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "compatible-model",
+            "api_key": "secret",
+            "extra_request_fields": {"top_p": 0.8},
+        }
+    ).complete(system_prompt="s", user_prompt="u")
+
+    assert captured["payload"]["top_p"] == 0.8
+    assert "thinking" not in captured["payload"]
+
+
+def test_client_can_request_non_streaming_json_response(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponse()
+
+    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "compatible-model",
+            "api_key": "secret",
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert content == "plain json"
+    assert captured["payload"]["stream"] is False
+
+
+def test_client_wraps_stream_interruptions(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _InterruptedStreamingResponse()
+
+    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="LLM stream interrupted"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "compatible-model",
+                "api_key": "secret",
+            }
+        ).complete(system_prompt="s", user_prompt="u")

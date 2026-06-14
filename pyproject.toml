@@ -6,17 +6,17 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi",
-  "uvicorn",
-  "nbformat",
-  "nbclient",
-  "openpyxl",
-  "python-docx",
-  "pydantic",
-  "pandas",
-  "numpy",
-  "pypmml",
-  "matplotlib",
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "nbformat>=5,<6",
+  "nbclient>=0.7,<0.11",
+  "openpyxl>=3.1,<4",
+  "python-docx>=1.1,<2",
+  "pydantic>=2,<3",
+  "pandas>=2,<4",
+  "numpy>=1.26,<3",
+  "pypmml>=0.9,<1",
+  "matplotlib>=3.8,<4",
 ]
 
 [project.scripts]
@@ -26,9 +26,9 @@ marvis-risk-agent = "riskmodel_checker.__main__:main"
 
 [project.optional-dependencies]
 dev = [
-  "pytest",
-  "httpx",
-  "ruff",
+  "pytest>=8,<10",
+  "httpx>=0.27,<1",
+  "ruff>=0.8,<1",
 ]
 
 [tool.pytest.ini_options]
@@ -39,4 +39,4 @@ pythonpath = ["."]
 where = ["."]
 
 [tool.setuptools.package-data]
-riskmodel_checker = ["static/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*"]
+riskmodel_checker = ["static/*", "static/js/*", "static/css/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*"]

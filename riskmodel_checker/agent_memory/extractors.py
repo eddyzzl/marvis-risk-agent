@@ -11,6 +11,7 @@ from riskmodel_checker.agent_memory.policy import classify_memory_candidate
 
 
 PITFALL_KINDS = {"notebook", "pmml", "field", "execution", "report"}
+USER_PREFERENCE_MAX_CHARS = 200
 
 
 def extract_model_experience(result: dict[str, Any]) -> MemoryCandidate | None:
@@ -117,7 +118,7 @@ def extract_user_preference(message: dict[str, Any]) -> MemoryCandidate | None:
     if not text or _mentions_reserved_skill_runtime(text):
         return None
 
-    preference = _explicit_preference(text)
+    preference = _truncate_text(_explicit_preference(text), USER_PREFERENCE_MAX_CHARS)
     if not preference:
         return None
 
@@ -229,6 +230,12 @@ def _explicit_preference(text: str) -> str:
         if text.startswith(marker):
             return text[len(marker) :].strip()
     return ""
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
 
 
 def _mentions_reserved_skill_runtime(text: str) -> bool:

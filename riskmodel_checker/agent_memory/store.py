@@ -160,6 +160,40 @@ class AgentMemoryStore:
                 )
         return _row_to_entry(row)
 
+    def record_retrievals(
+        self,
+        entry_ids: list[str],
+        *,
+        task_id: str | None = None,
+        message_id: str | None = None,
+    ) -> set[str]:
+        ordered_ids = list(dict.fromkeys(str(entry_id) for entry_id in entry_ids if entry_id))
+        if not ordered_ids:
+            return set()
+        placeholders = ",".join("?" for _ in ordered_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id
+                  FROM agent_memory_entries
+                 WHERE status != 'deleted'
+                   AND id IN ({placeholders})
+                """,
+                ordered_ids,
+            ).fetchall()
+            found_ids = {str(row["id"]) for row in rows}
+            for entry_id in ordered_ids:
+                if entry_id in found_ids:
+                    self._append_event(
+                        conn,
+                        entry_id,
+                        "retrieve",
+                        task_id=task_id,
+                        message_id=message_id,
+                        details={},
+                    )
+        return found_ids
+
     def list_entries(
         self,
         *,
@@ -215,7 +249,9 @@ class AgentMemoryStore:
         use_reason: str = "",
     ) -> None:
         with connect(self.db_path) as conn:
-            self._select_entry(conn, entry_id, include_deleted=False)
+            entry = self._select_entry(conn, entry_id, include_deleted=False)
+            if entry["status"] == "rejected":
+                raise ValueError("rejected memory entries are terminal")
             self._append_event(
                 conn,
                 entry_id,
@@ -274,7 +310,12 @@ class AgentMemoryStore:
     ) -> MemoryEntry:
         now = _now()
         with connect(self.db_path) as conn:
-            self._select_entry(conn, entry_id, include_deleted=False)
+            current = self._select_entry(conn, entry_id, include_deleted=False)
+            if current["status"] == "rejected":
+                # rejected is a terminal audit state: a rejected candidate (and its
+                # rejection record) must not be overwritten by a delete, matching the
+                # terminal guard already enforced in set_status / record_use.
+                raise ValueError("rejected memory entries are terminal")
             conn.execute(
                 """
                 UPDATE agent_memory_entries
@@ -395,7 +436,7 @@ def ensure_agent_memory_schema(conn: sqlite3.Connection) -> None:
             message_id TEXT,
             details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
-            FOREIGN KEY(memory_id) REFERENCES agent_memory_entries(id) ON DELETE SET NULL
+            FOREIGN KEY(memory_id) REFERENCES agent_memory_entries(id)
         )
         """
     )

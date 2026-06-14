@@ -32,7 +32,6 @@ COMPUTED_REPORT_TEXT_KEYS = frozenset({
 })
 
 AGENT_CONFIRMED_REPORT_TEXT_KEYS = frozenset({
-    "TEXT:pressure_test_summary",
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
 })
@@ -79,7 +78,11 @@ def report_text_values_from_results(
         "TEXT:stress_test_summary": stress_summary,
         "TEXT:pressure_test_summary": stress_summary,
     }
-    return merge_report_text_values(values, report_values, manual_values)
+    return merge_report_text_values(
+        values,
+        report_values=report_values,
+        manual_values=manual_values,
+    )
 
 
 def computed_report_text_values_from_payload(payload: dict) -> dict[str, str]:
@@ -124,17 +127,24 @@ def computed_report_text_values_from_payload(payload: dict) -> dict[str, str]:
 
 def merge_report_text_values(
     generated_values: dict[str, str],
-    *manual_value_sets: dict[str, str] | None,
+    *,
+    report_values: dict[str, str] | None = None,
+    manual_values: dict[str, str] | None = None,
 ) -> dict[str, str]:
     values = dict(generated_values)
-    for index, manual_values in enumerate(manual_value_sets):
-        if not manual_values:
+    for candidate_values, allowed_computed_keys in (
+        (report_values, AGENT_CONFIRMED_REPORT_TEXT_KEYS),
+        (manual_values, frozenset()),
+    ):
+        if not candidate_values:
             continue
-        allowed_computed_keys = AGENT_CONFIRMED_REPORT_TEXT_KEYS if index == 0 else frozenset()
         values.update({
             key: value
-            for key, value in _with_text_prefix(manual_values).items()
-            if key not in COMPUTED_REPORT_TEXT_KEYS or key in allowed_computed_keys
+            for key, value in _with_text_prefix(candidate_values).items()
+            if (
+                (key not in COMPUTED_REPORT_TEXT_KEYS or key in allowed_computed_keys)
+                and (key not in AGENT_CONFIRMED_REPORT_TEXT_KEYS or key in allowed_computed_keys)
+            )
         })
     return _apply_report_text_aliases(values)
 
@@ -282,8 +292,16 @@ def _reproducibility_text(results: ValidationResults) -> str:
 
 def _stress_text(results: ValidationResults) -> str:
     items = []
+    status_prefix = {
+        "partial": "压力测试部分完成，需关注异常类别：",
+        "failed": "压力测试未完成，需先修复异常：",
+        "skipped": "压力测试未执行有效类别：",
+    }.get(results.stress_test.status, "")
     for item in results.stress_test.per_category:
-        if item.error:
+        if item.status == "skipped":
+            items.append(f"{item.category}：未找到可用于压力测试的入模特征")
+            continue
+        if item.error or item.status == "error":
             items.append(f"{item.category}：{item.error}")
             continue
         delta = item.ks_delta if item.ks_delta is not None else 0.0
@@ -292,7 +310,8 @@ def _stress_text(results: ValidationResults) -> str:
             f"{item.category}（置 -9999 {len(item.dropped_features)} 个特征）："
             f"KS 变化 {delta:+.4f}，PSI {psi:.4f}"
         )
-    return "；".join(items) or "无压力测试结果"
+    text = "；".join(items) or "无压力测试结果"
+    return f"{status_prefix}{text}" if status_prefix else text
 
 
 def _optional_float(value) -> float | None:

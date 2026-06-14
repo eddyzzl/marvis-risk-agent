@@ -5,15 +5,28 @@ import xml.etree.ElementTree as ET
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from PIL import Image as PILImage
 
 from riskmodel_checker.template_reports import (
     TemplateTable,
     TemplateReportPayload,
+    _column_widths_twips,
     find_placeholders,
     render_template_report,
 )
+
+
+def test_column_widths_never_negative_for_many_or_narrow_columns():
+    # Many columns whose 360-twip floors already exceed the table width must not
+    # produce a negative last-column width (invalid OOXML).
+    for column_count in (40, 30, 12, 3, 1):
+        table = TemplateTable(rows=[["x"] * column_count])
+        widths = _column_widths_twips(table, column_count, table_width_twips=9000)
+        assert len(widths) == column_count
+        assert min(widths) >= 360, (column_count, widths)
 
 
 PNG_BYTES = b64decode(
@@ -488,3 +501,60 @@ def test_find_placeholders_reads_paragraphs_and_tables(tmp_path):
     placeholders = find_placeholders(template)
 
     assert placeholders == ["{{TEXT:model_name}}", "{{TEXT:oot_ks}}"]
+
+
+def test_render_template_report_replaces_placeholders_inside_nested_tables(tmp_path):
+    document = Document()
+    outer = document.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "嵌套 {{TEXT:model_name}}"
+    template = tmp_path / "template.docx"
+    output = tmp_path / "output.docx"
+    document.save(template)
+
+    result = render_template_report(
+        TemplateReportPayload(
+            template_path=template,
+            output_path=output,
+            text_values={"TEXT:model_name": "贷前评分卡"},
+            image_values={},
+        )
+    )
+
+    generated = Document(output)
+    assert result.unresolved_placeholders == []
+    assert "贷前评分卡" in "\n".join(
+        paragraph.text
+        for table in generated.tables
+        for row in table.rows
+        for cell in row.cells
+        for nested_table in cell.tables
+        for nested_row in nested_table.rows
+        for nested_cell in nested_row.cells
+        for paragraph in nested_cell.paragraphs
+    )
+
+
+def test_render_template_report_clears_non_run_paragraph_children(tmp_path):
+    document = Document()
+    paragraph = document.add_paragraph("模型：{{TEXT:model_name}}")
+    bookmark = OxmlElement("w:bookmarkStart")
+    bookmark.set(qn("w:id"), "0")
+    bookmark.set(qn("w:name"), "bookmark_to_remove")
+    paragraph._p.append(bookmark)
+    template = tmp_path / "template.docx"
+    output = tmp_path / "output.docx"
+    document.save(template)
+
+    result = render_template_report(
+        TemplateReportPayload(
+            template_path=template,
+            output_path=output,
+            text_values={"TEXT:model_name": "贷前评分卡"},
+            image_values={},
+        )
+    )
+
+    document_xml = _document_xml(output)
+    assert result.unresolved_placeholders == []
+    assert document_xml.find(f".//{W_NS}bookmarkStart") is None

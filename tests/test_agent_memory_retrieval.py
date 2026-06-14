@@ -277,3 +277,42 @@ def test_normalize_model_family_recognizes_english_and_chinese_examples():
     assert normalize_model_family("利率模型") == "rate"
     assert normalize_model_family("pre-screening model") == "pre_screening"
     assert normalize_model_family("前筛模型") == "pre_screening"
+
+
+def test_bounded_payload_preserves_non_model_memory_fields():
+    from riskmodel_checker.agent_memory.prompting import (
+        _bounded_payload,
+        normalize_memory_context,
+    )
+
+    # A field_convention memory keeps its allowlisted structured fields; the old
+    # hard-coded model_experience set silently dropped them to {}.
+    convention = _bounded_payload(
+        {"field": "apply_month", "meaning": "申请月份", "secret": "leak"},
+        "field_convention",
+    )
+    assert convention == {"field": "apply_month", "meaning": "申请月份"}
+
+    # model_experience metrics still pass; non-allowlisted keys are filtered.
+    model = _bounded_payload({"ks": 30.0, "auc": 0.72, "bogus": 1}, "model_experience")
+    assert model == {"ks": 30.0, "auc": 0.72}
+
+    # Unknown memory_type denies all payload fields by default.
+    assert _bounded_payload({"field": "x"}, "mystery") == {}
+
+    normalized = normalize_memory_context(
+        {
+            "memories": [
+                {
+                    "id": "m1",
+                    "memory_type": "field_convention",
+                    "summary": "s",
+                    "payload": {"field": "apply_month", "meaning": "申请月份"},
+                }
+            ]
+        }
+    )
+    assert normalized["memories"][0]["payload"] == {
+        "field": "apply_month",
+        "meaning": "申请月份",
+    }

@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MARVIS-全能风控智能体</title>
     <link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png" />
-    <link rel="stylesheet" href="static/styles.css?v=20260605-create-dialog-button-gap" />
+    <link rel="stylesheet" href="static/styles.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" />
   </head>
   <body data-theme="light">
     <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
@@ -96,13 +97,8 @@
               <span>验证人员</span>
               <input id="validator" placeholder="填写验证人员姓名" autocomplete="off" />
             </label>
-            <label class="wide-field">
-              <span>材料目录</span>
-              <input id="sourceDir" placeholder="/path/to/project" autocomplete="off" />
-            </label>
           </section>
           <section id="createTaskReportFields" class="task-form-section">
-            <h3>报告初始内容</h3>
             <label class="wide-field">
               <span>模型概述</span>
               <textarea id="createModelOverview" data-create-report-key="TEXT:model_overview"></textarea>
@@ -119,6 +115,54 @@
               <span>好样本定义</span>
               <input id="createGoodSampleDefinition" data-create-report-key="TEXT:good_sample_definition" autocomplete="off" />
             </label>
+          </section>
+          <section id="createTaskMaterialSection" class="task-form-section material-source-section">
+            <div class="material-source-segment" role="tablist" aria-label="材料来源">
+              <button
+                id="materialSourcePathTab"
+                class="material-source-tab selected"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="materialSourcePathPanel"
+              >
+                文件路径
+              </button>
+              <button
+                id="materialSourceUploadTab"
+                class="material-source-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="materialSourceUploadPanel"
+              >
+                文件上传
+              </button>
+            </div>
+            <div id="materialSourcePathPanel" class="material-source-panel" role="tabpanel" aria-labelledby="materialSourcePathTab">
+              <label class="wide-field">
+                <span>材料目录</span>
+                <input id="sourceDir" placeholder="/path/to/project" autocomplete="off" />
+              </label>
+            </div>
+            <div
+              id="materialSourceUploadPanel"
+              class="material-source-panel material-upload-panel hidden"
+              hidden
+              role="tabpanel"
+              aria-labelledby="materialSourceUploadTab"
+            >
+              <input id="materialUploadInput" class="visually-hidden" type="file" multiple />
+              <div class="material-upload-dropzone" role="button" tabindex="0">
+                <svg class="material-upload-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 15V4"></path>
+                  <path d="M7.5 8.5 12 4l4.5 4.5"></path>
+                  <path d="M5 15.5v2.2A2.3 2.3 0 0 0 7.3 20h9.4a2.3 2.3 0 0 0 2.3-2.3v-2.2"></path>
+                </svg>
+                <strong>点击或拖拽上传</strong>
+                <span id="materialUploadStatus">文件上传提交暂未开放，请先使用文件路径。</span>
+              </div>
+            </div>
           </section>
           <button id="createTaskButton" class="button primary full" type="button">
             创建任务
@@ -201,6 +245,10 @@
             <label class="wide-field">
               <span>API 密钥</span>
               <input id="llmEngineApiKey" type="password" placeholder="sk-..." autocomplete="new-password" />
+            </label>
+            <label class="checkbox-field">
+              <input id="llmEngineEnableThinking" type="checkbox" />
+              <span>发送 reasoning/thinking 扩展字段</span>
             </label>
           </section>
           <div id="llmEngineEditStatus" class="status" role="status" aria-live="polite"></div>
@@ -426,16 +474,73 @@
           </svg>
         </button>
         <section id="workspaceWelcome" class="workspace-welcome" aria-label="欢迎">
-          <img
-            id="workspaceBrandLogo"
-            class="workspace-brand-logo"
-            src="static/brand/marvis-logo.png"
-            alt="MARVIS-全能风控智能体 logo"
-          />
-          <h2 id="workspaceGreetingTitle">
-            <span id="workspaceGreetingText" class="workspace-greeting-nowrap">早上好，开启活力一天</span><span>，我来帮您完成信贷风控工作</span>
-          </h2>
-          <p>创建任务或从左侧选择已有任务</p>
+          <div class="workspace-welcome-inner">
+            <img
+              id="workspaceBrandLogo"
+              class="workspace-brand-logo"
+              src="static/brand/marvis-logo.png"
+              alt="MARVIS-全能风控智能体 logo"
+            />
+            <h2 id="workspaceGreetingTitle">
+              <span id="workspaceGreetingText" class="workspace-greeting-nowrap">早上好，开启活力一天</span><span>，我来帮您完成信贷风控工作</span>
+            </h2>
+            <div id="welcomeTaskCards" class="welcome-task-cards" aria-label="选择任务类型">
+              <button
+                id="welcomeModelDevelopmentCard"
+                class="welcome-task-card"
+                type="button"
+                disabled aria-disabled="true"
+              >
+                <span class="welcome-task-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M4.5 17.5 9 13l3 3 7.5-8"></path>
+                    <path d="M4 20h16"></path>
+                    <path d="M6 4h12v5H6z"></path>
+                  </svg>
+                </span>
+                <strong>模型开发</strong>
+                <span>训练建模、特征加工与模型产物交付</span>
+                <small>暂未开放</small>
+              </button>
+              <button
+                id="welcomeModelValidationCard"
+                class="welcome-task-card available"
+                type="button"
+                data-task-kind="model_validation"
+              >
+                <span class="welcome-task-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M5 4h10l4 4v12H5z"></path>
+                    <path d="M14 4v5h5"></path>
+                    <path d="m8 15 2 2 5-6"></path>
+                  </svg>
+                </span>
+                <strong>模型验证</strong>
+                <span>一致性、稳定性、效果验证，压力测试和编写报告</span>
+                <small>立即创建</small>
+              </button>
+              <button
+                id="welcomeStrategyDevelopmentCard"
+                class="welcome-task-card"
+                type="button"
+                disabled aria-disabled="true"
+              >
+                <span class="welcome-task-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="M4 19V5"></path>
+                    <path d="M4 19h16"></path>
+                    <path d="M8 15v-4"></path>
+                    <path d="M12 15V8"></path>
+                    <path d="M16 15v-6"></path>
+                    <path d="M7 7h10l-2-2"></path>
+                  </svg>
+                </span>
+                <strong>策略开发</strong>
+                <span>规则策略、组合分析与上线监控准备</span>
+                <small>暂未开放</small>
+              </button>
+            </div>
+          </div>
         </section>
         <div class="workspace-body">
           <section id="resultWorkspace" class="result-workspace" aria-label="验证输出">
@@ -596,6 +701,6 @@
     </div>
     <div id="searchScrim" class="search-scrim" aria-hidden="true"></div>
     <div id="metricTooltip" class="metric-tooltip" hidden></div>
-    <script src="static/app.js?v=20260603-zero-rail-collapse"></script>
+    <script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>
   </body>
 </html>

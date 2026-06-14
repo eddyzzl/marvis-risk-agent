@@ -23,6 +23,7 @@ def test_scan_source_dir_ignores_lock_files_and_hashes_small_artifacts(tmp_path)
     checkpoint_dir.mkdir()
     checkpoint = checkpoint_dir / "model-checkpoint.ipynb"
     sample = tmp_path / "sample.feather"
+    hidden_sample = tmp_path / ".hidden.csv"
     lock_file = tmp_path / ".~04_验证数据汇总表.xlsx"
     office_workbook_lock_file = tmp_path / "~$04_验证数据汇总表.xlsx"
     office_docx_lock_file = tmp_path / "~$验证文档.docx"
@@ -30,6 +31,7 @@ def test_scan_source_dir_ignores_lock_files_and_hashes_small_artifacts(tmp_path)
     notebook.write_text("{}", encoding="utf-8")
     checkpoint.write_text("{}", encoding="utf-8")
     sample.write_bytes(b"sample data")
+    hidden_sample.write_text("hidden", encoding="utf-8")
     lock_file.write_bytes(b"office lock")
     office_workbook_lock_file.write_bytes(b"office workbook lock")
     office_docx_lock_file.write_bytes(b"office docx lock")
@@ -40,6 +42,7 @@ def test_scan_source_dir_ignores_lock_files_and_hashes_small_artifacts(tmp_path)
     assert ".~04_验证数据汇总表.xlsx" not in by_name
     assert "~$04_验证数据汇总表.xlsx" not in by_name
     assert "~$验证文档.docx" not in by_name
+    assert ".hidden.csv" not in by_name
     assert "model-checkpoint.ipynb" not in by_name
     assert by_name["model.ipynb"].role == FileRole.NOTEBOOK
     assert by_name["sample.feather"].role == FileRole.SAMPLE
@@ -60,6 +63,23 @@ def test_scan_source_dir_raises_for_non_directory_path(tmp_path):
 
     with pytest.raises(NotADirectoryError):
         scan_source_dir(source_file)
+
+
+def test_scan_source_dir_rejects_too_many_files(tmp_path):
+    for index in range(3):
+        (tmp_path / f"sample-{index}.csv").write_text("x,y\n1,0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="too many files"):
+        scan_source_dir(tmp_path, max_files=2)
+
+
+def test_scan_source_dir_rejects_too_deep_paths(tmp_path):
+    deep_dir = tmp_path / "a" / "b" / "c"
+    deep_dir.mkdir(parents=True)
+    (deep_dir / "sample.csv").write_text("x,y\n1,0\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="too deep"):
+        scan_source_dir(tmp_path, max_depth=2)
 
 
 def test_scan_source_dir_ignores_symlinked_materials(tmp_path):

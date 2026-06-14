@@ -15,7 +15,7 @@ def test_kernel_imported_modules_do_not_require_stdlib_strenum():
         assert "riskmodel_checker.compat import StrEnum" in source
 
 
-def test_kernel_imported_modules_defer_pep604_annotations_for_py39():
+def test_kernel_imported_modules_defer_annotations_at_runtime():
     for relative_path in [
         "riskmodel_checker/domain.py",
         "riskmodel_checker/output/excel.py",

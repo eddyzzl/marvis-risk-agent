@@ -69,18 +69,16 @@ def render_template_report(payload: TemplateReportPayload) -> TemplateReportResu
             unresolved=unresolved,
         )
 
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    _replace_paragraph_placeholders(
-                        paragraph,
-                        text_values=payload.text_values,
-                        image_values=payload.image_values,
-                        table_values=table_values,
-                        max_image_width_inches=max_image_width_inches,
-                        unresolved=unresolved,
-                    )
+    for cell in _iter_unique_table_cells(document.tables):
+        for paragraph in cell.paragraphs:
+            _replace_paragraph_placeholders(
+                paragraph,
+                text_values=payload.text_values,
+                image_values=payload.image_values,
+                table_values=table_values,
+                max_image_width_inches=max_image_width_inches,
+                unresolved=unresolved,
+            )
 
     unresolved.extend(
         placeholder
@@ -308,11 +306,27 @@ def _copy_run_properties(source_run, target_run) -> None:
 
 def _document_text_parts(document) -> list[str]:
     parts = [paragraph.text for paragraph in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                parts.extend(paragraph.text for paragraph in cell.paragraphs)
+    for cell in _iter_unique_table_cells(document.tables):
+        parts.extend(paragraph.text for paragraph in cell.paragraphs)
     return parts
+
+
+def _iter_unique_table_cells(tables):
+    seen: set[int] = set()
+    for table in tables:
+        yield from _iter_unique_table_cells_in_table(table, seen)
+
+
+def _iter_unique_table_cells_in_table(table, seen: set[int]):
+    for row in table.rows:
+        for cell in row.cells:
+            cell_id = id(cell._tc)
+            if cell_id in seen:
+                continue
+            seen.add(cell_id)
+            yield cell
+            for nested_table in cell.tables:
+                yield from _iter_unique_table_cells_in_table(nested_table, seen)
 
 
 def _unique_placeholders(parts: list[str]) -> list[str]:
@@ -326,11 +340,6 @@ def _unique_placeholders(parts: list[str]) -> list[str]:
 
 def _is_report_placeholder(placeholder: str) -> bool:
     return placeholder.startswith(("{{TEXT:", "{{IMAGE:", "{{TABLE:"))
-
-
-def _set_paragraph_text(paragraph, text: str) -> None:
-    _clear_paragraph(paragraph)
-    paragraph.add_run(text)
 
 
 def _insert_table_after_paragraph(paragraph, table_data: TemplateTable, *, anchor=None):
@@ -373,8 +382,10 @@ def _insert_table_after_paragraph(paragraph, table_data: TemplateTable, *, ancho
 
 
 def _clear_paragraph(paragraph) -> None:
-    for run in list(paragraph.runs):
-        paragraph._p.remove(run._r)
+    for child in list(paragraph._p):
+        if child.tag == qn("w:pPr"):
+            continue
+        paragraph._p.remove(child)
 
 
 def _format_table_shell(
@@ -480,7 +491,10 @@ def _column_widths_twips(
         for weight in weights
     ]
     width_delta = table_width_twips - sum(widths)
-    widths[-1] += width_delta
+    # Put the rounding remainder on the last column, but never below the 360-twip
+    # floor: when many/narrow columns already sum past table_width_twips the delta
+    # is negative and would otherwise produce an invalid negative OOXML width.
+    widths[-1] = max(360, widths[-1] + width_delta)
     return widths
 
 

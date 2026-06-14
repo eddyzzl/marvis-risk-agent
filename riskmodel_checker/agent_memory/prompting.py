@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from riskmodel_checker.agent_memory.policy import PAYLOAD_FIELD_ALLOWLISTS
+
 
 MEMORY_USAGE_RULES = (
     "跨任务记忆只能辅助解释、参数建议、风险提醒、历史对比和报告措辞；"
@@ -9,6 +11,7 @@ MEMORY_USAGE_RULES = (
     "若提到历史模型效果对比，只能依据 cross_task_memory.memories 中的结构化 payload "
     "和当前 available_evidence/evidence 中的平台结构化结果。"
 )
+MEMORY_PROMPT_SUMMARY_MAX_CHARS = 400
 
 
 def normalize_memory_context(memory_context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -84,27 +87,27 @@ def _memory_packet(memory: dict[str, Any]) -> dict[str, Any]:
     packet = {
         "id": str(memory.get("id")),
         "memory_type": memory.get("memory_type"),
-        "summary": memory.get("summary"),
+        "summary": _truncate_text(memory.get("summary"), MEMORY_PROMPT_SUMMARY_MAX_CHARS),
         "source_task_id": memory.get("source_task_id"),
         "confidence": memory.get("confidence") or "medium",
         "match_reason": memory.get("match_reason") or "",
     }
     payload = memory.get("payload")
     if isinstance(payload, dict):
-        packet["payload"] = _bounded_payload(payload)
+        packet["payload"] = _bounded_payload(payload, memory.get("memory_type"))
     return packet
 
 
-def _bounded_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed_fields = {
-        "ks",
-        "auc",
-        "psi",
-        "month",
-        "channel",
-        "model_name",
-        "model_version",
-        "scope",
-        "important_feature_sources",
-    }
+def _bounded_payload(payload: dict[str, Any], memory_type: Any) -> dict[str, Any]:
+    # Filter by the memory's own type allowlist (the same set policy enforces at
+    # ingestion). The previous hard-coded model_experience set silently dropped the
+    # structured payload of every non-model memory type into `{}`.
+    allowed_fields = PAYLOAD_FIELD_ALLOWLISTS.get(str(memory_type or ""), frozenset())
     return {key: value for key, value in payload.items() if key in allowed_fields}
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."

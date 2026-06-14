@@ -12,6 +12,9 @@ from riskmodel_checker.validation.results import (
 )
 from riskmodel_checker.validation.scorer import Scorer
 
+_REVIEW_MISMATCH_RATIO_THRESHOLD = 0.01
+_REVIEW_MAX_ABS_DIFF_THRESHOLD = 1e-4
+
 
 def scores_match_at_precision(left: float, right: float, decimals: int) -> bool:
     return round(float(left), decimals) == round(float(right), decimals)
@@ -69,6 +72,7 @@ def run_reproducibility(
     rows: list[ScoreCompareRow] = []
     match_count = 0
     mismatch_count = 0
+    unknown_diff_mismatch_count = 0
     max_abs_diff = 0.0
     decimals = config.score_decimal_places
     for row_index, code_score, pmml_score in zip(drawn.index, scores_code, scores_pmml):
@@ -99,8 +103,15 @@ def run_reproducibility(
             match_count += 1
         else:
             mismatch_count += 1
+            if abs_diff is None:
+                unknown_diff_mismatch_count += 1
 
-    status = ConsistencyStatus.PASS if mismatch_count == 0 else ConsistencyStatus.FAIL
+    status = _consistency_status(
+        sample_size=take,
+        mismatch_count=mismatch_count,
+        max_abs_diff=max_abs_diff,
+        unknown_diff_mismatch_count=unknown_diff_mismatch_count,
+    )
     return ReproducibilityResult(
         sample_size=take,
         seed=config.random_seed,
@@ -112,3 +123,23 @@ def run_reproducibility(
             status=status,
         ),
     )
+
+
+def _consistency_status(
+    *,
+    sample_size: int,
+    mismatch_count: int,
+    max_abs_diff: float,
+    unknown_diff_mismatch_count: int,
+) -> ConsistencyStatus:
+    if mismatch_count == 0:
+        return ConsistencyStatus.PASS
+    if sample_size <= 0 or unknown_diff_mismatch_count > 0:
+        return ConsistencyStatus.FAIL
+    mismatch_ratio = mismatch_count / sample_size
+    if (
+        mismatch_ratio <= _REVIEW_MISMATCH_RATIO_THRESHOLD
+        and max_abs_diff <= _REVIEW_MAX_ABS_DIFF_THRESHOLD
+    ):
+        return ConsistencyStatus.REVIEW
+    return ConsistencyStatus.FAIL

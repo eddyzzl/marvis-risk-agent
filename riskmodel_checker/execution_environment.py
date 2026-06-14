@@ -325,7 +325,11 @@ def _conda_environment_paths() -> list[Path]:
 
 
 def _python_path_for_environment(env_path: Path) -> Path | None:
-    for candidate in [env_path / "bin" / "python", env_path / "python.exe"]:
+    if sys.platform.startswith("win"):
+        candidates = [env_path / "python.exe"]
+    else:
+        candidates = [env_path / "bin" / "python", env_path / "python"]
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
     return None

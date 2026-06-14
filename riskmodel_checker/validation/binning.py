@@ -6,7 +6,11 @@ from riskmodel_checker.validation.results import BinRow
 
 def equal_frequency_bin_edges(scores, bin_count: int):
     quantiles = np.linspace(0.0, 1.0, bin_count + 1)
-    edges = np.quantile(np.asarray(scores, dtype=float), quantiles)
+    values = np.asarray(scores, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) == 0:
+        return np.asarray([-np.inf, np.inf], dtype=float)
+    edges = np.quantile(values, quantiles)
     return edges
 
 
@@ -32,20 +36,22 @@ def bin_distribution(scores, edges) -> np.ndarray:
 def compute_ks(scores, labels) -> float:
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
+    finite_mask = np.isfinite(scores)
+    scores = scores[finite_mask]
+    labels = labels[finite_mask]
     if len(scores) == 0 or labels.sum() == 0 or labels.sum() == len(labels):
         return 0.0
-    total_bad = labels.sum()
+    total_bad = int(labels.sum())
     total_good = len(labels) - total_bad
-    # Evaluate KS only at unique score thresholds to handle ties correctly.
-    # For each unique score value, count all bads/goods with score <= threshold.
-    unique_scores = np.unique(scores)
-    ks = 0.0
-    for threshold in unique_scores:
-        mask = scores <= threshold
-        cum_bad = labels[mask].sum() / total_bad
-        cum_good = (mask.sum() - labels[mask].sum()) / total_good
-        ks = max(ks, abs(cum_bad - cum_good))
-    return float(ks)
+    order = np.argsort(scores, kind="mergesort")
+    sorted_scores = scores[order]
+    sorted_labels = labels[order]
+    cum_bad = np.cumsum(sorted_labels)
+    cum_total = np.arange(1, len(sorted_labels) + 1)
+    threshold_indexes = np.r_[np.where(np.diff(sorted_scores) != 0)[0], len(sorted_scores) - 1]
+    bad_cdf = cum_bad[threshold_indexes] / total_bad
+    good_cdf = (cum_total[threshold_indexes] - cum_bad[threshold_indexes]) / total_good
+    return float(np.max(np.abs(bad_cdf - good_cdf)))
 
 
 def compute_psi(expected_distribution, actual_distribution, smoothing: float = 1e-6) -> float:
@@ -73,8 +79,6 @@ def bin_table(
     rows: list[BinRow] = []
     cum_count = 0
     cum_bad = 0
-    bad_cum_pct_running = 0.0
-    good_cum_pct_running = 0.0
     for bin_index in range(1, len(edges)):
         mask = bins == bin_index
         count = int(mask.sum())
@@ -85,8 +89,6 @@ def bin_table(
         cum_sample_pct = cum_count / total if total else 0.0
         cum_bad_pct = cum_bad / total_bad if total_bad else 0.0
         cum_good_pct = (cum_count - cum_bad) / (total - total_bad) if (total - total_bad) else 0.0
-        bad_cum_pct_running = cum_bad_pct
-        good_cum_pct_running = cum_good_pct
         lift = (bad_rate / overall_bad_rate) if overall_bad_rate else 0.0
         rows.append(
             BinRow(
@@ -99,7 +101,7 @@ def bin_table(
                 cum_sample_pct=cum_sample_pct,
                 cum_bad_pct=cum_bad_pct,
                 lift=lift,
-                ks=float(abs(bad_cum_pct_running - good_cum_pct_running)),
+                ks=float(abs(cum_bad_pct - cum_good_pct)),
             )
         )
     return rows

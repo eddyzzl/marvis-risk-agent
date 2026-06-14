@@ -60,6 +60,21 @@ marvis-risk-agent serve \
     --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
+## 材料目录允许范围
+
+创建任务时，后端只接受位于当前 `workspace` 或当前用户 home 目录下的材料目录。这样可以避免本地服务被误暴露时读取任意路径。
+
+如果 Windows 部署时材料放在 D 盘、外接盘或其他不在 home 下的位置，先设置额外材料根目录再启动：
+
+```powershell
+$env:RMC_MATERIAL_ROOTS="D:\model_materials"
+marvis serve --host 127.0.0.1 --port 8000 --workspace .\workspace
+```
+
+多个根目录可以按系统路径分隔符拼接；Windows 用分号，macOS/Linux/WSL 用冒号。
+
+WSL2 中运行时，页面里的材料目录也要填写 Linux/WSL 路径，例如 `/mnt/c/Users/<you>/Downloads/project`，不要填写 `C:\Users\...`。
+
 ## 多 worktree / 多版本同时启动
 
 多个 worktree 同时启动时，端口和 workspace 都要分开，避免访问错版本或共用 SQLite/任务产物。profile 会自动选择默认值：
@@ -112,9 +127,11 @@ python -m pip install -e .
 ```bash
 # 1. 在 Web 页面或 API 创建任务，拿到 task_id
 # 2. CLI 跑当前内置的模型验证流水线
-python -m riskmodel_checker validate <task_id> \
+marvis validate <task_id> \
     --workspace ./workspace
 ```
+
+兼容入口：`python -m riskmodel_checker validate <task_id> --workspace ./workspace`。
 
 ## 当前内置模型验证流程
 

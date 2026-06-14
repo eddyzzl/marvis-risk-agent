@@ -2,10 +2,10 @@
 
 ## Status
 
-- Status: Ready for implementation planning
+- Status: Historical design / implemented baseline reference
 - Date: 2026-06-04
-- Scope: V1.1 documentation and development preparation only
-- Code status: no implementation code in this spec
+- Scope: Original V1.1 Agent Memory Foundation design; retained for rationale and boundary review.
+- Code status: V1.1 baseline is implemented in the product line. Do not use this file as the current implementation checklist; current version boundaries live in `docs/roadmap.md` and `docs/versioning.md`, and future memory evolution lives in `2026-06-13-phase-5-memory-evolution.md`.
 
 ## Why V1.1 Was Reset
 

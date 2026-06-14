@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from http.client import HTTPException
 import json
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -22,6 +23,7 @@ class OpenAICompatibleLLMClient:
         temperature: float = 0.2,
         response_format: dict | None = None,
         on_delta: Callable[[str], None] | None = None,
+        stream: bool = True,
     ) -> str:
         api_base_url = str(self.profile.get("api_base_url") or "").rstrip("/")
         model_name = str(self.profile.get("model_name") or "")
@@ -30,18 +32,21 @@ class OpenAICompatibleLLMClient:
             raise LLMClientError("LLM profile is incomplete")
         if not api_base_url.startswith(("http://", "https://")):
             raise LLMClientError("api_base_url must start with http:// or https://")
-        reasoning_effort = str(self.profile.get("reasoning_effort") or "high")
         payload = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "stream": True,
-            "reasoning_effort": reasoning_effort,
-            "thinking": {"type": "enabled"},
+            "stream": bool(stream),
             "temperature": temperature,
         }
+        if self.profile.get("enable_thinking"):
+            payload["reasoning_effort"] = str(self.profile.get("reasoning_effort") or "high")
+            payload["thinking"] = {"type": "enabled"}
+        extra_request_fields = self.profile.get("extra_request_fields")
+        if isinstance(extra_request_fields, dict):
+            payload.update(extra_request_fields)
         if response_format:
             payload["response_format"] = response_format
         request = Request(
@@ -58,12 +63,20 @@ class OpenAICompatibleLLMClient:
             with urlopen(request, timeout=timeout) as response:
                 content = _read_completion_content(response, on_delta=on_delta)
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise LLMClientError(f"LLM HTTP {exc.code}: {detail[:500]}") from exc
+            # Drain the body to free the socket, but never surface it: error bodies
+            # can echo the rejected prompt and would be persisted into
+            # agent_messages.metadata. Only the status code and reason are recorded.
+            try:
+                exc.read()
+            except Exception:
+                pass
+            raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
         except URLError as exc:
             raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
         except TimeoutError as exc:
             raise LLMClientError("LLM request timed out") from exc
+        except (OSError, HTTPException) as exc:
+            raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
         return content.strip()
 
 

@@ -27,6 +27,20 @@ def test_equal_frequency_bin_edges_dedupes_when_many_ties():
     assert len(set(edges)) < 11
 
 
+def test_equal_frequency_bin_edges_filters_non_finite_scores():
+    scores = np.array([0.0, 1.0, np.nan, np.inf, -np.inf])
+    edges = equal_frequency_bin_edges(scores, bin_count=2)
+
+    assert np.isfinite(edges).all()
+    assert edges.tolist() == [0.0, 0.5, 1.0]
+
+
+def test_equal_frequency_bin_edges_returns_catchall_when_no_finite_scores():
+    edges = equal_frequency_bin_edges([np.nan, np.inf], bin_count=10)
+
+    assert edges.tolist() == [-np.inf, np.inf]
+
+
 def test_assign_bins_maps_scores_to_indices():
     edges = np.array([0.0, 0.2, 0.5, 1.0])
     scores = np.array([0.1, 0.3, 0.7, 0.9, 0.0, 1.0])

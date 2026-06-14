@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from riskmodel_checker.report_texts import report_text_values_from_results
+from riskmodel_checker.report_texts import merge_report_text_values, report_text_values_from_results
 from riskmodel_checker.validation.results import SplitRow
 from tests.output.test_excel import _make_results
 
@@ -51,6 +51,19 @@ def test_pressure_test_summary_placeholder_gets_platform_fallback():
     )
 
     assert values["TEXT:pressure_test_summary"] == values["TEXT:stress_test_summary"]
+
+
+def test_agent_report_values_cannot_replace_platform_pressure_test_summary():
+    values = report_text_values_from_results(
+        _make_results(),
+        report_values={
+            "TEXT:pressure_test_summary": "Agent 不应覆盖平台摘要",
+            "TEXT:pressure_impact_recommendation": "Agent 可补充影响建议",
+        },
+    )
+
+    assert values["TEXT:pressure_test_summary"] == values["TEXT:stress_test_summary"]
+    assert values["TEXT:pressure_impact_recommendation"] == "Agent 可补充影响建议"
 
 
 def test_manual_report_values_override_and_extend_generated_text():
@@ -122,3 +135,22 @@ def test_pressure_recommendation_alias_tracks_manual_summary():
     )
 
     assert values["TEXT:pressure_impact_recommendation"] == "重点关注征信类变量冲击。"
+
+
+def test_merge_report_text_values_uses_named_permission_sets():
+    values = merge_report_text_values(
+        {"TEXT:oot_ks": "0.2500", "TEXT:report_title": "平台标题"},
+        report_values={
+            "TEXT:final_validation_conclusion": "Agent 已确认结论",
+            "TEXT:oot_ks": "不允许",
+        },
+        manual_values={
+            "TEXT:report_title": "人工标题",
+            "TEXT:final_validation_conclusion": "不允许覆盖 Agent 确认结论",
+            "TEXT:oot_ks": "不允许",
+        },
+    )
+
+    assert values["TEXT:oot_ks"] == "0.2500"
+    assert values["TEXT:report_title"] == "人工标题"
+    assert values["TEXT:final_validation_conclusion"] == "Agent 已确认结论"

@@ -8,12 +8,16 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 
-DEFAULT_BRANDING = {
+DEFAULT_BRANDING: dict[str, Any] = {
     "platformName": "MARVIS-全能风控智能体",
     "browserTitle": "MARVIS-全能风控智能体",
     "primaryColor": "#000000",
     "logoUrl": "static/brand/marvis-logo.png",
     "faviconUrl": "static/brand/marvis-favicon.png",
+    # Optional per-workspace map of real validator name -> display alias, used for
+    # the agent's display name. Kept out of the public static JS so real names live
+    # only in the deployment's own brand.json, never in the shipped bundle.
+    "validatorAliases": {},
     "source": "default",
 }
 
@@ -22,7 +26,7 @@ BRANDING_CONFIG_NAME = "brand.json"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
-def load_branding(workspace: str | Path) -> dict[str, str]:
+def load_branding(workspace: str | Path) -> dict[str, Any]:
     workspace_path = Path(workspace)
     config_path = branding_config_path(workspace_path)
     config = _load_config(config_path)
@@ -31,6 +35,9 @@ def load_branding(workspace: str | Path) -> dict[str, str]:
 
     result = dict(DEFAULT_BRANDING)
     result["source"] = "workspace"
+    result["validatorAliases"] = _validator_aliases(
+        _first(config, "validator_aliases", "validatorAliases")
+    )
     result["platformName"] = _text_field(
         config, "platform_name", "platformName", fallback=result["platformName"]
     )
@@ -136,6 +143,25 @@ def _text_field(config: dict[str, Any], *keys: str, fallback: str) -> str:
     if not cleaned or len(cleaned) > 120:
         return fallback
     return cleaned
+
+
+def _validator_aliases(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    for name, alias in value.items():
+        if not isinstance(name, str) or not isinstance(alias, str):
+            continue
+        cleaned_name = name.strip()
+        cleaned_alias = alias.strip()
+        if not cleaned_name or not cleaned_alias:
+            continue
+        if len(cleaned_name) > 120 or len(cleaned_alias) > 120:
+            continue
+        aliases[cleaned_name] = cleaned_alias
+        if len(aliases) >= 200:
+            break
+    return aliases
 
 
 def _color_field(config: dict[str, Any], *keys: str, fallback: str) -> str:

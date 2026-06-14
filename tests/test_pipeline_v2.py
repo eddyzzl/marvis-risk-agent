@@ -2,6 +2,7 @@ import json
 import math
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +16,11 @@ from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskSta
 from riskmodel_checker.notebook_contract import RuntimeContract
 from riskmodel_checker.notebook_cancellation import request_notebook_cancellation
 from riskmodel_checker.notebooks import close_live_notebook_session, register_live_notebook_session
+from riskmodel_checker import pipeline as pipeline_module
 from riskmodel_checker.pipeline import (
+    NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
+    SCAN_STAGE_FAILURE_PREFIX,
     PipelineError,
     PipelineSettings,
     _build_metrics_cell_source,
@@ -24,6 +28,8 @@ from riskmodel_checker.pipeline import (
     _feature_columns,
     _load_sample,
     _required_path,
+    _scan_artifacts,
+    _stage_failure_message,
     _write_metrics_results_in_session,
     _write_reproducibility_result_in_session,
     run_metrics_stage,
@@ -34,6 +40,47 @@ from riskmodel_checker.pipeline import (
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_scan_artifacts_tags_limit_breach_as_scan_failure(monkeypatch):
+    # A scan-limit ValueError (max_files / max_depth) raised mid-pipeline must be
+    # wrapped as a PipelineError carrying the scan-stage prefix, so downstream
+    # stage handlers do not mislabel it as a notebook failure.
+    def _raise_limit(_path):
+        raise ValueError("source_dir has too many files: max_files=2000")
+
+    monkeypatch.setattr(pipeline_module, "scan_source_dir", _raise_limit)
+    task = SimpleNamespace(source_dir="/tmp/whatever")
+
+    try:
+        _scan_artifacts(task)
+    except PipelineError as exc:
+        assert str(exc).startswith(SCAN_STAGE_FAILURE_PREFIX)
+        assert "too many files" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected PipelineError")
+
+
+def test_memory_failure_kind_classifies_scan_limit_failures():
+    kind = pipeline_module._memory_failure_kind
+    assert kind(f"{SCAN_STAGE_FAILURE_PREFIX}source_dir has too many files: max_files=2000",
+                default="notebook") == "scan"
+    assert kind("source dir invalid: too deep", default="notebook") == "scan"
+    # unrelated failures keep their existing classification
+    assert kind("PMML mismatch", default="notebook") == "pmml"
+    assert kind("live notebook kernel is not available", default="notebook") == "notebook"
+
+
+def test_stage_failure_message_preserves_scan_attribution():
+    scan_message = f"{SCAN_STAGE_FAILURE_PREFIX}source_dir is too deep"
+    # Bubbling through the notebook stage handler keeps the scan prefix intact...
+    assert (
+        _stage_failure_message(NOTEBOOK_STAGE_FAILURE_PREFIX, scan_message) == scan_message
+    )
+    # ...while a genuine notebook failure still receives the notebook prefix.
+    assert _stage_failure_message(NOTEBOOK_STAGE_FAILURE_PREFIX, "kernel died") == (
+        f"{NOTEBOOK_STAGE_FAILURE_PREFIX}kernel died"
+    )
 
 
 def test_stage_artifact_cleanup_invalidates_downstream_outputs(tmp_path: Path):
@@ -218,7 +265,6 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
         model_meta_path=tmp_path / "model_meta.json",
         reproducibility_json_path=tmp_path / "reproducibility_result.json",
         results_json_path=tmp_path / "validation_results.json",
-        results_pickle_path=tmp_path / "validation_results.pkl",
         excel_path=tmp_path / "validation.xlsx",
     )
 
@@ -228,6 +274,55 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
     assert "load_pmml_scorer" not in source
     assert "def _rmc_raise_if_metrics_cancelled()" in source
     assert "cancellation_check=_rmc_raise_if_metrics_cancelled" in source
+    assert "dataframe.index.equals(_rmc_sample.index)" in source
+    assert "import pickle" not in source
+    assert "results_pickle_path" not in source
+    assert f"_rmc_package_root = {tmp_path.as_posix()!r}" in source
+
+
+def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    task = replace(task, split_col=None, time_col=None)
+
+    source = _build_metrics_cell_source(
+        package_root=tmp_path,
+        task=task,
+        settings=PipelineSettings(
+            workspace=tmp_path,
+            db_path=repo.db_path,
+            report_template_path=tmp_path / "template.docx",
+        ),
+        dictionary_path=tmp_path / "dictionary.csv",
+        input_pmml_path=tmp_path / "model.pmml",
+        contract=RuntimeContract(
+            target_col="y",
+            split_col=None,
+            time_col=None,
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "code_model_scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="lgb",
+        ),
+        model_meta_path=tmp_path / "model_meta.json",
+        reproducibility_json_path=tmp_path / "reproducibility_result.json",
+        results_json_path=tmp_path / "validation_results.json",
+        excel_path=tmp_path / "validation.xlsx",
+    )
+
+    assert '"split_col": ""' in source
+    assert '"time_col": ""' in source
+    assert "if column and column not in _rmc_sample.columns" in source
 
 
 def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholder(tmp_path: Path):
@@ -267,7 +362,6 @@ def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholde
         model_meta_path=tmp_path / "model_meta.json",
         reproducibility_json_path=tmp_path / "reproducibility_result.json",
         results_json_path=tmp_path / "validation_results.json",
-        results_pickle_path=tmp_path / "validation_results.pkl",
         excel_path=tmp_path / "validation.xlsx",
     )
 
@@ -358,7 +452,6 @@ def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
             calls.append(("execute", cell_index))
             if cell_index == 7:
                 (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
-                (outputs_dir / "validation_results.pkl").write_bytes(b"pickle")
                 (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
             return SimpleNamespace(succeeded=True, cancelled=False)
 
@@ -754,7 +847,6 @@ def test_metrics_stage_success_captures_model_experience_memory(
             ),
             encoding="utf-8",
         )
-        (outputs_dir / "validation_results.pkl").write_bytes(b"pickle")
         (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
 
     monkeypatch.setattr(
@@ -1345,7 +1437,7 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
                 f"#!{sys.executable}",
                 "import sys",
                 "import pandas as pd",
-                "pd.DataFrame({'x1': [1, 2], 'y': [0, 1]}).to_pickle(sys.argv[4])",
+                "pd.DataFrame({'x1': [1, 2], 'y': [0, 1]}).to_json(sys.argv[4], orient='table')",
             ]
         ),
         encoding="utf-8",

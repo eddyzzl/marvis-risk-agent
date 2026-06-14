@@ -15,6 +15,18 @@ def test_pyproject_exposes_short_marvis_script_alias():
     assert 'marvis = "riskmodel_checker.__main__:main"' in text
 
 
+def test_pyproject_declares_runtime_dependency_bounds():
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    for requirement in [
+        '"pydantic>=2,<3"',
+        '"pandas>=2,<4"',
+        '"nbclient>=0.7,<0.11"',
+        '"nbformat>=5,<6"',
+    ]:
+        assert requirement in text
+
+
 def test_main_without_subcommand_starts_default_profile(monkeypatch):
     observed = []
 

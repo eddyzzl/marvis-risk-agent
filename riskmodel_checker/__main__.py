@@ -147,11 +147,12 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _validate(args: argparse.Namespace) -> None:
-    build_settings, init_db, PipelineSettings, run_staged_pipeline = (
+    build_settings, init_db, PipelineSettings, run_staged_pipeline, load_execution_environment = (
         _load_validation_runtime()
     )
     workspace = args.workspace or _profile_defaults(getattr(args, "profile", "")).workspace
     settings = build_settings(workspace)
+    environment = load_execution_environment(settings.workspace)
     init_db(settings.db_path)
     run_staged_pipeline(
         task_id=args.task_id,
@@ -160,16 +161,18 @@ def _validate(args: argparse.Namespace) -> None:
             db_path=settings.db_path,
             report_template_path=settings.report_template_path,
             feature_columns=_parse_feature_columns(args.feature_columns),
+            notebook_kernel_name=environment.kernel_name,
         ),
     )
 
 
 def _load_validation_runtime():
     from riskmodel_checker.db import init_db
+    from riskmodel_checker.execution_environment import load_execution_environment
     from riskmodel_checker.pipeline import PipelineSettings, run_staged_pipeline
     from riskmodel_checker.settings import build_settings
 
-    return build_settings, init_db, PipelineSettings, run_staged_pipeline
+    return build_settings, init_db, PipelineSettings, run_staged_pipeline, load_execution_environment
 
 
 def _parse_feature_columns(value: str) -> list[str]:

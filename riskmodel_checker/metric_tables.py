@@ -26,8 +26,10 @@ COLUMN_SPEC_BY_HEADER = {
     "累计逾期率":    {"kind": "percent-heat"},
     # discrimination
     "KS":            {"kind": "databar-primary"},
+    "KS(%)":         {"kind": "databar-primary"},
     "ks":            {"kind": "text"},
     "AUC":           {"kind": "databar", "color": "accent"},
+    "AUC(%)":        {"kind": "databar", "color": "accent"},
     "5%头部lift":    {"kind": "databar", "color": "accent"},
     "5%尾部lift":    {"kind": "databar", "color": "accent"},
     "单组lift":      {"kind": "databar", "color": "accent"},
@@ -37,6 +39,8 @@ COLUMN_SPEC_BY_HEADER = {
     "PSI(首月基准)":  {"kind": "psi", "thresholds": PSI_THRESHOLDS},
     "PSI(尾月基准)":  {"kind": "psi", "thresholds": PSI_THRESHOLDS},
     "PSI(环比)":      {"kind": "psi", "thresholds": PSI_THRESHOLDS},
+    "PSI(较上一有样本月)": {"kind": "psi", "thresholds": PSI_THRESHOLDS},
+    "PSI参考月":      {"kind": "text"},
     "PSI vs baseline":{"kind": "psi", "thresholds": PSI_THRESHOLDS},
     # stress
     "类别":           {"kind": "text"},
@@ -110,8 +114,8 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
                         "样本量",
                         "逾期率",
                         "坏样本量",
-                        "KS",
-                        "AUC",
+                        "KS(%)",
+                        "AUC(%)",
                         "5%头部lift",
                         "5%尾部lift",
                         "PSI",
@@ -131,13 +135,14 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
                         "样本量",
                         "逾期率",
                         "坏样本量",
-                        "KS",
-                        "AUC",
+                        "KS(%)",
+                        "AUC(%)",
                         "5%头部lift",
                         "5%尾部lift",
                         "PSI(首月基准)",
                         "PSI(尾月基准)",
-                        "PSI(环比)",
+                        "PSI(较上一有样本月)",
+                        "PSI参考月",
                     ],
                     _monthly_effect_rows(
                         _as_list(effectiveness.get("monthly_ks")),
@@ -165,7 +170,11 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
                     ],
                     _ranking_rows(_as_list(bin_tables.get(split))),
                 )
-                for split, title in (("train", "Train"), ("test", "Test"), ("oot", "OOT"))
+                for split, title in (
+                    ("train", "Train(独立分箱)"),
+                    ("test", "Test(独立分箱)"),
+                    ("oot", "OOT(独立分箱)"),
+                )
             ],
         },
         {
@@ -194,7 +203,7 @@ def metric_table_sections_from_payload(payload: dict[str, Any]) -> list[dict[str
                 _table(
                     "IMAGE:pressure_ks_table",
                     "压力测试",
-                    ["类别", "KS_baseline", "KS_after", "KS_delta", "PSI vs baseline"],
+                    ["类别", "状态", "KS_baseline", "KS_after", "KS_delta", "PSI vs baseline"],
                     _pressure_test_rows(_as_dict(stress_test.get("baseline")), per_category),
                 ),
             ],
@@ -311,10 +320,26 @@ def _monthly_effect_rows(monthly_ks: list[Any], monthly_psi: list[Any]) -> list[
     by_month: dict[str, dict[str, Any]] = {}
     for row in monthly_ks:
         if isinstance(row, dict):
-            by_month.setdefault(str(row.get("month") or ""), {}).update(row)
+            month = str(row.get("month") or "")
+            by_month.setdefault(month, {}).update({
+                "sample_count": row.get("sample_count"),
+                "bad_rate": row.get("bad_rate"),
+                "bad_count": row.get("bad_count"),
+                "ks": row.get("ks"),
+                "auc": row.get("auc"),
+                "head_lift_5pct": row.get("head_lift_5pct"),
+                "tail_lift_5pct": row.get("tail_lift_5pct"),
+            })
     for row in monthly_psi:
         if isinstance(row, dict):
-            by_month.setdefault(str(row.get("month") or ""), {}).update(row)
+            month = str(row.get("month") or "")
+            by_month.setdefault(month, {}).update({
+                "psi_first_month": row.get("psi_first_month"),
+                "psi_last_month": row.get("psi_last_month"),
+                "psi_mom": row.get("psi_mom"),
+                "psi_mom_reference_month": row.get("psi_mom_reference_month"),
+                "psi_mom_has_calendar_gap": row.get("psi_mom_has_calendar_gap"),
+            })
 
     months = sorted(month for month in by_month if month)
     first_month = months[0] if months else ""
@@ -332,6 +357,10 @@ def _monthly_effect_rows(monthly_ks: list[Any], monthly_psi: list[Any]) -> list[
             "BASE" if month == first_month else _decimal(data.get("psi_first_month"), digits=3),
             "BASE" if month == last_month else _decimal(data.get("psi_last_month"), digits=3),
             "-" if month == first_month else _decimal(data.get("psi_mom"), digits=3),
+            "-" if month == first_month else _psi_reference_month_text(
+                _value(data.get("psi_mom_reference_month")),
+                has_calendar_gap=bool(data.get("psi_mom_has_calendar_gap")),
+            ),
         ]
         for month, data in ((month, by_month[month]) for month in months)
     ]
@@ -368,6 +397,7 @@ def _pressure_test_rows(baseline: dict[str, Any], rows: list[Any]) -> list[list[
     return [
         [
             _value(row.get("category")),
+            _stress_status_label(row.get("status"), row.get("error")),
             _decimal(baseline_ks, digits=4),
             _decimal(row.get("ks_after"), digits=4),
             _decimal(row.get("ks_delta"), digits=4),
@@ -378,8 +408,26 @@ def _pressure_test_rows(baseline: dict[str, Any], rows: list[Any]) -> list[list[
     ]
 
 
+def _stress_status_label(status: Any, error: Any = None) -> str:
+    if error and not status:
+        status = "error"
+    return {
+        "completed": "完成",
+        "skipped": "跳过",
+        "error": "异常",
+        "partial": "部分完成",
+        "failed": "失败",
+    }.get(str(status or "completed"), str(status or "completed"))
+
+
 def _score_interval(lower: Any, upper: Any) -> str:
     return f"[{_compact_number(lower)},{_compact_number(upper)}]"
+
+
+def _psi_reference_month_text(month: str, *, has_calendar_gap: bool) -> str:
+    if not month or month == "-":
+        return ""
+    return f"{month}(跨月)" if has_calendar_gap else month
 
 
 def _compact_number(value: Any) -> str:
