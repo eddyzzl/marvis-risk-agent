@@ -70,6 +70,52 @@ def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
     assert captured["cwd"] == str(tmp_path)
 
 
+def test_execution_session_close_falls_back_to_kernel_manager_shutdown():
+    class FakeKernelManager:
+        def __init__(self):
+            self.calls = []
+
+        def shutdown_kernel(self, *, now):
+            self.calls.append(now)
+
+    class FakeClient:
+        def __init__(self):
+            self.km = FakeKernelManager()
+
+    session = object.__new__(NotebookExecutionSession)
+    session.closed = False
+    session.client = FakeClient()
+
+    session.close()
+
+    assert session.closed is True
+    assert session.client.km.calls == [True]
+
+
+def test_execution_session_close_falls_back_when_private_cleanup_fails():
+    class FakeKernelManager:
+        def __init__(self):
+            self.calls = []
+
+        def shutdown_kernel(self, *, now):
+            self.calls.append(now)
+
+    class FakeClient:
+        def __init__(self):
+            self.km = FakeKernelManager()
+
+        def _cleanup_kernel(self):
+            raise RuntimeError("cleanup unavailable")
+
+    session = object.__new__(NotebookExecutionSession)
+    session.closed = False
+    session.client = FakeClient()
+
+    session.close()
+
+    assert session.client.km.calls == [True]
+
+
 def test_run_notebook_uses_explicit_execution_cwd(tmp_path: Path, monkeypatch):
     notebook_path = tmp_path / "execution" / "prepared.ipynb"
     notebook_path.parent.mkdir()

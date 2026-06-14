@@ -1,11 +1,13 @@
-import sqlite3
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import uuid
 
-from riskmodel_checker.db import _now
-from riskmodel_checker.domain import TaskStatus
+from riskmodel_checker.db import _now, connect
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_SERVER_RESTART,
+    TaskStatus,
+)
 
 
 ORPHAN_RECLAIM_STATUSES = frozenset(
@@ -44,7 +46,7 @@ def reclaim_stale_running_tasks(
         datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
     ).isoformat()
     orphan_placeholders = ",".join(["?"] * len(ORPHAN_RECLAIM_STATUSES))
-    with sqlite3.connect(db_path) as conn:
+    with connect(db_path) as conn:
         agent_task_ids = _interrupted_agent_task_ids(
             conn, orphan_placeholders, cutoff
         )
@@ -53,6 +55,7 @@ def reclaim_stale_running_tasks(
             UPDATE tasks
                SET status = ?,
                    status_message = ?,
+                   status_reason_code = ?,
                    updated_at = ?
              WHERE updated_at <= ?
                AND status IN ({orphan_placeholders})
@@ -60,6 +63,7 @@ def reclaim_stale_running_tasks(
             (
                 TaskStatus.FAILED.value,
                 "reclaimed: server restart while running",
+                TASK_STATUS_REASON_SERVER_RESTART,
                 _now(),
                 cutoff,
                 *(status.value for status in ORPHAN_RECLAIM_STATUSES),
@@ -78,12 +82,11 @@ def reclaim_stale_running_tasks(
             """,
             (_now(),),
         )
-        conn.commit()
         return cursor.rowcount
 
 
 def _interrupted_agent_task_ids(
-    conn: sqlite3.Connection,
+    conn,
     orphan_placeholders: str,
     cutoff: str,
 ) -> list[str]:
@@ -100,14 +103,15 @@ def _interrupted_agent_task_ids(
           JOIN jobs ON jobs.task_id = tasks.id
          WHERE tasks.run_mode = 'agent'
            AND jobs.status IN ('queued', 'running')
+           AND tasks.updated_at <= ?
         """,
-        (*(status.value for status in ORPHAN_RECLAIM_STATUSES), cutoff),
+        (*(status.value for status in ORPHAN_RECLAIM_STATUSES), cutoff, cutoff),
     ).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def _finalize_interrupted_agent_messages(
-    conn: sqlite3.Connection,
+    conn,
     task_ids: list[str],
 ) -> None:
     if not task_ids:
@@ -144,7 +148,7 @@ def _finalize_interrupted_agent_messages(
 
 
 def _add_agent_restart_notices(
-    conn: sqlite3.Connection,
+    conn,
     task_ids: list[str],
 ) -> None:
     for task_id in task_ids:

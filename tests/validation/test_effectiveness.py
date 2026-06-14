@@ -6,7 +6,9 @@ import pandas as pd
 import pytest
 
 from riskmodel_checker.validation.config import ValidationConfig
+from riskmodel_checker.validation.binning import compute_psi
 from riskmodel_checker.validation.effectiveness import (
+    _should_reverse_eval_bins,
     build_effectiveness_result,
     compute_bin_tables,
     compute_monthly_ks,
@@ -134,6 +136,35 @@ def test_overall_auc_keeps_declared_positive_score_direction():
     assert train.tail_lift_5pct == pytest.approx(5.0)
 
 
+def test_roc_ks_curve_population_at_ks_uses_rank_position_not_fpr():
+    rows = []
+    for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
+        for index in range(20):
+            rows.append({
+                "x1": 0.0,
+                "sample_score": 1.0 - index / 20,
+                "y": int(index == 0),
+                "split": split,
+                "apply_month": month,
+            })
+    sample = pd.DataFrame(rows)
+
+    curves = compute_roc_ks_curves(sample=sample, config=_config(bin_count=5))
+
+    assert curves["train"].ks == pytest.approx(1.0)
+    assert curves["train"].fpr[1] == pytest.approx(0.0)
+    assert curves["train"].population_at_ks == pytest.approx(1 / 20)
+
+
+def test_split_bin_auto_sort_does_not_reverse_zero_variance_scores():
+    sample = pd.DataFrame({
+        "sample_score": [0.5, 0.5, 0.5, 0.5],
+        "y": [0, 1, 0, 1],
+    })
+
+    assert _should_reverse_eval_bins(sample, score_col="sample_score", target_col="y") is False
+
+
 def test_split_bin_tables_follow_model_analysis_auto_sort_direction():
     rows = []
     for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
@@ -191,6 +222,31 @@ def test_psi_stability_uses_train_test_bins_against_oot_distribution():
     assert sum(row.psi for row in psi_rows) > 0
 
 
+def test_psi_stability_table_uses_shared_compute_psi_smoothing():
+    rows = []
+    for split, scores in {
+        "train": [0.1, 0.2, 0.3, 0.4],
+        "test": [0.15, 0.25, 0.35, 0.45],
+        "oot": [0.9, 0.95, 0.97, 0.99],
+    }.items():
+        for score in scores:
+            rows.append({
+                "x1": 0.0,
+                "sample_score": score,
+                "y": int(score >= 0.5),
+                "split": split,
+                "apply_month": "202503",
+            })
+    sample = pd.DataFrame(rows)
+
+    psi_rows = compute_psi_stability_table(sample=sample, config=_config(bin_count=2))
+
+    assert psi_rows[0].actual_pct == pytest.approx(0.0)
+    assert psi_rows[0].psi == pytest.approx(
+        compute_psi([psi_rows[0].expected_pct], [psi_rows[0].actual_pct])
+    )
+
+
 def test_monthly_metrics_present_for_each_month():
     sample = _build_sample()
     result = run_effectiveness(sample=sample, config=_config(bin_count=5))
@@ -207,6 +263,10 @@ def test_monthly_metrics_include_model_analysis_psi_variants():
 
     assert by_month["202503"].psi_first_month == pytest.approx(0.0)
     assert by_month["202503"].psi_mom is None
+    assert by_month["202503"].psi_mom_reference_month == ""
+    assert by_month["202503"].psi_mom_has_calendar_gap is False
+    assert by_month["202505"].psi_mom_reference_month == "202503"
+    assert by_month["202505"].psi_mom_has_calendar_gap is True
     assert by_month["202507"].psi_last_month == pytest.approx(0.0)
     assert by_month["202507"].psi_mom is not None
 

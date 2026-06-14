@@ -1,17 +1,44 @@
-const defaultPetPreference = "naitang";
-const explicitPetNoneStorageKey = "riskmodel_checker_pet_none_explicit";
-const agentComposerPreferenceStorageKey = "riskmodel_checker_agent_composer_preferences";
-// Per-task composer overrides: `{ [taskId]: { model_id, effort, acceptance_mode } }`.
-// Each task remembers its own mode/model/effort. The global preferences above
-// are only the seed value applied when a task has no override yet.
-const agentTaskComposerStorageKey = "riskmodel_checker_agent_task_composer_preferences";
-const defaultBranding = {
-  platformName: "MARVIS-全能风控智能体",
-  browserTitle: "MARVIS-全能风控智能体",
-  primaryColor: "#000000",
-  logoUrl: "static/brand/marvis-logo.png",
-  faviconUrl: "static/brand/marvis-favicon.png",
-};
+import { api, sleep } from "./js/api.js";
+import { applyBranding, normalizeBranding } from "./js/branding.js";
+import { createMaterialSourceController } from "./js/dialogs.js";
+import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
+import { renderAgentMarkdown } from "./js/render-agent.js";
+import {
+  columnFractions,
+  columnHeatColors,
+  columnRanks,
+  parseNumeric,
+  psiTier,
+  psiTooltipText,
+} from "./js/render-metrics.js";
+import {
+  activeValidationStatuses,
+  agentComposerPreferenceStorageKey,
+  agentTaskComposerStorageKey,
+  createRenderSignatures,
+  defaultBranding,
+  defaultExecutionEnvironment,
+  defaultPetPreference,
+  explicitPetNoneStorageKey,
+  metricOverviewCompleteStatuses,
+  notebookReproducibilityCompleteStatuses,
+  requiredMaterialRoles,
+  roleLabels,
+  scanFailurePrefix,
+  selectedTaskStorageKey,
+  statusLabels,
+  terminalTaskStatuses,
+  workflowSteps,
+} from "./js/state.js";
+import {
+  $,
+  clamp,
+  escapeHtml,
+  fileName,
+  formatDateInput,
+  signatureFromParts,
+  splitListInput,
+} from "./js/ui-utils.js";
 
 let selectedTaskId = null;
 let selectedTask = null;
@@ -20,7 +47,7 @@ let lastMetricValues = {};
 let lastMetricValuesTaskId = null;
 let lastMetricTableSections = [];
 const taskBusyActions = new Map();
-const backgroundProgressPolls = new Map();
+const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let globalBusyAction = null;
 let themePreference = "light";
@@ -46,22 +73,7 @@ let lastAgentStructuralSignature = null;
 // Cached render-input signatures so the per-second polling loop can skip
 // rewriting DOM regions whose visible inputs have not changed. Reset only
 // when task selection, validation run, or filter/sort/search state changes.
-const renderSignatures = {
-  actionStatus: "",
-  currentTask: "",
-  taskList: "",
-  workflowStepper: "",
-  metricPreview: "",
-  metricPreviewTaskId: "",
-  // Reproducibility precision-bar chart lives in a second highly-animated
-  // region. We track its structural signature here (instead of on the DOM
-  // dataset) and gate the CSS entry animation so it only plays for the
-  // first populated render of a given task — not every time a transient
-  // empty evidence payload arrives between populated ones.
-  reproducibilityEvidence: "",
-  reproducibilityTaskId: "",
-  reproducibilityAnimatedTaskId: "",
-};
+const renderSignatures = createRenderSignatures();
 const agentTypingState = new Map();
 // messageId -> content as it appeared when the typewriter caught up and the
 // server stopped streaming. Lets a later streaming-resumed render seed
@@ -91,6 +103,10 @@ let petReactionTimer = null;
 let taskHeroGlassFrame = null;
 let taskHeroGlassActive = null;
 let taskHeroCanScroll = false;
+const materialSourceController = createMaterialSourceController({
+  $,
+  onFilesChanged: renderMaterialUploadSelection,
+});
 
 const PET_REACTION_DURATION_MS = 6500;
 const AGENT_STREAM_POLL_INTERVAL_MS = 180;
@@ -139,86 +155,10 @@ const legacyPetPreferences = {
   "ragdoll-cat": "xiaojiu",
 };
 
-const defaultExecutionEnvironment = {
-  execution_mode: "jupyter_kernel",
-  kernel_name: "python3",
-  conda_env_name: "",
-  python_executable: "",
-};
-
 executionEnvironmentSettings = { ...defaultExecutionEnvironment };
 
-const activeValidationStatuses = new Set([
-  "created",
-  "scanned",
-  "running",
-  "executed",
-  "computing_metrics",
-  "writing_artifacts",
-]);
-
-const terminalTaskStatuses = new Set([
-  "succeeded",
-  "failed",
-  "review_required",
-]);
-
-const notebookReproducibilityCompleteStatuses = new Set([
-  "executed",
-  "computing_metrics",
-  "writing_artifacts",
-  "succeeded",
-  "review_required",
-]);
-
-const metricOverviewCompleteStatuses = new Set([
-  "writing_artifacts",
-  "succeeded",
-  "review_required",
-]);
-
-const workflowSteps = [
-  { id: "scan", title: "模型材料完备性验证", hint: "巡检材料内容", target: "scanSection", action: "scan", actionLabel: "重新扫描" },
-  { id: "notebook", title: "模型可复现性验证", hint: "执行建模代码", target: "notebookSection", action: "notebook", actionLabel: "运行" },
-  { id: "metrics", title: "模型效果&稳定性验证", hint: "指标概览", target: "metricSection", action: "metrics", actionLabel: "生成" },
-  { id: "report", title: "报告输出", hint: "Word报告与Excel分析", target: "reportSection", action: "report", actionLabel: "生成" },
-];
-
-const statusLabels = {
-  created: "已创建",
-  scanned: "已扫描",
-  running: "运行中",
-  executed: "已执行",
-  computing_metrics: "计算指标",
-  writing_artifacts: "写入产物",
-  succeeded: "已出报告",
-  failed: "失败",
-  review_required: "待复核",
-};
-
-const roleLabels = {
-  notebook: "Notebook",
-  sample: "样本数据",
-  model_pmml: "PMML 模型",
-  data_dictionary: "数据字典",
-  unknown: "未识别文件",
-};
-
-const requiredMaterialRoles = [
-  { role: "notebook", label: "Notebook" },
-  { role: "sample", label: "样本数据" },
-  { role: "model_pmml", label: "PMML 模型" },
-  { role: "data_dictionary", label: "数据字典" },
-];
-const scanFailurePrefix = "材料扫描失败：";
-
 function taskStopped(task = selectedTask) {
-  const message = String(task?.status_message || "").toLowerCase();
-  return (
-    message.includes("已停止") ||
-    message.includes("已取消") ||
-    message.includes("cancelled")
-  );
+  return task?.stopped === true;
 }
 
 function taskBusyAction(taskId = selectedTaskId) {
@@ -243,76 +183,20 @@ function selectedTaskIsBusy() {
   return Boolean(taskBusyAction());
 }
 
-function $(id) {
-  return document.getElementById(id);
-}
-
-function normalizeBranding(payload = {}) {
-  const branding = { ...defaultBranding };
-  if (typeof payload.platformName === "string" && payload.platformName.trim()) {
-    branding.platformName = payload.platformName.trim();
-  }
-  if (typeof payload.browserTitle === "string" && payload.browserTitle.trim()) {
-    branding.browserTitle = payload.browserTitle.trim();
-  }
-  if (typeof payload.primaryColor === "string" && /^#[0-9a-fA-F]{6}$/.test(payload.primaryColor.trim())) {
-    branding.primaryColor = payload.primaryColor.trim().toLowerCase();
-  }
-  if (typeof payload.logoUrl === "string" && payload.logoUrl.trim()) {
-    branding.logoUrl = payload.logoUrl.trim();
-  }
-  if (typeof payload.faviconUrl === "string" && payload.faviconUrl.trim()) {
-    branding.faviconUrl = payload.faviconUrl.trim();
-  }
-  return branding;
-}
-
-function brandHoverColor(color) {
-  if (color === "#000000") return "#1f1f1f";
-  const parts = [1, 3, 5].map((index) => parseInt(color.slice(index, index + 2), 16));
-  return `#${parts.map((value) => Math.max(0, Math.round(value * 0.86)).toString(16).padStart(2, "0")).join("")}`;
-}
-
-function imageMimeType(url) {
-  const path = url.split("?")[0].toLowerCase();
-  if (path.endsWith(".svg")) return "image/svg+xml";
-  if (path.endsWith(".ico")) return "image/x-icon";
-  if (path.endsWith(".webp")) return "image/webp";
-  return "image/png";
-}
-
-function applyBranding(branding) {
-  document.title = branding.browserTitle;
-  if ($("platformName")) $("platformName").textContent = branding.platformName;
-  if ($("brandLogo")) {
-    $("brandLogo").src = branding.logoUrl;
-    $("brandLogo").alt = `${branding.platformName} logo`;
-  }
-  if ($("workspaceBrandLogo")) {
-    $("workspaceBrandLogo").src = branding.logoUrl;
-    $("workspaceBrandLogo").alt = `${branding.platformName} logo`;
-  }
-  const favicon = $("brandFavicon") || document.querySelector('link[rel="icon"]');
-  if (favicon) {
-    favicon.href = branding.faviconUrl;
-    favicon.type = imageMimeType(branding.faviconUrl);
-  }
-  document.documentElement.style.setProperty("--brand-primary", branding.primaryColor);
-  document.documentElement.style.setProperty("--brand-primary-hover", brandHoverColor(branding.primaryColor));
-}
+// Real validator name -> display alias, populated from the workspace brand.json
+// via GET api/branding. Empty by default so real names never ship in this bundle.
+let agentValidatorAliases = {};
 
 async function loadBranding() {
   try {
     const response = await fetch("api/branding");
     const payload = response.ok ? await response.json() : {};
-    applyBranding(normalizeBranding(payload));
+    const branding = normalizeBranding(payload);
+    agentValidatorAliases = branding.validatorAliases || {};
+    applyBranding(branding);
   } catch (_error) {
     applyBranding(defaultBranding);
   }
-}
-
-function signatureFromParts(parts) {
-  return JSON.stringify(parts.map((part) => (part === undefined ? null : part)));
 }
 
 function currentTaskSignature(task) {
@@ -413,13 +297,42 @@ function openTaskDialog() {
     delete card.dataset.wasChecked;
   });
   setCreateStatus("");
+  materialSourceController.reset();
   prefillCreateTaskReportFields();
   $("taskDialog").showModal();
   $("modelName").focus();
 }
 
+function openTaskTypeWelcome() {
+  const taskDialog = $("taskDialog");
+  if (taskDialog?.open) closeTaskDialog();
+  if (selectedTaskId || selectedTask) {
+    deselectCurrentTask();
+    return;
+  }
+  rememberSelectedTaskId(null);
+  setActionStatus("");
+  renderCurrentTask({ force: true });
+  renderTaskList();
+}
+
 function closeTaskDialog() {
   $("taskDialog").close();
+}
+
+function renderMaterialUploadSelection(files = materialSourceController.selectedFiles()) {
+  const status = $("materialUploadStatus");
+  if (!status) return;
+  if (files.length === 0) {
+    status.textContent = "文件上传提交暂未开放，请先使用文件路径。";
+    return;
+  }
+  const names = files
+    .slice(0, 3)
+    .map((file) => file.name)
+    .join("、");
+  const suffix = files.length > 3 ? ` 等 ${files.length} 个文件` : "";
+  status.textContent = `已选择 ${names}${suffix}；上传提交暂未开放。`;
 }
 
 function handleRunModeCardPointerDown(event) {
@@ -513,10 +426,6 @@ function applyTheme(theme) {
 
 function setCssNumber(name, value) {
   document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
 }
 
 function formControlFocusTarget(target) {
@@ -1062,31 +971,6 @@ function handleSettingsMenuChange(event) {
   }
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function fileName(path) {
-  return String(path || "").split(/[\\/]/).filter(Boolean).pop() || path || "";
-}
-
-function formatDateInput(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
-  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
-}
-
-function splitListInput(value) {
-  return String(value || "")
-    .split(/[\n,，]+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function taskDisplayName(task) {
   if (!task) return "";
   const name = String(task.model_name || "").trim();
@@ -1216,11 +1100,11 @@ function taskStoppedActionStatusMessage(task = selectedTask) {
 }
 
 function taskFailedDuringScan(task = selectedTask) {
-  return task?.status === "failed" && String(task.status_message || "").startsWith("材料扫描失败：");
+  return task?.status === "failed" && normalizedFailureStage(task.failure_stage) === "scan";
 }
 
 function taskFailureWasRestartReclaim(task = selectedTask) {
-  return task?.status === "failed" && String(task.status_message || "") === "reclaimed: server restart while running";
+  return task?.status === "failed" && task?.failure_reason_code === "server_restart_while_running";
 }
 
 function normalizedFailureStage(stage) {
@@ -1232,13 +1116,7 @@ function taskFailureStage(task = selectedTask) {
   if (!task || task.status !== "failed") return null;
   const structuredStage = normalizedFailureStage(task.failure_stage);
   if (structuredStage) return structuredStage;
-  if (taskFailedDuringScan(task)) return "scan";
-  const message = String(task.status_message || "");
-  if (
-    /模型效果&稳定性验证失败|指标|metrics|notebook metrics failed|sample column check failed|data dictionary missing columns|live notebook kernel is not available/i.test(message)
-  ) return "metrics";
-  if (/报告输出失败|报告|Word|report/i.test(message)) return "report";
-  return "notebook";
+  return null;
 }
 
 function taskFailedDuringMetrics(task = selectedTask) {
@@ -1260,7 +1138,8 @@ function taskFailureActionStatusTitle(task = selectedTask) {
   if (stage === "scan") return "材料识别失败。";
   if (stage === "metrics") return "模型效果&稳定性验证失败。";
   if (stage === "report") return "报告输出失败。";
-  return "模型可复现性验证失败。";
+  if (stage === "notebook") return "模型可复现性验证失败。";
+  return "任务执行失败。";
 }
 
 function taskStoppedActionStatusTitle(task = selectedTask) {
@@ -1493,46 +1372,6 @@ function setBusy(actionId, message = "", taskId = selectedTaskId) {
   updateAgentSendDisabled();
 }
 
-function formatErrorDetail(detail) {
-  if (Array.isArray(detail)) {
-    return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
-  }
-  if (detail && typeof detail === "object") {
-    return JSON.stringify(detail);
-  }
-  return detail || "请求失败";
-}
-
-async function readErrorMessage(response) {
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    const payload = await response.json();
-    return formatErrorDetail(payload.detail || payload);
-  }
-  return (await response.text()) || "请求失败";
-}
-
-async function api(endpoint, options = {}) {
-  const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
-    ? endpoint
-    : `/${endpoint}`;
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {}),
-  };
-  const response = await fetch(normalizedEndpoint, {
-    ...options,
-    headers,
-  });
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
-  }
-  if (response.status === 204) {
-    return null;
-  }
-  return response.json();
-}
-
 function setAgentMemoryStatus(message = "", kind = "") {
   const status = $("agentMemoryStatus");
   if (!status) return;
@@ -1722,10 +1561,6 @@ function requireTaskId(taskId, actionName = "当前操作") {
     throw new Error(`${actionName}缺少任务 ID，请刷新任务列表后重试。`);
   }
   return normalizedTaskId;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeExecutionEnvironment(settings = {}) {
@@ -2082,6 +1917,8 @@ function collectLLMSettings() {
       provider: model.provider || "OpenAI Compatible",
       model_name: (model.model_name || "").trim(),
       api_base_url: (model.api_base_url || "").trim(),
+      enabled: model.enabled !== false,
+      enable_thinking: Boolean(model.enable_thinking),
       timeout_seconds: Number(model.timeout_seconds || 60),
     };
     if (typeof model.api_key === "string" && model.api_key.trim()) {
@@ -2091,8 +1928,8 @@ function collectLLMSettings() {
     }
     return payload;
   });
-  // enabled is omitted (server defaults to true) and default_model_id is left
-  // for the server to derive — model selection happens in the composer, not here.
+  // default_model_id is left for the server to derive — model selection happens
+  // in the composer, not here.
   return { default_model_id: "", models };
 }
 
@@ -2151,6 +1988,7 @@ function openLLMEngineEdit(index) {
   $("llmEngineDisplayName").value = model.display_name || "";
   $("llmEngineModelName").value = model.model_name || "";
   $("llmEngineBaseUrl").value = model.api_base_url || "";
+  $("llmEngineEnableThinking").checked = Boolean(model.enable_thinking);
   const keyInput = $("llmEngineApiKey");
   keyInput.value = "";
   keyInput.placeholder = model.has_api_key ? "留空保持不变" : "sk-...";
@@ -2182,6 +2020,7 @@ async function saveLLMEngineEdit() {
   model.display_name = displayName;
   model.model_name = modelName;
   model.api_base_url = baseUrl;
+  model.enable_thinking = $("llmEngineEnableThinking").checked;
   if (apiKey) {
     model.api_key = apiKey;
     model.has_api_key = true;
@@ -2205,18 +2044,52 @@ async function saveLLMEngineEdit() {
   }
 }
 
+function rememberSelectedTaskId(taskId) {
+  try {
+    if (taskId) {
+      localStorage.setItem(selectedTaskStorageKey, taskId);
+    } else {
+      localStorage.removeItem(selectedTaskStorageKey);
+    }
+  } catch (_) {
+    // Browser storage can be unavailable in private or embedded contexts.
+  }
+}
+
+function storedSelectedTaskId() {
+  try {
+    return localStorage.getItem(selectedTaskStorageKey) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function syncSelectedTaskFromCache() {
   if (!selectedTaskId) {
+    const storedTaskId = storedSelectedTaskId();
+    if (storedTaskId) {
+      const restored = taskCache.find((task) => task.id === storedTaskId);
+      if (restored) {
+        selectedTaskId = restored.id;
+        selectedTask = restored;
+        applyAgentTaskComposerPreferences(restored.id);
+        prepareResultScrollRestoreForTask(restored.id);
+        return;
+      }
+      rememberSelectedTaskId(null);
+    }
     selectedTask = null;
     return;
   }
   const current = taskCache.find((task) => task.id === selectedTaskId);
   if (current) {
     selectedTask = current;
+    rememberSelectedTaskId(current.id);
     return;
   }
   selectedTaskId = null;
   selectedTask = null;
+  rememberSelectedTaskId(null);
 }
 
 function findTaskInCache(taskId) {
@@ -2226,13 +2099,8 @@ function findTaskInCache(taskId) {
 function ensureActiveTaskProgressPolling(task = selectedTask) {
   const taskId = task?.id || selectedTaskId;
   if (!taskId || !taskServerBusyAction(task)) return;
-  if (backgroundProgressPolls.has(taskId)) return;
-  const promise = pollValidationProgress(terminalTaskStatuses, taskId, { background: true })
-    .catch(() => null)
-    .finally(() => {
-      backgroundProgressPolls.delete(taskId);
-    });
-  backgroundProgressPolls.set(taskId, promise);
+  if (progressPolls.has(taskId)) return;
+  pollValidationProgress(terminalTaskStatuses, taskId, { background: true }).catch(() => null);
 }
 
 function runModeLabel(mode) {
@@ -2604,6 +2472,7 @@ function metricStepsForRail() {
 }
 
 function workflowStageCompleteFromEvidence(stepId) {
+  if (stepId === "scan") return latestNotebookSteps.length > 0;
   const stageSteps = stepId === "notebook"
     ? notebookStepsForRail()
     : stepId === "metrics"
@@ -3131,6 +3000,7 @@ function selectTask(task) {
   resetAgentTypingState();
   selectedTaskId = task.id;
   selectedTask = task;
+  rememberSelectedTaskId(task.id);
   applyAgentTaskComposerPreferences(task.id);
   prepareResultScrollRestoreForTask(task.id);
   applyResultScrollPosition(task.id);
@@ -3153,6 +3023,7 @@ function deselectCurrentTask() {
   rememberResultScrollPosition();
   selectedTaskId = null;
   selectedTask = null;
+  rememberSelectedTaskId(null);
   latestNotebookSteps = [];
   agentMessages = [];
   resetAgentComposerToGlobalDefaults();
@@ -3244,108 +3115,9 @@ function renderMetricTableSection(section = {}, index = 0, options = {}) {
 
 // ====== Metric overview cell helpers ======
 
-function parseNumeric(value) {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  const text = String(value).trim().replace(/,/g, "");
-  if (!text || text === "-") return null;
-  if (text.endsWith("%")) {
-    const inner = Number(text.slice(0, -1));
-    return Number.isFinite(inner) ? inner / 100 : null;
-  }
-  const num = Number(text);
-  return Number.isFinite(num) ? num : null;
-}
-
-function columnNumerics(rows, columnIndex) {
-  return rows
-    .map((row, index) => [index, parseNumeric(Array.isArray(row) ? row[columnIndex] : null)])
-    .filter(([, value]) => value !== null);
-}
-
-function columnFractions(rows, columnIndex) {
-  const indexed = columnNumerics(rows, columnIndex);
-  if (indexed.length === 0) return new Map();
-  const values = indexed.map(([, v]) => v);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const result = new Map();
-  for (const [rowIndex, value] of indexed) {
-    let fraction;
-    if (max === min) fraction = value ? 1 : 0;
-    else if (min >= 0 && max > 0) fraction = value / max;
-    else fraction = (value - min) / (max - min);
-    result.set(rowIndex, fraction);
-  }
-  return result;
-}
-
-function heatColor(value, min, mid, max) {
-  if (max === min) return "#FFEB84";
-  const lerp = (a, b, t) => Math.round(a + (b - a) * Math.max(0, Math.min(1, t)));
-  const GREEN = [0x63, 0xBE, 0x7B];
-  const YELLOW = [0xFF, 0xEB, 0x84];
-  const RED = [0xF8, 0x69, 0x6B];
-  let r, g, b;
-  if (value <= mid) {
-    const t = mid === min ? 0 : (value - min) / (mid - min);
-    [r, g, b] = [lerp(GREEN[0], YELLOW[0], t), lerp(GREEN[1], YELLOW[1], t), lerp(GREEN[2], YELLOW[2], t)];
-  } else {
-    const t = max === mid ? 1 : (value - mid) / (max - mid);
-    [r, g, b] = [lerp(YELLOW[0], RED[0], t), lerp(YELLOW[1], RED[1], t), lerp(YELLOW[2], RED[2], t)];
-  }
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
-function columnHeatColors(rows, columnIndex) {
-  const indexed = columnNumerics(rows, columnIndex);
-  if (indexed.length === 0) return new Map();
-  const sorted = [...indexed].map(([, v]) => v).sort((a, b) => a - b);
-  const min = sorted[0];
-  const max = sorted[sorted.length - 1];
-  const mid = sorted[Math.floor(sorted.length / 2)];
-  const result = new Map();
-  for (const [rowIndex, value] of indexed) {
-    result.set(rowIndex, heatColor(value, min, mid, max));
-  }
-  return result;
-}
-
-function columnRanks(rows, columnIndex) {
-  const indexed = columnNumerics(rows, columnIndex);
-  if (indexed.length === 0) return new Map();
-  const sorted = [...indexed].sort((a, b) => b[1] - a[1]);
-  const ranks = new Map();
-  let lastValue = null;
-  let lastRank = 0;
-  sorted.forEach(([rowIndex, value], i) => {
-    const rank = value === lastValue ? lastRank : i + 1;
-    ranks.set(rowIndex, `#${rank} of ${indexed.length}`);
-    lastValue = value;
-    lastRank = rank;
-  });
-  return ranks;
-}
-
-function psiTier(value, thresholds) {
-  if (value === null) return "base";
-  const [warnAt, critAt] = thresholds;
-  if (Math.abs(value) >= critAt) return "critical";
-  if (Math.abs(value) >= warnAt) return "warn";
-  return "stable";
-}
-
-function psiTooltipText(value, thresholds) {
-  const [warnAt, critAt] = thresholds;
-  if (value === null) return `PSI · 基线\n阈值：稳定 <${warnAt} · 可接受 <${critAt} · 漂移 ≥${critAt}`;
-  const tier = psiTier(value, thresholds);
-  const tierLabel = { stable: "稳定", warn: "可接受", critical: "漂移显著", base: "基线" }[tier];
-  return `PSI ${value.toFixed(4)}\n当前：${tierLabel}\n阈值：稳定 <${warnAt} · 可接受 <${critAt} · 漂移 ≥${critAt}`;
-}
-
 function renderCellByKind(spec, value, context) {
   const kind = (spec && spec.kind) || "text";
-  if (kind === "trend-spark") {
+  if (kind === "trend-spark" && spec && spec.__localHtml === true) {
     return { cls: "cell-sparkline", html: String(value ?? "") };  // value is raw <svg>
   }
   const headerLabel = context.headerLabel ?? "";
@@ -3436,10 +3208,11 @@ function renderKpiCards(table = {}, options = {}) {
   const curves = (options && options.curves) || null;
 
   const idx = (label) => headers.indexOf(label);
+  const idxAny = (...labels) => labels.map(idx).find((index) => index >= 0) ?? -1;
   const splitIdx = idx("数据集");
   const periodIdx = idx("时间范围");
-  const ksIdx = idx("KS");
-  const aucIdx = idx("AUC");
+  const ksIdx = idxAny("KS(%)", "KS");
+  const aucIdx = idxAny("AUC(%)", "AUC");
   const headLiftIdx = idx("5%头部lift");
   const tailLiftIdx = idx("5%尾部lift");
   const psiIdx = idx("PSI");
@@ -3530,7 +3303,9 @@ function renderTrendTable(table = {}) {
   const baseRows = Array.isArray(table.rows) ? table.rows.map((row) => Array.isArray(row) ? [...row] : []) : [];
   const baseSpecs = Array.isArray(table.column_specs) ? [...table.column_specs] : [];
 
-  const ksIdx = baseHeaders.indexOf("KS");
+  const ksIdx = baseHeaders.indexOf("KS(%)") >= 0
+    ? baseHeaders.indexOf("KS(%)")
+    : baseHeaders.indexOf("KS");
   const ksSeries = ksIdx >= 0
     ? baseRows.map((row) => parseNumeric(row[ksIdx])).filter((v) => v !== null)
     : [];
@@ -3543,7 +3318,7 @@ function renderTrendTable(table = {}) {
   const trendHeaders = [...baseHeaders];
   const trendSpecs = [...baseSpecs];
   trendHeaders.splice(insertAt, 0, "KS 趋势");
-  trendSpecs.splice(insertAt, 0, { kind: "trend-spark" });
+  trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });
   const trendRows = baseRows.map((row, rowIndex) => {
     const copy = [...row];
     const sparkHtml = renderSparklineSvg(ksSeries, ksAll[rowIndex]);
@@ -3612,7 +3387,12 @@ function renderRocCard(split, curve) {
   const tprPath = buildPath(fpr, tpr);
   const diagonalPath = `M${xOf(0)},${yOf(0)} L${xOf(1)},${yOf(1)}`;
   const ksPath = ks.length === fpr.length ? buildPath(fpr, ks) : "";
-  const ksMarkerX = xOf(curve.population_at_ks ?? 0);
+  // KS marker sits on the FPR axis: anchor it at fpr[argmax(|ks_curve|)]. Using
+  // population_at_ks (a different axis) misplaces the line on imbalanced data.
+  const ksArgmax = ks.length
+    ? ks.reduce((best, value, i) => (Math.abs(value) > Math.abs(ks[best]) ? i : best), 0)
+    : 0;
+  const ksMarkerX = xOf(fpr[ksArgmax] ?? 0);
 
   const gridLines = [0.25, 0.5, 0.75].map((t) =>
     `<line class="roc-grid-line" x1="${xOf(t).toFixed(2)}" y1="${plot.y}" x2="${xOf(t).toFixed(2)}" y2="${plot.y + plot.h}"></line>`
@@ -3724,9 +3504,9 @@ let metricTooltipAttached = false;
 
 function attachMetricTooltip(rootEl) {
   if (metricTooltipAttached || !rootEl) return;
-  metricTooltipAttached = true;
   const tooltip = document.getElementById("metricTooltip");
   if (!tooltip) return;
+  metricTooltipAttached = true;
   let currentTarget = null;
   const positionTooltip = (el, event) => {
     const pad = 12;
@@ -3750,16 +3530,16 @@ function attachMetricTooltip(rootEl) {
     currentTarget = null;
     tooltip.hidden = true;
   };
-  rootEl.addEventListener("mouseover", (event) => {
-    const target = event.target.closest("[data-tip]");
-    if (target && rootEl.contains(target)) show(target, event);
+  document.addEventListener("mouseover", (event) => {
+    const target = event.target.closest("#metricPreview [data-tip]");
+    if (target) show(target, event);
   });
-  rootEl.addEventListener("mousemove", (event) => {
+  document.addEventListener("mousemove", (event) => {
     if (currentTarget && currentTarget.contains(event.target)) {
       positionTooltip(tooltip, event);
     }
   });
-  rootEl.addEventListener("mouseout", (event) => {
+  document.addEventListener("mouseout", (event) => {
     if (!currentTarget) return;
     const next = event.relatedTarget;
     if (!next || !currentTarget.contains(next)) hide();
@@ -4689,6 +4469,26 @@ function agentFrozenSnapshotsByTriggerId() {
   return result;
 }
 
+function stripIdsFromHtml(html) {
+  // Sanitize a frozen HTML fragment before re-inserting it:
+  //  - remove id attributes so we never produce duplicate ids (e.g. two
+  //    #metricPreview) that make getElementById/querySelector resolve to a stale
+  //    frozen element;
+  //  - as defense-in-depth, drop <script> elements and inline on* event handlers
+  //    so a snapshot can never reintroduce active content (the live data source is
+  //    already escaped, but frozen snapshots must stay inert).
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
+  template.content.querySelectorAll("script").forEach((el) => el.remove());
+  template.content.querySelectorAll("*").forEach((el) => {
+    el.removeAttribute("id");
+    for (const attr of [...el.attributes]) {
+      if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+    }
+  });
+  return template.innerHTML;
+}
+
 function createAgentFrozenSnapshotElement(snapshot) {
   const wrap = document.createElement("section");
   wrap.className = "progress-panel agent-frozen-snapshot";
@@ -4701,7 +4501,7 @@ function createAgentFrozenSnapshotElement(snapshot) {
   wrap.innerHTML = [
     `<div class="agent-frozen-snapshot-label">${escapeHtml(snapshot.label || "历史")}</div>`,
     snapshot.headingHtml || "",
-    `<div class="${escapeHtml(innerWrapClass)}" data-frozen-snapshot-content="true">${snapshot.contentHtml || ""}</div>`,
+    `<div class="${escapeHtml(innerWrapClass)}" data-frozen-snapshot-content="true">${stripIdsFromHtml(snapshot.contentHtml)}</div>`,
   ].join("");
   return wrap;
 }
@@ -4728,7 +4528,7 @@ function restoreResultScrollDefaultOrder() {
 
 function agentMessageIsContinuePrompt(message) {
   const metadata = message?.metadata || {};
-  return Boolean(metadata.awaiting_next_stage) || String(message?.content || "").includes("是否继续执行");
+  return Boolean(metadata.awaiting_next_stage);
 }
 
 function agentMessageContent(message) {
@@ -4772,10 +4572,7 @@ function stripAgentAdvanceIntentAffixes(value) {
 
 function agentMessageIsScanLead(message) {
   const metadata = message?.metadata || {};
-  return (
-    metadata.tool_call?.name === "scan_materials" ||
-    String(message?.content || "").startsWith("正在调用材料识别工具")
-  );
+  return metadata.tool_call?.name === "scan_materials";
 }
 
 function agentReportMessagesForDisplay(messages = []) {
@@ -5179,11 +4976,7 @@ function agentThinkingHtml() {
 }
 
 function agentValidatorAlias(validator) {
-  const aliases = {
-    "于添": "蛋黄",
-    "张雯萱": "小九",
-  };
-  return aliases[String(validator || "").trim()] || "";
+  return agentValidatorAliases[String(validator || "").trim()] || "";
 }
 
 function agentStageLabel(_stage) {
@@ -5193,288 +4986,6 @@ function agentStageLabel(_stage) {
 function formatAgentMessageContent(content, { markdown = false } = {}) {
   if (markdown) return renderAgentMarkdown(content);
   return escapeHtml(content).replaceAll("\n", "<br>");
-}
-
-function renderAgentMarkdown(content) {
-  const lines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
-  const html = [];
-  let listType = "";
-  let codeLines = null;
-  let codeLanguage = "";
-
-  const closeList = () => {
-    if (!listType) return;
-    html.push(`</${listType}>`);
-    listType = "";
-  };
-  const openList = (type, start = "") => {
-    if (listType === type) return;
-    closeList();
-    listType = type;
-    const startNumber = Number.parseInt(start, 10);
-    const startAttr = type === "ol" && Number.isFinite(startNumber) && startNumber > 1
-      ? ` start="${startNumber}"`
-      : "";
-    html.push(`<${type}${startAttr}>`);
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim().startsWith("```")) {
-      const language = line.trim().slice(3).trim().split(/\s+/)[0] || "";
-      if (codeLines) {
-        html.push(renderMarkdownCodeBlock(codeLines, codeLanguage));
-        codeLines = null;
-        codeLanguage = "";
-      } else {
-        closeList();
-        codeLines = [];
-        codeLanguage = normalizeMarkdownCodeLanguage(language);
-      }
-      continue;
-    }
-    if (codeLines) {
-      codeLines.push(line);
-      continue;
-    }
-    if (!line.trim()) {
-      closeList();
-      continue;
-    }
-    if (splitMarkdownTableRow(line).length > 1 && isMarkdownTableDivider(lines[index + 1])) {
-      closeList();
-      const headerCells = splitMarkdownTableRow(line);
-      const bodyRows = [];
-      index += 2;
-      while (index < lines.length && splitMarkdownTableRow(lines[index]).length > 1) {
-        if (isMarkdownTableDivider(lines[index])) break;
-        bodyRows.push(splitMarkdownTableRow(lines[index]));
-        index += 1;
-      }
-      index -= 1;
-      html.push(renderMarkdownTable(headerCells, bodyRows));
-      continue;
-    }
-    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
-    if (heading) {
-      closeList();
-      const level = heading[1].length + 2;
-      html.push(`<h${level}>${renderMarkdownInline(heading[2])}</h${level}>`);
-      continue;
-    }
-    const unordered = /^\s*[-*]\s+(.+)$/.exec(line);
-    if (unordered) {
-      openList("ul");
-      html.push(`<li>${renderMarkdownInline(unordered[1])}</li>`);
-      continue;
-    }
-    const ordered = /^\s*(\d+)\.\s+(.+)$/.exec(line);
-    if (ordered) {
-      openList("ol", ordered[1]);
-      html.push(`<li>${renderMarkdownInline(ordered[2])}</li>`);
-      continue;
-    }
-    const quote = /^\s*>\s+(.+)$/.exec(line);
-    if (quote) {
-      closeList();
-      html.push(`<blockquote>${renderMarkdownInline(quote[1])}</blockquote>`);
-      continue;
-    }
-    closeList();
-    html.push(`<p>${renderMarkdownInline(line)}</p>`);
-  }
-  if (codeLines) html.push(renderMarkdownCodeBlock(codeLines, codeLanguage));
-  closeList();
-  return `<div class="agent-markdown">${html.join("")}</div>`;
-}
-
-function normalizeMarkdownCodeLanguage(language) {
-  const normalized = String(language || "").trim().toLowerCase().replace(/[^a-z0-9_+.-]/g, "");
-  return {
-    py: "python",
-    js: "javascript",
-    ts: "typescript",
-    sh: "bash",
-    shell: "bash",
-    yml: "yaml",
-  }[normalized] || normalized;
-}
-
-function renderMarkdownCodeBlock(codeLines, language = "") {
-  const normalizedLanguage = normalizeMarkdownCodeLanguage(language);
-  const languageClass = normalizedLanguage ? ` class="language-${escapeHtml(normalizedLanguage)}"` : "";
-  return `<pre><code${languageClass}>${highlightMarkdownCode(codeLines.join("\n"), normalizedLanguage)}</code></pre>`;
-}
-
-function highlightMarkdownCode(code, language = "") {
-  return String(code || "")
-    .split("\n")
-    .map((line) => highlightMarkdownCodeLine(line, language))
-    .join("\n");
-}
-
-function highlightMarkdownCodeLine(line, language = "") {
-  const keywordSet = markdownCodeKeywordSet(language);
-  const commentMarkers = markdownCodeCommentMarkers(language);
-  const segments = [];
-  let index = 0;
-  while (index < line.length) {
-    const commentMarker = commentMarkers.find((marker) => line.startsWith(marker, index));
-    if (commentMarker) {
-      segments.push(markdownCodeToken("comment", line.slice(index)));
-      break;
-    }
-    const char = line[index];
-    if (char === '"' || char === "'" || (char === "`" && ["javascript", "typescript"].includes(language))) {
-      const endIndex = findMarkdownCodeStringEnd(line, index, char);
-      segments.push(markdownCodeToken("string", line.slice(index, endIndex)));
-      index = endIndex;
-      continue;
-    }
-    const number = /^\d+(?:\.\d+)?\b/.exec(line.slice(index));
-    if (number) {
-      segments.push(markdownCodeToken("number", number[0]));
-      index += number[0].length;
-      continue;
-    }
-    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(line.slice(index));
-    if (word) {
-      const value = word[0];
-      const nextChar = line.slice(index + value.length).trimStart()[0] || "";
-      if (keywordSet.has(value)) {
-        segments.push(markdownCodeToken("keyword", value));
-      } else if (nextChar === "(") {
-        segments.push(markdownCodeToken("function", value));
-      } else {
-        segments.push(escapeHtml(value));
-      }
-      index += value.length;
-      continue;
-    }
-    segments.push(escapeHtml(char));
-    index += 1;
-  }
-  return segments.join("");
-}
-
-function findMarkdownCodeStringEnd(line, startIndex, quote) {
-  let index = startIndex + 1;
-  while (index < line.length) {
-    if (line[index] === "\\" && index + 1 < line.length) {
-      index += 2;
-      continue;
-    }
-    if (line[index] === quote) return index + 1;
-    index += 1;
-  }
-  return line.length;
-}
-
-function markdownCodeToken(type, value) {
-  return `<span class="agent-code-token ${type}">${escapeHtml(value)}</span>`;
-}
-
-function markdownCodeKeywordSet(language = "") {
-  const common = [
-    "async", "await", "break", "case", "catch", "class", "const", "continue", "default",
-    "else", "export", "false", "finally", "for", "from", "function", "if", "import",
-    "in", "let", "new", "null", "return", "throw", "true", "try", "undefined", "var",
-    "while",
-  ];
-  const python = [
-    "and", "as", "def", "elif", "except", "False", "for", "from", "if", "import", "in",
-    "is", "lambda", "None", "not", "or", "pass", "raise", "return", "True", "with", "yield",
-  ];
-  const sql = [
-    "and", "as", "by", "case", "desc", "else", "end", "from", "group", "having", "in",
-    "inner", "insert", "join", "left", "limit", "not", "null", "on", "or", "order",
-    "outer", "right", "select", "then", "update", "when", "where",
-  ];
-  const yaml = ["false", "null", "true"];
-  if (language === "python") return new Set([...common, ...python]);
-  if (language === "sql") return new Set([...common, ...sql, ...sql.map((word) => word.toUpperCase())]);
-  if (language === "yaml") return new Set([...common, ...yaml]);
-  return new Set(common);
-}
-
-function markdownCodeCommentMarkers(language = "") {
-  if (["python", "bash", "yaml"].includes(language)) return ["#"];
-  if (language === "sql") return ["--"];
-  return ["//"];
-}
-
-function splitMarkdownTableRow(line) {
-  const value = String(line || "").trim();
-  if (!value.includes("|")) return [];
-  const trimmed = value.replace(/^\|/, "").replace(/\|$/, "");
-  return trimmed.split("|").map((cell) => cell.trim());
-}
-
-function isMarkdownTableDivider(line) {
-  const cells = splitMarkdownTableRow(line);
-  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
-}
-
-function normalizeMarkdownTableCells(cells, width) {
-  const normalized = [...cells];
-  while (normalized.length < width) normalized.push("");
-  return normalized.slice(0, width);
-}
-
-function renderMarkdownTable(headerCells, bodyRows) {
-  const width = headerCells.length;
-  const header = normalizeMarkdownTableCells(headerCells, width)
-    .map((cell) => `<th>${renderMarkdownInline(cell)}</th>`)
-    .join("");
-  const rows = bodyRows.map((row) => {
-    const cells = normalizeMarkdownTableCells(row, width)
-      .map((cell) => `<td>${renderMarkdownInline(cell)}</td>`)
-      .join("");
-    return `<tr>${cells}</tr>`;
-  });
-  return [
-    '<div class="agent-markdown-table-wrap">',
-    "<table>",
-    `<thead><tr>${header}</tr></thead>`,
-    `<tbody>${rows.join("")}</tbody>`,
-    "</table>",
-    "</div>",
-  ].join("");
-}
-
-function renderMarkdownInline(content) {
-  return String(content || "")
-    .split(/(`[^`]*`)/g)
-    .map((segment) => {
-      if (segment.startsWith("`") && segment.endsWith("`") && segment.length >= 2) {
-        return `<code>${escapeHtml(segment.slice(1, -1))}</code>`;
-      }
-      return renderMarkdownInlineText(segment);
-    })
-    .join("");
-}
-
-function renderMarkdownInlineText(content) {
-  return escapeHtml(content)
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+|\/[^)\s]+|#[^)]*)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_\n]+?)__/g, (match, value, offset, source) =>
-      hasMarkdownBoundaries(source, offset, match.length) ? `<strong>${value}</strong>` : match
-    )
-    .replace(/\*([^*\n]+?)\*/g, (match, value, offset, source) =>
-      hasMarkdownBoundaries(source, offset, match.length) ? `<em>${value}</em>` : match
-    )
-    .replace(/_([^_\n]+?)_/g, (match, value, offset, source) =>
-      hasMarkdownBoundaries(source, offset, match.length) ? `<em>${value}</em>` : match
-    );
-}
-
-function hasMarkdownBoundaries(source, offset, length) {
-  return isMarkdownBoundary(source[offset - 1] || "") && isMarkdownBoundary(source[offset + length] || "");
-}
-
-function isMarkdownBoundary(value) {
-  return !value || /[\s([{\u3000)\]},.;:!?，。；：！？]/.test(value);
 }
 
 function shouldPreserveOptimisticAgentMessages(nextMessages = []) {
@@ -5624,9 +5135,7 @@ async function waitForAgentValidation(taskId, { stopping = false } = {}) {
 }
 
 function agentValidationStopped(task) {
-  const status = task?.status || "";
-  const message = String(task?.status_message || "").toLowerCase();
-  return message.includes("cancelled") || message.includes("停止");
+  return task?.stopped === true;
 }
 
 function agentValidationPaused(task) {
@@ -5649,6 +5158,10 @@ async function createTask() {
     run_mode: selectedRunMode,
     report_values: collectCreateTaskReportValues(),
   };
+  if (materialSourceController.mode() === "upload") {
+    setCreateStatus("文件上传暂未开放，请先使用文件路径。", "error");
+    return null;
+  }
   if (!payload.model_name || !payload.validator || !payload.source_dir) {
     setCreateStatus("请先填写模型名称、验证人员和材料目录。", "error");
     return null;
@@ -5659,6 +5172,7 @@ async function createTask() {
   });
   selectedTaskId = task.id;
   selectedTask = task;
+  rememberSelectedTaskId(task.id);
   renderStoredStateSummaries();
   await refreshTasks();
   await loadReportFields();
@@ -5729,54 +5243,63 @@ async function pollValidationProgress(
   { stopping = false, background = false } = {},
 ) {
   if (!taskId) return null;
-  const startedAt = Date.now();
-  const timeoutMs = 1000 * 60 * 60;
-  while (true) {
-    await sleep(1000);
-    await refreshTasks();
-    const polledTask = findTaskInCache(taskId);
-    if (!polledTask) return null;
-    if (selectedTaskId === taskId) {
-      await loadTaskEvidence(taskId);
-      if (metricOverviewComplete(polledTask) && !currentMetricPreviewHasValues(taskId)) {
-        await loadReportFields(taskId);
-      }
-      if (selectedTaskIsAgentMode(polledTask)) await loadAgentMessages(taskId);
-      renderChangedValidationViews();
-    } else {
-      renderTaskList();
-    }
-
-    const status = polledTask.status || "";
-    const serverBusyAction = taskServerBusyAction(polledTask);
-    if (stopping && !serverBusyAction) {
-      if (selectedTaskId === taskId && !background) {
-        setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
-      }
-      return polledTask;
-    }
-    if (doneStatuses.has(status) && !serverBusyAction) {
-      if (selectedTaskId === taskId && !background) {
-        if (status === "failed" || status === "review_required") {
-          setTaskFailureActionStatus(polledTask);
-        } else {
-          setActionStatus("验证完成。", "success");
+  const claim = claimProgressPoll(progressPolls, taskId, { background });
+  if (!claim.claimed) return claim.existing.promise;
+  const pollState = claim.pollState;
+  const promise = (async () => {
+    const startedAt = Date.now();
+    const timeoutMs = 1000 * 60 * 60;
+    while (true) {
+      if (pollState.cancelled) return null;
+      await sleep(1000);
+      if (pollState.cancelled) return null;
+      await refreshTasks();
+      const polledTask = findTaskInCache(taskId);
+      if (!polledTask) return null;
+      if (selectedTaskId === taskId) {
+        await loadTaskEvidence(taskId);
+        if (metricOverviewComplete(polledTask) && !currentMetricPreviewHasValues(taskId)) {
+          await loadReportFields(taskId);
         }
+        if (selectedTaskIsAgentMode(polledTask)) await loadAgentMessages(taskId);
+        renderChangedValidationViews();
+      } else {
+        renderTaskList();
       }
-      return polledTask;
-    }
 
-    // Status copy for in-flight polling is owned by taskActionStatusSnapshot()
-    // via renderCurrentTask(); writing here too would alternate the pill text
-    // between two sources every second.
-
-    if (Date.now() - startedAt > timeoutMs) {
-      if (selectedTaskId === taskId && !background) {
-        setActionStatus("验证仍在后台运行，请稍后刷新查看结果。", "error");
+      const status = polledTask.status || "";
+      const serverBusyAction = taskServerBusyAction(polledTask);
+      if (stopping && !serverBusyAction) {
+        if (selectedTaskId === taskId && !background) {
+          setActionStatus("Agent 已停止，可根据当前阶段结果重新发起或继续下一步。", "success");
+        }
+        return polledTask;
       }
-      return polledTask;
+      if (doneStatuses.has(status) && !serverBusyAction) {
+        if (selectedTaskId === taskId && !background) {
+          if (status === "failed" || status === "review_required") {
+            setTaskFailureActionStatus(polledTask);
+          } else {
+            setActionStatus("验证完成。", "success");
+          }
+        }
+        return polledTask;
+      }
+
+      // Status copy for in-flight polling is owned by taskActionStatusSnapshot()
+      // via renderCurrentTask(); writing here too would alternate the pill text
+      // between two sources every second.
+
+      if (Date.now() - startedAt > timeoutMs) {
+        if (selectedTaskId === taskId && !background) {
+          setActionStatus("验证仍在后台运行，请稍后刷新查看结果。", "error");
+        }
+        return polledTask;
+      }
     }
-  }
+  })().finally(() => releaseProgressPoll(progressPolls, taskId, pollState));
+  pollState.promise = promise;
+  return promise;
 }
 
 async function validateCurrentTask(options = {}) {
@@ -5946,6 +5469,7 @@ async function deleteTask(task) {
     if (selectedTaskId === task.id) {
       selectedTaskId = null;
       selectedTask = null;
+      rememberSelectedTaskId(null);
     }
     resultScrollPositionsByTask.delete(task.id);
     await refreshTasks();
@@ -6097,7 +5621,8 @@ function handleWorkflowStepperKeydown(event) {
   scrollStepTarget(step.dataset.stepTarget);
 }
 
-$("createTaskOpenButton").onclick = openTaskDialog;
+$("createTaskOpenButton").onclick = openTaskTypeWelcome;
+$("welcomeModelValidationCard").onclick = openTaskDialog;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
 $("openExecutionEnvironmentButton").onclick = openExecutionEnvironmentDialog;
 $("closeExecutionEnvironmentButton").onclick = closeExecutionEnvironmentDialog;
@@ -6119,7 +5644,7 @@ $("sidebarCollapseButton").onclick = toggleSidebarCollapsed;
 $("sidebarBrandTrigger").onclick = expandSidebarFromBrand;
 $("sidebarBrandTrigger").onkeydown = handleSidebarBrandKeydown;
 $("createTaskButton").onclick = () =>
-  runAction(createTaskAndScan, { actionId: "scan", busyText: "正在创建任务..." });
+  runAction(createTaskAndScan);
 $("workflowStepper").onclick = handleWorkflowStepperClick;
 $("workflowStepper").onkeydown = handleWorkflowStepperKeydown;
 $("taskSearchInput").oninput = (event) => {
@@ -6271,6 +5796,8 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
+materialSourceController.bindTabs();
+materialSourceController.bindDropzone();
 const pet = $("petCompanion");
 if (pet) pet.addEventListener("pointerdown", startPetDrag);
 $("leftResizeHandle").onpointerdown = (event) => startResizeDrag("left", event);
@@ -6300,7 +5827,7 @@ document.addEventListener("keydown", (event) => {
     !event.isComposing
   ) {
     event.preventDefault();
-    runAction(createTaskAndScan, { actionId: "scan", busyText: "正在创建任务..." });
+    runAction(createTaskAndScan);
   }
 });
 
@@ -6328,10 +5855,20 @@ loadExecutionEnvironmentSettings({ silent: true });
 loadLLMSettings({ silent: true });
 renderMetricPreview({});
 renderStoredStateSummaries();
-runAction(async () => {
-  await refreshTasks();
-  renderStoredStateSummaries();
-  await loadReportFields();
-  await loadTaskEvidence();
-  await loadAgentMessages();
-});
+initializeApp();
+
+async function initializeApp() {
+  try {
+    await refreshTasks();
+    renderStoredStateSummaries();
+    await loadReportFields();
+    await loadTaskEvidence();
+    await loadAgentMessages();
+  } catch (error) {
+    const detail = error?.message || "";
+    setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail);
+    setCreateStatus(detail || "服务连接失败，请检查后端是否运行。", "error");
+  } finally {
+    renderAll();
+  }
+}

@@ -1,7 +1,11 @@
 import sqlite3
 
 from riskmodel_checker.db import TaskRepository, init_db
-from riskmodel_checker.domain import TaskCreate, TaskStatus
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_SERVER_RESTART,
+    TaskCreate,
+    TaskStatus,
+)
 from riskmodel_checker.recovery import last_completed_step, reclaim_stale_running_tasks
 
 
@@ -60,6 +64,7 @@ def test_reclaim_stale_running_tasks_marks_orphan_running_tasks_failed(tmp_path)
     assert reclaimed == 1
     assert loaded.status == TaskStatus.FAILED
     assert loaded.status_message == "reclaimed: server restart while running"
+    assert loaded.status_reason_code == TASK_STATUS_REASON_SERVER_RESTART
 
 
 def test_reclaim_stale_running_tasks_marks_later_active_states_failed(tmp_path):
@@ -169,6 +174,47 @@ def test_reclaim_stale_running_tasks_preserves_agent_writing_artifacts_with_acti
     messages = repo.list_agent_messages(task.id)
     assert messages[-1]["stage"] == "failure"
     assert messages[-1]["metadata"]["interrupted_by_restart"] is True
+
+
+def test_reclaim_stale_running_tasks_skips_recent_active_agent_job_within_stale_window(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="模型",
+            model_version="v1",
+            validator="验证人员",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
+    repo.update_status(task.id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED)
+    repo.update_status(task.id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING)
+    repo.update_status(
+        task.id,
+        TaskStatus.COMPUTING_METRICS,
+        "computing",
+        expected=TaskStatus.EXECUTED,
+    )
+    repo.update_status(
+        task.id,
+        TaskStatus.WRITING_ARTIFACTS,
+        "metrics generated",
+        expected=TaskStatus.COMPUTING_METRICS,
+    )
+    repo.start_job(task.id, "report")
+
+    # With a one-hour stale window a just-updated task is not yet stale, so it must
+    # NOT be treated as interrupted: no premature "server restart" notice is
+    # inserted (regression guard for the cutoff-gated active-job UNION half).
+    reclaimed = reclaim_stale_running_tasks(db_path, stale_after_seconds=3600)
+
+    loaded = repo.get_task(task.id)
+    assert reclaimed == 0
+    assert loaded.status == TaskStatus.WRITING_ARTIFACTS
+    assert repo.list_agent_messages(task.id) == []
 
 
 def test_reclaim_stale_running_tasks_finalizes_agent_draft_message_for_writing_artifacts_job(tmp_path):

@@ -220,6 +220,12 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+.material-source-tab:focus-visible,
+.material-upload-dropzone:focus-visible {
+  outline: 3px solid rgba(0, 113, 227, 0.28);
+  outline-offset: 2px;
+}
+
 input.suppress-pointer-focus-ring:focus-visible,
 textarea.suppress-pointer-focus-ring:focus-visible,
 select.suppress-pointer-focus-ring:focus-visible {
@@ -1504,7 +1510,7 @@ body.is-resizing {
   flex: 0 1 auto;
   min-height: 0;
   max-height: none;
-  grid-template-rows: auto auto auto auto minmax(0, auto);
+  grid-template-rows: auto auto auto auto auto minmax(0, auto);
   align-content: start;
   gap: 12px;
   overflow-x: hidden;
@@ -1533,6 +1539,112 @@ body.is-resizing {
 
 .task-form-section .wide-field {
   grid-column: 1 / -1;
+}
+
+.material-source-section {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.material-source-segment {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(104px, 1fr));
+  width: min(280px, 100%);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.material-source-tab {
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: calc(var(--radius) - 2px);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.material-source-tab:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--option-hover) 68%, transparent);
+}
+
+.material-source-tab.selected {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.material-source-panel {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.material-source-panel[hidden] {
+  display: none;
+}
+
+.material-upload-dropzone {
+  display: grid;
+  min-height: 128px;
+  align-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 20px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-soft) 78%, var(--surface));
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.material-upload-dropzone:hover,
+.material-upload-dropzone.is-dragover {
+  border-color: var(--accent);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--surface));
+}
+
+.material-upload-dropzone strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.material-upload-dropzone span {
+  font-size: 12px;
+}
+
+.material-upload-icon {
+  width: 30px;
+  height: 30px;
+  color: var(--text-muted);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.task-form-section .checkbox-field {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: row;
+  font-size: 13px;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.task-form-section .checkbox-field input {
+  margin: 0;
 }
 
 .run-mode-section {
@@ -2019,49 +2131,6 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   background-repeat: no-repeat;
   background-position: top left, top right;
   background-size: 16px 16px;
-}
-
-.workspace-welcome {
-  grid-column: 1 / -1;
-  grid-row: 1 / -1;
-  display: none;
-  min-height: 100%;
-  padding: 28px;
-  text-align: center;
-}
-
-.workspace-brand-logo {
-  width: 128px;
-  height: 128px;
-  margin: 0 0 28px;
-  object-fit: contain;
-}
-
-.workspace-welcome h2 {
-  max-width: none;
-  margin: 0;
-  color: var(--text);
-  font-size: 32px;
-  line-height: 1.18;
-  letter-spacing: 0;
-  white-space: nowrap;
-  word-break: keep-all;
-}
-
-.workspace-greeting-nowrap {
-  white-space: nowrap;
-}
-
-.workspace-welcome p {
-  margin: 12px 0 0;
-  color: var(--text-secondary);
-  font-size: 15px;
-}
-
-.validation-workspace.is-empty .workspace-welcome {
-  display: grid;
-  place-content: center;
-  justify-items: center;
 }
 
 .validation-workspace.is-empty .workspace-head,

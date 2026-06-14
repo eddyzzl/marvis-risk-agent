@@ -16,7 +16,13 @@ from riskmodel_checker.agent_memory.extractors import (
 )
 from riskmodel_checker.agent_memory.store import AgentMemoryStore
 from riskmodel_checker.db import TaskRepository
-from riskmodel_checker.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_USER_CANCELLED,
+    FileArtifact,
+    FileRole,
+    TaskRecord,
+    TaskStatus,
+)
 from riskmodel_checker.files import scan_source_dir
 from riskmodel_checker.execution_environment import (
     load_execution_environment,
@@ -74,10 +80,10 @@ RMC_PMML_SCORE_COL = "__rmc_submitted_pmml_score__"
 VALIDATION_RESULTS_PICKLE = "validation_results.pkl"
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
 METRICS_CANCEL_MARKER = "metrics_cancel.requested"
+SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 NOTEBOOK_STAGE_FAILURE_PREFIX = "模型可复现性验证失败："
 METRICS_STAGE_FAILURE_PREFIX = "模型效果&稳定性验证失败："
 REPORT_STAGE_FAILURE_PREFIX = "报告输出失败："
-METRICS_CANCEL_MARKER = "metrics_cancel.requested"
 
 
 def _metrics_cancel_marker_path(task_dir: Path) -> Path:
@@ -140,13 +146,13 @@ def run_notebook_stage(
                     contract_meta_path=execution_dir / "runtime_contract.json",
                     output_path=task_dir / "outputs" / REPRODUCIBILITY_RESULT_JSON,
                 )
-                register_live_notebook_session(task_id, live_session)
                 repo.update_status(
                     task_id,
                     TaskStatus.EXECUTED,
                     message="notebook executed",
                     expected=TaskStatus.RUNNING,
                 )
+                register_live_notebook_session(task_id, live_session)
         except PipelineCancelled as exc:
             if live_session is not None:
                 live_session.close()
@@ -448,7 +454,6 @@ def _write_metrics_results_in_session(
         model_meta_path=model_meta_path,
         reproducibility_json_path=reproducibility_json_path,
         results_json_path=outputs_dir / "validation_results.json",
-        results_pickle_path=outputs_dir / VALIDATION_RESULTS_PICKLE,
         excel_path=outputs_dir / "validation.xlsx",
     )
     planned_cells = _append_injected_cells(session, cell_sources)
@@ -465,7 +470,6 @@ def _write_metrics_results_in_session(
         )
     required = [
         outputs_dir / "validation_results.json",
-        outputs_dir / VALIDATION_RESULTS_PICKLE,
         outputs_dir / "validation.xlsx",
     ]
     missing = [path.name for path in required if not path.exists()]
@@ -534,10 +538,10 @@ def _package_root_for_notebook() -> Path:
 
 
 def _notebook_package_prelude(package_root: Path) -> list[str]:
-    package_root_json = json.dumps(str(package_root))
+    package_root_text = Path(package_root).as_posix()
     return [
         "import sys as _rmc_sys",
-        f"_rmc_package_root = {package_root_json}",
+        f"_rmc_package_root = {package_root_text!r}",
         "if _rmc_package_root not in _rmc_sys.path:",
         "    _rmc_sys.path.insert(0, _rmc_package_root)",
     ]
@@ -692,7 +696,6 @@ def _build_metrics_cell_source(
     model_meta_path: Path,
     reproducibility_json_path: Path,
     results_json_path: Path,
-    results_pickle_path: Path,
     excel_path: Path,
 ) -> str:
     return "\n\n".join(
@@ -707,7 +710,6 @@ def _build_metrics_cell_source(
             model_meta_path=model_meta_path,
             reproducibility_json_path=reproducibility_json_path,
             results_json_path=results_json_path,
-            results_pickle_path=results_pickle_path,
             excel_path=excel_path,
         )
     )
@@ -724,7 +726,6 @@ def _build_metrics_cell_sources(
     model_meta_path: Path,
     reproducibility_json_path: Path,
     results_json_path: Path,
-    results_pickle_path: Path,
     excel_path: Path,
 ) -> list[tuple[str, str]]:
     payload = {
@@ -736,12 +737,11 @@ def _build_metrics_cell_sources(
         "model_meta_path": str(model_meta_path),
         "reproducibility_json_path": str(reproducibility_json_path),
         "results_json_path": str(results_json_path),
-        "results_pickle_path": str(results_pickle_path),
         "excel_path": str(excel_path),
         "metrics_cancel_path": str(_metrics_cancel_marker_path(results_json_path.parent.parent)),
         "target_col": contract.target_col,
-        "split_col": contract.split_col or task.split_col,
-        "time_col": contract.time_col or task.time_col,
+        "split_col": contract.split_col or task.split_col or "",
+        "time_col": contract.time_col or task.time_col or "",
         "pmml_output_field": contract.pmml_output_field,
         "score_decimal_places": contract.score_decimal_places,
         "code_scores_path": str(contract.code_model_scores_path),
@@ -755,7 +755,6 @@ def _build_metrics_cell_sources(
         "# Injected by riskmodel_checker v3 (metrics).",
         *_notebook_package_prelude(package_root),
         "import json as _rmc_json",
-        "import pickle as _rmc_pickle",
         "from dataclasses import asdict as _rmc_asdict",
         "from pathlib import Path as _RmcPath",
         "import pandas as _rmc_pd",
@@ -827,7 +826,7 @@ def _build_metrics_cell_sources(
         "        'split_col': _rmc_payload['split_col'],",
         "        'time_col': _rmc_payload['time_col'],",
         "    }.items()",
-        "    if column not in _rmc_sample.columns",
+        "    if column and column not in _rmc_sample.columns",
         "]",
         "if _rmc_missing_cols:",
         "    raise ValueError('sample column check failed: ' + ', '.join(_rmc_missing_cols))",
@@ -879,7 +878,7 @@ def _build_metrics_cell_sources(
         "_rmc_sample_scored[_rmc_config.score_col] = _rmc_pd.Series(_rmc_model_scores, index=_rmc_sample_scored.index, dtype=float)",
         "class _RmcNotebookScorer:",
         "    def score(self, dataframe):",
-        "        if len(dataframe) == len(_rmc_sample) and list(dataframe.index) == list(_rmc_sample.index):",
+        "        if len(dataframe) == len(_rmc_sample) and dataframe.index.equals(_rmc_sample.index):",
         "            return list(_rmc_model_scores)",
         "        return _rmc_score_with_notebook(dataframe)",
     ]
@@ -955,6 +954,11 @@ def _build_metrics_cell_sources(
         "    _rmc_feature_categories,",
         "    model_features=_rmc_model_features(_rmc_config, _rmc_basic_info.feature_importance),",
         ")",
+        "if not _rmc_config.split_col:",
+        "    raise ValueError(",
+        "        'split_col is not configured; set RMC_SPLIT_COL in the notebook or '",
+        "        'configure the task split column before running metrics'",
+        "    )",
         "_rmc_oot_sample = _rmc_sample[_rmc_sample[_rmc_config.split_col] == _rmc_config.split_values['oot']]",
         "_rmc_stress_test = _rmc_run_stress_test(",
         "    oot_sample=_rmc_oot_sample,",
@@ -982,10 +986,6 @@ def _build_metrics_cell_sources(
         "    _rmc_json.dumps(_rmc_asdict(_rmc_results), ensure_ascii=False, indent=2),",
         "    encoding='utf-8',",
         ")",
-        "_rmc_results_pickle_path = _RmcPath(_rmc_payload['results_pickle_path'])",
-        "_rmc_results_pickle_path.parent.mkdir(parents=True, exist_ok=True)",
-        "with _rmc_results_pickle_path.open('wb') as _rmc_handle:",
-        "    _rmc_pickle.dump(_rmc_results, _rmc_handle)",
         "_rmc_write_validation_excel(_rmc_results, _RmcPath(_rmc_payload['excel_path']))",
     ]
     return [
@@ -1192,6 +1192,12 @@ def _scan_artifacts(task: TaskRecord) -> list[FileArtifact]:
         return scan_source_dir(Path(task.source_dir))
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise PipelineError(f"source dir invalid: {exc}") from exc
+    except ValueError as exc:
+        # scan-limit breaches (max_files / max_depth) raise ValueError. Tag them
+        # with the scan-stage prefix so the notebook/metrics/report except handlers
+        # keep the failure attributed to the scan stage instead of mislabeling it
+        # as a notebook failure (see _stage_failure_message + _is_scan_failure).
+        raise PipelineError(f"{SCAN_STAGE_FAILURE_PREFIX}{exc}") from exc
 
 
 def _required_path(
@@ -1325,13 +1331,13 @@ def _load_arrow_sample_with_python(
             "    df = pd.read_parquet(input_path)",
             "else:",
             "    raise ValueError(f'unsupported arrow suffix: {suffix}')",
-            "df.to_pickle(output_path)",
+            "df.to_json(output_path, orient='table', force_ascii=False)",
         ]
     )
     with tempfile.TemporaryDirectory(prefix="riskmodel-sample-") as tmp_dir:
-        pickle_path = Path(tmp_dir) / "sample.pkl"
+        json_path = Path(tmp_dir) / "sample.json"
         completed = subprocess.run(
-            [str(python_executable), "-c", code, str(sample_path), str(pickle_path), suffix],
+            [str(python_executable), "-c", code, str(sample_path), str(json_path), suffix],
             check=False,
             capture_output=True,
             text=True,
@@ -1341,7 +1347,7 @@ def _load_arrow_sample_with_python(
             raise PipelineError(
                 (completed.stderr or completed.stdout or "selected Python failed").strip()
             )
-        return pd.read_pickle(pickle_path)
+        return pd.read_json(json_path, orient="table")
 
 
 def _same_python(left: Path | str, right: Path | str) -> bool:
@@ -1442,10 +1448,6 @@ def _clear_generated_artifacts(task_dir: Path, *, stage: str) -> None:
         return
 
     raise ValueError(f"unknown artifact cleanup stage: {stage}")
-
-
-def _metrics_cancel_marker_path(task_dir: Path) -> Path:
-    return task_dir / "execution" / METRICS_CANCEL_MARKER
 
 
 def _unlink_if_exists(path: Path) -> None:
@@ -1602,6 +1604,13 @@ def _memory_important_feature_sources(results: dict) -> list[str]:
 
 def _memory_failure_kind(message: str, *, default: str) -> str:
     text = str(message or "").lower()
+    if (
+        SCAN_STAGE_FAILURE_PREFIX.lower() in text
+        or "too many files" in text
+        or "too deep" in text
+        or "source dir invalid" in text
+    ):
+        return "scan"
     if "pmml" in text:
         return "pmml"
     if (
@@ -1640,7 +1649,6 @@ def _notebook_step_v3(
     mark_executed: bool = True,
     cancel_message: str = "notebook cancelled",
     cancel_resume_status: TaskStatus = TaskStatus.SCANNED,
-    cancel_expected_status: TaskStatus = TaskStatus.RUNNING,
 ) -> NotebookExecutionSession | None:
     prepared = execution_dir / "prepared.ipynb"
     executed = execution_dir / "executed.ipynb"
@@ -1738,15 +1746,28 @@ def _mark_cancelled(
     try:
         current = repo.get_task(task_id).status
         if current == resume_status:
-            repo.update_status_message(task_id, message)
+            repo.update_status_message(
+                task_id,
+                message,
+                reason_code=TASK_STATUS_REASON_USER_CANCELLED,
+            )
             return
-        repo.update_status(task_id, resume_status, message=message, expected=None)
+        repo.update_status(
+            task_id,
+            resume_status,
+            message=message,
+            expected=None,
+            reason_code=TASK_STATUS_REASON_USER_CANCELLED,
+        )
     except Exception:
         pass
 
 
 def _stage_failure_message(prefix: str, message: str) -> str:
-    if message.startswith(prefix):
+    # A scan-stage failure can surface while a later stage's prefix is active
+    # (the notebook/metrics/report try-blocks re-scan artifacts). Preserve an
+    # already scan-prefixed message so _is_scan_failure keeps the right attribution.
+    if message.startswith(prefix) or message.startswith(SCAN_STAGE_FAILURE_PREFIX):
         return message
     return f"{prefix}{message}"
 

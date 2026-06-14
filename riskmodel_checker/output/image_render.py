@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Union
 
@@ -70,7 +71,7 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
         images[f"IMAGE:ranking_table_{split}"] = _render_table(
             output_dir / f"ranking_table_{split}.png",
             header=[
-                split, "样本总数", "累计占比", "逾期数量", "逾期率",
+                f"{split}(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
                 "累计逾期率", "单组lift", "累计lift", "ks",
             ],
             rows=_reference_bin_rows(results.effectiveness.bin_tables.get(split, [])),
@@ -87,7 +88,7 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
         output_dir / "overall_model_effect.png",
         header=[
             "数据集", "时间范围", "样本量", "逾期率", "坏样本量",
-            "KS", "AUC", "5%头部lift", "5%尾部lift", "PSI",
+            "KS(%)", "AUC(%)", "5%头部lift", "5%尾部lift", "PSI",
         ],
         rows=_model_effect_rows(results),
         data_bar_columns={5: "63BE7B"},
@@ -96,8 +97,9 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
     images["IMAGE:loan_month_effect"] = _render_table(
         output_dir / "loan_month_effect.png",
         header=[
-            "月份", "样本量", "逾期率", "坏样本量", "KS", "AUC",
-            "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)", "PSI(环比)",
+            "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
+            "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
+            "PSI(较上一有样本月)", "PSI参考月",
         ],
         rows=_monthly_effect_rows(results),
         data_bar_columns={4: "63BE7B"},
@@ -184,6 +186,22 @@ def render_all_images(results: ValidationResults, output_dir: Path) -> dict[str,
     return images
 
 
+def _fpr_at_ks(curve: RocKsCurve) -> float:
+    """FPR coordinate of the KS-maximizing threshold.
+
+    The KS marker is drawn on the ROC x-axis (False Positive Rate), so it must be
+    anchored at the FPR where |TPR-FPR| peaks — i.e. fpr[argmax(|ks_curve|)].
+    ``population_at_ks`` lives on a different (cumulative-population) axis and would
+    misplace the line on imbalanced credit data; it is only used for the text label.
+    """
+    if not curve.ks_curve or not curve.fpr:
+        return 0.0
+    ks_index = max(range(len(curve.ks_curve)), key=lambda i: abs(curve.ks_curve[i]))
+    if ks_index >= len(curve.fpr):
+        ks_index = len(curve.fpr) - 1
+    return curve.fpr[ks_index]
+
+
 def render_roc_ks_graph(
     curve: RocKsCurve | None,
     output_path: Path,
@@ -203,7 +221,7 @@ def render_roc_ks_graph(
     ax.plot(curve.fpr, curve.tpr, "r-", label="True Positive Rate", linewidth=2)
     ax.plot(curve.fpr, curve.fpr, "b-", label="Random Baseline", linewidth=2)
     ax.plot(curve.fpr, curve.ks_curve, "g-", label="KS Curve", linewidth=2)
-    ax.axvline(x=curve.population_at_ks, color="g", linestyle="--", alpha=0.5)
+    ax.axvline(x=_fpr_at_ks(curve), color="g", linestyle="--", alpha=0.5)
     ax.text(
         0.02,
         0.95,
@@ -221,9 +239,11 @@ def render_roc_ks_graph(
     ax.tick_params(axis="both", which="major", labelsize=28)
     ax.set_xlim([-0.01, 1.01])
     ax.set_ylim([-0.01, 1.01])
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        fig.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight")
+    finally:
+        plt.close(fig)
     return output_path
 
 
@@ -270,12 +290,12 @@ def _model_effect_rows(results: ValidationResults) -> list[tuple]:
             ),
             row.sample_count,
             f"{row.bad_rate:.2%}",
-            int(row.bad_count or round(row.sample_count * row.bad_rate)),
+            int(row.bad_count),
             f"{row.ks * 100:.1f}",
             f"{row.auc * 100:.1f}",
             _opt_float(row.head_lift_5pct, digits=2),
             _opt_float(row.tail_lift_5pct, digits=2),
-            "BASE" if row.split == "train" else f"{row.psi_vs_train:.3f}",
+            "BASE" if row.split == "train" else _opt_float(row.psi_vs_train, digits=3),
         ))
     return rows
 
@@ -297,6 +317,8 @@ def _monthly_effect_rows(results: ValidationResults) -> list[tuple]:
             "psi_first_month": row.psi_first_month,
             "psi_last_month": row.psi_last_month,
             "psi_mom": row.psi_mom,
+            "psi_mom_reference_month": row.psi_mom_reference_month,
+            "psi_mom_has_calendar_gap": row.psi_mom_has_calendar_gap,
         })
     months = sorted(by_month)
     first_month = months[0] if months else ""
@@ -316,6 +338,10 @@ def _monthly_effect_rows(results: ValidationResults) -> list[tuple]:
             "BASE" if month == first_month else _opt_float(data.get("psi_first_month"), digits=3),
             "BASE" if month == last_month else _opt_float(data.get("psi_last_month"), digits=3),
             "-" if month == first_month else _opt_float(data.get("psi_mom"), digits=3),
+            "-" if month == first_month else _psi_reference_month_text(
+                str(data.get("psi_mom_reference_month") or ""),
+                has_calendar_gap=bool(data.get("psi_mom_has_calendar_gap")),
+            ),
         ))
     return rows
 
@@ -353,6 +379,12 @@ def _opt_float(value, *, digits: int) -> str:
     return "" if value is None else f"{float(value):.{digits}f}"
 
 
+def _psi_reference_month_text(month: str, *, has_calendar_gap: bool) -> str:
+    if not month:
+        return ""
+    return f"{month}(跨月)" if has_calendar_gap else month
+
+
 def _ratio(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator else 0.0
 
@@ -372,6 +404,10 @@ def _score_interval(lower: float, upper: float) -> str:
 
 
 def _compact_number(value: float) -> str:
+    if value == float("inf"):
+        return "inf"
+    if value == float("-inf"):
+        return "-inf"
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.3f}".rstrip("0").rstrip(".")
@@ -472,9 +508,11 @@ def _render_table(
                 fontweight="bold" if is_header else "normal",
             )
             text.set_clip_path(cell_background)
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    try:
+        fig.tight_layout()
+        fig.savefig(output_path, bbox_inches="tight")
+    finally:
+        plt.close(fig)
     return output_path
 
 
@@ -633,7 +671,7 @@ def _resolve_matplotlib_font() -> FontProperties:
             )
         except ValueError:
             continue
-        if font_path:
+        if font_path and _font_path_matches_family(font_path, family):
             return FontProperties(fname=font_path)
     logging.warning(
         "No CJK font found among %s; Chinese text in rendered PNGs may show as "
@@ -641,3 +679,10 @@ def _resolve_matplotlib_font() -> FontProperties:
         ", ".join(CJK_FONT_CANDIDATES),
     )
     return FontProperties(family=FONT_NAME)
+
+
+def _font_path_matches_family(font_path: str, family: str) -> bool:
+    normalized_path = Path(font_path).stem.lower().replace(" ", "").replace("-", "")
+    normalized_family = family.lower().replace(" ", "").replace("-", "")
+    family_tokens = [token for token in re.split(r"[\s,-]+", family.lower()) if token]
+    return normalized_family in normalized_path or any(token in normalized_path for token in family_tokens)

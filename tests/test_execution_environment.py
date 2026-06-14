@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import riskmodel_checker.execution_environment as execution_environment
 from riskmodel_checker.execution_environment import (
     ExecutionEnvironmentSettings,
     detect_execution_environment_options,
@@ -135,3 +136,26 @@ def test_detect_execution_environment_options_marks_conda_without_kernel_unavail
 
     assert conda_option.available is False
     assert "Kernel" in conda_option.note
+
+
+def test_python_path_for_conda_environment_uses_windows_candidate(tmp_path: Path, monkeypatch):
+    env_path = tmp_path / "envs" / "marvis"
+    windows_python = env_path / "python.exe"
+    windows_python.parent.mkdir(parents=True)
+    windows_python.write_text("", encoding="utf-8")
+    (env_path / "bin").mkdir()
+    (env_path / "bin" / "python").write_text("", encoding="utf-8")
+    monkeypatch.setattr(execution_environment.sys, "platform", "win32")
+
+    assert execution_environment._python_path_for_environment(env_path) == windows_python
+
+
+def test_python_path_for_conda_environment_uses_posix_candidate(tmp_path: Path, monkeypatch):
+    env_path = tmp_path / "envs" / "marvis"
+    posix_python = env_path / "bin" / "python"
+    posix_python.parent.mkdir(parents=True)
+    posix_python.write_text("", encoding="utf-8")
+    (env_path / "python.exe").write_text("", encoding="utf-8")
+    monkeypatch.setattr(execution_environment.sys, "platform", "darwin")
+
+    assert execution_environment._python_path_for_environment(env_path) == posix_python

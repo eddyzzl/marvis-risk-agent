@@ -72,3 +72,19 @@ def test_push_release_uses_atomic_push(monkeypatch):
     release_push.push_release("origin", "main", "V1.0.1")
 
     assert calls == [["git", "push", "--atomic", "origin", "main", "V1.0.1"]]
+
+
+def test_dry_run_release_verifies_clean_main_before_reporting(monkeypatch, capsys):
+    release_push = _load_release_push_module()
+    calls = []
+
+    monkeypatch.setattr(release_push, "latest_version_tag", lambda: "V1.0.0")
+    monkeypatch.setattr(release_push, "tag_exists", lambda tag: False)
+    monkeypatch.setattr(release_push, "ensure_clean_worktree", lambda: calls.append("clean"))
+    monkeypatch.setattr(release_push, "ensure_on_branch", lambda branch: calls.append(("branch", branch)))
+
+    result = release_push.main(["--dry-run", "--branch", "main", "--no-push"])
+
+    assert result == 0
+    assert calls == ["clean", ("branch", "main")]
+    assert "verified clean worktree on branch main" in capsys.readouterr().out

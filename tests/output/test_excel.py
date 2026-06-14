@@ -168,13 +168,37 @@ def test_reference_sample_and_effect_headers_and_number_formats(tmp_path: Path):
     effect_sheet = wb["模型效果"]
     assert [cell.value for cell in effect_sheet[1][:10]] == [
         "数据集", "时间范围", "样本量", "逾期率", "坏样本量",
-        "KS", "AUC", "5%头部lift", "5%尾部lift", "PSI",
+        "KS(%)", "AUC(%)", "5%头部lift", "5%尾部lift", "PSI",
     ]
     assert effect_sheet.cell(row=2, column=4).number_format == "0.00%"
     assert effect_sheet.cell(row=2, column=6).number_format == "0.0"
     assert effect_sheet.cell(row=2, column=7).number_format == "0.0"
     assert effect_sheet.cell(row=2, column=8).number_format == "0.00"
     assert effect_sheet.cell(row=2, column=10).value == "BASE"
+
+    monthly_sheet = wb["逐月效果"]
+    assert [cell.value for cell in monthly_sheet[1][:12]] == [
+        "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
+        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
+        "PSI(较上一有样本月)", "PSI参考月",
+    ]
+
+
+def test_effectiveness_sheet_preserves_zero_bad_count(tmp_path: Path):
+    results = _make_results()
+    overall = list(results.effectiveness.overall)
+    overall[0] = replace(overall[0], bad_count=0, bad_rate=0.004)
+    results = replace(
+        results,
+        effectiveness=replace(results.effectiveness, overall=overall),
+    )
+    output = tmp_path / "out.xlsx"
+
+    write_validation_excel(results, output)
+
+    wb = load_workbook(output, data_only=True)
+    sheet = wb["模型效果"]
+    assert sheet.cell(row=2, column=5).value == 0
 
 
 def test_reference_bin_table_columns_and_formats(tmp_path: Path):
@@ -184,7 +208,7 @@ def test_reference_bin_table_columns_and_formats(tmp_path: Path):
     sheet = wb["分箱_oot"]
 
     assert [cell.value for cell in sheet[1][:9]] == [
-        "oot", "样本总数", "累计占比", "逾期数量", "逾期率",
+        "oot(独立分箱)", "样本总数", "累计占比", "逾期数量", "逾期率",
         "累计逾期率", "单组lift", "累计lift", "ks",
     ]
     assert sheet.cell(row=2, column=1).value == "[0,0.5]"

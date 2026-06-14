@@ -28,9 +28,18 @@ Example:
   "browser_title": "本地信贷风控工作台",
   "primary_color": "#1f6feb",
   "logo": "private-logo.svg",
-  "favicon": "private-logo.svg"
+  "favicon": "private-logo.svg",
+  "validator_aliases": {
+    "张三": "小三",
+    "李四": "老四"
+  }
 }
 ```
+
+`validator_aliases` maps a real validator name to the display alias shown as the
+agent's name. It is optional and lives only in this private config, so real names
+never ship in the public bundle. Entries are trimmed; empty or non-string values
+are ignored. When unset, the agent simply shows `Agent`.
 
 Put referenced files next to the config, for example:
 

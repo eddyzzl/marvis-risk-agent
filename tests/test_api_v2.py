@@ -10,8 +10,13 @@ from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from riskmodel_checker.api import router
-from riskmodel_checker.domain import TaskRecord, TaskStatus
+from riskmodel_checker.api import _agent_has_stop_ack_message, router
+from riskmodel_checker.domain import (
+    TASK_STATUS_REASON_SERVER_RESTART,
+    TASK_STATUS_REASON_USER_CANCELLED,
+    TaskRecord,
+    TaskStatus,
+)
 from riskmodel_checker.execution_environment import ExecutionEnvironmentOption
 
 
@@ -28,6 +33,7 @@ class FakeTaskRepository:
         task_id = f"task-{len(self.tasks) + 1}"
         task = TaskRecord(
             id=task_id,
+            task_type=payload.task_type,
             model_name=payload.model_name,
             model_version=payload.model_version,
             validator=payload.validator,
@@ -124,7 +130,15 @@ class FakeTaskRepository:
         self.deleted.append(task_id)
         del self.tasks[task_id]
 
-    def update_status(self, task_id: str, status, message, *, expected=None):
+    def update_status(
+        self,
+        task_id: str,
+        status,
+        message,
+        *,
+        expected=None,
+        reason_code: str = "",
+    ):
         from riskmodel_checker.state_machine import IllegalTransition
 
         task = self.get_task(task_id)
@@ -137,9 +151,23 @@ class FakeTaskRepository:
                 **asdict(task),
                 "status": status,
                 "status_message": message,
+                "status_reason_code": reason_code,
                 "updated_at": "2026-05-21T00:01:00+00:00",
             }
         )
+
+    def update_status_message(
+        self,
+        task_id: str,
+        message: str,
+        *,
+        reason_code: str | None = None,
+    ):
+        task = self.get_task(task_id)
+        values = {**asdict(task), "status_message": message}
+        if reason_code is not None:
+            values["status_reason_code"] = reason_code
+        self.tasks[task_id] = TaskRecord(**values)
 
     def get_report_values(self, task_id: str):
         self.get_task(task_id)
@@ -215,6 +243,7 @@ def test_create_then_get_task(tmp_path: Path, monkeypatch):
     )
     assert response.status_code == 200, response.text
     task = response.json()
+    assert task["task_type"] == "validation"
     assert task["algorithm"] == "lgb"
     assert task["target_col"] == "target"
     assert task["run_mode"] == "agent"
@@ -232,6 +261,7 @@ def test_create_then_get_task(tmp_path: Path, monkeypatch):
     got = client.get(f"/api/tasks/{task['id']}")
     assert got.status_code == 200
     assert got.json()["model_name"] == "A卡"
+    assert got.json()["task_type"] == "validation"
     assert got.json()["active_job_kind"] is None
     assert got.json()["report_available"] is False
 
@@ -298,8 +328,166 @@ def test_task_payload_exposes_structured_failure_stage_for_reloaded_ui(
 
     assert got.status_code == 200
     assert got.json()["failure_stage"] == "metrics"
+    assert got.json()["stopped"] is False
     assert listed.status_code == 200
     assert listed.json()[0]["failure_stage"] == "metrics"
+    assert listed.json()[0]["stopped"] is False
+
+
+def test_pipeline_failure_with_unknown_message_keeps_failure_stage_unknown(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.FAILED,
+            "status_message": "unexpected pipeline failure",
+        }
+    )
+    FakeTaskRepository.jobs["job-pipeline"] = {
+        "id": "job-pipeline",
+        "task_id": task_id,
+        "kind": "pipeline",
+        "status": "failed",
+    }
+
+    got = client.get(f"/api/tasks/{task_id}")
+
+    assert got.status_code == 200
+    assert got.json()["failure_stage"] is None
+
+
+def test_task_payload_exposes_structured_stopped_state(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.SCANNED,
+            "status_message": "普通状态",
+            "status_reason_code": TASK_STATUS_REASON_USER_CANCELLED,
+        }
+    )
+
+    got = client.get(f"/api/tasks/{task_id}")
+
+    assert got.status_code == 200
+    assert got.json()["stopped"] is True
+    assert got.json()["stop_reason_code"] == TASK_STATUS_REASON_USER_CANCELLED
+
+
+def test_cancelled_job_history_does_not_mark_rerun_task_stopped(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.RUNNING,
+            "status_message": "agent rerun requested: metrics",
+            "status_reason_code": "",
+        }
+    )
+    FakeTaskRepository.jobs["job-cancelled"] = {
+        "id": "job-cancelled",
+        "task_id": task_id,
+        "kind": "agent",
+        "status": "cancelled",
+    }
+
+    got = client.get(f"/api/tasks/{task_id}")
+
+    assert got.status_code == 200
+    assert got.json()["stopped"] is False
+    assert got.json()["stop_reason_code"] is None
+
+
+def test_task_payload_normalizes_legacy_stopped_text_server_side(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.SCANNED,
+            "status_message": "已停止当前动作",
+            "status_reason_code": "",
+        }
+    )
+
+    got = client.get(f"/api/tasks/{task_id}")
+
+    assert got.status_code == 200
+    assert got.json()["stopped"] is True
+    assert got.json()["stop_reason_code"] == TASK_STATUS_REASON_USER_CANCELLED
+
+
+def test_task_payload_exposes_structured_restart_failure_reason(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    current = FakeTaskRepository.tasks[task_id]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{
+            **asdict(current),
+            "status": TaskStatus.FAILED,
+            "status_message": "普通失败文案",
+            "status_reason_code": TASK_STATUS_REASON_SERVER_RESTART,
+        }
+    )
+
+    got = client.get(f"/api/tasks/{task_id}")
+
+    assert got.status_code == 200
+    assert got.json()["failure_reason_code"] == TASK_STATUS_REASON_SERVER_RESTART
 
 
 def test_task_payload_exposes_report_availability_for_download_buttons(
@@ -347,6 +535,30 @@ def test_create_task_rejects_source_dir_outside_allowed_roots(
 
     assert response.status_code == 422
     assert "allowed material root" in response.json()["detail"]
+    assert "RMC_MATERIAL_ROOTS" in response.json()["detail"]
+
+
+def test_create_task_accepts_source_dir_under_extra_material_root(
+    tmp_path: Path,
+    monkeypatch,
+):
+    extra_root = tmp_path.parent / "external-materials"
+    source_dir = extra_root / "project-a"
+    source_dir.mkdir(parents=True)
+    monkeypatch.setenv("RMC_MATERIAL_ROOTS", str(extra_root))
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(source_dir),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source_dir"] == str(source_dir.resolve())
 
 
 def test_create_task_accepts_missing_model_version(tmp_path: Path, monkeypatch):
@@ -731,7 +943,7 @@ def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypat
 def test_execution_environment_options_api(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "riskmodel_checker.api.detect_execution_environment_options",
+        "riskmodel_checker.api_settings.detect_execution_environment_options",
         lambda: [
             ExecutionEnvironmentOption(
                 id="kernel:python3",
@@ -743,7 +955,7 @@ def test_execution_environment_options_api(tmp_path: Path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.available_kernel_names",
+        "riskmodel_checker.api_settings.available_kernel_names",
         lambda: ["python3"],
         raising=False,
     )
@@ -1241,8 +1453,9 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
         repo.update_status(
             task_id,
             TaskStatus.EXECUTED,
-            "metrics cancelled",
+            "ordinary resume status",
             expected=TaskStatus.COMPUTING_METRICS,
+            reason_code=TASK_STATUS_REASON_USER_CANCELLED,
         )
 
     _run_stage_job(
@@ -1649,6 +1862,75 @@ def test_scan_endpoint_translates_multiple_missing_rmc_contract_fields(
     )
 
 
+def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # scan_source_dir raises ValueError when the tree breaches max_files / max_depth.
+    # That is a client-side "bad source dir" condition and must surface as 422,
+    # not crash into a 500.
+    client = _client(tmp_path, monkeypatch)
+    source = tmp_path / "source"
+    source.mkdir()
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "model_version": "v1",
+            "validator": "qa",
+            "source_dir": str(source),
+        },
+    ).json()["id"]
+
+    def _raise_limit(*_args, **_kwargs):
+        raise ValueError("source_dir has too many files: max_files=2000")
+
+    monkeypatch.setattr("riskmodel_checker.api.scan_source_dir", _raise_limit)
+
+    response = client.post(f"/api/tasks/{task_id}/scan")
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail.startswith("source dir invalid")
+    assert "too many files" in detail
+
+
+def test_normalize_task_type_whitelists_known_types():
+    from riskmodel_checker.db import _normalize_task_type
+    from riskmodel_checker.domain import TASK_TYPE_VALIDATION
+
+    assert _normalize_task_type(None) == TASK_TYPE_VALIDATION
+    assert _normalize_task_type("") == TASK_TYPE_VALIDATION
+    assert _normalize_task_type("validation") == TASK_TYPE_VALIDATION
+    # Unknown / arbitrary strings must not persist as-is.
+    assert _normalize_task_type("modeling") == TASK_TYPE_VALIDATION
+    assert _normalize_task_type("'; DROP TABLE tasks;--") == TASK_TYPE_VALIDATION
+
+
+def test_task_stop_reason_code_ignores_legacy_text_for_successful_terminals():
+    from riskmodel_checker.api_task_payloads import task_stop_reason_code, task_stopped
+    from riskmodel_checker.domain import TASK_STATUS_REASON_USER_CANCELLED
+
+    # A SUCCEEDED task whose message incidentally contains "已取消" must NOT be
+    # reported as stopped — only the structured status_reason_code can mark it.
+    succeeded = SimpleNamespace(
+        status=TaskStatus.SUCCEEDED,
+        status_reason_code=None,
+        status_message="报告包含 3 笔已取消订单的分析",
+    )
+    assert task_stop_reason_code(None, succeeded) is None
+    assert task_stopped(None, succeeded) is False
+
+    # A genuinely cancelled task is still detected via the structured reason code.
+    cancelled = SimpleNamespace(
+        status=TaskStatus.FAILED,
+        status_reason_code=TASK_STATUS_REASON_USER_CANCELLED,
+        status_message="已停止",
+    )
+    assert task_stop_reason_code(None, cancelled) == TASK_STATUS_REASON_USER_CANCELLED
+    assert task_stopped(None, cancelled) is True
+
+
 def test_report_download_endpoint_returns_generated_word(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     task_id = client.post(
@@ -1779,6 +2061,53 @@ def test_delete_task_removes_repo_record_and_task_dir(tmp_path: Path, monkeypatc
     assert response.status_code == 204
     assert FakeTaskRepository.deleted == [task_id]
     assert not task_dir.exists()
+
+
+def test_delete_task_keeps_record_deleted_when_directory_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+):
+    client = _client(tmp_path, monkeypatch)
+    create = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "model_version": "v1",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    )
+    task_id = create.json()["id"]
+    task_dir = tmp_path / "tasks" / task_id
+    task_dir.mkdir()
+
+    def fail_rmtree(path):
+        raise PermissionError(f"locked: {path}")
+
+    monkeypatch.setattr("riskmodel_checker.api.shutil.rmtree", fail_rmtree)
+
+    response = client.delete(f"/api/tasks/{task_id}")
+
+    assert response.status_code == 204
+    assert FakeTaskRepository.deleted == [task_id]
+    assert task_dir.exists()
+    assert "task dir cleanup failed" in caplog.text
+
+
+def test_agent_stop_ack_detection_scans_past_latest_user_message():
+    class Repo:
+        def list_agent_messages(self, task_id):
+            assert task_id == "task-1"
+            return [
+                {
+                    "role": "assistant",
+                    "metadata": {"intent": "stop", "cancel_requested": True},
+                },
+                {"role": "user", "metadata": {}},
+            ]
+
+    assert _agent_has_stop_ack_message(Repo(), "task-1") is True
 
 
 def test_delete_task_allows_stale_busy_status_when_no_active_job(

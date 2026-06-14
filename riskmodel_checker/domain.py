@@ -18,6 +18,14 @@ class TaskStatus(StrEnum):
     REVIEW_REQUIRED = "review_required"
 
 
+TASK_STATUS_REASON_USER_CANCELLED = "user_cancelled"
+TASK_STATUS_REASON_SERVER_RESTART = "server_restart_while_running"
+TASK_TYPE_VALIDATION = "validation"
+# Known task types. New capabilities (modeling/strategy/...) must register here
+# so _normalize_task_type can keep arbitrary strings out of the database.
+VALID_TASK_TYPES = frozenset({TASK_TYPE_VALIDATION})
+
+
 class FileRole(StrEnum):
     NOTEBOOK = "notebook"
     SAMPLE = "sample"
@@ -32,6 +40,7 @@ class TaskCreate:
     model_version: str
     validator: str
     source_dir: str
+    task_type: str = TASK_TYPE_VALIDATION
     algorithm: str = ""
     run_mode: str = "manual"
     # column mappings provided at task-creation time
@@ -70,6 +79,8 @@ class TaskRecord:
     status_message: str
     created_at: str
     updated_at: str
+    status_reason_code: str = ""
+    task_type: str = TASK_TYPE_VALIDATION
 
 
 @dataclass(frozen=True)

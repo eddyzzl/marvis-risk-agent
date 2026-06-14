@@ -323,7 +323,7 @@ def _preview_css() -> str:
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Arial,sans-serif; line-height:1.62; }
     .shell { max-width: 1120px; margin: 0 auto; padding: 32px 20px 56px; }
-    .toolbar { position: sticky; top: 0; z-index: 2; margin: -32px -20px 24px; padding: 14px 20px; background: rgba(244,246,249,.92); backdrop-filter: blur(14px); border-bottom: 1px solid var(--line); }
+    .toolbar { position: sticky; top: 0; z-index: 2; margin: -32px -20px 24px; padding: 14px 20px; background: #f4f6f9; border-bottom: 1px solid var(--line); }
     .toolbar strong { display:block; font-size:15px; }
     .toolbar span { display:block; color:var(--muted); font-size:12px; margin-top:2px; }
     article { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 42px 54px; box-shadow: 0 18px 50px rgba(31,41,55,.08); }

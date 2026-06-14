@@ -54,8 +54,49 @@ def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
         "primaryColor": "#000000",
         "logoUrl": "static/brand/marvis-logo.png",
         "faviconUrl": "static/brand/marvis-favicon.png",
+        "validatorAliases": {},
         "source": "default",
     }
+
+
+def test_branding_reads_validator_aliases_from_workspace_config(tmp_path: Path):
+    branding_dir = tmp_path / "branding"
+    branding_dir.mkdir()
+    (branding_dir / "brand.json").write_text(
+        json.dumps(
+            {
+                "platform_name": "本地平台",
+                "validator_aliases": {
+                    "  张三  ": "  小三  ",
+                    "李四": "老四",
+                    "bad-empty": "",
+                    "non-string": 123,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    payload = client.get("/api/branding").json()
+
+    # Aliases are trimmed; empty / non-string entries are dropped.
+    assert payload["validatorAliases"] == {"张三": "小三", "李四": "老四"}
+
+
+def test_branding_validator_aliases_default_empty_for_missing_or_invalid_config(tmp_path: Path):
+    branding_dir = tmp_path / "branding"
+    branding_dir.mkdir()
+    (branding_dir / "brand.json").write_text(
+        json.dumps({"platform_name": "本地平台", "validator_aliases": ["not", "a", "map"]}),
+        encoding="utf-8",
+    )
+    client = _client(tmp_path)
+
+    payload = client.get("/api/branding").json()
+
+    assert payload["validatorAliases"] == {}
 
 
 def test_branding_reads_workspace_config_and_serves_asset(tmp_path: Path):
@@ -160,6 +201,7 @@ def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):
         "primaryColor": "#000000",
         "logoUrl": "static/brand/marvis-logo.png",
         "faviconUrl": "static/brand/marvis-favicon.png",
+        "validatorAliases": {},
         "source": "workspace",
     }
     assert client.get("/branding/assets/../secret.svg").status_code == 404

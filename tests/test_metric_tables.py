@@ -44,7 +44,14 @@ def payload() -> dict:
             ],
             "monthly_psi": [
                 {"month": "202501", "psi_first_month": 0.0,   "psi_last_month": 0.012, "psi_mom": None},
-                {"month": "202503", "psi_first_month": 0.012, "psi_last_month": 0.0,   "psi_mom": 0.008},
+                {
+                    "month": "202503",
+                    "psi_first_month": 0.012,
+                    "psi_last_month": 0.0,
+                    "psi_mom": 0.008,
+                    "psi_mom_reference_month": "202501",
+                    "psi_mom_has_calendar_gap": True,
+                },
             ],
             "bin_tables": {
                 "train": [
@@ -181,3 +188,21 @@ def test_column_specs_match_headers_length_and_kind(payload):
     psi_spec = overall["column_specs"][-1]
     assert psi_spec["kind"] == "psi"
     assert psi_spec["thresholds"] == [0.02, 0.10]
+
+    monthly = by_key["IMAGE:loan_month_effect"]
+    assert monthly["headers"] == [
+        "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
+        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
+        "PSI(较上一有样本月)", "PSI参考月",
+    ]
+    assert monthly["rows"][1][-2:] == ["0.008", "202501(跨月)"]
+
+
+def test_monthly_metric_merge_does_not_let_psi_rows_override_ks_fields(payload):
+    payload["effectiveness"]["monthly_psi"][1]["sample_count"] = 999999
+
+    sections = metric_table_sections_from_payload(payload)
+    by_key = {table["key"]: table for section in sections for table in section["tables"]}
+    monthly = by_key["IMAGE:loan_month_effect"]
+
+    assert monthly["rows"][1][1] == "30"

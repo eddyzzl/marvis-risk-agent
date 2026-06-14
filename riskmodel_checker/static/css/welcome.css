@@ -1,0 +1,148 @@
+.welcome-task-card:focus-visible {
+  outline: 3px solid rgba(0, 113, 227, 0.28);
+  outline-offset: 2px;
+}
+
+.workspace-welcome {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  display: none;
+  min-height: 100%;
+  padding: 28px;
+  text-align: center;
+}
+
+.workspace-welcome-inner {
+  display: grid;
+  width: min(760px, 100%);
+  justify-items: center;
+  transform: translateY(-2vh);
+}
+
+.workspace-brand-logo {
+  width: 128px;
+  height: 128px;
+  margin: 0 0 28px;
+  object-fit: contain;
+}
+
+.workspace-welcome h2 {
+  max-width: none;
+  margin: 0;
+  color: var(--text);
+  font-size: 32px;
+  line-height: 1.18;
+  letter-spacing: 0;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.workspace-greeting-nowrap {
+  white-space: nowrap;
+}
+
+.workspace-welcome p {
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+
+.welcome-task-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  max-width: 760px;
+  gap: 14px;
+  margin-top: clamp(24px, 4vh, 36px);
+}
+
+.welcome-task-card {
+  display: grid;
+  min-height: 122px;
+  align-content: start;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow-floating);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease,
+    background 150ms ease;
+}
+
+.welcome-task-card.available:hover {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--surface) 86%, var(--accent-soft));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+}
+
+.welcome-task-card:disabled {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-soft) 78%, var(--surface));
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.welcome-task-icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+}
+
+.welcome-task-card:disabled .welcome-task-icon {
+  color: var(--text-muted);
+}
+
+.welcome-task-icon svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.welcome-task-card strong,
+.welcome-task-card span,
+.welcome-task-card small {
+  display: block;
+}
+
+.welcome-task-card strong {
+  font-size: 15px;
+}
+
+.welcome-task-card span:not(.welcome-task-icon) {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.welcome-task-card small {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.validation-workspace.is-empty .workspace-welcome {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+}
+
+@media (max-width: 760px) {
+  .welcome-task-cards {
+    grid-template-columns: 1fr;
+  }
+}

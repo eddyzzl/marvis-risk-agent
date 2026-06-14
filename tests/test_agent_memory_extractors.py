@@ -144,6 +144,20 @@ def test_extract_user_preference_from_explicit_remember_and_correction_messages(
     assert correction.payload["preference"] == "AUC 展示保留三位小数。"
 
 
+def test_extract_user_preference_truncates_long_explicit_memory():
+    candidate = extract_user_preference(
+        {
+            "message_id": "msg-long",
+            "text": "请记住：" + "报告措辞保持克制。" * 40,
+        }
+    )
+
+    assert candidate is not None
+    assert len(candidate.summary) <= 203
+    assert candidate.summary.endswith("...")
+    assert candidate.payload["preference"] == candidate.summary
+
+
 def test_skill_experience_reserved_does_not_create_active_runtime_candidates():
     candidates = extract_memory_candidates(
         task_result={

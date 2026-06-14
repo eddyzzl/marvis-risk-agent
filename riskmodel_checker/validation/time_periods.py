@@ -107,5 +107,9 @@ def _parse_normalized_time_value(value) -> pd.Timestamp | pd.NaT:
 def _timestamp_without_timezone(value) -> pd.Timestamp:
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is not None:
+        # Drop the timezone but keep the local wall-clock time. Converting to UTC
+        # here would shift boundary samples across day/month lines and corrupt the
+        # monthly grouping (e.g. 2025-01-01 00:30+08:00 -> 2024-12-31). pandas'
+        # tz_localize(None) on a tz-aware Timestamp yields the wall-clock naive value.
         return timestamp.tz_localize(None)
     return timestamp

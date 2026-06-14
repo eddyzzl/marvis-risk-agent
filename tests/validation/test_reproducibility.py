@@ -83,6 +83,32 @@ def test_mismatch_beyond_decimal_returns_fail():
     assert result.summary.max_abs_diff > 0.05
 
 
+def test_small_low_ratio_mismatch_returns_review():
+    row_count = 200
+    sample = pd.DataFrame({
+        "x1": [0.1] * row_count,
+        "x2": [0.0] * row_count,
+        "sample_score": [0.5] * row_count,
+        "y": [0] * row_count,
+        "split": ["train"] * row_count,
+        "apply_month": ["202503"] * row_count,
+    })
+    code_scores = pd.Series({idx: 0.5 for idx in range(row_count)})
+    submitted_scores = {idx: 0.5 for idx in range(row_count)}
+    submitted_scores[0] = 0.50005
+
+    result = run_reproducibility(
+        sample=sample,
+        config=_config(random_sample_size=row_count),
+        code_scores=code_scores,
+        submitted_pmml_scorer=_FakeScorer(submitted_scores),
+    )
+
+    assert result.summary.mismatch_count == 1
+    assert result.summary.max_abs_diff == pytest.approx(0.00005)
+    assert result.summary.status is ConsistencyStatus.REVIEW
+
+
 def test_null_submitted_pmml_score_is_reported_as_mismatch():
     sample = pd.DataFrame({
         "x1": [0.1, 0.2, 0.3],

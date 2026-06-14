@@ -190,7 +190,7 @@ def compute_psi_stability_table(
                 expected_pct=float(expected_pct),
                 actual_count=int(actual_count),
                 actual_pct=float(actual_pct),
-                psi=_psi_component(expected_pct, actual_pct),
+                psi=float(compute_psi([expected_pct], [actual_pct])),
             )
         )
     return rows
@@ -267,10 +267,16 @@ def _should_reverse_eval_bins(
     valid = dataframe[[score_col, target_col]].dropna()
     if len(valid) < 2:
         return False
+    scores = valid[score_col].to_numpy(dtype=float)
+    labels = valid[target_col].to_numpy(dtype=float)
+    if np.std(scores) == 0.0 or np.std(labels) == 0.0:
+        return False
     correlation = np.corrcoef(
-        valid[score_col].to_numpy(dtype=float),
-        valid[target_col].to_numpy(dtype=float),
+        scores,
+        labels,
     )[0, 1]
+    if not np.isfinite(correlation):
+        return False
     return not bool(correlation > 0)
 
 
@@ -324,6 +330,7 @@ def compute_monthly_psi(
     first_distribution = bin_distribution(first_group[score_col].to_numpy(dtype=float), context.edges)
     last_distribution = bin_distribution(last_group[score_col].to_numpy(dtype=float), context.edges)
     previous_distribution = None
+    previous_month = ""
 
     for month, group in grouped:
         scores = group[score_col].to_numpy(dtype=float)
@@ -336,10 +343,32 @@ def compute_monthly_psi(
                 psi_first_month=0.0 if month == first_month else float(compute_psi(first_distribution, distribution)),
                 psi_last_month=0.0 if month == last_month else float(compute_psi(last_distribution, distribution)),
                 psi_mom=psi_mom,
+                psi_mom_reference_month=previous_month,
+                psi_mom_has_calendar_gap=_has_calendar_month_gap(previous_month, month),
             )
         )
         previous_distribution = distribution
+        previous_month = month
     return monthly_psi
+
+
+def _has_calendar_month_gap(previous_month: str, current_month: str) -> bool:
+    previous_ordinal = _month_ordinal(previous_month)
+    current_ordinal = _month_ordinal(current_month)
+    if previous_ordinal is None or current_ordinal is None:
+        return False
+    return current_ordinal - previous_ordinal > 1
+
+
+def _month_ordinal(month: str) -> int | None:
+    text = str(month)
+    if len(text) != 6 or not text.isdigit():
+        return None
+    year = int(text[:4])
+    month_number = int(text[4:])
+    if not 1 <= month_number <= 12:
+        return None
+    return year * 12 + month_number
 
 
 def compute_auc(scores, labels) -> float:
@@ -421,12 +450,6 @@ def _bin_counts(scores, edges) -> np.ndarray:
     return np.bincount(bins, minlength=len(edges) - 1)
 
 
-def _psi_component(expected_pct: float, actual_pct: float, smoothing: float = 1e-7) -> float:
-    expected = max(float(expected_pct), smoothing)
-    actual = max(float(actual_pct), smoothing)
-    return float((expected - actual) * np.log(expected / actual))
-
-
 def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:
     scores = np.asarray(scores, dtype=float)
     labels = np.asarray(labels, dtype=int)
@@ -453,6 +476,7 @@ def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:
     threshold_indexes = np.r_[np.where(np.diff(sorted_scores) != 0)[0], len(sorted_scores) - 1]
     tpr = np.r_[0.0, cum_bad[threshold_indexes] / positive_count]
     fpr = np.r_[0.0, cum_good[threshold_indexes] / negative_count]
+    population = np.r_[0.0, (threshold_indexes + 1) / len(sorted_scores)]
     ks_curve = tpr - fpr
     ks_index = int(np.argmax(np.abs(ks_curve)))
     return RocKsCurve(
@@ -461,7 +485,7 @@ def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:
         tpr=[float(value) for value in tpr],
         ks_curve=[float(value) for value in ks_curve],
         ks=float(abs(ks_curve[ks_index])),
-        population_at_ks=float(fpr[ks_index]),
+        population_at_ks=float(population[ks_index]),
     )
 
 

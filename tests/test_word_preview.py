@@ -35,6 +35,7 @@ def test_docx_preview_replaces_browser_unsupported_images_with_notice(tmp_path: 
     assert "unsupported-image-note" in preview_html
     assert "预览暂不支持 EMF 图片" in preview_html
     assert "1 张图片仅在 Word 中保留" in preview_html
+    assert "backdrop-filter" not in preview_html
 
 
 def _append_body_image_with_unsupported_content_type(docx_path: Path) -> None:

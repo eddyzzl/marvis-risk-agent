@@ -87,6 +87,7 @@ def run_stress_test(
                 ks_after=None, ks_delta=None, psi_vs_baseline=None,
                 bin_table=[],
                 error="no features from this category are present in the sample",
+                status="skipped",
             ))
             continue
         try:
@@ -120,6 +121,7 @@ def run_stress_test(
                 psi_vs_baseline=psi,
                 bin_table=after_bin_rows,
                 error=None,
+                status="completed",
             ))
             _raise_if_cancelled(cancellation_check)
         except Exception as exc:
@@ -129,11 +131,29 @@ def run_stress_test(
                 ks_after=None, ks_delta=None, psi_vs_baseline=None,
                 bin_table=[],
                 error=f"{type(exc).__name__}: {exc}",
+                status="error",
             ))
 
-    return StressTestResult(baseline=baseline, per_category=per_category)
+    return StressTestResult(
+        baseline=baseline,
+        per_category=per_category,
+        status=_stress_test_status(per_category),
+    )
 
 
 def _raise_if_cancelled(cancellation_check: Callable[[], None] | None) -> None:
     if cancellation_check is not None:
         cancellation_check()
+
+
+def _stress_test_status(per_category: list[StressCategoryResult]) -> str:
+    if not per_category:
+        return "skipped"
+    statuses = {row.status for row in per_category}
+    if statuses == {"completed"}:
+        return "completed"
+    if statuses == {"skipped"}:
+        return "skipped"
+    if statuses == {"error"}:
+        return "failed"
+    return "partial"

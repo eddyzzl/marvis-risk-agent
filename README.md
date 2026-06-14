@@ -20,7 +20,7 @@ MARVIS Risk Agent is built for governed credit-risk work that should stay close 
 
 The current V1.1.1 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
 
-Planned next steps are documented in [docs/roadmap.md](docs/roadmap.md): V1.1 adds Agent Memory Foundation for historical validation metric comparison, V2 adds the Agent Plugin/Tool Runtime, and later releases build modeling and strategy capability packs on that runtime.
+The current V1.1.x line already ships the Agent Memory Foundation for historical validation metric comparison. Planned next steps are documented in [docs/roadmap.md](docs/roadmap.md): V2 adds the Agent Plugin/Tool Runtime, and later releases build modeling and strategy capability packs on that runtime.
 
 ## What You Get
 
@@ -120,6 +120,17 @@ The Python module name `riskmodel_checker` is retained in V1 for compatibility w
 python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
+
+## Material Directories
+
+When creating a task, the material directory must be under the current `workspace` or the current user's home directory by default. On Windows, allow another drive or local folder before startup:
+
+```powershell
+$env:RMC_MATERIAL_ROOTS="D:\model_materials"
+marvis serve --host 127.0.0.1 --port 8000 --workspace .\workspace
+```
+
+When running under WSL2, enter the WSL path such as `/mnt/c/Users/<you>/Downloads/project`, not a `C:\...` Windows path.
 
 ## Multiple Worktrees / Versions
 

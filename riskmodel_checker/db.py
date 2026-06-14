@@ -1,11 +1,19 @@
 import json
+import logging
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from riskmodel_checker.domain import TaskCreate, TaskRecord, TaskStatus
+from riskmodel_checker.domain import (
+    TASK_TYPE_VALIDATION,
+    VALID_TASK_TYPES,
+    TaskCreate,
+    TaskRecord,
+    TaskStatus,
+)
 from riskmodel_checker.model_algorithms import normalize_algorithm
 from riskmodel_checker.report_texts import COMPUTED_REPORT_TEXT_KEYS
 from riskmodel_checker.state_machine import (
@@ -14,11 +22,15 @@ from riskmodel_checker.state_machine import (
     assert_transition,
 )
 
+logger = logging.getLogger(__name__)
+
 AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:pressure_test_summary",
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
 })
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MIGRATION_TABLES = frozenset({"tasks"})
 
 
 def _now() -> str:
@@ -27,13 +39,13 @@ def _now() -> str:
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        _configure_connection(conn)
+    with connect(db_path) as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                model_name TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    task_type TEXT NOT NULL DEFAULT 'validation',
+                    model_name TEXT NOT NULL,
                 model_version TEXT NOT NULL,
                 validator TEXT NOT NULL,
                 source_dir TEXT NOT NULL,
@@ -45,10 +57,17 @@ def init_db(db_path: Path) -> None:
                 time_col TEXT NOT NULL DEFAULT 'apply_month',
                 status TEXT NOT NULL,
                 status_message TEXT NOT NULL,
+                status_reason_code TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
+            column="task_type",
+            definition="TEXT NOT NULL DEFAULT 'validation'",
         )
         _ensure_column(
             conn,
@@ -128,6 +147,12 @@ def init_db(db_path: Path) -> None:
             column="report_values_revision",
             definition="INTEGER NOT NULL DEFAULT 0",
         )
+        _ensure_column(
+            conn,
+            table="tasks",
+            column="status_reason_code",
+            definition="TEXT NOT NULL DEFAULT ''",
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -183,7 +208,6 @@ def init_db(db_path: Path) -> None:
         from riskmodel_checker.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
-        conn.commit()
 
 
 class TaskRepository:
@@ -195,6 +219,7 @@ class TaskRepository:
         now = _now()
         record = TaskRecord(
             id=task_id,
+            task_type=_normalize_task_type(payload.task_type),
             model_name=payload.model_name,
             model_version=payload.model_version,
             validator=payload.validator,
@@ -213,6 +238,7 @@ class TaskRepository:
             report_values_revision=0,
             status=TaskStatus.CREATED,
             status_message="created",
+            status_reason_code="",
             created_at=now,
             updated_at=now,
         )
@@ -221,17 +247,18 @@ class TaskRepository:
                 """
                 INSERT INTO tasks
                 (
-                    id, model_name, model_version, validator, source_dir,
+                    id, task_type, model_name, model_version, validator, source_dir,
                     algorithm, run_mode, target_col, score_col, split_col,
                     time_col, feature_columns_json, notebook_path, sample_path,
                     pmml_path, dictionary_path, report_values_json,
-                    report_values_revision, status, status_message, created_at,
-                    updated_at
+                    report_values_revision, status, status_message,
+                    status_reason_code, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
+                    record.task_type,
                     record.model_name,
                     record.model_version,
                     record.validator,
@@ -251,6 +278,7 @@ class TaskRepository:
                     record.report_values_revision,
                     record.status.value,
                     record.status_message,
+                    record.status_reason_code,
                     record.created_at,
                     record.updated_at,
                 ),
@@ -297,9 +325,11 @@ class TaskRepository:
         message: str,
         *,
         expected: TaskStatus | set[TaskStatus] | None = None,
+        reason_code: str = "",
     ) -> None:
         expected_set = _expected_status_set(expected)
         with connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             current_row = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
@@ -313,13 +343,17 @@ class TaskRepository:
             cursor = conn.execute(
                 f"""
                 UPDATE tasks
-                   SET status = ?, status_message = ?, updated_at = ?
+                   SET status = ?,
+                       status_message = ?,
+                       status_reason_code = ?,
+                       updated_at = ?
                  WHERE id = ?
                    AND status IN ({placeholders})
                 """,
                 (
                     status.value,
                     message,
+                    reason_code,
                     _now(),
                     task_id,
                     *(allowed.value for allowed in expected_set),
@@ -333,17 +367,35 @@ class TaskRepository:
                     raise KeyError(f"Task not found: {task_id}")
                 raise IllegalTransition(TaskStatus(latest["status"]), status)
 
-    def update_status_message(self, task_id: str, message: str) -> None:
+    def update_status_message(
+        self,
+        task_id: str,
+        message: str,
+        *,
+        reason_code: str | None = None,
+    ) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE tasks
-                   SET status_message = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                """,
-                (message, _now(), task_id),
-            )
+            if reason_code is None:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status_message = ?,
+                           updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (message, _now(), task_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status_message = ?,
+                           status_reason_code = ?,
+                           updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (message, reason_code, _now(), task_id),
+                )
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_id}")
 
@@ -382,6 +434,7 @@ class TaskRepository:
                 UPDATE tasks
                    SET status = ?,
                        status_message = ?,
+                       status_reason_code = '',
                        report_values_json = ?,
                        report_values_revision = report_values_revision + ?,
                        updated_at = ?
@@ -690,6 +743,7 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:
     return TaskRecord(
         id=row["id"],
+        task_type=row["task_type"] or TASK_TYPE_VALIDATION,
         model_name=row["model_name"],
         model_version=row["model_version"],
         validator=row["validator"],
@@ -710,11 +764,21 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         status_message=row["status_message"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        status_reason_code=row["status_reason_code"],
     )
 
 
 def _normalize_run_mode(value: str | None) -> str:
     return "agent" if value == "agent" else "manual"
+
+
+def _normalize_task_type(value: str | None) -> str:
+    # Whitelist known task types; unrecognized or empty values fall back to the
+    # default rather than letting arbitrary client-supplied strings persist.
+    if value in (None, ""):
+        return TASK_TYPE_VALIDATION
+    text = str(value)
+    return text if text in VALID_TASK_TYPES else TASK_TYPE_VALIDATION
 
 
 def _normalize_algorithm(value: str | None) -> str:
@@ -783,12 +847,26 @@ def _ensure_column(
     column: str,
     definition: str,
 ) -> None:
+    table_sql = _migration_table_identifier(table)
+    column_sql = _sql_identifier(column)
     existing_columns = {
         row[1]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
     }
     if column not in existing_columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {definition}")
+
+
+def _migration_table_identifier(table: str) -> str:
+    if table not in _MIGRATION_TABLES:
+        raise ValueError(f"unsupported migration table: {table}")
+    return _sql_identifier(table)
+
+
+def _sql_identifier(identifier: str) -> str:
+    if not _SQL_IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(f"unsafe SQL identifier: {identifier}")
+    return f'"{identifier}"'
 
 
 def _expected_status_set(
@@ -802,7 +880,13 @@ def _expected_status_set(
 
 
 def _configure_connection(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode=WAL")
+    mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    # WAL is requested for concurrent readers/writers. It silently degrades on
+    # read-only or networked filesystems; surface that instead of assuming the
+    # concurrency guarantees hold. In-memory databases legitimately report
+    # "memory" and are exempt.
+    if mode_row is not None and str(mode_row[0]).lower() not in ("wal", "memory"):
+        logger.warning("Failed to enable WAL journal mode; got %r", mode_row[0])
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -814,8 +898,7 @@ def connect(db_path: Path):
     conn = sqlite3.connect(db_path, timeout=5.0, isolation_level="DEFERRED")
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
+        _configure_connection(conn)
         yield conn
         conn.commit()
     except Exception:

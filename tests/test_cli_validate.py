@@ -52,11 +52,13 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
             db_path,
             report_template_path,
             feature_columns,
+            notebook_kernel_name,
         ):
             self.workspace = workspace
             self.db_path = db_path
             self.report_template_path = report_template_path
             self.feature_columns = feature_columns
+            self.notebook_kernel_name = notebook_kernel_name
 
     monkeypatch.setattr(
         __main__,
@@ -66,6 +68,7 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
             fake_init_db,
             FakePipelineSettings,
             fake_run_staged_pipeline,
+            lambda workspace: type("Environment", (), {"kernel_name": "riskmodel-kernel"})(),
         ),
     )
 
@@ -84,6 +87,7 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
     assert calls[1][0] == "run_staged_pipeline"
     assert calls[1][1] == "task-1"
     assert calls[1][2].feature_columns == ["x1", "x2"]
+    assert calls[1][2].notebook_kernel_name == "riskmodel-kernel"
 
 
 def test_cli_without_subcommand_defaults_to_serve(monkeypatch):

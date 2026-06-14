@@ -173,3 +173,54 @@ def test_validation_results_from_dict_preserves_feature_importance_category():
     results = validation_results_from_dict(payload)
 
     assert [row.category for row in results.basic_info.feature_importance] == ["征信", "行为"]
+
+
+def test_validation_results_from_dict_preserves_monthly_psi_reference_month():
+    payload = {
+        "model_name": "A卡",
+        "model_version": "v1",
+        "algorithm": "lgb",
+        "target_type": "binary",
+        "reproducibility": {
+            "sample_size": 0,
+            "seed": 42,
+            "rows": [],
+            "summary": {
+                "match_count": 0,
+                "mismatch_count": 0,
+                "max_abs_diff": 0.0,
+                "status": "pass",
+            },
+        },
+        "basic_info": {
+            "sample_period": ["20250101", "20250131"],
+            "split_summary": [],
+            "monthly_distribution": [],
+            "hyperparameters": {},
+            "feature_importance": [],
+        },
+        "effectiveness": {
+            "overall": [],
+            "bin_tables": {},
+            "monthly_ks": [],
+            "monthly_psi": [
+                {
+                    "month": "202503",
+                    "psi_vs_train": 0.01,
+                    "psi_mom": 0.02,
+                    "psi_mom_reference_month": "202501",
+                    "psi_mom_has_calendar_gap": True,
+                }
+            ],
+        },
+        "stress_test": {
+            "baseline": {"ks": 0.0, "sample_count": 0, "bin_table": []},
+            "per_category": [],
+        },
+    }
+
+    results = validation_results_from_dict(payload)
+
+    row = results.effectiveness.monthly_psi[0]
+    assert row.psi_mom_reference_month == "202501"
+    assert row.psi_mom_has_calendar_gap is True

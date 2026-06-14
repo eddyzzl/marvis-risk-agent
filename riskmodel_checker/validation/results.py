@@ -190,6 +190,8 @@ class MonthlyPsiRow:
     psi_first_month: float | None = None
     psi_last_month: float | None = None
     psi_mom: float | None = None
+    psi_mom_reference_month: str = ""
+    psi_mom_has_calendar_gap: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,12 +220,14 @@ class StressCategoryResult:
     psi_vs_baseline: float | None
     bin_table: list[BinRow]
     error: str | None
+    status: str = "completed"
 
 
 @dataclass(frozen=True)
 class StressTestResult:
     baseline: StressBaseline
     per_category: list[StressCategoryResult]
+    status: str = "completed"
 
 
 @dataclass(frozen=True)
@@ -362,6 +366,8 @@ def _effectiveness_from_dict(payload: dict[str, Any]) -> EffectivenessResult:
                 psi_first_month=_optional_float(row.get("psi_first_month")),
                 psi_last_month=_optional_float(row.get("psi_last_month")),
                 psi_mom=_optional_float(row.get("psi_mom")),
+                psi_mom_reference_month=str(row.get("psi_mom_reference_month") or ""),
+                psi_mom_has_calendar_gap=bool(row.get("psi_mom_has_calendar_gap")),
             )
             for row in payload.get("monthly_psi") or []
         ],
@@ -393,25 +399,43 @@ def _effectiveness_from_dict(payload: dict[str, Any]) -> EffectivenessResult:
 
 def _stress_test_from_dict(payload: dict[str, Any]) -> StressTestResult:
     baseline = payload.get("baseline") or {}
+    per_category = [
+        StressCategoryResult(
+            category=str(row.get("category") or ""),
+            dropped_features=[str(feature) for feature in row.get("dropped_features") or []],
+            ks_after=_optional_float(row.get("ks_after")),
+            ks_delta=_optional_float(row.get("ks_delta")),
+            psi_vs_baseline=_optional_float(row.get("psi_vs_baseline")),
+            bin_table=[_bin_row_from_dict(item) for item in row.get("bin_table") or []],
+            error=row.get("error"),
+            status=str(row.get("status") or ("error" if row.get("error") else "completed")),
+        )
+        for row in payload.get("per_category") or []
+    ]
     return StressTestResult(
         baseline=StressBaseline(
             ks=float(baseline.get("ks") or 0.0),
             sample_count=int(baseline.get("sample_count") or 0),
             bin_table=[_bin_row_from_dict(row) for row in baseline.get("bin_table") or []],
         ),
-        per_category=[
-            StressCategoryResult(
-                category=str(row.get("category") or ""),
-                dropped_features=[str(feature) for feature in row.get("dropped_features") or []],
-                ks_after=_optional_float(row.get("ks_after")),
-                ks_delta=_optional_float(row.get("ks_delta")),
-                psi_vs_baseline=_optional_float(row.get("psi_vs_baseline")),
-                bin_table=[_bin_row_from_dict(item) for item in row.get("bin_table") or []],
-                error=row.get("error"),
-            )
-            for row in payload.get("per_category") or []
-        ],
+        per_category=per_category,
+        status=str(payload.get("status") or _stress_test_status_from_categories(per_category)),
     )
+
+
+def _stress_test_status_from_categories(
+    per_category: list[StressCategoryResult],
+) -> str:
+    if not per_category:
+        return "skipped"
+    statuses = {row.status for row in per_category}
+    if statuses == {"completed"}:
+        return "completed"
+    if statuses == {"skipped"}:
+        return "skipped"
+    if statuses == {"error"}:
+        return "failed"
+    return "partial"
 
 
 def _bin_row_from_dict(row: dict[str, Any]) -> BinRow:

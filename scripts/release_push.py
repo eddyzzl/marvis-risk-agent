@@ -166,15 +166,16 @@ def main(argv: list[str] | None = None) -> int:
     if tag_exists(new_tag):
         raise RuntimeError(f"tag already exists: {new_tag}")
 
+    ensure_clean_worktree()
+    ensure_on_branch(args.branch)
     if args.dry_run:
+        print(f"verified clean worktree on branch {args.branch}")
         print(f"would update release metadata: {old_tag} -> {new_tag}")
         print(f"would create annotated tag: {new_tag}")
         if not args.no_push:
             print(f"would push {args.branch} and {new_tag} to {args.remote}")
         return 0
 
-    ensure_clean_worktree()
-    ensure_on_branch(args.branch)
     changed = update_release_files(old_tag, new_tag)
     create_release_commit(new_tag, changed)
     run(["git", "tag", "-a", new_tag, "-m", f"MARVIS Risk Agent {new_tag}"])

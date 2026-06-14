@@ -47,7 +47,7 @@ def write_validation_excel(results: ValidationResults, output_path: Path) -> Pat
             workbook,
             f"分箱_{split}",
             results.effectiveness.bin_tables.get(split, []),
-            first_header=split,
+            first_header=f"{split}(独立分箱)",
         )
     _write_monthly_effectiveness(workbook, results)
     _write_stress_summary(workbook, results)
@@ -147,7 +147,7 @@ def _write_effectiveness_overall(workbook: Workbook, results: ValidationResults)
     split_summary = {row.split: row for row in results.basic_info.split_summary}
     rows: list[tuple] = [(
         "数据集", "时间范围", "样本量", "逾期率", "坏样本量",
-        "KS", "AUC", "5%头部lift", "5%尾部lift", "PSI",
+        "KS(%)", "AUC(%)", "5%头部lift", "5%尾部lift", "PSI",
     )]
     rows.extend(
         (
@@ -239,13 +239,18 @@ def _write_monthly_effectiveness(workbook: Workbook, results: ValidationResults)
         by_month.setdefault(psi_row.month, {})["PSI"] = psi_row.psi_vs_train
         by_month[psi_row.month]["PSI(首月基准)"] = psi_row.psi_first_month
         by_month[psi_row.month]["PSI(尾月基准)"] = psi_row.psi_last_month
-        by_month[psi_row.month]["PSI(环比)"] = psi_row.psi_mom
+        by_month[psi_row.month]["PSI(较上一有样本月)"] = psi_row.psi_mom
+        by_month[psi_row.month]["PSI参考月"] = _psi_reference_month_text(
+            psi_row.psi_mom_reference_month,
+            has_calendar_gap=psi_row.psi_mom_has_calendar_gap,
+        )
     months = sorted(by_month)
     first_month = months[0] if months else ""
     last_month = months[-1] if months else ""
     rows: list[tuple] = [(
-        "月份", "样本量", "逾期率", "坏样本量", "KS", "AUC",
-        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)", "PSI(环比)",
+        "月份", "样本量", "逾期率", "坏样本量", "KS(%)", "AUC(%)",
+        "5%头部lift", "5%尾部lift", "PSI(首月基准)", "PSI(尾月基准)",
+        "PSI(较上一有样本月)", "PSI参考月",
     )]
     rows.extend(
         (
@@ -259,7 +264,8 @@ def _write_monthly_effectiveness(workbook: Workbook, results: ValidationResults)
             _optional_number(data.get("5%尾部lift")),
             "BASE" if month == first_month else _optional_number(data.get("PSI(首月基准)")),
             "BASE" if month == last_month else _optional_number(data.get("PSI(尾月基准)")),
-            "-" if month == first_month else _optional_number(data.get("PSI(环比)")),
+            "-" if month == first_month else _optional_number(data.get("PSI(较上一有样本月)")),
+            "-" if month == first_month else data.get("PSI参考月", ""),
         )
         for month, data in sorted(by_month.items())
     )
@@ -275,26 +281,45 @@ def _write_monthly_effectiveness(workbook: Workbook, results: ValidationResults)
 
 def _write_stress_summary(workbook: Workbook, results: ValidationResults) -> None:
     sheet = workbook.create_sheet("压力测试_汇总")
-    rows: list[tuple] = [("类别", "置 -9999 特征数", "KS_baseline", "KS_after", "KS_delta", "PSI", "错误")]
+    rows: list[tuple] = [(
+        "类别",
+        "状态",
+        "置 -9999 特征数",
+        "KS_baseline",
+        "KS_after",
+        "KS_delta",
+        "PSI",
+        "错误",
+    )]
     baseline_ks = results.stress_test.baseline.ks
     rows.extend(
-        (item.category, len(item.dropped_features), baseline_ks,
+        (item.category, _stress_status_label(item.status), len(item.dropped_features), baseline_ks,
          item.ks_after if item.ks_after is not None else "",
          item.ks_delta if item.ks_delta is not None else "",
          item.psi_vs_baseline if item.psi_vs_baseline is not None else "",
          item.error or "")
         for item in results.stress_test.per_category
     )
-    _write_rows(sheet, rows, header_rows=1, decimal_columns={2, 3, 4, 5})
+    _write_rows(sheet, rows, header_rows=1, decimal_columns={3, 4, 5, 6})
     # color KS_delta cells based on threshold
     for row_index, item in enumerate(results.stress_test.per_category, start=2):
         if item.ks_delta is None:
             continue
         color = ks_delta_cell_color(item.ks_delta)
         if color:
-            sheet.cell(row=row_index, column=5).fill = PatternFill(
+            sheet.cell(row=row_index, column=6).fill = PatternFill(
                 start_color=color, end_color=color, fill_type="solid",
             )
+
+
+def _stress_status_label(status: str) -> str:
+    return {
+        "completed": "完成",
+        "skipped": "跳过",
+        "error": "异常",
+        "partial": "部分完成",
+        "failed": "失败",
+    }.get(str(status or ""), str(status or ""))
 
 
 def _write_bins(
@@ -448,6 +473,10 @@ def _score_interval(lower: float, upper: float) -> str:
 
 
 def _compact_number(value: float) -> str:
+    if value == float("inf"):
+        return "inf"
+    if value == float("-inf"):
+        return "-inf"
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.3f}".rstrip("0").rstrip(".")
@@ -472,11 +501,19 @@ def _pct_point(value: float) -> float:
 
 
 def _bad_count(row) -> int:
-    return int(row.bad_count or round(row.sample_count * row.bad_rate))
+    if row.bad_count is not None:
+        return int(row.bad_count)
+    return int(round(row.sample_count * row.bad_rate))
 
 
 def _optional_number(value) -> float | str:
     return "" if value is None else float(value)
+
+
+def _psi_reference_month_text(month: str, *, has_calendar_gap: bool) -> str:
+    if not month:
+        return ""
+    return f"{month}(跨月)" if has_calendar_gap else str(month)
 
 
 def _safe_sheet_title(workbook: Workbook, title: str) -> str:

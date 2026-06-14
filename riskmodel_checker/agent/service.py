@@ -77,7 +77,10 @@ GREETING_CHAT_FALLBACK = (
 AGENT_RESPONSE_PREAMBLE_PATTERNS = (
     r"^(?:好的|好|收到|明白|可以)[，,。！!\s]*",
     r"^(?:我会|我将)?(?:遵照|根据|按照)(?:您|你)?的?(?:指示|要求)[，,。！!\s]*",
-    r"^以下是(?:针对|关于|基于)[^\n]{0,160}?(?:验证分析|阶段分析|分析说明|验证总结|分析|总结)[。:：\s]*",
+    # The trailing terminator is required (+, not *): otherwise the bare 分析/总结
+    # alternatives match mid-sentence and delete the opening clause of legitimate
+    # content like "以下是关于本次验证分析的详细内容。" → "的详细内容。".
+    r"^以下是(?:针对|关于|基于)[^\n]{0,160}?(?:验证分析|阶段分析|分析说明|验证总结|分析|总结)[。:：\s]+",
 )
 AGENT_RESPONSE_LEADING_SEPARATOR_PATTERN = re.compile(r"^(?:[-*_]\s*){3,}\s*")
 
@@ -655,6 +658,7 @@ def generate_word_conclusions(
             user_prompt=prompt,
             temperature=0.2,
             response_format={"type": "json_object"},
+            stream=False,
         )
         values = _parse_conclusion_json(content)
     except (LLMClientError, ValueError) as exc:
@@ -1033,10 +1037,11 @@ def _sanitize_llm_payload(value: object, task: TaskRecord) -> object:
     if isinstance(value, tuple):
         return [_sanitize_llm_payload(item, task) for item in value]
     if isinstance(value, dict):
+        # Only sanitize values, never keys. Keys are structural field names; a
+        # key that happens to contain the task id should not be rewritten into a
+        # display name (which would corrupt the payload schema seen by the LLM).
         return {
-            _sanitize_llm_text(key, task)
-            if isinstance(key, str)
-            else key: _sanitize_llm_payload(item, task)
+            key: _sanitize_llm_payload(item, task)
             for key, item in value.items()
         }
     return value
@@ -1098,7 +1103,10 @@ def _stage_instructions(stage: str) -> str:
 
 
 def _parse_conclusion_json(content: str) -> dict[str, str]:
-    payload = json.loads(content)
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LLM 返回不是有效 JSON") from exc
     if not isinstance(payload, dict):
         raise ValueError("word conclusion response must be a JSON object")
     values = {

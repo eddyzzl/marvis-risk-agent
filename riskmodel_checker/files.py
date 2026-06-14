@@ -24,7 +24,12 @@ def classify_file(path: Path) -> FileRole:
 
 
 def scan_source_dir(
-    source_dir: Path, hash_limit_bytes: int = 50 * 1024 * 1024
+    source_dir: Path,
+    hash_limit_bytes: int = 50 * 1024 * 1024,
+    *,
+    max_files: int = 2000,
+    max_depth: int = 6,
+    max_total_hash_bytes: int = 500 * 1024 * 1024,
 ) -> list[FileArtifact]:
     if not source_dir.exists():
         raise FileNotFoundError(source_dir)
@@ -32,20 +37,36 @@ def scan_source_dir(
         raise NotADirectoryError(source_dir)
 
     artifacts: list[FileArtifact] = []
+    scanned_files = 0
+    total_hashed_bytes = 0
     for path in sorted(source_dir.rglob("*")):
         if path.is_symlink():
             continue
         if not path.is_file():
             continue
-        if _is_hidden_or_checkpoint_path(path.relative_to(source_dir)):
+        relative_path = path.relative_to(source_dir)
+        if _is_hidden_or_checkpoint_path(relative_path):
             continue
+        if max_depth > 0 and len(relative_path.parent.parts) > max_depth:
+            raise ValueError(
+                f"source_dir is too deep: {relative_path} exceeds max_depth={max_depth}"
+            )
+        scanned_files += 1
+        if max_files > 0 and scanned_files > max_files:
+            raise ValueError(f"source_dir has too many files: max_files={max_files}")
 
         role = classify_file(path)
         if role == FileRole.UNKNOWN:
             continue
 
         size_bytes = path.stat().st_size
-        digest = sha256_file(path) if size_bytes <= hash_limit_bytes else None
+        should_hash = (
+            size_bytes <= hash_limit_bytes
+            and total_hashed_bytes + size_bytes <= max_total_hash_bytes
+        )
+        digest = sha256_file(path) if should_hash else None
+        if should_hash:
+            total_hashed_bytes += size_bytes
         risk_notes = []
         artifacts.append(
             FileArtifact(
@@ -70,5 +91,5 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 def _is_hidden_or_checkpoint_path(relative_path: Path) -> bool:
     return any(
         part.startswith(".") or part == ".ipynb_checkpoints"
-        for part in relative_path.parts[:-1]
+        for part in relative_path.parts
     )

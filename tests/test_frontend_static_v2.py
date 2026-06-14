@@ -155,20 +155,14 @@ def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
 
 
 def _render_agent_markdown(markdown: str) -> str:
-    app_js = _read_static("app.js")
-    escape_start = app_js.index("function escapeHtml")
-    escape_end = app_js.index("function fileName", escape_start)
-    renderer_start = app_js.index("function renderAgentMarkdown")
-    renderer_end = app_js.index("function shouldPreserveOptimisticAgentMessages", renderer_start)
     script = "\n".join(
         [
-            app_js[escape_start:escape_end],
-            app_js[renderer_start:renderer_end],
+            "import { renderAgentMarkdown } from './riskmodel_checker/static/js/render-agent.js';",
             f"process.stdout.write(renderAgentMarkdown({json.dumps(markdown, ensure_ascii=False)}));",
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -317,39 +311,6 @@ def _task_display_status_for(
     return json.loads(result.stdout)
 
 
-def test_browser_chrome_uses_public_default_branding():
-    index_html = _read_static("index.html")
-
-    assert "<title>MARVIS-全能风控智能体</title>" in index_html
-    assert '<link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png' in index_html
-    assert 'id="brandLogo"' in index_html
-    assert 'class="brand-mark"' in index_html
-    assert 'src="static/brand/marvis-logo.png' in index_html
-    assert 'id="platformName"' in index_html
-    assert "MARVIS-全能风控智能体" in index_html
-    assert "private-logo.svg" not in index_html
-    assert 'href="data:,"' not in index_html
-
-
-def test_runtime_branding_hooks_exist():
-    app_js = _read_static("app.js")
-
-    assert "const defaultBranding" in app_js
-    assert 'fetch("api/branding")' in app_js
-    assert "async function loadBranding()" in app_js
-    assert "function applyBranding(branding)" in app_js
-    assert "document.title = branding.browserTitle" in app_js
-    assert '$("platformName").textContent = branding.platformName' in app_js
-    assert '$("brandLogo").src = branding.logoUrl' in app_js
-    assert '$("brandLogo").alt = `${branding.platformName} logo`' in app_js
-    assert '$("workspaceBrandLogo").src = branding.logoUrl' in app_js
-    assert '$("workspaceBrandLogo").alt = `${branding.platformName} logo`' in app_js
-    assert 'favicon.href = branding.faviconUrl' in app_js
-    assert 'document.documentElement.style.setProperty("--brand-primary", branding.primaryColor)' in app_js
-    assert 'document.documentElement.style.setProperty("--brand-primary-hover"' in app_js
-    assert "loadBranding();" in app_js
-
-
 def test_frontend_uses_v2_task_actions_only():
     app_js = _read_static("app.js")
 
@@ -466,7 +427,7 @@ def test_completed_report_actions_render_below_step_copy_with_excel_green():
 def test_report_download_readiness_requires_generated_report_flag():
     app_js = _read_static("app.js")
     busy_start = app_js.index("function taskStopped")
-    busy_end = app_js.index("function $", busy_start)
+    busy_end = app_js.index("function currentTaskSignature", busy_start)
     ready_start = app_js.index("function completedReportReadyForDownloads")
     ready_end = app_js.index("function stepDownloadActionsHtml", ready_start)
     script = "\n".join(
@@ -526,17 +487,19 @@ def test_stage_actions_capture_task_id_before_polling():
 
 def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
     app_js = _read_static("app.js")
+    polling_js = _read_static("js/polling.js")
 
-    assert "const backgroundProgressPolls = new Map();" in app_js
+    assert "const progressPolls = createProgressPollRegistry();" in app_js
+    assert "export function createProgressPollRegistry" in polling_js
+    assert "existing.cancelled = true;" in polling_js
     assert "function ensureActiveTaskProgressPolling" in app_js
 
     ensure_start = app_js.index("function ensureActiveTaskProgressPolling")
     ensure_end = app_js.index("async function refreshTasks", ensure_start)
     ensure_body = app_js[ensure_start:ensure_end]
     assert "taskServerBusyAction(task)" in ensure_body
-    assert "backgroundProgressPolls.has(taskId)" in ensure_body
+    assert "progressPolls.has(taskId)" in ensure_body
     assert "pollValidationProgress(terminalTaskStatuses, taskId, { background: true })" in ensure_body
-    assert "backgroundProgressPolls.delete(taskId)" in ensure_body
 
     refresh_start = app_js.index("async function refreshTasks")
     refresh_end = app_js.index("async function scanCurrentTask", refresh_start)
@@ -553,6 +516,9 @@ def test_selected_running_task_auto_polls_progress_after_refresh_or_reselect():
     poll_end = app_js.index("async function validateCurrentTask", poll_start)
     poll_body = app_js[poll_start:poll_end]
     assert "{ stopping = false, background = false } = {}" in poll_body
+    assert "const claim = claimProgressPoll(progressPolls, taskId, { background });" in poll_body
+    assert "if (!claim.claimed) return claim.existing.promise;" in poll_body
+    assert "releaseProgressPoll(progressPolls, taskId, pollState)" in poll_body
     assert "if (selectedTaskId === taskId && !background)" in poll_body
     assert "if (selectedTaskId === taskId && !background) {" in poll_body
 
@@ -573,7 +539,14 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
 
-    assert "static/app.js?v=20260603-zero-rail-collapse" in index_html
+    assert "static/app.js?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert '<script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>' in index_html
+    assert "static/app.js?v=20260613-task-entry-welcome" not in index_html
+    assert "static/app.js?v=20260613-review-fixes" not in index_html
+    assert "static/app.js?v=20260613-task-entry-upload" not in index_html
+    assert 'static/app.js?v=20260613-task-entry"' not in index_html
+    assert "static/app.js?v=20260605-create-task-error" not in index_html
+    assert "static/app.js?v=20260603-zero-rail-collapse" not in index_html
     assert "static/app.js?v=20260603-task-validator-icon" not in index_html
     assert "static/app.js?v=20260603-field-focus-ring" not in index_html
     assert "static/app.js?v=20260603-dark-masks" not in index_html
@@ -613,6 +586,16 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "select.suppress-pointer-focus-ring:focus-visible" in suppress_rule
     assert "outline: none" in suppress_rule
     assert "box-shadow: none" in suppress_rule
+
+
+def test_initialization_failure_shows_service_connection_error():
+    app_js = _read_static("app.js")
+    init_body = _slice_function(app_js, "async function initializeApp")
+
+    assert "initializeApp();" in app_js
+    assert "服务连接失败，请检查后端是否运行。" in init_body
+    assert 'setActionStatus("服务连接失败，请检查后端是否运行。", "error", detail)' in init_body
+    assert "runAction(async () => {\n  await refreshTasks();" not in app_js
 
 
 def test_create_task_payload_omits_notebook_contract_fields():
@@ -814,6 +797,57 @@ def test_create_task_requires_run_mode_and_allows_agent_mode():
     assert '?.value || "manual"' not in create_renderer
 
 
+def test_create_dialog_moves_material_source_to_bottom_segment():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    dialogs_js = _read_static("js/dialogs.js")
+    styles_css = _read_static("styles.css")
+
+    assert "报告初始内容" not in index_html
+    task_info_start = index_html.index('<h3>任务信息</h3>')
+    report_start = index_html.index('id="createTaskReportFields"')
+    material_start = index_html.index('id="createTaskMaterialSection"')
+    create_button_start = index_html.index('id="createTaskButton"')
+    assert task_info_start < report_start < material_start < create_button_start
+
+    task_info_section = index_html[task_info_start:report_start]
+    assert 'id="sourceDir"' not in task_info_section
+    assert index_html.index('id="createGoodSampleDefinition"') < index_html.index('id="sourceDir"')
+
+    material_section = index_html[material_start:create_button_start]
+    assert 'role="tablist"' in material_section
+    assert 'id="materialSourcePathTab"' in material_section
+    assert 'id="materialSourceUploadTab"' in material_section
+    assert "文件路径" in material_section
+    assert "文件上传" in material_section
+    assert 'aria-selected="true"' in material_section
+    assert 'aria-selected="false"' in material_section
+    assert 'id="materialSourcePathPanel"' in material_section
+    assert 'id="materialSourceUploadPanel"' in material_section
+    assert 'id="sourceDir"' in material_section
+    assert "材料目录" in material_section
+    assert 'id="materialUploadInput" class="visually-hidden" type="file" multiple />' in material_section
+    assert 'class="material-upload-dropzone"' in material_section
+    assert 'role="button" tabindex="0"' in material_section
+    assert 'class="material-upload-icon"' in material_section
+    assert 'id="materialUploadStatus"' in material_section
+    assert "点击或拖拽上传" in material_section
+    assert "暂未开放" in material_section
+
+    assert "export function createMaterialSourceController" in dialogs_js
+    assert "function bindDropzone()" in dialogs_js
+    assert "captureFiles(input.files)" in dialogs_js
+    assert "captureFiles(event.dataTransfer?.files)" in dialogs_js
+    assert 'dropzone.classList.add("is-dragover")' in dialogs_js
+    assert "materialSourceController.bindDropzone();" in app_js
+
+    assert ".material-source-section" in styles_css
+    assert ".material-source-segment" in styles_css
+    assert ".material-source-tab" in styles_css
+    assert ".material-upload-dropzone" in styles_css
+    assert ".material-upload-dropzone.is-dragover" in styles_css
+
+
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
     app_js = _read_static("app.js")
 
@@ -878,7 +912,7 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     assert "overflow-x: hidden" in form_rule
     assert "overflow-y: auto" in form_rule
     assert "overscroll-behavior: contain" in form_rule
-    assert "grid-template-rows: auto auto auto auto minmax(0, auto)" in form_rule
+    assert "grid-template-rows: auto auto auto auto auto minmax(0, auto)" in form_rule
     assert "minmax(19px, auto)" not in form_rule
 
     environment_start = styles_css.index(".environment-dialog {")
@@ -1081,7 +1115,11 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
-    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/styles.css?v=20260613-task-entry-upload" not in index_html
+    assert 'static/styles.css?v=20260613-task-entry"' not in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" not in index_html
     assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
     assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
@@ -1300,94 +1338,41 @@ def test_selected_task_header_omits_local_validation_subtitle():
     ]
 
 
-def test_unselected_workspace_shows_centered_welcome_only():
-    index_html = _read_static("index.html")
+def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_only():
     app_js = _read_static("app.js")
-    styles_css = _read_static("styles.css")
+    state_js = _read_static("js/state.js")
 
-    assert 'id="workspaceWelcome"' in index_html
-    assert 'id="workspaceBrandLogo"' in index_html
-    assert 'class="workspace-brand-logo"' in index_html
-    assert 'id="workspaceGreetingTitle"' in index_html
-    assert 'id="workspaceGreetingText"' in index_html
-    assert 'id="workspaceGreetingCursor"' not in index_html
-    assert 'class="workspace-greeting-cursor"' not in index_html
-    assert 'class="workspace-greeting-nowrap"' in index_html
-    assert "早上好，开启活力一天" in index_html
-    assert "我来帮您完成信贷风控工作" in index_html
-    assert "我来帮您完成模型验证工作" not in index_html
-    assert "欢迎，我来帮您完成信贷风控工作" not in index_html
-    assert "创建任务或从左侧选择已有任务" in index_html
-    assert "validationWorkspace" in app_js
-    assert 'classList.toggle("is-empty", !selectedTask)' in app_js
-    assert 'class="validation-workspace region is-empty"' in index_html
-
-    assert ".workspace-welcome" in styles_css
-    assert ".workspace-brand-logo" in styles_css
-    assert ".workspace-greeting-nowrap" in styles_css
-    assert "white-space: nowrap" in styles_css
-    assert ".workspace-greeting-cursor" not in styles_css
-    assert "workspace-greeting-cursor-blink" not in styles_css
-    title_start = styles_css.index(".workspace-welcome h2 {")
-    title_end = styles_css.index("}", title_start)
-    title_rule = styles_css[title_start:title_end]
-    assert "white-space: nowrap" in title_rule
-    assert "max-width: none" in title_rule
-    assert "word-break: keep-all" in title_rule
-    logo_start = styles_css.index(".workspace-brand-logo {")
-    logo_end = styles_css.index("}", logo_start)
-    logo_rule = styles_css[logo_start:logo_end]
-    assert "width: 128px" in logo_rule
-    assert "height: 128px" in logo_rule
-    assert "object-fit: contain" in logo_rule
-    assert "margin: 0 0 28px" in logo_rule
-    assert "display: none" in styles_css
-    assert ".validation-workspace.is-empty .workspace-welcome" in styles_css
-    assert "display: grid" in styles_css
-    assert ".validation-workspace.is-empty .workspace-head" in styles_css
-    assert ".validation-workspace.is-empty .workspace-body" in styles_css
-
-
-def test_empty_workspace_greeting_changes_by_local_time():
-    app_js = _read_static("app.js")
-
-    assert "function workspaceGreetingForHour(hour)" in app_js
-    assert "function updateWorkspaceGreeting(now = new Date())" in app_js
-    assert "workspaceGreetingForHour(now.getHours())" in app_js
-    assert "$(\"workspaceGreetingText\").textContent = greeting" in app_js
-    assert "${greeting}，我来帮您完成信贷风控工作" not in app_js
-    assert "我来帮您完成模型验证工作" not in app_js
-    assert "updateWorkspaceGreeting();" in app_js
-
-    assert "早上好，开启活力一天" in app_js
-    assert "上午好，记得多补充水份" in app_js
-    assert "下午好，记得起来活动一下" in app_js
-    assert "晚上好，工作辛苦了" in app_js
-
-    greeting_start = app_js.index("function workspaceGreetingForHour(hour)")
-    greeting_end = app_js.index("function updateWorkspaceGreeting", greeting_start)
-    greeting_logic = app_js[greeting_start:greeting_end]
-    assert "hour >= 5 && hour < 9" in greeting_logic
-    assert "hour >= 9 && hour < 12" in greeting_logic
-    assert "hour >= 12 && hour < 18" in greeting_logic
-    assert "return \"晚上好，工作辛苦了\"" in greeting_logic
-
-
-def test_task_selection_can_be_toggled_off_and_refresh_does_not_auto_select():
-    app_js = _read_static("app.js")
+    assert 'export const selectedTaskStorageKey = "riskmodel_checker_selected_task_id";' in state_js
+    assert "function rememberSelectedTaskId" in app_js
+    assert "function storedSelectedTaskId" in app_js
 
     sync_start = app_js.index("function syncSelectedTaskFromCache")
     sync_end = app_js.index("function runModeLabel", sync_start)
     sync_renderer = app_js[sync_start:sync_end]
     assert "taskCache[0]" not in sync_renderer
+    assert "const storedTaskId = storedSelectedTaskId();" in sync_renderer
+    assert "taskCache.find((task) => task.id === storedTaskId)" in sync_renderer
+    assert "rememberSelectedTaskId(null);" in sync_renderer
 
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function renderMetricPreview", select_start)
     select_renderer = app_js[select_start:select_end]
     assert "if (selectedTaskId === task.id)" in select_renderer
     assert "deselectCurrentTask()" in select_renderer
+    assert "rememberSelectedTaskId(task.id);" in select_renderer
+    assert "rememberSelectedTaskId(null);" in select_renderer
     assert "renderMetricPreview({});" in select_renderer
     assert "function deselectCurrentTask" in app_js
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_renderer = app_js[create_start:create_end]
+    assert "rememberSelectedTaskId(task.id);" in create_renderer
+
+    delete_start = app_js.index("async function deleteTask")
+    delete_end = app_js.index("async function runAction", delete_start)
+    delete_renderer = app_js[delete_start:delete_end]
+    assert "rememberSelectedTaskId(null);" in delete_renderer
 
 
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
@@ -1628,7 +1613,11 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "#182a3f" not in styles_css
     assert "#345b8a" not in styles_css
     assert "#172032" not in styles_css
-    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/styles.css?v=20260613-task-entry-upload" not in index_html
+    assert 'static/styles.css?v=20260613-task-entry"' not in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" not in index_html
     assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
     assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
@@ -1964,6 +1953,7 @@ def test_header_task_meta_values_stay_on_one_line():
 
 def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
 
     renderer_start = app_js.index("function stepActionButtonHtml")
     renderer_end = app_js.index("function formatDate", renderer_start)
@@ -1982,9 +1972,9 @@ def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
     assert "running" in renderer
     assert "failed" in renderer
 
-    steps_start = app_js.index("const workflowSteps = [")
-    steps_end = app_js.index("];", steps_start)
-    steps_config = app_js[steps_start:steps_end]
+    steps_start = state_js.index("export const workflowSteps = [")
+    steps_end = state_js.index("];", steps_start)
+    steps_config = state_js[steps_start:steps_end]
     assert 'title: "模型材料完备性验证"' in steps_config
     assert 'hint: "巡检材料内容"' in steps_config
     assert 'title: "模型可复现性验证"' in steps_config
@@ -2209,7 +2199,11 @@ def test_workflow_actions_are_gated_by_completed_previous_steps():
     app_js = _read_static("app.js")
 
     assert "function taskFailedDuringScan" in app_js
-    assert 'startsWith("材料扫描失败：")' in app_js
+    scan_start = app_js.index("function taskFailedDuringScan")
+    scan_end = app_js.index("function taskFailureWasRestartReclaim", scan_start)
+    scan_helper = app_js[scan_start:scan_end]
+    assert "status_message" not in scan_helper
+    assert 'normalizedFailureStage(task.failure_stage) === "scan"' in scan_helper
     recommended_start = app_js.index("function recommendedAction")
     recommended_end = app_js.index("function canRunStepAction", recommended_start)
     recommended = app_js[recommended_start:recommended_end]
@@ -2282,8 +2276,8 @@ def test_stage_failures_keep_completed_previous_steps_green():
     assert "function taskFailureStage" in app_js
     assert "function normalizedFailureStage" in app_js
     assert "const structuredStage = normalizedFailureStage(task.failure_stage);" in helper_renderer
-    assert "模型效果&稳定性验证失败" in helper_renderer
-    assert 'return "metrics";' in helper_renderer
+    assert "status_message" not in helper_renderer
+    assert "if (structuredStage) return structuredStage;\n  return null;" in helper_renderer
     assert "const failedIndex = workflowSteps.findIndex((candidate) => candidate.id === failedStepId);" in status_renderer
     assert 'if (step.id === failedStepId) return "failed";' in status_renderer
     assert 'if (failedIndex >= 0) return index < failedIndex ? "succeeded" : "pending";' in status_renderer
@@ -2313,6 +2307,11 @@ def test_structured_failure_stage_overrides_legacy_status_message():
 
 
 def test_restart_reclaimed_task_keeps_completed_notebook_and_metrics_steps_green():
+    app_js = _read_static("app.js")
+    restart_body = _slice_function(app_js, "function taskFailureWasRestartReclaim")
+    assert "failure_reason_code" in restart_body
+    assert "status_message" not in restart_body
+
     notebook_steps = [
         {"id": "notebook-load", "status": "succeeded"},
         {"id": "system-repro-pmml", "status": "succeeded"},
@@ -2330,14 +2329,15 @@ def test_restart_reclaimed_task_keeps_completed_notebook_and_metrics_steps_green
     assert _workflow_step_statuses_for(
         {
             "status": "failed",
-            "status_message": "reclaimed: server restart while running",
+            "status_message": "普通失败文案",
+            "failure_reason_code": "server_restart_while_running",
             "active_job_kind": None,
         },
         notebook_steps,
     ) == ["succeeded", "succeeded", "succeeded", "pending"]
 
 
-def test_legacy_metrics_failures_stay_on_metrics_step():
+def test_missing_structured_failure_stage_stays_unknown():
     app_js = _read_static("app.js")
 
     helper_start = app_js.index("function taskFailureStage")
@@ -2347,12 +2347,19 @@ def test_legacy_metrics_failures_stay_on_metrics_step():
     index_end = app_js.index("function taskFailureStepId", index_start)
     index_renderer = app_js[index_start:index_end]
 
-    assert "sample column check failed" in helper_renderer
-    assert "data dictionary missing columns" in helper_renderer
-    assert "notebook metrics failed" in helper_renderer
-    assert "live notebook kernel is not available" in helper_renderer
+    assert "status_message" not in helper_renderer
+    assert "return null;" in helper_renderer
     assert 'if (taskFailedDuringMetrics(selectedTask)) return 2;' in index_renderer
     assert 'if (taskFailedDuringReport(selectedTask)) return 3;' in index_renderer
+    assert _workflow_step_statuses_for(
+        {
+            "status": "failed",
+            "status_message": "unexpected pipeline failure",
+            "active_job_kind": None,
+            "failure_stage": None,
+        },
+        [],
+    ) == ["pending", "pending", "pending", "pending"]
 
 
 def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
@@ -2439,6 +2446,22 @@ def test_create_task_auto_scans_materials_after_creation():
     assert "await createTask()" in handler_renderer
     assert "await scanCurrentTask()" in handler_renderer
     assert "await loadTaskEvidence(task.id)" in handler_renderer
+
+
+def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
+    app_js = _read_static("app.js")
+
+    click_start = app_js.index('$("createTaskButton").onclick')
+    click_end = app_js.index('$("workflowStepper").onclick', click_start)
+    click_handler = app_js[click_start:click_end]
+    assert 'runAction(createTaskAndScan);' in click_handler
+    assert 'actionId: "scan"' not in click_handler
+
+    keydown_start = app_js.index('event.key === "Enter"')
+    keydown_end = app_js.index('document.addEventListener("click"', keydown_start)
+    keydown_handler = app_js[keydown_start:keydown_end]
+    assert 'runAction(createTaskAndScan);' in keydown_handler
+    assert 'actionId: "scan"' not in keydown_handler
 
 
 def test_initial_load_restores_task_evidence_for_selected_task():
@@ -2627,6 +2650,7 @@ def test_sidebar_settings_exposes_execution_environment_dialog():
 def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
     styles_css = _read_static("styles.css")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
@@ -2675,7 +2699,7 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     ]:
         assert removed_asset not in app_js
 
-    assert 'const defaultPetPreference = "naitang";' in app_js
+    assert 'export const defaultPetPreference = "naitang";' in state_js
     assert "let petPreference = defaultPetPreference" in app_js
     assert 'naitang: {' in app_js
     assert 'name: "蛋黄"' in app_js
@@ -2733,7 +2757,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
     assert 'petPreference = normalized;' in app_js
 
     preference_start = app_js.index("const petDefinitions")
-    preference_end = app_js.index("const defaultExecutionEnvironment", preference_start)
+    preference_end = app_js.index("executionEnvironmentSettings =", preference_start)
     normalize_start = app_js.index("function normalizePetPreference")
     normalize_end = app_js.index("function persistPetPreference", normalize_start)
     script = "\n".join(
@@ -2763,9 +2787,10 @@ def test_pet_preference_restores_legacy_local_storage_ids():
 
 def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
 
-    assert 'const defaultPetPreference = "naitang";' in app_js
-    assert 'const explicitPetNoneStorageKey = "riskmodel_checker_pet_none_explicit";' in app_js
+    assert 'export const defaultPetPreference = "naitang";' in state_js
+    assert 'export const explicitPetNoneStorageKey = "riskmodel_checker_pet_none_explicit";' in state_js
     assert "function persistPetPreference" in app_js
     assert 'if (value === "none" && explicitNone) {' in app_js
     assert "localStorage.setItem(explicitPetNoneStorageKey, \"1\");" in app_js
@@ -3111,14 +3136,15 @@ def test_reproducibility_panel_formats_null_scores_as_missing_values():
 def test_reproducibility_card_is_hidden_until_notebook_success():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
     styles_css = _read_static("styles.css")
 
     assert 'id="notebookSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
     assert "function shouldShowReproducibilitySection" in app_js
-    assert "const notebookReproducibilityCompleteStatuses = new Set([" in app_js
+    assert "export const notebookReproducibilityCompleteStatuses = new Set([" in state_js
     for status in ["executed", "computing_metrics", "writing_artifacts", "succeeded", "review_required"]:
-        assert f'"{status}"' in app_js
+        assert f'"{status}"' in state_js
     assert "notebookReproducibilityCompleteStatuses.has(task?.status || \"\")" in app_js
     assert '$("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection())' in app_js
 
@@ -3126,21 +3152,46 @@ def test_reproducibility_card_is_hidden_until_notebook_success():
 def test_metric_card_is_hidden_until_metric_validation_success():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
     styles_css = _read_static("styles.css")
 
     assert 'id="metricSection" class="progress-panel hidden"' in index_html
     assert ".progress-panel.hidden" in styles_css
     assert "function shouldShowMetricSection" in app_js
-    assert "const metricOverviewCompleteStatuses = new Set([" in app_js
+    assert "export const metricOverviewCompleteStatuses = new Set([" in state_js
     for status in ["writing_artifacts", "succeeded"]:
-        assert f'"{status}"' in app_js
-    helper_start = app_js.index("const metricOverviewCompleteStatuses = new Set([")
-    helper_end = app_js.index("const workflowSteps = [", helper_start)
-    helper_block = app_js[helper_start:helper_end]
+        assert f'"{status}"' in state_js
+    helper_start = state_js.index("export const metricOverviewCompleteStatuses = new Set([")
+    helper_end = state_js.index("export const workflowSteps = [", helper_start)
+    helper_block = state_js[helper_start:helper_end]
     assert '"computing_metrics"' not in helper_block
     assert '"executed"' not in helper_block
     assert "metricOverviewCompleteStatuses.has(task?.status || \"\")" in app_js
     assert '$("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection())' in app_js
+
+
+def test_metric_sparkline_html_requires_local_spec_marker():
+    app_js = _read_static("app.js")
+    renderer_start = app_js.index("function renderCellByKind")
+    renderer_end = app_js.index("function renderMetricTable", renderer_start)
+    renderer = app_js[renderer_start:renderer_end]
+    trend_start = app_js.index("function renderTrendTable")
+    trend_end = app_js.index("function renderSparklineSvg", trend_start)
+    trend_renderer = app_js[trend_start:trend_end]
+
+    assert 'kind === "trend-spark" && spec && spec.__localHtml === true' in renderer
+    assert 'trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });' in trend_renderer
+
+
+def test_metric_tooltip_uses_document_delegation_for_rebuilt_preview():
+    app_js = _read_static("app.js")
+    tooltip_start = app_js.index("function attachMetricTooltip")
+    tooltip_end = app_js.index("function renderEnhancedTable", tooltip_start)
+    tooltip = app_js[tooltip_start:tooltip_end]
+
+    assert 'document.addEventListener("mouseover"' in tooltip
+    assert 'event.target.closest("#metricPreview [data-tip]")' in tooltip
+    assert 'rootEl.addEventListener("mouseover"' not in tooltip
 
 
 def test_metric_kpi_footer_values_are_centered_in_each_column():
@@ -3399,6 +3450,7 @@ def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
             "status": "scanned",
             "status_message": "已停止当前动作",
             "active_job_kind": "agent",
+            "stopped": True,
         }
     )
     result = _task_action_status_for(
@@ -3406,6 +3458,7 @@ def test_stopped_agent_task_status_copy_is_not_failure_or_busy():
             "status": "scanned",
             "status_message": "已停止当前动作",
             "active_job_kind": "agent",
+            "stopped": True,
         }
     )
 
@@ -3426,6 +3479,7 @@ def test_stopped_agent_task_does_not_spin_running_substeps():
         "status": "scanned",
         "status_message": "已停止当前动作",
         "active_job_kind": "agent",
+        "stopped": True,
     }
     notebook_steps = [
         {"id": "system-repro-pmml", "status": "succeeded"},
@@ -3586,7 +3640,11 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
 
     assert 'id="resultScrollContent"' in index_html
-    assert "static/styles.css?v=20260605-create-dialog-button-gap" in index_html
+    assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/styles.css?v=20260613-task-entry-upload" not in index_html
+    assert 'static/styles.css?v=20260613-task-entry"' not in index_html
+    assert "static/styles.css?v=20260605-create-dialog-button-gap" not in index_html
     assert "static/styles.css?v=20260605-create-dialog-scroll" not in index_html
     assert "static/styles.css?v=20260603-sidebar-icon-controls" not in index_html
     assert "static/styles.css?v=20260603-run-mode-selected-glow" not in index_html
@@ -3602,7 +3660,13 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "static/styles.css?v=20260603-task-options" not in index_html
     assert "static/styles.css?v=20260603-neutral-options" not in index_html
     assert "static/styles.css?v=20260603-dark-masks" not in index_html
-    assert "static/app.js?v=20260603-zero-rail-collapse" in index_html
+    assert "static/app.js?v=__MARVIS_STATIC_VERSION__" in index_html
+    assert "static/app.js?v=20260613-task-entry-welcome" not in index_html
+    assert "static/app.js?v=20260613-review-fixes" not in index_html
+    assert "static/app.js?v=20260613-task-entry-upload" not in index_html
+    assert 'static/app.js?v=20260613-task-entry"' not in index_html
+    assert "static/app.js?v=20260605-create-task-error" not in index_html
+    assert "static/app.js?v=20260603-zero-rail-collapse" not in index_html
     assert "static/app.js?v=20260603-task-validator-icon" not in index_html
     assert "static/app.js?v=20260603-field-focus-ring" not in index_html
     assert "static/app.js?v=20260603-dark-masks" not in index_html
@@ -3692,10 +3756,11 @@ def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
 
 def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
     app_js = _read_static("app.js")
+    api_js = _read_static("js/api.js")
 
-    api_start = app_js.index("async function api")
-    api_end = app_js.index("function sleep", api_start)
-    api_body = app_js[api_start:api_end]
+    api_start = api_js.index("export async function api")
+    api_end = api_js.index("export function sleep", api_start)
+    api_body = api_js[api_start:api_end]
     assert 'endpoint.startsWith("/")' in api_body
     assert '`/${endpoint}`' in api_body
     assert "fetch(normalizedEndpoint" in api_body
@@ -3808,6 +3873,7 @@ def test_llm_settings_dialog_and_agent_model_selector_exist():
     assert 'id="llmEngineModelName"' in index_html
     assert 'id="llmEngineBaseUrl"' in index_html
     assert 'id="llmEngineApiKey"' in index_html
+    assert 'id="llmEngineEnableThinking"' in index_html
     assert 'id="addLLMModelButton"' in index_html
     assert 'class="llm-engine-toolbar"' not in index_html
     assert 'id="llmDefaultModelSelect"' not in index_html
@@ -3818,9 +3884,13 @@ def test_llm_settings_dialog_and_agent_model_selector_exist():
     assert "renderAgentModelOptions" in app_js
     assert "openLLMEngineEdit" in app_js
     assert "saveLLMEngineEdit" in app_js
+    assert "enabled: model.enabled !== false" in app_js
+    assert "enable_thinking: Boolean(model.enable_thinking)" in app_js
+    assert "$(\"llmEngineEnableThinking\").checked = Boolean(model.enable_thinking)" in app_js
     assert "llm-engine-item" in app_js
     assert ".llm-engine-item" in styles_css
     assert ".llm-engine-add" in styles_css
+    assert ".checkbox-field" in styles_css
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():
@@ -4022,8 +4092,11 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     stage_label_body = app_js[stage_label_start:stage_label_end]
     assert "function agentValidatorAlias" in alias_and_stage_label_body
     assert 'return agentValidatorAlias(selectedTask?.validator) || "Agent";' in stage_label_body
-    assert '"于添": "蛋黄"' in alias_and_stage_label_body
-    assert '"张雯萱": "小九"' in alias_and_stage_label_body
+    # Real validator names must not be hard-coded in the shipped bundle: the alias
+    # map is sourced from the workspace brand.json via agentValidatorAliases.
+    assert "agentValidatorAliases[String(validator" in alias_and_stage_label_body
+    assert "于添" not in alias_and_stage_label_body
+    assert "张雯萱" not in alias_and_stage_label_body
     assert "材料完备性" not in stage_label_body
     assert "分数一致性" not in stage_label_body
     assert "效果与稳定性" not in stage_label_body
@@ -4538,12 +4611,15 @@ def test_agent_stage_messages_merge_consecutive_duplicate_titles():
     assert "<body>材料检查完成。</body>" in html
 
 
-def test_agent_label_uses_validator_easter_egg_aliases():
+def test_agent_label_uses_validator_aliases_from_workspace_config():
     app_js = _read_static("app.js")
     alias_start = app_js.index("function agentValidatorAlias")
     alias_end = app_js.index("function formatAgentMessageContent", alias_start)
     script = "\n".join(
         [
+            # Aliases are sourced from the workspace brand.json (loadBranding sets
+            # agentValidatorAliases), not hard-coded in the bundle.
+            "let agentValidatorAliases = { '于添': '蛋黄', '张雯萱': '小九' };",
             "let selectedTask = { validator: '于添' };",
             app_js[alias_start:alias_end],
             "const labels = [];",
@@ -4746,8 +4822,9 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
 
 def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_changes_them():
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
 
-    assert 'const agentComposerPreferenceStorageKey = "riskmodel_checker_agent_composer_preferences";' in app_js
+    assert 'export const agentComposerPreferenceStorageKey = "riskmodel_checker_agent_composer_preferences";' in state_js
     assert "const agentComposerPreferences = restoreAgentComposerPreferences();" in app_js
     assert 'let agentSelectedModelId = agentComposerPreferences.model_id || "";' in app_js
     assert 'let agentSelectedEffort = agentComposerPreferences.effort || "high";' in app_js
@@ -4791,8 +4868,9 @@ def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
     # remember different configurations. The global preference acts as the
     # seed when a task is opened for the first time.
     app_js = _read_static("app.js")
+    state_js = _read_static("js/state.js")
 
-    assert 'const agentTaskComposerStorageKey = "riskmodel_checker_agent_task_composer_preferences";' in app_js
+    assert 'export const agentTaskComposerStorageKey = "riskmodel_checker_agent_task_composer_preferences";' in state_js
     assert "function loadAgentTaskComposerOverrides" in app_js
     assert "function persistAgentTaskComposerOverrides" in app_js
     assert "function getAgentTaskComposerOverride" in app_js
@@ -4951,15 +5029,15 @@ def test_agent_model_preference_ignores_disabled_saved_model():
 
 def test_agent_assistant_messages_render_markdown_safely():
     app_js = _read_static("app.js")
+    render_agent_js = _read_static("js/render-agent.js")
     styles_css = _read_static("styles.css")
 
-    assert "function renderAgentMarkdown" in app_js
-    assert "function renderMarkdownInline" in app_js
-    assert "function renderMarkdownInlineText" in app_js
+    assert 'import { renderAgentMarkdown } from "./js/render-agent.js";' in app_js
+    assert "export function renderAgentMarkdown" in render_agent_js
+    assert "export function renderMarkdownInline" in render_agent_js
+    assert "export function renderMarkdownInlineText" in render_agent_js
     assert 'formatAgentMessageContent(agentVisibleContent(message), { markdown: role === "assistant" })' in app_js
-    assert "escapeHtml" in app_js[
-        app_js.index("function renderAgentMarkdown"):app_js.index("function shouldPreserveOptimisticAgentMessages")
-    ]
+    assert 'import { escapeHtml } from "./ui-utils.js";' in render_agent_js
     assert ".agent-markdown" in styles_css
     assert ".agent-markdown ul" in styles_css
     assert ".agent-markdown code" in styles_css
@@ -4974,10 +5052,12 @@ def test_agent_assistant_messages_render_markdown_safely():
     assert "color: inherit;" in em_rule
     assert "color: var(--text-secondary);" not in em_rule
     assert ".agent-markdown a" in styles_css
-    assert "renderMarkdownInlineText(segment)" in app_js
-    assert "|#[^)]*" in app_js
-    assert ".replace(/_([^_]+)_/g" not in app_js
-    assert "isMarkdownBoundary" in app_js
+    assert "renderMarkdownInlineText(segment)" in render_agent_js
+    assert "export function isSafeMarkdownHref" in render_agent_js
+    assert "export function markdownAnchorHtml" in render_agent_js
+    assert ".replace(/\\[([^\\]\\n]+)\\]\\(" not in render_agent_js
+    assert ".replace(/_([^_]+)_/g" not in render_agent_js
+    assert "isMarkdownBoundary" in render_agent_js
 
 
 def test_agent_markdown_renders_highlighted_code_blocks():
@@ -5009,11 +5089,11 @@ def test_agent_markdown_renders_highlighted_code_blocks():
 
 
 def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():
-    app_js = _read_static("app.js")
+    render_agent_js = _read_static("js/render-agent.js")
 
-    renderer_start = app_js.index("function renderAgentMarkdown")
-    renderer_end = app_js.index("function renderMarkdownInline", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
+    renderer_start = render_agent_js.index("export function renderAgentMarkdown")
+    renderer_end = render_agent_js.index("export function normalizeMarkdownCodeLanguage", renderer_start)
+    renderer = render_agent_js[renderer_start:renderer_end]
 
     assert r"^\s*(\d+)\.\s+(.+)$" in renderer
     assert 'openList("ol", ordered[1])' in renderer
@@ -5045,6 +5125,82 @@ def test_agent_markdown_renders_pipe_tables():
     assert ".agent-markdown table" in styles_css
     assert ".agent-markdown th" in styles_css
     assert ".agent-markdown td" in styles_css
+
+
+def test_agent_markdown_rejects_unsafe_links_and_escapes_html():
+    html = _render_agent_markdown(
+        "[bad](javascript:alert(1)) [data](data:text/html,test) "
+        "[phish](//evil.test/steal) "
+        "[ok](https://example.test) <img src=x onerror=alert(1)>"
+    )
+
+    assert "javascript:" not in html
+    assert "data:text/html" not in html
+    # protocol-relative URLs ("//evil.test") resolve to an external https origin
+    # in the browser, so they must not pass the same-origin "/" allowance: the URL
+    # is dropped entirely while the link label survives as plain text.
+    assert "evil.test" not in html
+    assert "phish" in html
+    assert '<a href="https://example.test"' in html
+    assert "<img" not in html
+    assert "&lt;img" in html
+
+
+def test_branding_normalizer_rejects_unsafe_asset_urls():
+    script = "\n".join(
+        [
+            "import { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } from "
+            "'./riskmodel_checker/static/js/branding.js';",
+            "const probes = {",
+            "  absolute: isSafeAssetUrl('/branding/assets/logo.png'),",
+            "  relative: isSafeAssetUrl('static/brand/logo.png'),",
+            "  https: isSafeAssetUrl('https://cdn.test/logo.png'),",
+            "  protocolRelative: isSafeAssetUrl('//evil.test/x'),",
+            "  javascript: isSafeAssetUrl('javascript:alert(1)'),",
+            "  data: isSafeAssetUrl('data:text/html,x'),",
+            "};",
+            "const fallback = normalizeBranding({ logoUrl: 'javascript:alert(1)', "
+            "faviconUrl: '//evil.test/f.ico' });",
+            "const aliases = normalizeValidatorAliases({ '  A  ': '  a  ', B: '', C: 5, D: 'd' });",
+            "process.stdout.write(JSON.stringify({ probes, logoUrl: fallback.logoUrl, "
+            "faviconUrl: fallback.faviconUrl, aliases, brandingAliases: fallback.validatorAliases }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["probes"] == {
+        "absolute": True,
+        "relative": True,
+        "https": True,
+        "protocolRelative": False,
+        "javascript": False,
+        "data": False,
+    }
+    # Unsafe URLs are dropped and the safe defaults are kept (never the injection).
+    assert "javascript:" not in data["logoUrl"]
+    assert "evil.test" not in data["faviconUrl"]
+    # Validator aliases are trimmed; empty / non-string entries are dropped.
+    assert data["aliases"] == {"A": "a", "D": "d"}
+    assert data["brandingAliases"] == {}
+
+
+def test_frozen_snapshot_sanitizer_strips_scripts_and_event_handlers():
+    app_js = _read_static("app.js")
+    start = app_js.index("function stripIdsFromHtml(")
+    end = app_js.index("\n}", start)
+    body = app_js[start:end]
+    # Frozen snapshots must be inert: the sanitizer drops <script> and inline on*
+    # handlers in addition to id attributes (defense-in-depth re-insertion guard).
+    assert 'querySelectorAll("script")' in body
+    assert ".remove()" in body
+    assert 'removeAttribute("id")' in body
+    assert "/^on/i" in body
 
 
 def test_step_rail_bottom_padding_is_visually_balanced():
@@ -5174,7 +5330,7 @@ def test_reproducibility_animation_replays_only_on_first_render_per_task():
 
 def _run_node_capture_json(script: str) -> dict:
     result = subprocess.run(
-        ["node", "-e", script], check=True, capture_output=True, text=True
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
 
@@ -5303,7 +5459,7 @@ def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild()
     # bound to the agent-composer-chip blur logic.
     boot_marker = 'document.addEventListener(\n  "mousedown"'
     boot_idx = app_js.index(boot_marker)
-    app_js = app_js[:boot_idx]
+    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./riskmodel_checker/static/js/')
 
     populated_a = {
         "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
@@ -5380,7 +5536,9 @@ def test_reproducibility_render_handles_task_switch_animation_policy():
     """
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
-    app_js = app_js[: app_js.index(boot_marker)]
+    app_js = app_js[: app_js.index(boot_marker)].replace(
+        'from "./js/', 'from "./riskmodel_checker/static/js/'
+    )
 
     populated = {
         "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
@@ -5517,6 +5675,31 @@ def test_writing_artifacts_idle_shows_metrics_complete():
         "message": "指标概览进行中。",
         "kind": "busy",
     }
+
+
+def test_task_stopped_uses_structured_stopped_field_only():
+    app_js = _read_static("app.js")
+    stopped_body = _slice_function(app_js, "function taskStopped")
+    script = "\n".join(
+        [
+            "let selectedTask = null;",
+            stopped_body,
+            "const structured = taskStopped({ stopped: true, status_message: '普通状态' });",
+            "const legacy = taskStopped({ status_message: '已停止当前动作' });",
+            "const active = taskStopped({ stopped: false, status_message: '普通状态' });",
+            "process.stdout.write(JSON.stringify({ structured, legacy, active }));",
+        ]
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    states = json.loads(result.stdout)
+    assert states == {"structured": True, "legacy": False, "active": False}
 
 
 def test_writing_artifacts_status_tone_idle_vs_report_busy():
