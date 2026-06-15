@@ -62,7 +62,7 @@
 - V1.1 components to design: inline memory-aware Agent statements, expandable memory references on Agent messages, memory management/audit view, memory disable/delete actions, and memory-use audit metadata.
 - V2 components to design later: plugin registry, tool run evidence panel, hook run evidence panel, workflow plan view, extension metric tables, extension report sections, and plugin output display declarations.
 - Variants and states: primary/secondary/disabled/loading/error/success buttons; empty/loading/error/success summaries; high/medium/low confidence memory comparison states; disabled memory state; deleted-memory reference state.
-- Token/component ownership: `riskmodel_checker/static/styles.css`.
+- Token/component ownership: `marvis/static/styles.css`.
 
 ## Accessibility
 - Target standard: practical WCAG AA for contrast and keyboard focus on the local tool.

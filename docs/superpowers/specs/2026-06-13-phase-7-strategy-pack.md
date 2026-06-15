@@ -18,7 +18,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/packs/strategy/
+marvis/packs/strategy/
   __init__.py
   manifest.json
   contracts.py     VintageCurve / RollRateMatrix / ProfitResult / Strategy / BacktestResult / TradeoffPoint
@@ -30,7 +30,7 @@ riskmodel_checker/packs/strategy/
   backtest.py      backtest_strategy（历史回放）
   tradeoff.py      tradeoff_view（风险收益前沿）
   tools.py
-riskmodel_checker/db.py   新增 strategies / backtests 表
+marvis/db.py   新增 strategies / backtests 表
 ```
 
 新增依赖：Phase 4V 共享核心 `validation/vintage.py`（`compute_vintage_curve` / `vintage_curve_wide` / `compute_roll_rate`）。vintage/roll-rate 的确定性计算**不在本包重写**，只做策略侧适配与解读。
@@ -119,7 +119,7 @@ def vintage_curve(df: pd.DataFrame, *, cohort_col: str, mob_col: str,
     入参: df; cohort_col 放款月份; mob_col 账龄（月）; bad_col 0/1 是否坏; mob_max（按需截断）。
     出参: VintageCurve（各 cohort 的累计坏账率序列）。
     伪代码:
-      from riskmodel_checker.validation.vintage import compute_vintage_curve, vintage_curve_wide
+      from marvis.validation.vintage import compute_vintage_curve, vintage_curve_wide
       points = compute_vintage_curve(df, cohort_col=cohort_col, mob_col=mob_col, target_col=bad_col)
       wide = vintage_curve_wide(points, metric="cum_bad_rate")   # {cohort: [按 MOB 升序累计坏率]}
       curves = {c: _truncate_or_pad(vals, mob_max) for c, vals in wide.items()}
@@ -153,7 +153,7 @@ def roll_rate_matrix(df: pd.DataFrame, *, id_col: str, time_col: str,
     出参: RollRateMatrix（转移概率方阵）。
     不变量: 每行转移概率和≈1（由 4V 的 per-from-bucket 归一化保证）。
     伪代码:
-      from riskmodel_checker.validation.vintage import compute_roll_rate
+      from marvis.validation.vintage import compute_roll_rate
       df = df.sort_values([id_col, time_col])
       # 本包独有：构造每个客户相邻周期 (from_state, to_state) 明细
       rows = []

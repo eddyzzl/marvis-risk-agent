@@ -4,8 +4,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.sample_stats import run_basic_info
+from marvis.validation.config import ValidationConfig
+from marvis.validation.sample_stats import run_basic_info
 
 
 def _config() -> ValidationConfig:

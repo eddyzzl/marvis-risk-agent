@@ -1,6 +1,6 @@
 import pytest
 
-from riskmodel_checker.safe_paths import assert_within, safe_filename_component
+from marvis.safe_paths import assert_within, safe_filename_component
 
 
 def test_safe_filename_component_preserves_allowed_chinese_model_text():

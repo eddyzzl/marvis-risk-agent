@@ -11,7 +11,7 @@ from pathlib import Path
 VERSION_RE = re.compile(r"^V?(\d+)\.(\d+)\.(\d+)$")
 RELEASE_FILES = (
     Path("pyproject.toml"),
-    Path("riskmodel_checker/__init__.py"),
+    Path("marvis/__init__.py"),
     Path("README.md"),
     Path("README.zh-CN.md"),
     Path("docs/runbook.md"),

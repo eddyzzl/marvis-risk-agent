@@ -1,7 +1,7 @@
 import pytest
 
-from riskmodel_checker.domain import TaskStatus
-from riskmodel_checker.state_machine import IllegalTransition, assert_transition
+from marvis.domain import TaskStatus
+from marvis.state_machine import IllegalTransition, assert_transition
 
 
 def test_pipeline_happy_path_transitions():

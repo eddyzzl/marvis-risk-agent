@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from riskmodel_checker.domain import FileRole
-from riskmodel_checker.files import classify_file, scan_source_dir
+from marvis.domain import FileRole
+from marvis.files import classify_file, scan_source_dir
 
 
 def test_classify_file_roles():

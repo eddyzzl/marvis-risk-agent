@@ -10,7 +10,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from PIL import Image as PILImage
 
-from riskmodel_checker.template_reports import (
+from marvis.template_reports import (
     TemplateTable,
     TemplateReportPayload,
     _column_widths_twips,

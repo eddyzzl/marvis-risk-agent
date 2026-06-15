@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from riskmodel_checker.metric_tables import metric_table_sections_from_payload
+from marvis.metric_tables import metric_table_sections_from_payload
 
 
 @pytest.fixture

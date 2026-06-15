@@ -10,14 +10,14 @@ import nbformat
 import pandas as pd
 from docx import Document
 
-from riskmodel_checker.agent_memory.store import AgentMemoryStore
-from riskmodel_checker.db import TaskRepository, init_db
-from riskmodel_checker.domain import FileArtifact, FileRole, TaskCreate, TaskStatus
-from riskmodel_checker.notebook_contract import RuntimeContract
-from riskmodel_checker.notebook_cancellation import request_notebook_cancellation
-from riskmodel_checker.notebooks import close_live_notebook_session, register_live_notebook_session
-from riskmodel_checker import pipeline as pipeline_module
-from riskmodel_checker.pipeline import (
+from marvis.agent_memory.store import AgentMemoryStore
+from marvis.db import TaskRepository, init_db
+from marvis.domain import FileArtifact, FileRole, TaskCreate, TaskStatus
+from marvis.notebook_contract import RuntimeContract
+from marvis.notebook_cancellation import request_notebook_cancellation
+from marvis.notebooks import close_live_notebook_session, register_live_notebook_session
+from marvis import pipeline as pipeline_module
+from marvis.pipeline import (
     NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
     SCAN_STAGE_FAILURE_PREFIX,
@@ -231,7 +231,7 @@ class _PredColumnScorer:
 
 
 def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path: Path):
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
     task = repo.create_task(
         TaskCreate(
@@ -281,7 +281,7 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
 
 
 def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
     task = repo.create_task(
         TaskCreate(
@@ -326,7 +326,7 @@ def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: P
 
 
 def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholder(tmp_path: Path):
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
     task = repo.create_task(
         TaskCreate(
@@ -369,7 +369,7 @@ def test_metrics_cell_uses_runtime_contract_algorithm_not_create_task_placeholde
 
 
 def test_reproducibility_stage_shows_pmml_scoring_and_compare_progress(tmp_path: Path):
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
     task = repo.create_task(
         TaskCreate(
@@ -398,7 +398,7 @@ def test_reproducibility_stage_shows_pmml_scoring_and_compare_progress(tmp_path:
 
     class FakeSession:
         def append_code_cell(self, source, **kwargs):
-            calls.append(("append", kwargs["metadata"]["riskmodel_checker"]))
+            calls.append(("append", kwargs["metadata"]["marvis"]))
             return len(calls) - 1
 
         def execute_existing_code_cell(self, cell_index, **kwargs):
@@ -429,7 +429,7 @@ def test_reproducibility_stage_shows_pmml_scoring_and_compare_progress(tmp_path:
 
 
 def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)
     task = repo.create_task(
         TaskCreate(
@@ -445,7 +445,7 @@ def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
 
     class FakeSession:
         def append_code_cell(self, source, **kwargs):
-            calls.append(("append", kwargs["metadata"]["riskmodel_checker"]))
+            calls.append(("append", kwargs["metadata"]["marvis"]))
             return len(calls) - 1
 
         def execute_existing_code_cell(self, cell_index, **kwargs):
@@ -504,7 +504,7 @@ def test_pipeline_end_to_end(tmp_path: Path):
     project = _build_project(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     template = _write_template(tmp_path / "template.docx")
@@ -558,7 +558,7 @@ def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
     project = _build_project(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -614,7 +614,7 @@ def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
         )
         return SimpleNamespace(closed=False, close=lambda: None)
 
-    monkeypatch.setattr("riskmodel_checker.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
 
     def fake_write_reproducibility_result_in_session(*, output_path, settings, **_kwargs):
         assert repo.get_task(task.id).status is TaskStatus.RUNNING
@@ -645,7 +645,7 @@ def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline._write_reproducibility_result_in_session",
+        "marvis.pipeline._write_reproducibility_result_in_session",
         fake_write_reproducibility_result_in_session,
     )
 
@@ -683,7 +683,7 @@ def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(tmp_path: 
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -768,7 +768,7 @@ def test_metrics_stage_success_captures_model_experience_memory(
 ):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     project = tmp_path / "project"
@@ -850,7 +850,7 @@ def test_metrics_stage_success_captures_model_experience_memory(
         (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
 
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline._write_metrics_results_in_session",
+        "marvis.pipeline._write_metrics_results_in_session",
         fake_write_metrics_results_in_session,
     )
     register_live_notebook_session(
@@ -894,7 +894,7 @@ def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -968,7 +968,7 @@ def test_report_stage_cancel_returns_to_review_required_status(tmp_path: Path):
     project.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1012,7 +1012,7 @@ def test_report_stage_cancel_during_word_write_does_not_promote_partial_docx(
     project.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1038,7 +1038,7 @@ def test_report_stage_cancel_during_word_write_does_not_promote_partial_docx(
     report_path.write_bytes(b"previous-docx")
 
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline._load_validation_results",
+        "marvis.pipeline._load_validation_results",
         lambda _outputs_dir: SimpleNamespace(),
     )
 
@@ -1047,7 +1047,7 @@ def test_report_stage_cancel_during_word_write_does_not_promote_partial_docx(
         request_notebook_cancellation(task.id)
         return SimpleNamespace(unresolved_placeholders=[])
 
-    monkeypatch.setattr("riskmodel_checker.pipeline.write_validation_word", fake_word_writer)
+    monkeypatch.setattr("marvis.pipeline.write_validation_word", fake_word_writer)
 
     run_report_stage(
         task_id=task.id,
@@ -1082,7 +1082,7 @@ def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1135,7 +1135,7 @@ def test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1188,7 +1188,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
     project.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1233,12 +1233,12 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
         outputs_dir.mkdir(parents=True, exist_ok=True)
         (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
 
-    monkeypatch.setattr("riskmodel_checker.pipeline._scan_step", fake_scan_step)
-    monkeypatch.setattr("riskmodel_checker.pipeline._notebook_step_v3", fake_notebook_step_v3)
-    monkeypatch.setattr("riskmodel_checker.pipeline._write_reproducibility_result_in_session", lambda **_kwargs: None)
-    monkeypatch.setattr("riskmodel_checker.pipeline._write_metrics_results_in_session", fake_metrics_writer)
+    monkeypatch.setattr("marvis.pipeline._scan_step", fake_scan_step)
+    monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr("marvis.pipeline._write_reproducibility_result_in_session", lambda **_kwargs: None)
+    monkeypatch.setattr("marvis.pipeline._write_metrics_results_in_session", fake_metrics_writer)
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline.load_runtime_contract",
+        "marvis.pipeline.load_runtime_contract",
         lambda _path: RuntimeContract(
             target_col="y",
             split_col="split",
@@ -1252,7 +1252,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
         ),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline._load_validation_results",
+        "marvis.pipeline._load_validation_results",
         lambda _outputs_dir: SimpleNamespace(
             reproducibility=SimpleNamespace(
                 summary=SimpleNamespace(status=None)
@@ -1260,7 +1260,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
         ),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.pipeline.write_validation_word",
+        "marvis.pipeline.write_validation_word",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("docx failed")),
     )
 
@@ -1293,7 +1293,7 @@ def test_pipeline_marks_missing_required_input_failed(tmp_path: Path):
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1374,7 +1374,7 @@ def test_pipeline_uses_explicit_notebook_path_when_multiple_exist(tmp_path: Path
 def test_pipeline_rejects_completed_task_without_marking_failed(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    db_path = workspace / "riskmodel_checker.sqlite"
+    db_path = workspace / "marvis.sqlite"
     init_db(db_path)
     repo = TaskRepository(db_path)
     task = repo.create_task(
@@ -1447,7 +1447,7 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
     def fake_read_feather(path):
         raise ImportError("pyarrow is unavailable in platform env")
 
-    monkeypatch.setattr("riskmodel_checker.pipeline.pd.read_feather", fake_read_feather)
+    monkeypatch.setattr("marvis.pipeline.pd.read_feather", fake_read_feather)
 
     sample = _load_sample(sample_path, fallback_python=fallback_python)
 

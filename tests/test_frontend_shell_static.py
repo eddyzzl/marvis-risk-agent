@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "riskmodel_checker" / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
 
 def _read_static(name: str) -> str:

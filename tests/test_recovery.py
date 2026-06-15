@@ -1,12 +1,12 @@
 import sqlite3
 
-from riskmodel_checker.db import TaskRepository, init_db
-from riskmodel_checker.domain import (
+from marvis.db import TaskRepository, init_db
+from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TaskCreate,
     TaskStatus,
 )
-from riskmodel_checker.recovery import last_completed_step, reclaim_stale_running_tasks
+from marvis.recovery import last_completed_step, reclaim_stale_running_tasks
 
 
 def test_last_completed_step_returns_none_when_dir_empty(tmp_path):

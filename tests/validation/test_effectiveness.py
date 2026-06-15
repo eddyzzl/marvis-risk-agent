@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.binning import compute_psi
-from riskmodel_checker.validation.effectiveness import (
+from marvis.validation.config import ValidationConfig
+from marvis.validation.binning import compute_psi
+from marvis.validation.effectiveness import (
     _should_reverse_eval_bins,
     build_effectiveness_result,
     compute_bin_tables,
@@ -23,7 +23,7 @@ from riskmodel_checker.validation.effectiveness import (
 
 
 def test_metrics_imported_effectiveness_postpones_annotations():
-    source = Path("riskmodel_checker/validation/effectiveness.py").read_text(encoding="utf-8")
+    source = Path("marvis/validation/effectiveness.py").read_text(encoding="utf-8")
     module = ast.parse(source)
     first_statement_index = 0
     if (

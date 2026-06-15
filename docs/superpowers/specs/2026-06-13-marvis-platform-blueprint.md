@@ -117,7 +117,7 @@ INV-10 模块边界（第 3 节）是硬约束：validation/ 不依赖 DB/FastAP
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
-│ 前端  riskmodel_checker/static/  (ES Modules, 无构建, 离线)          │
+│ 前端  marvis/static/  (ES Modules, 无构建, 离线)          │
 │   js/core/      状态、事件总线、API client、轮询管理                  │
 │   js/views/     任务树、子agent状态、plugin管理、workflow图、工件预览  │
 │   js/render/    指标表、Agent对话、Markdown                          │

@@ -1,6 +1,6 @@
 import pytest
 
-from riskmodel_checker.model_algorithms import (
+from marvis.model_algorithms import (
     ALLOWED_ALGORITHMS,
     model_training_description,
     normalize_algorithm,

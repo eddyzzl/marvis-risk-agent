@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.pmml_scoring import PmmlScorer, load_pmml_scorer
+from marvis.validation.pmml_scoring import PmmlScorer, load_pmml_scorer
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "min_lr.pmml"
 

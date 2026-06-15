@@ -1,4 +1,4 @@
-from riskmodel_checker.agent_memory.extractors import (
+from marvis.agent_memory.extractors import (
     extract_field_convention,
     extract_memory_candidates,
     extract_model_experience,

@@ -89,8 +89,8 @@ conda run -n py_313 python -m ruff check ...
 
 ```bash
 conda run -n py_313 python -m pytest -q
-conda run -n py_313 python -m ruff check riskmodel_checker tests --extend-exclude '*.ipynb'
-node --check riskmodel_checker/static/app.js
+conda run -n py_313 python -m ruff check marvis tests --extend-exclude '*.ipynb'
+node --check marvis/static/app.js
 git diff --check
 ```
 

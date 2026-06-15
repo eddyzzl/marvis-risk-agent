@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation import time_periods
+from marvis.validation import time_periods
 
 
 def test_date_keys_do_not_depend_on_pandas_mixed_format_support(monkeypatch):

@@ -5,10 +5,10 @@ import pandas as pd
 from docx import Document
 from openpyxl import load_workbook
 
-from riskmodel_checker.output.excel import write_validation_excel
-from riskmodel_checker.output.word import write_validation_word
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.engine import EngineInputs, run_validation
+from marvis.output.excel import write_validation_excel
+from marvis.output.word import write_validation_word
+from marvis.validation.config import ValidationConfig
+from marvis.validation.engine import EngineInputs, run_validation
 
 
 class _IdentityScorer:

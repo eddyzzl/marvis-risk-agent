@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.in_memory_scores import load_code_model_scores
+from marvis.validation.in_memory_scores import load_code_model_scores
 
 
 def test_load_code_model_scores_returns_series_indexed_by_row_index(tmp_path: Path):

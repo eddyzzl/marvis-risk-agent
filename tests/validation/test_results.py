@@ -1,4 +1,4 @@
-from riskmodel_checker.validation.results import (
+from marvis.validation.results import (
     ValidationResults,
     ReproducibilityResult,
     ConsistencySummary,

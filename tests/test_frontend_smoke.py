@@ -7,8 +7,8 @@ from urllib.parse import urljoin, urlparse
 
 from fastapi.testclient import TestClient
 
-from riskmodel_checker import __version__
-from riskmodel_checker.app import create_app
+from marvis import __version__
+from marvis.app import create_app
 
 
 _STATIC_IMPORT_RE = re.compile(

@@ -18,7 +18,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/packs/modeling/
+marvis/packs/modeling/
   __init__.py
   manifest.json
   contracts.py      ModelRecipe / TrainConfig / ModelMetrics / ModelArtifact / TrainResult / Experiment
@@ -35,8 +35,8 @@ riskmodel_checker/packs/modeling/
   scenarios.py      场景参数模板（贷前/前筛/营销/...）
   reject_inference.py   拒绝推断（桩，标注需方法论评审，V1 不实现）
   tools.py          tool_* 包装
-riskmodel_checker/db.py   新增 experiments / model_artifacts 表
-riskmodel_checker/validation/overfitting.py   迁入过拟合检测（CODE_REVIEW P2-27）
+marvis/db.py   新增 experiments / model_artifacts 表
+marvis/validation/overfitting.py   迁入过拟合检测（CODE_REVIEW P2-27）
 ```
 
 新增依赖：`lightgbm>=4`、`xgboost>=2`、`scikit-learn>=1.3`、`sklearn2pmml` 或 `nyoka`（PMML 导出，二选一在实施时定）。

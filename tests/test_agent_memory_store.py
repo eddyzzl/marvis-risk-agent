@@ -1,8 +1,8 @@
 import pytest
 
-from riskmodel_checker.agent_memory.store import AgentMemoryStore
-from riskmodel_checker.db import connect, init_db
-from riskmodel_checker.agent_memory.models import (
+from marvis.agent_memory.store import AgentMemoryStore
+from marvis.db import connect, init_db
+from marvis.agent_memory.models import (
     MEMORY_STATUSES,
     MEMORY_TYPES,
     MODEL_EXPERIENCE_REQUIRED_FIELDS,
@@ -11,7 +11,7 @@ from riskmodel_checker.agent_memory.models import (
     normalize_memory_type,
     validate_model_experience_payload,
 )
-from riskmodel_checker.agent_memory.policy import classify_memory_candidate
+from marvis.agent_memory.policy import classify_memory_candidate
 
 
 def _model_experience_payload(**overrides):

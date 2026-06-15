@@ -1,7 +1,7 @@
 from pathlib import Path
 
-import riskmodel_checker.execution_environment as execution_environment
-from riskmodel_checker.execution_environment import (
+import marvis.execution_environment as execution_environment
+from marvis.execution_environment import (
     ExecutionEnvironmentSettings,
     detect_execution_environment_options,
     load_execution_environment,
@@ -13,7 +13,7 @@ from riskmodel_checker.execution_environment import (
 def test_execution_environment_settings_round_trip(tmp_path: Path):
     settings = ExecutionEnvironmentSettings(
         execution_mode="jupyter_kernel",
-        kernel_name="riskmodel-kernel",
+        kernel_name="marvis-kernel",
         conda_env_name="",
         python_executable="",
     )
@@ -32,7 +32,7 @@ def test_execution_environment_defaults_to_python3_kernel(tmp_path: Path):
 
 def test_validate_jupyter_kernel_reports_missing_kernel(monkeypatch):
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_names",
+        "marvis.execution_environment.available_kernel_names",
         lambda: ["python3"],
     )
     settings = ExecutionEnvironmentSettings(
@@ -50,12 +50,12 @@ def test_validate_jupyter_kernel_reports_missing_kernel(monkeypatch):
 
 def test_validate_jupyter_kernel_reports_available_kernel(monkeypatch):
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_names",
-        lambda: ["python3", "riskmodel-kernel"],
+        "marvis.execution_environment.available_kernel_names",
+        lambda: ["python3", "marvis-kernel"],
     )
     settings = ExecutionEnvironmentSettings(
         execution_mode="jupyter_kernel",
-        kernel_name="riskmodel-kernel",
+        kernel_name="marvis-kernel",
         conda_env_name="",
         python_executable="",
     )
@@ -63,7 +63,7 @@ def test_validate_jupyter_kernel_reports_available_kernel(monkeypatch):
     result = validate_execution_environment(settings)
 
     assert result.ok is True
-    assert result.kernel_name == "riskmodel-kernel"
+    assert result.kernel_name == "marvis-kernel"
 
 
 def test_detect_execution_environment_options_includes_registered_conda_kernel(
@@ -78,7 +78,7 @@ def test_detect_execution_environment_options_includes_registered_conda_kernel(
     current_python.parent.mkdir(parents=True)
     current_python.write_text("", encoding="utf-8")
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_specs",
+        "marvis.execution_environment.available_kernel_specs",
         lambda: {
             "python3": {
                 "display_name": "Python 3",
@@ -91,11 +91,11 @@ def test_detect_execution_environment_options_includes_registered_conda_kernel(
         },
     )
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment._conda_environment_paths",
+        "marvis.execution_environment._conda_environment_paths",
         lambda: [conda_env],
     )
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.sys.executable",
+        "marvis.execution_environment.sys.executable",
         str(current_python),
     )
 
@@ -121,11 +121,11 @@ def test_detect_execution_environment_options_marks_conda_without_kernel_unavail
     conda_python.parent.mkdir(parents=True)
     conda_python.write_text("", encoding="utf-8")
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_specs",
+        "marvis.execution_environment.available_kernel_specs",
         lambda: {"python3": {"display_name": "Python 3", "argv": []}},
     )
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment._conda_environment_paths",
+        "marvis.execution_environment._conda_environment_paths",
         lambda: [conda_env],
     )
 

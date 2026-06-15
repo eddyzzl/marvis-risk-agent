@@ -1,4 +1,4 @@
-from riskmodel_checker.validation.config import ValidationConfig
+from marvis.validation.config import ValidationConfig
 
 
 def test_validation_config_requires_core_columns():

@@ -1,4 +1,4 @@
-from riskmodel_checker.notebook_cancellation import NotebookCancellationRegistry
+from marvis.notebook_cancellation import NotebookCancellationRegistry
 
 
 def test_pending_notebook_cancellation_can_be_cleared_before_later_retry():

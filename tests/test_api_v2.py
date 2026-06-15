@@ -10,14 +10,14 @@ from docx import Document
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from riskmodel_checker.api import _agent_has_stop_ack_message, router
-from riskmodel_checker.domain import (
+from marvis.api import _agent_has_stop_ack_message, router
+from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TASK_STATUS_REASON_USER_CANCELLED,
     TaskRecord,
     TaskStatus,
 )
-from riskmodel_checker.execution_environment import ExecutionEnvironmentOption
+from marvis.execution_environment import ExecutionEnvironmentOption
 
 
 class FakeTaskRepository:
@@ -60,7 +60,7 @@ class FakeTaskRepository:
         return task
 
     def start_job(self, task_id: str, kind: str) -> str:
-        from riskmodel_checker.state_machine import ConflictError
+        from marvis.state_machine import ConflictError
 
         self.get_task(task_id)
         if self.task_has_active_job(task_id):
@@ -139,7 +139,7 @@ class FakeTaskRepository:
         expected=None,
         reason_code: str = "",
     ):
-        from riskmodel_checker.state_machine import IllegalTransition
+        from marvis.state_machine import IllegalTransition
 
         task = self.get_task(task_id)
         if expected is not None:
@@ -174,8 +174,8 @@ class FakeTaskRepository:
         return self.report_values[task_id]
 
     def update_report_values(self, task_id: str, values, expected_revision: int):
-        from riskmodel_checker.state_machine import ConflictError
-        from riskmodel_checker.report_texts import COMPUTED_REPORT_TEXT_KEYS
+        from marvis.state_machine import ConflictError
+        from marvis.report_texts import COMPUTED_REPORT_TEXT_KEYS
 
         self.get_task(task_id)
         computed_keys = sorted(set(values) & COMPUTED_REPORT_TEXT_KEYS)
@@ -199,13 +199,13 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.deleted = []
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
-    monkeypatch.setattr("riskmodel_checker.api.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
 
     app = FastAPI()
     app.state.settings = SimpleNamespace(
         workspace=tmp_path,
         tasks_dir=tmp_path / "tasks",
-        db_path=tmp_path / "riskmodel_checker.sqlite",
+        db_path=tmp_path / "marvis.sqlite",
         report_template_path=tmp_path / "report_templates" / "default.docx",
     )
     app.state.settings.tasks_dir.mkdir()
@@ -916,15 +916,15 @@ def test_list_tasks_returns_array(tmp_path: Path, monkeypatch):
 def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_names",
-        lambda: ["python3", "riskmodel-kernel"],
+        "marvis.execution_environment.available_kernel_names",
+        lambda: ["python3", "marvis-kernel"],
     )
 
     response = client.put(
         "/api/settings/execution-environment",
         json={
             "execution_mode": "jupyter_kernel",
-            "kernel_name": "riskmodel-kernel",
+            "kernel_name": "marvis-kernel",
             "conda_env_name": "",
             "python_executable": "",
         },
@@ -932,18 +932,18 @@ def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypat
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["settings"]["kernel_name"] == "riskmodel-kernel"
+    assert payload["settings"]["kernel_name"] == "marvis-kernel"
     assert payload["validation"]["ok"] is True
 
     got = client.get("/api/settings/execution-environment")
     assert got.status_code == 200
-    assert got.json()["settings"]["kernel_name"] == "riskmodel-kernel"
+    assert got.json()["settings"]["kernel_name"] == "marvis-kernel"
 
 
 def test_execution_environment_options_api(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "riskmodel_checker.api_settings.detect_execution_environment_options",
+        "marvis.api_settings.detect_execution_environment_options",
         lambda: [
             ExecutionEnvironmentOption(
                 id="kernel:python3",
@@ -955,12 +955,12 @@ def test_execution_environment_options_api(tmp_path: Path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api_settings.available_kernel_names",
+        "marvis.api_settings.available_kernel_names",
         lambda: ["python3"],
         raising=False,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.execution_environment.available_kernel_names",
+        "marvis.execution_environment.available_kernel_names",
         lambda: ["python3"],
     )
 
@@ -1084,9 +1084,9 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     def fake_report_stage(*, task_id, settings, **_kwargs):
         calls.append(("report", task_id, settings))
 
-    monkeypatch.setattr("riskmodel_checker.api.run_notebook_stage", fake_notebook_stage)
-    monkeypatch.setattr("riskmodel_checker.api.run_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("riskmodel_checker.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
 
     create = client.post(
         "/api/tasks",
@@ -1135,7 +1135,7 @@ def test_stage_endpoint_blocks_active_same_task_but_allows_other_tasks(
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: calls.append(kwargs["task_id"]),
     )
     task_id = client.post(
@@ -1173,15 +1173,15 @@ def test_completed_task_can_rerun_prior_workflow_stages(tmp_path: Path, monkeypa
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_notebook_stage",
+        "marvis.api.run_notebook_stage",
         lambda **_kwargs: calls.append("notebook"),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **_kwargs: calls.append("metrics"),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.get_live_notebook_session",
+        "marvis.api.get_live_notebook_session",
         lambda _task_id: object(),
     )
     source = tmp_path / "source"
@@ -1238,7 +1238,7 @@ def test_notebook_endpoint_claims_running_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_notebook_stage",
+        "marvis.api.run_notebook_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1265,7 +1265,7 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1291,7 +1291,7 @@ def test_cancel_notebook_endpoint_rejects_non_running_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1316,7 +1316,7 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1347,7 +1347,7 @@ def test_cancel_metrics_endpoint_rejects_non_running_metrics_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1372,7 +1372,7 @@ def test_cancel_report_endpoint_requests_report_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1407,7 +1407,7 @@ def test_cancel_report_endpoint_rejects_without_active_report_job(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1433,7 +1433,7 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
     tmp_path: Path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _run_stage_job
+    from marvis.api import _run_stage_job
 
     client = _client(tmp_path, monkeypatch)
     task_id = client.post(
@@ -1446,7 +1446,7 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
             "status": TaskStatus.COMPUTING_METRICS,
         }
     )
-    repo = FakeTaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = FakeTaskRepository(tmp_path / "marvis.sqlite")
     job_id = repo.start_job(task_id, "metrics")
 
     def cancelled_stage(*, task_id: str) -> None:
@@ -1460,7 +1460,7 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
 
     _run_stage_job(
         job_id,
-        tmp_path / "riskmodel_checker.sqlite",
+        tmp_path / "marvis.sqlite",
         cancelled_stage,
         {"task_id": task_id},
     )
@@ -1475,7 +1475,7 @@ def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1502,11 +1502,11 @@ def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.get_live_notebook_session",
+        "marvis.api.get_live_notebook_session",
         lambda _task_id: None,
     )
     task_id = client.post(
@@ -1532,7 +1532,7 @@ def test_metrics_endpoint_allows_retry_after_metrics_stage_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1561,7 +1561,7 @@ def test_metrics_endpoint_allows_retry_after_legacy_sample_column_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1588,7 +1588,7 @@ def test_metrics_endpoint_rejects_non_metrics_failure(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    monkeypatch.setattr("riskmodel_checker.api.run_metrics_stage", lambda **_kwargs: None)
+    monkeypatch.setattr("marvis.api.run_metrics_stage", lambda **_kwargs: None)
     task_id = client.post(
         "/api/tasks",
         json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
@@ -1617,7 +1617,7 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
     def fake_run_staged_pipeline(*, task_id, settings):
         calls.append((task_id, settings))
 
-    monkeypatch.setattr("riskmodel_checker.api.run_staged_pipeline", fake_run_staged_pipeline)
+    monkeypatch.setattr("marvis.api.run_staged_pipeline", fake_run_staged_pipeline)
     create = client.post(
         "/api/tasks",
         json={
@@ -1643,7 +1643,7 @@ def test_validate_rejects_terminal_task_without_dispatching_pipeline(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_staged_pipeline",
+        "marvis.api.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1674,7 +1674,7 @@ def test_validate_accepts_tasks_without_feature_columns(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_staged_pipeline",
+        "marvis.api.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     create = client.post(
@@ -1885,7 +1885,7 @@ def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
     def _raise_limit(*_args, **_kwargs):
         raise ValueError("source_dir has too many files: max_files=2000")
 
-    monkeypatch.setattr("riskmodel_checker.api.scan_source_dir", _raise_limit)
+    monkeypatch.setattr("marvis.api.scan_source_dir", _raise_limit)
 
     response = client.post(f"/api/tasks/{task_id}/scan")
 
@@ -1896,8 +1896,8 @@ def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
 
 
 def test_normalize_task_type_whitelists_known_types():
-    from riskmodel_checker.db import _normalize_task_type
-    from riskmodel_checker.domain import TASK_TYPE_VALIDATION
+    from marvis.db import _normalize_task_type
+    from marvis.domain import TASK_TYPE_VALIDATION
 
     assert _normalize_task_type(None) == TASK_TYPE_VALIDATION
     assert _normalize_task_type("") == TASK_TYPE_VALIDATION
@@ -1908,8 +1908,8 @@ def test_normalize_task_type_whitelists_known_types():
 
 
 def test_task_stop_reason_code_ignores_legacy_text_for_successful_terminals():
-    from riskmodel_checker.api_task_payloads import task_stop_reason_code, task_stopped
-    from riskmodel_checker.domain import TASK_STATUS_REASON_USER_CANCELLED
+    from marvis.api_task_payloads import task_stop_reason_code, task_stopped
+    from marvis.domain import TASK_STATUS_REASON_USER_CANCELLED
 
     # A SUCCEEDED task whose message incidentally contains "已取消" must NOT be
     # reported as stopped — only the structured status_reason_code can mark it.
@@ -2085,7 +2085,7 @@ def test_delete_task_keeps_record_deleted_when_directory_cleanup_fails(
     def fail_rmtree(path):
         raise PermissionError(f"locked: {path}")
 
-    monkeypatch.setattr("riskmodel_checker.api.shutil.rmtree", fail_rmtree)
+    monkeypatch.setattr("marvis.api.shutil.rmtree", fail_rmtree)
 
     response = client.delete(f"/api/tasks/{task_id}")
 

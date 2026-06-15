@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from riskmodel_checker import __main__ as cli
+from marvis import __main__ as cli
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -12,17 +12,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_pyproject_exposes_short_marvis_script_alias():
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert 'marvis = "riskmodel_checker.__main__:main"' in text
+    assert 'marvis = "marvis.__main__:main"' in text
 
 
 def test_pyproject_declares_runtime_dependency_bounds():
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     for requirement in [
-        '"pydantic>=2,<3"',
-        '"pandas>=2,<4"',
-        '"nbclient>=0.7,<0.11"',
-        '"nbformat>=5,<6"',
+        '"pydantic>=2.7,<3"',
+        '"pandas>=2.2,<4"',
+        '"nbclient>=0.10,<0.12"',
+        '"nbformat>=5.10,<6"',
+        '"ipykernel>=6.29,<8"',
+        '"scikit-learn>=1.4,<2"',
     ]:
         assert requirement in text
 

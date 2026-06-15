@@ -1,12 +1,12 @@
 import pytest
 
-from riskmodel_checker.db import TaskRepository, _ensure_column, connect, init_db
-from riskmodel_checker.domain import (
+from marvis.db import TaskRepository, _ensure_column, connect, init_db
+from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TaskCreate,
     TaskStatus,
 )
-from riskmodel_checker.state_machine import ConflictError, IllegalTransition
+from marvis.state_machine import ConflictError, IllegalTransition
 
 
 def _task_create(model_name: str = "模型", **overrides) -> TaskCreate:

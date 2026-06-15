@@ -1,4 +1,4 @@
-from riskmodel_checker.output.styles import (
+from marvis.output.styles import (
     BRAND_HEADER_FILL,
     BRAND_HEADER_FONT_COLOR,
     CJK_FONT_CANDIDATES,
@@ -7,7 +7,7 @@ from riskmodel_checker.output.styles import (
     status_cell_color,
     ks_delta_cell_color,
 )
-from riskmodel_checker.validation.results import ConsistencyStatus
+from marvis.validation.results import ConsistencyStatus
 
 
 def test_brand_tokens_are_hex_strings():

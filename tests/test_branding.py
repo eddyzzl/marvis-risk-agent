@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from riskmodel_checker.app import create_app
+from marvis.app import create_app
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,8 +24,8 @@ def _edge_pixels(image: Image.Image):
 
 def test_default_marvis_logo_assets_are_transparent_squares():
     for relative_path in [
-        "riskmodel_checker/static/brand/marvis-logo.png",
-        "riskmodel_checker/static/brand/marvis-favicon.png",
+        "marvis/static/brand/marvis-logo.png",
+        "marvis/static/brand/marvis-favicon.png",
     ]:
         image = Image.open(PROJECT_ROOT / relative_path).convert("RGBA")
         width, height = image.size

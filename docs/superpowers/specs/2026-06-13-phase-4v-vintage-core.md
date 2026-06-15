@@ -12,7 +12,7 @@
 
 Phase 4V 只交付确定性计算核心和轻量 payload，不做策略生成、不做前端 V2 图形、不做 LLM 文案。
 
-- 计算函数放在 `riskmodel_checker/validation/vintage.py`。
+- 计算函数放在 `marvis/validation/vintage.py`。
 - 只依赖 pandas/numpy 标准数据结构，不依赖 DB/FastAPI/Agent/Plugin runtime。
 - packs 和报告层可以 import 本模块；本模块不 import packs/output/api。
 
@@ -26,7 +26,7 @@ Phase 4V 只交付确定性计算核心和轻量 payload，不做策略生成、
 ## 模块布局
 
 ```text
-riskmodel_checker/validation/vintage.py
+marvis/validation/vintage.py
 tests/validation/test_vintage.py
 ```
 

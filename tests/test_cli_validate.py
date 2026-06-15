@@ -3,8 +3,8 @@ import sys
 
 import pytest
 
-from riskmodel_checker import __main__
-from riskmodel_checker.settings import Settings
+from marvis import __main__
+from marvis.settings import Settings
 
 
 def test_cli_help_lists_validate_subcommand(capsys):
@@ -20,7 +20,7 @@ def test_cli_help_lists_validate_subcommand(capsys):
 @pytest.mark.parametrize("args", [["--help"], ["serve", "--help"]])
 def test_cli_help_returns_without_loading_validation_stack(args):
     result = subprocess.run(
-        [sys.executable, "-m", "riskmodel_checker", *args],
+        [sys.executable, "-m", "marvis", *args],
         capture_output=True,
         text=True,
         timeout=5,
@@ -68,7 +68,7 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
             fake_init_db,
             FakePipelineSettings,
             fake_run_staged_pipeline,
-            lambda workspace: type("Environment", (), {"kernel_name": "riskmodel-kernel"})(),
+            lambda workspace: type("Environment", (), {"kernel_name": "marvis-kernel"})(),
         ),
     )
 
@@ -83,11 +83,11 @@ def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):
         ]
     )
 
-    assert calls[0] == ("init_db", tmp_path / "riskmodel_checker.sqlite")
+    assert calls[0] == ("init_db", tmp_path / "marvis.sqlite")
     assert calls[1][0] == "run_staged_pipeline"
     assert calls[1][1] == "task-1"
     assert calls[1][2].feature_columns == ["x1", "x2"]
-    assert calls[1][2].notebook_kernel_name == "riskmodel-kernel"
+    assert calls[1][2].notebook_kernel_name == "marvis-kernel"
 
 
 def test_cli_without_subcommand_defaults_to_serve(monkeypatch):

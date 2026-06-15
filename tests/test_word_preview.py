@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 from docx import Document
 
-from riskmodel_checker.output.word_preview import docx_to_html_preview
+from marvis.output.word_preview import docx_to_html_preview
 
 
 PNG_BYTES = b64decode(

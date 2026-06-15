@@ -1,5 +1,5 @@
-from riskmodel_checker.agent_memory.models import MemoryCandidate
-from riskmodel_checker.agent_memory.retrieval import (
+from marvis.agent_memory.models import MemoryCandidate
+from marvis.agent_memory.retrieval import (
     MemoryQuery,
     compare_model_experience,
     normalize_model_family,
@@ -280,7 +280,7 @@ def test_normalize_model_family_recognizes_english_and_chinese_examples():
 
 
 def test_bounded_payload_preserves_non_model_memory_fields():
-    from riskmodel_checker.agent_memory.prompting import (
+    from marvis.agent_memory.prompting import (
         _bounded_payload,
         normalize_memory_context,
     )

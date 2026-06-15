@@ -27,13 +27,13 @@ V1.1 记忆是「单条原始记忆」（用户偏好、字段口径、验证坑
 ## 模块布局
 
 ```text
-riskmodel_checker/agent_memory/
+marvis/agent_memory/
   （现有）store.py / retrieval.py / extractors.py / policy.py / prompting.py
   distillation.py    ← 新增：蒸馏引擎
   evolution.py       ← 新增：置信度演进 + 取代关系
   consolidation.py   ← 新增：后台固化调度（Hook 触发）
-riskmodel_checker/db.py   新增 memory_distillations 表 + 扩展 AgentMemoryStore
-riskmodel_checker/routers/memory.py   扩展：蒸馏查看/审计/回滚端点
+marvis/db.py   新增 memory_distillations 表 + 扩展 AgentMemoryStore
+marvis/routers/memory.py   扩展：蒸馏查看/审计/回滚端点
 ```
 
 无新依赖（复用现有 agent_memory 基础设施 + LLM client 做摘要）。

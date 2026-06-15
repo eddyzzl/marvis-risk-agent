@@ -30,7 +30,7 @@
 
 ### A-1 修复 `_roc_ks_curve` 的 `population_at_ks` 语义错误
 
-- **文件**：`riskmodel_checker/validation/effectiveness.py:443-465`（`_roc_ks_curve`）
+- **文件**：`marvis/validation/effectiveness.py:443-465`（`_roc_ks_curve`）
 - **不变量**：INV-1（指标正确性）
 - **现状问题**：`population_at_ks=float(fpr[ks_index])` 返回的是累计 good 占比（FPR），而非"达到最大 KS 时的累计人口占比"。信贷场景 bad rate 低，二者差异显著，KS 曲线分位标记点位置错误。
 
@@ -64,7 +64,7 @@
 
 ### A-2 修复 `_timestamp_without_timezone` 对 tz-aware 时间崩溃
 
-- **文件**：`riskmodel_checker/validation/time_periods.py:106-111`
+- **文件**：`marvis/validation/time_periods.py:106-111`
 - **不变量**：INV-1（月度分析可用性）
 - **现状问题**：对带时区的 `Timestamp` 直接 `tz_localize(None)` 在部分 pandas 版本抛 `TypeError`，含 `+08:00` 的时间列导致月度 KS/PSI 失败。
   > 实测修正（pandas 3.0.3）：`Timestamp.tz_localize(None)` 在该版本**不抛错**，直接返回钟面时间——原 CODE_REVIEW P0-2 在此版本是误报。但跨版本不保证，仍应显式处理。
@@ -100,7 +100,7 @@
 
 ### A-3 修复 LLM 客户端无条件发送 DeepSeek 专有字段
 
-- **文件**：`riskmodel_checker/llm_client.py:33-43`；`riskmodel_checker/llm_settings.py`（save 字段）
+- **文件**：`marvis/llm_client.py:33-43`；`marvis/llm_settings.py`（save 字段）
 - **不变量**：roadmap "手动模式和 Agent P1 模式都必须可用"
 - **现状问题**：`reasoning_effort` 和 `thinking: {"type": "enabled"}` 无条件注入所有请求，非 DeepSeek 提供商返回 400，P1 模式整体不可用。
 
@@ -145,7 +145,7 @@
 - **不变量**：INV（可维护性）
 - **现状问题**：当前分支合并事故，同名重复定义，静默保留最后一个。
 - **实现要点**：保留首处定义，删除后处副本。确认两处实现一致后再删（已核验一致）。
-- **测试要点**：`node --check` 无关；`python -c "import riskmodel_checker.api, riskmodel_checker.pipeline"` 无错；ruff F811 不再报（见 D-1）。
+- **测试要点**：`node --check` 无关；`python -c "import marvis.api, marvis.pipeline"` 无错；ruff F811 不再报（见 D-1）。
 - **验收**：ruff F811 清零；现有 cancel 相关测试（`test_notebook_cancellation.py`）通过。
 
 ### B-2 修复 `_agent_has_stop_ack_message` 只检查最后一条消息
@@ -190,7 +190,7 @@
 
 ### B-5 统一 `_resolve_scan_material` 路径校验走 `assert_within`
 
-- **文件**：`api.py:3146-3158`；`riskmodel_checker/safe_paths.py`
+- **文件**：`api.py:3146-3158`；`marvis/safe_paths.py`
 - **不变量**：INV-9 / 安全
 - **现状问题**：用 `relative_to` 自行校验，与项目统一入口 `assert_within` 不一致。
 - **目标行为**：改用 `assert_within(source_dir, resolved)`，捕获 `PermissionError` 返回友好错误 `(None, "配置的 {label} 必须位于材料目录内")`。
@@ -252,7 +252,7 @@
 - **文件**：`recovery.py:47`；`db.py:30-31,183-185`（`init_db` 同问题）
 - **不变量**：INV-8
 - **现状问题**：裸 `sqlite3.connect`，无 `busy_timeout`/`foreign_keys`/`row_factory`，启动恢复期锁冲突立即报错。
-- **目标行为**：`recovery.reclaim_stale_running_tasks` 改用 `from riskmodel_checker.db import connect`，删手动 `conn.commit()`（封装自动提交）。`init_db` 统一走封装或显式事务包裹 DDL。
+- **目标行为**：`recovery.reclaim_stale_running_tasks` 改用 `from marvis.db import connect`，删手动 `conn.commit()`（封装自动提交）。`init_db` 统一走封装或显式事务包裹 DDL。
 - **测试要点**：`test_recovery.py` 回归；并发连接下恢复不抛 `database is locked`。
 - **验收**：恢复路径与主连接行为一致。
 
@@ -394,8 +394,8 @@
 - 运行：
   ```bash
   conda run -n py_313 python -m pytest -q
-  conda run -n py_313 python -m ruff check riskmodel_checker tests --extend-exclude '*.ipynb'
-  node --check riskmodel_checker/static/js/main.js   # 及各模块
+  conda run -n py_313 python -m ruff check marvis tests --extend-exclude '*.ipynb'
+  node --check marvis/static/js/main.js   # 及各模块
   git diff --check
   ```
 - **验收**：全绿；F811 清零；前端模块化后 `test_frontend_static_v2.py` 通过。

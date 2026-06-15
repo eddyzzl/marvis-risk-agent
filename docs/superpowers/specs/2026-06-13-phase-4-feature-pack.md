@@ -17,7 +17,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/feature/
+marvis/feature/
   __init__.py
   contracts.py      Bin / BinningResult / FeatureMetrics / WOEResult / CorrelationReport
   errors.py
@@ -28,7 +28,7 @@ riskmodel_checker/feature/
   encode.py         onehot / label / woe 编码
   transform.py      归一化 / 标准化 / 缺失填充 / 异常截断
   derive.py         特征衍生 / 交叉
-riskmodel_checker/packs/feature/
+marvis/packs/feature/
   manifest.json     10 个 tool 声明
   tools.py
 ```

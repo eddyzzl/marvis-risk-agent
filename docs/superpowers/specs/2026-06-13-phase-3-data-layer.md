@@ -18,7 +18,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/data/
+marvis/data/
   __init__.py
   contracts.py      Dataset/ColumnProfile/ColumnFingerprint/JoinPlan/JoinSpec/KeyPair/JoinDiagnostics
   errors.py         数据层异常
@@ -31,11 +31,11 @@ riskmodel_checker/data/
   align.py          ColumnAligner：键字典 + 模糊兜底
   join_engine.py    JoinEngine：propose / diagnose / execute
   registry.py       DatasetRegistry
-riskmodel_checker/packs/data_ops/
+marvis/packs/data_ops/
   __init__.py
   manifest.json     7 个 tool 声明
   tools.py          tool_* 函数（包装 data/ 能力为 Tool 契约）
-riskmodel_checker/db.py   新增 datasets / joins 表 + DatasetRepository
+marvis/db.py   新增 datasets / joins 表 + DatasetRepository
 ```
 
 新增依赖：`duckdb>=0.9`、`pyarrow>=12`（feather/parquet）、`openpyxl`（已有）、`rapidfuzz>=3`（模糊列名匹配）。

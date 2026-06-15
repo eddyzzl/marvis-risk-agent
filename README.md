@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="riskmodel_checker/static/brand/marvis-logo.png" alt="MARVIS Risk Agent logo" width="148" />
+  <img src="marvis/static/brand/marvis-logo.png" alt="MARVIS Risk Agent logo" width="148" />
 </p>
 
 <h1 align="center">MARVIS Risk Agent</h1>
@@ -41,7 +41,7 @@ The current V1.1.x line already ships the Agent Memory Foundation for historical
 
 - Platform name: `MARVIS-全能风控智能体`
 - Primary color: black
-- Default logo and favicon: `riskmodel_checker/static/brand/`
+- Default logo and favicon: `marvis/static/brand/`
 
 ## Branding
 
@@ -114,10 +114,10 @@ marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 
 Then open `http://127.0.0.1:8000/`.
 
-The Python module name `riskmodel_checker` is retained in V1 for compatibility with the current validation runtime. The older entrypoints still work:
+The Python module name `marvis` is retained in V1 for compatibility with the current validation runtime. The older entrypoints still work:
 
 ```bash
-python -m riskmodel_checker serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+python -m marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 marvis-risk-agent serve --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
@@ -181,8 +181,8 @@ After that, future upgrades can use `marvis update`.
 
 ```bash
 python -m pytest -q
-ruff check riskmodel_checker tests --extend-exclude '*.ipynb'
-node --check riskmodel_checker/static/app.js
+ruff check marvis tests --extend-exclude '*.ipynb'
+node --check marvis/static/app.js
 ```
 
 ## Release Push

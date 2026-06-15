@@ -2,7 +2,7 @@
 
 - 审查日期：2026-06-13
 - 审查对象：当前工作树（分支 `codex/windows-create-task-422`，含未提交修改）
-- 审查范围：`riskmodel_checker/` 全部后端模块、`static/` 前端、`validation/` 算法层、`agent/` 与 `agent_memory/`、`output/` 渲染层、CLI 与发布脚本、全部设计文档
+- 审查范围：`marvis/` 全部后端模块、`static/` 前端、`validation/` 算法层、`agent/` 与 `agent_memory/`、`output/` 渲染层、CLI 与发布脚本、全部设计文档
 - 方法：按模块并行深度审查（8 个独立审查通道），所有 P0 级发现已由人工二次核验代码确认
 
 ## 总览
@@ -25,7 +25,7 @@
 
 ### P0-1 `population_at_ks` 语义错误：返回 FPR 而非累计人口占比
 
-- **位置**：`riskmodel_checker/validation/effectiveness.py:464`
+- **位置**：`marvis/validation/effectiveness.py:464`
 - **置信度**：高（已人工核验）
 
 ```python
@@ -54,7 +54,7 @@ population_at_ks=float(population[ks_index]),
 
 ### P0-2 带时区的时间字段导致月度分析整体崩溃
 
-- **位置**：`riskmodel_checker/validation/time_periods.py:107-111`
+- **位置**：`marvis/validation/time_periods.py:107-111`
 - **置信度**：高（已人工核验）
 
 ```python
@@ -83,7 +83,7 @@ def _timestamp_without_timezone(value) -> pd.Timestamp:
 
 ### P0-3 LLM 客户端无条件发送 DeepSeek 专有字段，非 DeepSeek 提供商下 Agent P1 模式不可用
 
-- **位置**：`riskmodel_checker/llm_client.py:33-43`
+- **位置**：`marvis/llm_client.py:33-43`
 - **置信度**：高（已人工核验）
 
 ```python
@@ -244,7 +244,7 @@ elif getattr(self.client, "km", None) is not None:
 
 **问题**：`sqlite3.connect(db_path)` 不带 `busy_timeout`/`foreign_keys`/`row_factory`，与 `db.py` 的 `connect()` 封装行为不一致。FastAPI 启动恢复期与其他连接并发时，锁冲突会立即抛 `database is locked` 而不是等待 5 秒。同时启动恢复对 `agent_memory_entries` 的半写入状态完全无感知。
 
-**修复**：改用 `from riskmodel_checker.db import connect`，删除手动 `conn.commit()`。`init_db`（`db.py:30-31`）同样建议统一（见 P2-9）。
+**修复**：改用 `from marvis.db import connect`，删除手动 `conn.commit()`。`init_db`（`db.py:30-31`）同样建议统一（见 P2-9）。
 
 ### 验证算法层（validation/）
 
@@ -424,7 +424,7 @@ except (TimeoutError, OSError, http.client.HTTPException) as exc:
 | P2-25 | `AGENTS.md:15-16`、`docs/roadmap.md:7`、`docs/versioning.md:7` | 版本边界过时：V1.1 仍标"计划中"，实际已发布 V1.1.1 且 agent_memory 已落地。AGENTS.md 是 AI 协作的事实来源，过时描述会让 Claude/Codex 对功能状态作出错误判断 | 三处统一改为"当前稳定线 V1.1.x（含 Agent Memory Foundation）" |
 | P2-26 | `docs/对notebook的要求.md` 第 9 节（约 338-365 行） | "推荐完整契约 cell"缺少必填变量 `RMC_SAMPLE_DF`，建模人员照抄会直接静态检查失败 | 在该代码块补 `RMC_SAMPLE_DF = modeling_sample`，与 `docs/notebook_contract.md` 对齐 |
 | P2-27 | `api.py:91-92, 2762-2817` | 过拟合检测算法（含业务阈值 0.10/0.05）实现在 HTTP 路由层，违反 AGENTS.md 模块边界（"api.py 不承载验证算法"），且 `validation/` 中无对应实现 | 迁移到 `validation/overfitting.py`，api.py 只调用 |
-| P2-28 | `docs/runbook.md:128-131` | CLI 示例只给 `python -m riskmodel_checker validate`，未展示首选入口 `marvis validate` | 首选 `marvis validate`，模块路径作为兼容备注 |
+| P2-28 | `docs/runbook.md:128-131` | CLI 示例只给 `python -m marvis validate`，未展示首选入口 `marvis validate` | 首选 `marvis validate`，模块路径作为兼容备注 |
 | P2-29 | `output/word_preview.py:326` | 内联 CSS 用 `backdrop-filter: blur(14px)`，违反 DESIGN.md 性能约束 | 改用不透明背景色 |
 
 ### 输出渲染（Word/Excel/图表）

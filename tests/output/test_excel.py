@@ -4,8 +4,8 @@ import re
 
 from openpyxl import load_workbook
 
-from riskmodel_checker.output.excel import write_validation_excel
-from riskmodel_checker.validation.results import (
+from marvis.output.excel import write_validation_excel
+from marvis.validation.results import (
     BasicInfoResult,
     BinRow,
     ConsistencyStatus,

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.binning import (
+from marvis.validation.binning import (
     equal_frequency_bin_edges,
     assign_bins,
     bin_table,

@@ -7,12 +7,12 @@ from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
-from riskmodel_checker.app import create_app
-from riskmodel_checker.agent_memory.models import MemoryCandidate
-from riskmodel_checker.agent_memory.store import AgentMemoryStore
-from riskmodel_checker.db import TaskRepository
-from riskmodel_checker.domain import TaskStatus
-from riskmodel_checker.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX
+from marvis.app import create_app
+from marvis.agent_memory.models import MemoryCandidate
+from marvis.agent_memory.store import AgentMemoryStore
+from marvis.db import TaskRepository
+from marvis.domain import TaskStatus
+from marvis.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX
 
 
 REQUIRED_AGENT_CONCLUSIONS = {
@@ -31,7 +31,7 @@ def _client(tmp_path: Path) -> TestClient:
 
 
 def test_normalize_effort_falls_back_to_high():
-    from riskmodel_checker.api import _normalize_effort
+    from marvis.api import _normalize_effort
 
     assert _normalize_effort("low") == "low"
     assert _normalize_effort("Medium") == "medium"
@@ -170,11 +170,11 @@ def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr("riskmodel_checker.api.answer_chat_message", fake_answer_chat_message)
+    monkeypatch.setattr("marvis.api.answer_chat_message", fake_answer_chat_message)
     client = _client(tmp_path)
     _configure_llm(client)
     task_id = _create_task(client, tmp_path)
-    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
     memory = store.create(
         MemoryCandidate(
             memory_type="model_experience",
@@ -213,7 +213,7 @@ def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
 
 def test_agent_chat_persists_explicit_user_preference_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "riskmodel_checker.api.answer_chat_message",
+        "marvis.api.answer_chat_message",
         lambda **kwargs: ("已记住。", {"fallback": False}),
     )
     client = _client(tmp_path)
@@ -226,7 +226,7 @@ def test_agent_chat_persists_explicit_user_preference_memory(tmp_path, monkeypat
     )
 
     assert response.status_code == 202, response.text
-    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
     memories = store.list_entries(memory_type="user_preference")
     assert len(memories) == 1
     memory = memories[0]
@@ -256,7 +256,7 @@ def test_agent_start_queues_streaming_opening_before_background_scan(
         queued.append((task_id, opening_message_id, acceptance_mode, stage_instruction))
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -302,11 +302,11 @@ def test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _run_agent_validation_job
+    from marvis.api import _run_agent_validation_job
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     job_id = repo.start_job(task_id, "agent")
     calls: list[str] = []
 
@@ -354,15 +354,15 @@ def test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts(
         repo.update_agent_report_conclusions(task_id, REQUIRED_AGENT_CONCLUSIONS, expected_revision=0)
         return True
 
-    monkeypatch.setattr("riskmodel_checker.api._open_agent_stage", fake_open_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_scan_stage", fake_scan_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_reproducibility_stage", fake_repro_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_word_conclusion_stage", fake_word_stage)
+    monkeypatch.setattr("marvis.api._open_agent_stage", fake_open_stage)
+    monkeypatch.setattr("marvis.api._run_agent_scan_stage", fake_scan_stage)
+    monkeypatch.setattr("marvis.api._run_agent_reproducibility_stage", fake_repro_stage)
+    monkeypatch.setattr("marvis.api._run_agent_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.api._run_agent_word_conclusion_stage", fake_word_stage)
 
     _run_agent_validation_job(
         job_id,
-        SimpleNamespace(db_path=tmp_path / "riskmodel_checker.sqlite"),
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
         acceptance_mode="auto_accept",
@@ -389,15 +389,15 @@ def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _run_agent_validation_job
+    from marvis.api import _run_agent_validation_job
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     job_id = repo.start_job(task_id, "agent")
 
     monkeypatch.setattr(
-        "riskmodel_checker.api.compose_agent_start_message",
+        "marvis.api.compose_agent_start_message",
         lambda **_kwargs: ("开始验证材料。", {"fallback": True}),
     )
 
@@ -442,14 +442,14 @@ def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
         repo.update_agent_report_conclusions(task_id, REQUIRED_AGENT_CONCLUSIONS, expected_revision=0)
         return True
 
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_scan_stage", fake_scan_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_reproducibility_stage", fake_repro_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("riskmodel_checker.api._run_agent_word_conclusion_stage", fake_word_stage)
+    monkeypatch.setattr("marvis.api._run_agent_scan_stage", fake_scan_stage)
+    monkeypatch.setattr("marvis.api._run_agent_reproducibility_stage", fake_repro_stage)
+    monkeypatch.setattr("marvis.api._run_agent_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.api._run_agent_word_conclusion_stage", fake_word_stage)
 
     _run_agent_validation_job(
         job_id,
-        SimpleNamespace(db_path=tmp_path / "riskmodel_checker.sqlite"),
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
         acceptance_mode="auto_accept",
@@ -477,24 +477,24 @@ def test_agent_auto_accept_dispatch_does_not_precreate_received_intro_for_next_s
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _dispatch_agent_validation_job
+    from marvis.api import _dispatch_agent_validation_job
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(task_id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
     task = repo.get_task(task_id)
     background_tasks = BackgroundTasks()
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         lambda *_args, **_kwargs: None,
     )
 
     payload = _dispatch_agent_validation_job(
         repo=repo,
         task=task,
-        settings=SimpleNamespace(db_path=tmp_path / "riskmodel_checker.sqlite"),
+        settings=SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         model_profile={"model_id": "m1", "effort": "high"},
         acceptance_mode="auto_accept",
         background_tasks=background_tasks,
@@ -512,11 +512,11 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _run_agent_word_conclusion_stage
+    from marvis.api import _run_agent_word_conclusion_stage
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     report_calls: list[str] = []
 
@@ -525,7 +525,7 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
 
     def fake_run_report_stage(*, task_id, settings):
         report_calls.append(task_id)
-        local_repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+        local_repo = TaskRepository(tmp_path / "marvis.sqlite")
         local_repo.update_status(
             task_id,
             TaskStatus.SUCCEEDED,
@@ -533,14 +533,14 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
             expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
         )
 
-    monkeypatch.setattr("riskmodel_checker.api.generate_word_conclusions", fake_generate_word_conclusions)
-    monkeypatch.setattr("riskmodel_checker.api.run_report_stage", fake_run_report_stage)
-    monkeypatch.setattr("riskmodel_checker.api._agent_pipeline_settings", lambda _settings, _task: object())
-    monkeypatch.setattr("riskmodel_checker.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
+    monkeypatch.setattr("marvis.api.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.api.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.api._agent_pipeline_settings", lambda _settings, _task: object())
+    monkeypatch.setattr("marvis.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
 
     assert _run_agent_word_conclusion_stage(
         repo,
-        SimpleNamespace(db_path=tmp_path / "riskmodel_checker.sqlite"),
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
         auto_accept=True,
@@ -562,11 +562,11 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.api import _run_agent_word_conclusion_stage
+    from marvis.api import _run_agent_word_conclusion_stage
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     seen_instructions: list[str | None] = []
 
@@ -574,12 +574,12 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
         seen_instructions.append(kwargs.get("user_instruction"))
         return REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}
 
-    monkeypatch.setattr("riskmodel_checker.api.generate_word_conclusions", fake_generate_word_conclusions)
-    monkeypatch.setattr("riskmodel_checker.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
+    monkeypatch.setattr("marvis.api.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
 
     assert _run_agent_word_conclusion_stage(
         repo,
-        SimpleNamespace(db_path=tmp_path / "riskmodel_checker.sqlite"),
+        SimpleNamespace(db_path=tmp_path / "marvis.sqlite"),
         task_id,
         {"model_id": "m1", "effort": "high"},
         rewrite_instruction="重新写草稿，强化压力测试高风险数据源说明",
@@ -596,7 +596,7 @@ def test_metrics_stage_evidence_drops_oversized_roc_curve_arrays():
     # the LLM the prompt is too large and the call falls back to the
     # one-line placeholder text. The slim helper must drop them while
     # preserving the AUC/KS summary numbers the analysis depends on.
-    from riskmodel_checker.agent.service import _metrics_stage_evidence
+    from marvis.agent.service import _metrics_stage_evidence
 
     payload_curve = [{"x": i / 100, "y": (i / 100) ** 0.5} for i in range(2000)]
     evidence = {
@@ -629,7 +629,7 @@ def test_word_conclusion_draft_evidence_drops_oversized_roc_curves():
     # The Word draft stage uses the global evidence dict; the same large
     # roc_ks_curves arrays must not reach the LLM or the three drafts fall
     # back to placeholder text.
-    from riskmodel_checker.agent.service import _stage_scoped_evidence
+    from marvis.agent.service import _stage_scoped_evidence
 
     payload_curve = [{"x": i, "y": i} for i in range(500)]
     evidence = {
@@ -658,11 +658,11 @@ def test_word_conclusion_draft_evidence_drops_oversized_roc_curves():
 
 
 def test_scan_stage_prompt_tells_llm_completed_materials_are_not_missing(tmp_path):
-    from riskmodel_checker.agent.service import _stage_prompt
+    from marvis.agent.service import _stage_prompt
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "riskmodel_checker.sqlite").get_task(task_id)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
 
     prompt = json.loads(
         _stage_prompt(
@@ -697,7 +697,7 @@ def test_scan_stage_summary_overrides_llm_missing_claim_when_materials_complete(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.agent.service import summarize_stage
+    from marvis.agent.service import summarize_stage
 
     class FakeLLMClient:
         def __init__(self, profile):
@@ -707,12 +707,12 @@ def test_scan_stage_summary_overrides_llm_missing_claim_when_materials_complete(
             return "根据扫描结果，缺少 PMML 或 pickle、验证样本评分输出和 KS/PSI/AUC 中间结果。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "riskmodel_checker.sqlite").get_task(task_id)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
 
     content, metadata = summarize_stage(
         task=task,
@@ -745,7 +745,7 @@ def test_scan_stage_summary_overrides_llm_undetected_claim_when_materials_comple
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.agent.service import summarize_stage
+    from marvis.agent.service import summarize_stage
 
     class FakeLLMClient:
         def __init__(self, profile):
@@ -758,12 +758,12 @@ def test_scan_stage_summary_overrides_llm_undetected_claim_when_materials_comple
             )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    task = TaskRepository(tmp_path / "riskmodel_checker.sqlite").get_task(task_id)
+    task = TaskRepository(tmp_path / "marvis.sqlite").get_task(task_id)
 
     content, metadata = summarize_stage(
         task=task,
@@ -811,7 +811,7 @@ def test_agent_plain_chat_question_uses_llm_answer_instead_of_start_guidance(
             return "PMML 是一种模型部署交换格式。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -879,7 +879,7 @@ def test_agent_plain_chat_follow_up_uses_same_task_conversation_memory(
             return next(responses)
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -949,7 +949,7 @@ def test_agent_greeting_chat_instructs_llm_to_answer_naturally(
             return "你好，我在。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1001,7 +1001,7 @@ def test_agent_greeting_chat_suppresses_repeated_start_guidance(
             return "我可以协助启动验证、解释阶段结果，并在报告生成前起草三段 Word 结论。需要开始时，请输入“开始验证”。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1043,7 +1043,7 @@ def test_agent_chat_llm_error_fallback_does_not_show_start_command(
     tmp_path,
     monkeypatch,
 ):
-    from riskmodel_checker.llm_client import LLMClientError
+    from marvis.llm_client import LLMClientError
 
     class FakeLLMClient:
         def __init__(self, profile):
@@ -1053,7 +1053,7 @@ def test_agent_chat_llm_error_fallback_does_not_show_start_command(
             raise LLMClientError("network failed")
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1104,7 +1104,7 @@ def test_agent_chat_question_receives_current_validation_context(
             return "这张图对应的 OOT KS 为 0.3215，PSI 为 0.0123，整体区分和稳定性需要结合阈值复核。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1127,7 +1127,7 @@ def test_agent_chat_question_receives_current_validation_context(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     output_dir = tmp_path / "tasks" / task_id / "outputs"
     output_dir.mkdir(parents=True)
@@ -1198,7 +1198,7 @@ def test_agent_chat_question_receives_current_validation_context(
 
 
 def test_agent_evidence_adds_overfitting_check_from_split_ks(tmp_path):
-    from riskmodel_checker.api import _agent_evidence_from_settings
+    from marvis.api import _agent_evidence_from_settings
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
@@ -1251,7 +1251,7 @@ def test_agent_metrics_summary_prompt_uses_contextual_metric_guidance(
             return "OOT KS 为 0.3215，PSI 为 0.0123，整体表现可接受。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1318,7 +1318,7 @@ def test_agent_stage_summary_strips_instruction_acknowledgement_preamble(
             )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1371,7 +1371,7 @@ def test_agent_stage_summary_prompt_uses_model_name_not_task_id(
             return "将基于 A卡 的验证结果进行分析。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1423,11 +1423,11 @@ def test_agent_question_about_validation_conclusion_does_not_restart_validation(
             return "这是一段围绕当前验证结论的解释。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         lambda *args: queued.append(args),
     )
     client = _client(tmp_path)
@@ -1491,16 +1491,16 @@ def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
         return {"checks": [], "artifacts": []}
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("riskmodel_checker.api._perform_scan_task", fake_scan)
+    monkeypatch.setattr("marvis.api._perform_scan_task", fake_scan)
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_notebook_stage",
+        "marvis.api.run_notebook_stage",
         lambda **_kwargs: unexpected.append("notebook"),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -1532,7 +1532,7 @@ def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "accepted"
     assert unexpected == []
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     assert repo.get_task(task_id).status == TaskStatus.SCANNED
     messages = repo.list_agent_messages(task_id)
     assert messages[0]["role"] == "user"
@@ -1575,16 +1575,16 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api._perform_scan_task",
+        "marvis.api._perform_scan_task",
         lambda *_args, **_kwargs: unexpected.append("scan"),
     )
-    monkeypatch.setattr("riskmodel_checker.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -1607,7 +1607,7 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(
         task_id,
         TaskStatus.SCANNED,
@@ -1660,14 +1660,14 @@ def test_agent_continue_after_intervening_chat_dispatches_metrics_stage(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_notebook_stage",
+        "marvis.api.run_notebook_stage",
         lambda **_kwargs: pytest.fail("notebook stage should not rerun"),
     )
-    monkeypatch.setattr("riskmodel_checker.api.run_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_metrics_stage)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -1688,7 +1688,7 @@ def test_agent_continue_after_intervening_chat_dispatches_metrics_stage(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(
         task_id,
         TaskStatus.SCANNED,
@@ -1761,7 +1761,7 @@ def test_agent_continue_generate_report_after_intervening_chat_dispatches_word_d
             return "普通分析总结"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -1784,7 +1784,7 @@ def test_agent_continue_generate_report_after_intervening_chat_dispatches_word_d
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -1889,16 +1889,16 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api._perform_scan_task",
+        "marvis.api._perform_scan_task",
         lambda *_args, **_kwargs: unexpected.append("scan"),
     )
-    monkeypatch.setattr("riskmodel_checker.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -1921,7 +1921,7 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(
         task_id,
         TaskStatus.SCANNED,
@@ -1997,12 +1997,12 @@ def test_agent_continue_retries_notebook_stage_after_notebook_failure(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("riskmodel_checker.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_metrics_stage",
+        "marvis.api.run_metrics_stage",
         lambda **_kwargs: calls.append("metrics"),
     )
     client = _client(tmp_path)
@@ -2025,7 +2025,7 @@ def test_agent_continue_retries_notebook_stage_after_notebook_failure(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(
         task_id,
         TaskStatus.FAILED,
@@ -2050,12 +2050,12 @@ def test_agent_stop_message_requests_active_agent_cancellation_without_llm_confi
 ):
     requested: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.start_job(task_id, "agent")
 
     response = client.post(
@@ -2081,16 +2081,16 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
     requested_agent: list[str] = []
     requested_notebook: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_agent_cancellation",
+        "marvis.api.request_agent_cancellation",
         lambda task_id: requested_agent.append(task_id),
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda task_id: requested_notebook.append(task_id) or True,
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.start_job(task_id, "agent")
 
     response = client.post(f"/api/tasks/{task_id}/agent/stop")
@@ -2110,12 +2110,12 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
 
 def test_agent_stop_marks_scanned_task_stopped_without_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda _task_id: True,
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(task_id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
     repo.start_job(task_id, "agent")
 
@@ -2129,11 +2129,11 @@ def test_agent_stop_marks_scanned_task_stopped_without_failure(tmp_path, monkeyp
 
 
 def test_pipeline_cancel_resume_status_is_idempotent_and_stopped(tmp_path):
-    from riskmodel_checker.pipeline import _mark_cancelled
+    from marvis.pipeline import _mark_cancelled
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(task_id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
 
     _mark_cancelled(repo, task_id, TaskStatus.SCANNED, "已停止当前动作")
@@ -2145,7 +2145,7 @@ def test_pipeline_cancel_resume_status_is_idempotent_and_stopped(tmp_path):
 
 def test_agent_stop_keeps_active_job_guard_until_worker_finishes(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "riskmodel_checker.api.request_notebook_cancellation",
+        "marvis.api.request_notebook_cancellation",
         lambda _task_id: True,
     )
     client = _client(tmp_path)
@@ -2168,7 +2168,7 @@ def test_agent_stop_keeps_active_job_guard_until_worker_finishes(tmp_path, monke
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     active_job_id = repo.start_job(task_id, "agent")
 
     stop_response = client.post(f"/api/tasks/{task_id}/agent/stop")
@@ -2186,7 +2186,7 @@ def test_agent_stop_keeps_active_job_guard_until_worker_finishes(tmp_path, monke
 
 
 def test_agent_streaming_message_consumes_cancellation_after_quiet_producer(tmp_path):
-    from riskmodel_checker.api import (
+    from marvis.api import (
         AgentValidationCancelled,
         _add_streaming_agent_message,
         _clear_agent_cancellation,
@@ -2196,7 +2196,7 @@ def test_agent_streaming_message_consumes_cancellation_after_quiet_producer(tmp_
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     message = _add_streaming_agent_message(
         repo,
         task_id,
@@ -2245,14 +2245,14 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
             return json.dumps(REQUIRED_AGENT_CONCLUSIONS, ensure_ascii=False)
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    from riskmodel_checker.api import _run_agent_word_conclusion_stage
+    from marvis.api import _run_agent_word_conclusion_stage
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
     finished = _run_agent_word_conclusion_stage(
@@ -2289,7 +2289,7 @@ def test_agent_word_conclusion_stage_shows_thinking_while_llm_generates_draft(
 
 
 def test_agent_word_conclusion_display_uses_fixed_business_order():
-    from riskmodel_checker.api import _format_conclusion_values
+    from marvis.api import _format_conclusion_values
 
     content = _format_conclusion_values(
         {
@@ -2307,11 +2307,11 @@ def test_agent_word_conclusion_display_uses_fixed_business_order():
 
 
 def test_agent_word_conclusion_dispatch_returns_draft_thinking_message(tmp_path):
-    from riskmodel_checker.api import _dispatch_agent_validation_job
+    from marvis.api import _dispatch_agent_validation_job
 
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
     result = _dispatch_agent_validation_job(
@@ -2355,7 +2355,7 @@ def test_agent_word_conclusion_prompt_uses_contextual_metric_guidance(
             return json.dumps(REQUIRED_AGENT_CONCLUSIONS, ensure_ascii=False)
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -2424,10 +2424,10 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("riskmodel_checker.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -2448,7 +2448,7 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2498,10 +2498,10 @@ def test_agent_chat_confirm_report_draft_does_not_need_enabled_llm(tmp_path, mon
             expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
         )
 
-    monkeypatch.setattr("riskmodel_checker.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2547,11 +2547,11 @@ def test_agent_chat_confirm_report_draft_rejects_stale_revision_without_mutation
         },
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2595,11 +2595,11 @@ def test_agent_chat_confirm_ignores_freeform_assistant_report_headings(
             return "这是普通对话回复。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2622,7 +2622,7 @@ def test_agent_chat_confirm_ignores_freeform_assistant_report_headings(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2666,11 +2666,11 @@ def test_agent_chat_confirm_ignores_draft_after_report_was_confirmed(
             return "这是普通对话回复。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2693,7 +2693,7 @@ def test_agent_chat_confirm_ignores_draft_after_report_was_confirmed(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2739,11 +2739,11 @@ def test_agent_chat_regenerate_report_creates_structured_draft_not_plain_chat(
             return json.dumps(REQUIRED_AGENT_CONCLUSIONS, ensure_ascii=False)
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2766,7 +2766,7 @@ def test_agent_chat_regenerate_report_creates_structured_draft_not_plain_chat(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2817,7 +2817,7 @@ def test_agent_chat_regenerate_report_rejects_active_job_without_new_draft(
             return json.dumps(REQUIRED_AGENT_CONCLUSIONS, ensure_ascii=False)
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service.OpenAICompatibleLLMClient",
+        "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
     client = _client(tmp_path)
@@ -2840,7 +2840,7 @@ def test_agent_chat_regenerate_report_rejects_active_job_without_new_draft(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.add_agent_message(
         task_id,
@@ -2890,7 +2890,7 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -2913,7 +2913,7 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.update_agent_report_conclusions(
         task_id,
@@ -2986,7 +2986,7 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
     ],
 )
 def test_agent_rerun_stage_recognizes_step_numbers_and_business_aliases(content, stage):
-    from riskmodel_checker.agent.service import agent_rerun_stage
+    from marvis.agent.service import agent_rerun_stage
 
     assert agent_rerun_stage(content) == stage
 
@@ -3024,10 +3024,10 @@ def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
         return "不应进入普通问答。", {"fallback": True}
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         fake_run_agent_validation_job,
     )
-    monkeypatch.setattr("riskmodel_checker.api.answer_chat_message", fake_answer_chat_message)
+    monkeypatch.setattr("marvis.api.answer_chat_message", fake_answer_chat_message)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -3048,7 +3048,7 @@ def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     repo.update_status(task_id, TaskStatus.SCANNED, "已停止当前动作", expected=TaskStatus.CREATED)
     repo.add_agent_message(
         task_id,
@@ -3106,7 +3106,7 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
         )
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -3129,7 +3129,7 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.update_agent_report_conclusions(
         task_id,
@@ -3179,7 +3179,7 @@ def test_agent_rerun_rejects_stage_that_has_not_been_reached(tmp_path, monkeypat
         pytest.fail("unreached rerun stage should not dispatch an agent job")
 
     monkeypatch.setattr(
-        "riskmodel_checker.api._run_agent_validation_job",
+        "marvis.api._run_agent_validation_job",
         unexpected_dispatch,
     )
     client = _client(tmp_path)
@@ -3202,7 +3202,7 @@ def test_agent_rerun_rejects_stage_that_has_not_been_reached(tmp_path, monkeypat
         },
     )
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/messages",
@@ -3221,12 +3221,12 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
 ):
     calls: list[str] = []
     monkeypatch.setattr(
-        "riskmodel_checker.api.run_report_stage",
+        "marvis.api.run_report_stage",
         lambda **kwargs: calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
     response = client.post(
@@ -3250,7 +3250,7 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
 def test_agent_report_confirm_rejects_extra_report_keys(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     payload = {
         **REQUIRED_AGENT_CONCLUSIONS,
@@ -3269,7 +3269,7 @@ def test_agent_report_confirm_rejects_extra_report_keys(tmp_path):
 def test_agent_report_confirm_rejects_active_job_without_mutating_conclusions(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.start_job(task_id, "metrics")
 
@@ -3299,10 +3299,10 @@ def test_agent_report_confirm_claims_job_before_mutating_conclusions(
         start_attempts.append((task_id, kind))
         raise HTTPException(status_code=409, detail="task already has an active stage")
 
-    monkeypatch.setattr("riskmodel_checker.api._start_task_job", fail_start_job)
+    monkeypatch.setattr("marvis.api._start_task_job", fail_start_job)
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
     response = client.post(
@@ -3326,7 +3326,7 @@ def test_agent_report_confirm_rejects_non_reportable_status_without_mutating_con
 ):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
 
     response = client.post(
         f"/api/tasks/{task_id}/agent/report-draft/confirm",
@@ -3344,7 +3344,7 @@ def test_agent_report_confirm_rejects_non_reportable_status_without_mutating_con
 def test_agent_report_generation_requires_confirmed_conclusions(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
 
     response = client.post(f"/api/tasks/{task_id}/report")
@@ -3356,7 +3356,7 @@ def test_agent_report_generation_requires_confirmed_conclusions(tmp_path):
 def test_agent_report_preview_requires_confirmed_agent_conclusions(tmp_path):
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     _advance_to_writing_artifacts(repo, task_id)
     repo.update_status(
         task_id,

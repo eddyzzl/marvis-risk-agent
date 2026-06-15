@@ -1,7 +1,7 @@
 from dataclasses import replace
 
-from riskmodel_checker.report_texts import merge_report_text_values, report_text_values_from_results
-from riskmodel_checker.validation.results import SplitRow
+from marvis.report_texts import merge_report_text_values, report_text_values_from_results
+from marvis.validation.results import SplitRow
 from tests.output.test_excel import _make_results
 
 

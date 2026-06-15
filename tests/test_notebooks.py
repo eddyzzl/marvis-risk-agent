@@ -4,15 +4,15 @@ from pathlib import Path
 import nbformat
 import pytest
 
-from riskmodel_checker.notebook_cancellation import NotebookCancellationToken
-from riskmodel_checker.notebooks import (
+from marvis.notebook_cancellation import NotebookCancellationToken
+from marvis.notebooks import (
     _build_step_events,
     _record_cell_complete,
     _record_cell_start,
     NotebookExecutionSession,
     run_notebook,
 )
-from riskmodel_checker.notebook_steps import notebook_step_plan
+from marvis.notebook_steps import notebook_step_plan
 
 
 def test_run_notebook_executes_relative_to_notebook_directory(tmp_path: Path):
@@ -54,19 +54,19 @@ def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
         def execute(self, *, cwd):
             captured["cwd"] = cwd
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
 
     result = run_notebook(
         notebook_path,
         executed_path,
         log_path,
         timeout=60,
-        kernel_name="riskmodel-kernel",
+        kernel_name="marvis-kernel",
     )
 
     assert result.succeeded is True
     assert captured["timeout"] == 60
-    assert captured["kernel_name"] == "riskmodel-kernel"
+    assert captured["kernel_name"] == "marvis-kernel"
     assert captured["cwd"] == str(tmp_path)
 
 
@@ -133,7 +133,7 @@ def test_run_notebook_uses_explicit_execution_cwd(tmp_path: Path, monkeypatch):
         def execute(self, *, cwd):
             captured["cwd"] = cwd
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
 
     result = run_notebook(
         notebook_path,
@@ -179,7 +179,7 @@ def test_run_notebook_streams_step_progress_file(tmp_path: Path, monkeypatch):
             self.callbacks["on_cell_start"](cell=self.notebook.cells[3], cell_index=3)
             progress_snapshots.append(json.loads(progress_path.read_text(encoding="utf-8")))
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
 
     result = run_notebook(
         notebook_path,
@@ -249,8 +249,8 @@ def test_run_notebook_defers_step_elapsed_until_next_cell_or_return(
             self.callbacks["on_cell_complete"](cell=self.notebook.cells[3], cell_index=3)
             clock["value"] = "2026-05-25T00:00:15+00:00"
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
-    monkeypatch.setattr("riskmodel_checker.notebooks._utc_now", lambda: clock["value"])
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks._utc_now", lambda: clock["value"])
 
     result = run_notebook(
         notebook_path,
@@ -298,7 +298,7 @@ def test_appended_system_cells_are_visible_before_execution(tmp_path: Path, monk
             self.callbacks["on_cell_executed"](cell=cell, cell_index=cell_index)
             self.callbacks["on_cell_complete"](cell=cell, cell_index=cell_index)
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
 
     session = NotebookExecutionSession(
         notebook_path=notebook_path,
@@ -311,12 +311,12 @@ def test_appended_system_cells_are_visible_before_execution(tmp_path: Path, monk
     try:
         pmml_index = session.append_code_cell(
             "score_pmml()",
-            metadata={"riskmodel_checker": "repro-pmml"},
+            metadata={"marvis": "repro-pmml"},
             record_progress=True,
         )
         compare_index = session.append_code_cell(
             "compare_scores()",
-            metadata={"riskmodel_checker": "repro-compare"},
+            metadata={"marvis": "repro-compare"},
             record_progress=True,
         )
         planned = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -393,8 +393,8 @@ def test_execute_existing_code_cell_uses_return_time_for_completed_elapsed(
             self.callbacks["on_cell_complete"](cell=cell, cell_index=cell_index)
             clock["value"] = "2026-05-25T00:00:05+00:00"
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
-    monkeypatch.setattr("riskmodel_checker.notebooks._utc_now", lambda: clock["value"])
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks._utc_now", lambda: clock["value"])
 
     session = NotebookExecutionSession(
         notebook_path=notebook_path,
@@ -452,8 +452,8 @@ def test_execute_existing_code_cell_stays_running_until_execute_returns(
             progress_snapshots.append(json.loads(progress_path.read_text(encoding="utf-8")))
             clock["value"] = "2026-05-25T00:00:05+00:00"
 
-    monkeypatch.setattr("riskmodel_checker.notebooks.NotebookClient", FakeNotebookClient)
-    monkeypatch.setattr("riskmodel_checker.notebooks._utc_now", lambda: clock["value"])
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+    monkeypatch.setattr("marvis.notebooks._utc_now", lambda: clock["value"])
 
     session = NotebookExecutionSession(
         notebook_path=notebook_path,
@@ -545,8 +545,8 @@ def test_retried_system_step_progress_uses_latest_attempt_status():
             nbformat.v4.new_code_cell("prepare_new()"),
         ]
     )
-    notebook.cells[0].metadata["riskmodel_checker"] = "metrics-prepare"
-    notebook.cells[1].metadata["riskmodel_checker"] = "metrics-prepare"
+    notebook.cells[0].metadata["marvis"] = "metrics-prepare"
+    notebook.cells[1].metadata["marvis"] = "metrics-prepare"
     plan = notebook_step_plan(notebook)
     cell_events = {
         0: {

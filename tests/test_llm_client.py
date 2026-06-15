@@ -3,7 +3,7 @@ from http.client import RemoteDisconnected
 
 import pytest
 
-from riskmodel_checker.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 
 
 class _StreamingResponse:
@@ -58,7 +58,7 @@ def test_openai_compatible_client_defaults_to_portable_stream_payload(monkeypatc
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return _StreamingResponse()
 
-    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
     content = OpenAICompatibleLLMClient(
         {
@@ -104,7 +104,7 @@ def test_client_honors_reasoning_effort_from_profile(monkeypatch):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return _StreamingResponse()
 
-    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
     OpenAICompatibleLLMClient(
         {
@@ -127,7 +127,7 @@ def test_client_sends_extra_request_fields_when_configured(monkeypatch):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return _StreamingResponse()
 
-    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
     OpenAICompatibleLLMClient(
         {
@@ -149,7 +149,7 @@ def test_client_can_request_non_streaming_json_response(monkeypatch):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return _JsonResponse()
 
-    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
     content = OpenAICompatibleLLMClient(
         {
@@ -167,7 +167,7 @@ def test_client_wraps_stream_interruptions(monkeypatch):
     def fake_urlopen(request, timeout):
         return _InterruptedStreamingResponse()
 
-    monkeypatch.setattr("riskmodel_checker.llm_client.urlopen", fake_urlopen)
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
 
     with pytest.raises(LLMClientError, match="LLM stream interrupted"):
         OpenAICompatibleLLMClient(

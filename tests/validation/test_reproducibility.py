@@ -1,12 +1,12 @@
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.reproducibility import (
+from marvis.validation.config import ValidationConfig
+from marvis.validation.reproducibility import (
     scores_match_at_precision,
     run_reproducibility,
 )
-from riskmodel_checker.validation.results import ConsistencyStatus
+from marvis.validation.results import ConsistencyStatus
 
 
 class _FakeScorer:

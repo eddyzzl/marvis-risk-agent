@@ -18,7 +18,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/plugins/
+marvis/plugins/
   __init__.py
   errors.py              异常层级
   manifest.py            PluginManifest / ToolSpec / HookSpec + 解析校验
@@ -28,16 +28,16 @@ riskmodel_checker/plugins/
   subprocess_worker.py   子进程内执行入口（被 runner 起）
   runner.py              ToolRunner / ToolResult / ToolContext
   hooks.py               HookDispatcher
-riskmodel_checker/packs/
+marvis/packs/
   __init__.py
   _sample/               trivial 内置包（echo），证明链路
     __init__.py
     manifest.json
     tools.py
-riskmodel_checker/routers/
+marvis/routers/
   __init__.py
   plugins.py             HTTP 管理端点
-riskmodel_checker/db.py   新增 plugins/tools/audit 表 + PluginRepository
+marvis/db.py   新增 plugins/tools/audit 表 + PluginRepository
 ```
 
 新增依赖（`pyproject.toml`）：`jsonschema>=4.0`。
@@ -90,7 +90,7 @@ class WorkerProtocolError(PluginError):
 
 ### B-1 dataclasses
 
-> **ToolRef 的规范定义在此（Phase 1）**——runner/registry 都依赖它。Phase 2 `orchestrator/contracts.py` 复用本定义（`from riskmodel_checker.plugins.manifest import ToolRef`），不重复定义。
+> **ToolRef 的规范定义在此（Phase 1）**——runner/registry 都依赖它。Phase 2 `orchestrator/contracts.py` 复用本定义（`from marvis.plugins.manifest import ToolRef`），不重复定义。
 
 ```python
 @dataclass(frozen=True)
@@ -125,7 +125,7 @@ class PluginManifest:
     display_name: str
     description: str
     builtin: bool
-    module: str                # 包根模块路径，如 "riskmodel_checker.packs.feature"
+    module: str                # 包根模块路径，如 "marvis.packs.feature"
     tools: tuple[ToolSpec, ...]
     hooks: tuple[HookSpec, ...]
     permissions: tuple[str, ...]   # 仅审计展示
@@ -432,7 +432,7 @@ class ToolResult:
 ```text
 Job (runner → worker, stdin):
   {
-    "module": "riskmodel_checker.packs.feature",   # plugin.module
+    "module": "marvis.packs.feature",   # plugin.module
     "entrypoint": "tool_compute_iv",               # ToolSpec.entrypoint
     "inputs": {...},                               # 已过 input_schema
     "task_id": "...", "seed": 42 | null,
@@ -450,7 +450,7 @@ Result (worker → runner, stdout, 单行 JSON):
 ```python
 def worker_main() -> None:
     """子进程入口：读 stdin 的 Job JSON，执行 tool，写 stdout 的 Result JSON。
-    被 `python -m riskmodel_checker.plugins.subprocess_worker` 调起。
+    被 `python -m marvis.plugins.subprocess_worker` 调起。
     出参: None（结果走 stdout）。 进程退出码: 成功 0，协议级失败 1。
     不变量: INV-6（所有异常都转成 Result JSON，不让子进程裸崩）；INV-9（显式 utf-8）。
     """
@@ -604,7 +604,7 @@ class ToolRunner:
         不变量: INV-6（超时强杀）、INV-9（spawn + utf-8）。
         伪代码:
           proc = subprocess.Popen(
-              [self._python, "-m", "riskmodel_checker.plugins.subprocess_worker"],
+              [self._python, "-m", "marvis.plugins.subprocess_worker"],
               stdin=PIPE, stdout=PIPE, stderr=PIPE)
           try:
               out, err = proc.communicate(
@@ -977,7 +977,7 @@ def list_plugin_tools(request: Request, name: str) -> dict:
   "version": "0.1.0",
   "display_name": "Sample Echo Pack",
   "description": "Runtime smoke-test pack",
-  "module": "riskmodel_checker.packs._sample.tools",
+  "module": "marvis.packs._sample.tools",
   "tools": [{
     "name": "echo",
     "summary": "Echo back the given message",

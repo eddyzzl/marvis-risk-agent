@@ -5,7 +5,7 @@ import nbformat
 import pandas as pd
 import pytest
 
-from riskmodel_checker.notebook_contract import (
+from marvis.notebook_contract import (
     NotebookContractError,
     build_contract_head_cell_source,
     build_contract_tail_cell_source,

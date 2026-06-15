@@ -1,4 +1,4 @@
-from riskmodel_checker.llm_settings import (
+from marvis.llm_settings import (
     load_llm_settings,
     resolve_llm_model,
     save_llm_settings,

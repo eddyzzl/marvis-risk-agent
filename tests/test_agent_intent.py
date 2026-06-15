@@ -7,7 +7,7 @@ branch instead of the "treat as chat question" branch.
 
 import pytest
 
-from riskmodel_checker.agent.service import (
+from marvis.agent.service import (
     is_agent_advance_intent,
     is_continue_validation_intent,
 )

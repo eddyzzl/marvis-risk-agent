@@ -27,7 +27,7 @@
 ## 模块布局（在 Phase 2 基础上新增）
 
 ```text
-riskmodel_checker/orchestrator/
+marvis/orchestrator/
   capability.py     CapabilityTier + 档位表 + 解析（新增）
   context/
     __init__.py

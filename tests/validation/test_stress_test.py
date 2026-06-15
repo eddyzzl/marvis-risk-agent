@@ -1,8 +1,8 @@
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.stress_test import (
+from marvis.validation.config import ValidationConfig
+from marvis.validation.stress_test import (
     load_feature_categories,
     run_stress_test,
 )

@@ -4,9 +4,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from riskmodel_checker.validation.config import ValidationConfig
-from riskmodel_checker.validation.engine import EngineInputs, run_validation
-from riskmodel_checker.validation.results import ConsistencyStatus, ValidationResults
+from marvis.validation.config import ValidationConfig
+from marvis.validation.engine import EngineInputs, run_validation
+from marvis.validation.results import ConsistencyStatus, ValidationResults
 
 
 class _PassThroughScorer:

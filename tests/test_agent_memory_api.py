@@ -2,11 +2,11 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from riskmodel_checker.agent_memory.models import MemoryCandidate
-from riskmodel_checker.agent_memory.store import AgentMemoryStore
-from riskmodel_checker.app import create_app
-from riskmodel_checker.db import TaskRepository
-from riskmodel_checker.domain import TaskCreate
+from marvis.agent_memory.models import MemoryCandidate
+from marvis.agent_memory.store import AgentMemoryStore
+from marvis.app import create_app
+from marvis.db import TaskRepository
+from marvis.domain import TaskCreate
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -31,7 +31,7 @@ def _model_payload(**overrides):
 
 
 def _create_model_memory(tmp_path: Path, **payload_overrides):
-    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
     return store.create(
         MemoryCandidate(
             memory_type="model_experience",
@@ -120,7 +120,7 @@ def test_memory_api_can_disable_enable_and_delete_memory(tmp_path):
 
 def test_memory_api_cannot_enable_rejected_memory(tmp_path):
     client = _client(tmp_path)
-    store = AgentMemoryStore(tmp_path / "riskmodel_checker.sqlite")
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
     rejected = store.create(
         MemoryCandidate(
             memory_type="task_experience",
@@ -140,7 +140,7 @@ def test_memory_api_cannot_enable_rejected_memory(tmp_path):
 def test_memory_api_lists_references_attached_to_agent_message(tmp_path):
     client = _client(tmp_path)
     memory = _create_model_memory(tmp_path)
-    repo = TaskRepository(tmp_path / "riskmodel_checker.sqlite")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
     task = repo.create_task(
         TaskCreate(
             model_name="A卡模型",

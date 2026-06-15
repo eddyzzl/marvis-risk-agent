@@ -1,6 +1,6 @@
 import pytest
 
-from riskmodel_checker.validation.overfitting import overfitting_check_from_validation_results
+from marvis.validation.overfitting import overfitting_check_from_validation_results
 
 
 def test_overfitting_check_flags_train_test_relative_gap_and_train_oot_abs_gap():

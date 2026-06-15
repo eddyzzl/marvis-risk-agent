@@ -2,7 +2,7 @@ from pathlib import Path
 
 from docx import Document
 
-from riskmodel_checker.output.word import write_validation_word
+from marvis.output.word import write_validation_word
 from tests.output.test_excel import _make_results
 
 

@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 
-STATIC_DIR = Path(__file__).resolve().parents[1] / "riskmodel_checker" / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "marvis" / "static"
 
 
 def _read_static(name: str) -> str:
@@ -157,7 +157,7 @@ def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
 def _render_agent_markdown(markdown: str) -> str:
     script = "\n".join(
         [
-            "import { renderAgentMarkdown } from './riskmodel_checker/static/js/render-agent.js';",
+            "import { renderAgentMarkdown } from './marvis/static/js/render-agent.js';",
             f"process.stdout.write(renderAgentMarkdown({json.dumps(markdown, ensure_ascii=False)}));",
         ]
     )
@@ -1342,7 +1342,7 @@ def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
-    assert 'export const selectedTaskStorageKey = "riskmodel_checker_selected_task_id";' in state_js
+    assert 'export const selectedTaskStorageKey = "marvis_selected_task_id";' in state_js
     assert "function rememberSelectedTaskId" in app_js
     assert "function storedSelectedTaskId" in app_js
 
@@ -2513,8 +2513,8 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert 'const taskGroupModes = new Set(["none", "validator", "created_month"]);' in app_js
     assert "function restoreTaskListSettings" in app_js
     assert "function saveTaskListSettings" in app_js
-    assert 'localStorage.getItem("riskmodel_checker_task_list_settings")' in app_js
-    assert 'localStorage.setItem("riskmodel_checker_task_list_settings"' in app_js
+    assert 'localStorage.getItem("marvis_task_list_settings")' in app_js
+    assert 'localStorage.setItem("marvis_task_list_settings"' in app_js
     assert "taskSortMode = normalizeTaskSortMode(stored.sort);" in app_js
     assert "taskGroupMode = normalizeTaskGroupMode(stored.group);" in app_js
 
@@ -2606,7 +2606,7 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
     assert "function systemTheme" in app_js
     assert "function watchSystemTheme" in app_js
     assert 'themePreference === "system"' in app_js
-    assert 'localStorage.setItem("riskmodel_checker_theme", themePreference)' in app_js
+    assert 'localStorage.setItem("marvis_theme", themePreference)' in app_js
     assert 'id="settingsThemeSelect"' in _read_static("index.html")
     assert 'value="system"' in _read_static("index.html")
     assert "跟随系统" in _read_static("index.html")
@@ -2721,7 +2721,7 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert "function restorePetPreference" in app_js
     assert "function applyPetPreference" in app_js
     assert "function renderPetState" in app_js
-    assert "riskmodel_checker_pet" in app_js
+    assert "marvis_pet" in app_js
     assert '$("settingsPetSelect").value = petPreference' in app_js
 
     assert ".pet-companion {" in styles_css
@@ -2780,7 +2780,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
     restore_start = app_js.index("function restorePetPreference")
     restore_end = app_js.index("function applyPetPosition", restore_start)
     restore_renderer = app_js[restore_start:restore_end]
-    assert "const stored = localStorage.getItem(\"riskmodel_checker_pet\");" in restore_renderer
+    assert "const stored = localStorage.getItem(\"marvis_pet\");" in restore_renderer
     assert "const normalized = normalizePetPreference(stored);" in restore_renderer
     assert "applyPetPreference(normalized, { persist: normalized !== stored });" in restore_renderer
 
@@ -2790,7 +2790,7 @@ def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     state_js = _read_static("js/state.js")
 
     assert 'export const defaultPetPreference = "naitang";' in state_js
-    assert 'export const explicitPetNoneStorageKey = "riskmodel_checker_pet_none_explicit";' in state_js
+    assert 'export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";' in state_js
     assert "function persistPetPreference" in app_js
     assert 'if (value === "none" && explicitNone) {' in app_js
     assert "localStorage.setItem(explicitPetNoneStorageKey, \"1\");" in app_js
@@ -2966,7 +2966,7 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
     assert "function startPetDrag" in app_js
     assert "function restorePetPosition" in app_js
     assert "function savePetPosition" in app_js
-    assert "riskmodel_checker_pet_position" in app_js
+    assert "marvis_pet_position" in app_js
     assert 'selectedTask?.status || ""' in app_js
     assert 'if (selectedTaskIsBusy()) return "running";' in app_js
     assert 'if (status === "succeeded") return "success";' in app_js
@@ -4824,7 +4824,7 @@ def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
-    assert 'export const agentComposerPreferenceStorageKey = "riskmodel_checker_agent_composer_preferences";' in state_js
+    assert 'export const agentComposerPreferenceStorageKey = "marvis_agent_composer_preferences";' in state_js
     assert "const agentComposerPreferences = restoreAgentComposerPreferences();" in app_js
     assert 'let agentSelectedModelId = agentComposerPreferences.model_id || "";' in app_js
     assert 'let agentSelectedEffort = agentComposerPreferences.effort || "high";' in app_js
@@ -4870,7 +4870,7 @@ def test_agent_composer_preferences_are_kept_per_task_in_local_storage():
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
-    assert 'export const agentTaskComposerStorageKey = "riskmodel_checker_agent_task_composer_preferences";' in state_js
+    assert 'export const agentTaskComposerStorageKey = "marvis_agent_task_composer_preferences";' in state_js
     assert "function loadAgentTaskComposerOverrides" in app_js
     assert "function persistAgentTaskComposerOverrides" in app_js
     assert "function getAgentTaskComposerOverride" in app_js
@@ -5150,7 +5150,7 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
     script = "\n".join(
         [
             "import { isSafeAssetUrl, normalizeBranding, normalizeValidatorAliases } from "
-            "'./riskmodel_checker/static/js/branding.js';",
+            "'./marvis/static/js/branding.js';",
             "const probes = {",
             "  absolute: isSafeAssetUrl('/branding/assets/logo.png'),",
             "  relative: isSafeAssetUrl('static/brand/logo.png'),",
@@ -5459,7 +5459,7 @@ def test_reproducibility_render_skips_replay_and_disables_animation_on_rebuild()
     # bound to the agent-composer-chip blur logic.
     boot_marker = 'document.addEventListener(\n  "mousedown"'
     boot_idx = app_js.index(boot_marker)
-    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./riskmodel_checker/static/js/')
+    app_js = app_js[:boot_idx].replace('from "./js/', 'from "./marvis/static/js/')
 
     populated_a = {
         "summary": {"status": "ok", "mismatch_count": 0, "max_abs_diff": 0.00001},
@@ -5537,7 +5537,7 @@ def test_reproducibility_render_handles_task_switch_animation_policy():
     app_js = _read_static("app.js")
     boot_marker = 'document.addEventListener(\n  "mousedown"'
     app_js = app_js[: app_js.index(boot_marker)].replace(
-        'from "./js/', 'from "./riskmodel_checker/static/js/'
+        'from "./js/', 'from "./marvis/static/js/'
     )
 
     populated = {

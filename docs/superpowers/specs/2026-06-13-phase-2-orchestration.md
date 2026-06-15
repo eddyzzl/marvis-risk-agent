@@ -27,7 +27,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/orchestrator/
+marvis/orchestrator/
   __init__.py
   contracts.py        Plan / PlanStep / PostCheck / ToolRef / ReviewVerdict / SubAgent + 枚举
   errors.py           编排异常层级
@@ -42,8 +42,8 @@ riskmodel_checker/orchestrator/
   reviewer.py         Reviewer（deterministic / llm_critique / final）
   subagent.py         SubAgentDispatcher
   executor.py         PlanExecutor（可恢复 DAG 执行）
-riskmodel_checker/db.py    新增 plans / plan_steps / sub_agents 表 + PlanRepository
-riskmodel_checker/routers/plans.py   HTTP 端点
+marvis/db.py    新增 plans / plan_steps / sub_agents 表 + PlanRepository
+marvis/routers/plans.py   HTTP 端点
 ```
 
 ---
@@ -81,7 +81,7 @@ class AgentStatus(str, Enum):
 
 ### A-2 dataclasses（与蓝图 4.1 一致，补默认值与方法）
 
-> **ToolRef 复用 Phase 1 定义**：`from riskmodel_checker.plugins.manifest import ToolRef`，不在 orchestrator 重复定义（见 Phase 1 Part B-1）。下面只列出编排层新增的契约。
+> **ToolRef 复用 Phase 1 定义**：`from marvis.plugins.manifest import ToolRef`，不在 orchestrator 重复定义（见 Phase 1 Part B-1）。下面只列出编排层新增的契约。
 
 ```python
 # ToolRef 见 Phase 1 plugins/manifest.py —— { plugin, tool, version="" }, .label()

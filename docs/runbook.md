@@ -48,10 +48,10 @@ marvis serve \
     --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
-`riskmodel_checker` 是 V1 为兼容当前验证运行时保留的 Python 模块名。以下旧入口仍可用：
+`marvis` 是 V1 为兼容当前验证运行时保留的 Python 模块名。以下旧入口仍可用：
 
 ```bash
-python -m riskmodel_checker serve \
+python -m marvis serve \
     --host 127.0.0.1 --port 8000 --workspace ./workspace
 ```
 
@@ -131,7 +131,7 @@ marvis validate <task_id> \
     --workspace ./workspace
 ```
 
-兼容入口：`python -m riskmodel_checker validate <task_id> --workspace ./workspace`。
+兼容入口：`python -m marvis validate <task_id> --workspace ./workspace`。
 
 ## 当前内置模型验证流程
 

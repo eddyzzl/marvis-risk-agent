@@ -2,7 +2,7 @@ from pathlib import Path
 
 import nbformat
 
-from riskmodel_checker.notebook_steps import notebook_step_plan, notebook_step_preview
+from marvis.notebook_steps import notebook_step_plan, notebook_step_preview
 
 
 def test_notebook_step_plan_groups_code_cells_under_markdown_headings():
@@ -46,8 +46,8 @@ def test_notebook_step_plan_marks_injected_cells_as_system_steps():
             nbformat.v4.new_code_cell("validate_contract()"),
         ]
     )
-    notebook.cells[0].metadata["riskmodel_checker"] = "head"
-    notebook.cells[3].metadata["riskmodel_checker"] = "tail"
+    notebook.cells[0].metadata["marvis"] = "head"
+    notebook.cells[3].metadata["marvis"] = "tail"
 
     plan = notebook_step_plan(notebook)
 
@@ -71,12 +71,12 @@ def test_notebook_step_plan_names_injected_validation_stages():
             nbformat.v4.new_code_cell("run_pressure_test()"),
         ]
     )
-    notebook.cells[0].metadata["riskmodel_checker"] = "repro-pmml"
-    notebook.cells[1].metadata["riskmodel_checker"] = "repro-compare"
-    notebook.cells[2].metadata["riskmodel_checker"] = "metrics-ks"
-    notebook.cells[3].metadata["riskmodel_checker"] = "metrics-psi"
-    notebook.cells[4].metadata["riskmodel_checker"] = "metrics-binning"
-    notebook.cells[5].metadata["riskmodel_checker"] = "metrics-stress"
+    notebook.cells[0].metadata["marvis"] = "repro-pmml"
+    notebook.cells[1].metadata["marvis"] = "repro-compare"
+    notebook.cells[2].metadata["marvis"] = "metrics-ks"
+    notebook.cells[3].metadata["marvis"] = "metrics-psi"
+    notebook.cells[4].metadata["marvis"] = "metrics-binning"
+    notebook.cells[5].metadata["marvis"] = "metrics-stress"
 
     plan = notebook_step_plan(notebook)
 
@@ -105,10 +105,10 @@ def test_notebook_step_plan_uses_latest_retried_system_cell():
             nbformat.v4.new_code_cell("new_score()"),
         ]
     )
-    notebook.cells[0].metadata["riskmodel_checker"] = "metrics-prepare"
-    notebook.cells[1].metadata["riskmodel_checker"] = "metrics-score"
-    notebook.cells[2].metadata["riskmodel_checker"] = "metrics-prepare"
-    notebook.cells[3].metadata["riskmodel_checker"] = "metrics-score"
+    notebook.cells[0].metadata["marvis"] = "metrics-prepare"
+    notebook.cells[1].metadata["marvis"] = "metrics-score"
+    notebook.cells[2].metadata["marvis"] = "metrics-prepare"
+    notebook.cells[3].metadata["marvis"] = "metrics-score"
 
     plan = notebook_step_plan(notebook)
     steps_by_id = {step.id: step for step in plan.steps}

@@ -1,14 +1,14 @@
 import json
 
-from riskmodel_checker.agent.service import (
+from marvis.agent.service import (
     answer_chat_message,
     agent_conclusions_confirmed,
     generate_word_conclusions,
     summarize_stage,
     _strip_agent_response_preamble,
 )
-from riskmodel_checker.domain import TaskRecord, TaskStatus
-from riskmodel_checker.llm_client import LLMClientError
+from marvis.domain import TaskRecord, TaskStatus
+from marvis.llm_client import LLMClientError
 
 
 def test_strip_agent_response_preamble_removes_only_real_preamble():
@@ -63,7 +63,7 @@ def test_word_conclusion_llm_error_returns_non_confirmable_empty_values(monkeypa
             raise LLMClientError("offline")
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: FailingClient(),
     )
 
@@ -96,7 +96,7 @@ def test_word_conclusion_uses_non_streaming_json_request(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: CapturingClient(),
     )
 
@@ -118,7 +118,7 @@ def test_word_conclusion_invalid_json_reports_format_error(monkeypatch):
             return "不是 JSON"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: InvalidJsonClient(),
     )
 
@@ -143,7 +143,7 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
             return "当前模型 KS 相比历史版本提升，需要继续关注 PSI。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: CapturingClient(),
     )
     evidence = {"validation_results": {"effectiveness": {"overall": {"ks": 0.30}}}}
@@ -201,7 +201,7 @@ def test_summarize_stage_fallback_does_not_claim_memory_use(monkeypatch):
             raise LLMClientError("offline")
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: FailingClient(),
     )
 
@@ -227,7 +227,7 @@ def test_summarize_stage_truncates_memory_summary_in_prompt(monkeypatch):
             return "已参考历史偏好。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: CapturingClient(),
     )
 
@@ -264,7 +264,7 @@ def test_answer_chat_message_memory_context_is_separate_from_task_conversation(m
             return "上一版记录显示 KS 更低，当前版本效果更好。"
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: CapturingClient(),
     )
 
@@ -299,7 +299,7 @@ def test_answer_chat_message_fallback_does_not_claim_memory_use(monkeypatch):
             return ""
 
     monkeypatch.setattr(
-        "riskmodel_checker.agent.service._client",
+        "marvis.agent.service._client",
         lambda _profile: EmptyClient(),
     )
 

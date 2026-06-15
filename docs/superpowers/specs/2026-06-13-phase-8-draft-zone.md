@@ -19,7 +19,7 @@
 ## 模块布局
 
 ```text
-riskmodel_checker/drafts/
+marvis/drafts/
   __init__.py
   contracts.py     DraftTool / DraftRun / PromotionCheck / LearningNote
   errors.py
@@ -30,9 +30,9 @@ riskmodel_checker/drafts/
   promotion.py     validate_for_promotion / promote_draft（转正闸门）
   registry.py      DraftRegistry（与正式 registry 隔离，Planner 不可见）
   tools.py
-riskmodel_checker/db.py   新增 draft_tools / draft_runs 表
-riskmodel_checker/routers/drafts.py
-riskmodel_checker/static/js/views/drafts.js
+marvis/db.py   新增 draft_tools / draft_runs 表
+marvis/routers/drafts.py
+marvis/static/js/views/drafts.js
 ```
 
 新增依赖：`httpx>=0.24`（联网，可选）；离线部署可不装，相关 tool 自检缺失即降级。

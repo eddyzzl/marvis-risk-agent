@@ -2,8 +2,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from riskmodel_checker import __version__
-from riskmodel_checker.app import _is_local_client, create_app
+from marvis import __version__
+from marvis.app import _is_local_client, create_app
 
 
 def test_remote_read_does_not_leak_validator_aliases_via_branding(tmp_path, monkeypatch):

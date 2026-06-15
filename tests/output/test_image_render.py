@@ -4,10 +4,10 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from riskmodel_checker.output import image_render
-from riskmodel_checker.output.image_render import get_matplotlib_font, render_all_images
-from riskmodel_checker.output.styles import CJK_FONT_CANDIDATES
-from riskmodel_checker.validation.results import FeatureImportanceRow, RocKsCurve
+from marvis.output import image_render
+from marvis.output.image_render import get_matplotlib_font, render_all_images
+from marvis.output.styles import CJK_FONT_CANDIDATES
+from marvis.validation.results import FeatureImportanceRow, RocKsCurve
 from tests.output.test_excel import _make_results
 
 

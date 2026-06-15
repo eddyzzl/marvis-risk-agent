@@ -25,13 +25,13 @@ Do not implement:
 
 Create during implementation:
 
-- `riskmodel_checker/agent_memory/__init__.py`: public memory package exports.
-- `riskmodel_checker/agent_memory/models.py`: memory types, statuses, structured payload helpers.
-- `riskmodel_checker/agent_memory/policy.py`: allow/deny rules and safety classification.
-- `riskmodel_checker/agent_memory/store.py`: SQLite CRUD and audit event access.
-- `riskmodel_checker/agent_memory/extractors.py`: candidate extraction from task, validation, failure, report, and user preference events.
-- `riskmodel_checker/agent_memory/retrieval.py`: task-aware filtering, fuzzy matching, confidence scoring, bounded context packets.
-- `riskmodel_checker/agent_memory/prompting.py`: conversion of retrieved memories into Agent prompt/evidence payloads.
+- `marvis/agent_memory/__init__.py`: public memory package exports.
+- `marvis/agent_memory/models.py`: memory types, statuses, structured payload helpers.
+- `marvis/agent_memory/policy.py`: allow/deny rules and safety classification.
+- `marvis/agent_memory/store.py`: SQLite CRUD and audit event access.
+- `marvis/agent_memory/extractors.py`: candidate extraction from task, validation, failure, report, and user preference events.
+- `marvis/agent_memory/retrieval.py`: task-aware filtering, fuzzy matching, confidence scoring, bounded context packets.
+- `marvis/agent_memory/prompting.py`: conversion of retrieved memories into Agent prompt/evidence payloads.
 - `tests/test_agent_memory_store.py`: storage, audit, status, policy tests.
 - `tests/test_agent_memory_retrieval.py`: ranking and comparison-confidence tests.
 - `tests/test_agent_memory_extractors.py`: extraction tests for model, task, field, pitfall, and preference candidates.
@@ -39,15 +39,15 @@ Create during implementation:
 
 Modify during implementation:
 
-- `riskmodel_checker/db.py`: create memory tables and repository hooks or delegate to `agent_memory.store`.
-- `riskmodel_checker/domain.py`: add memory reference payloads only if shared typed records are needed.
-- `riskmodel_checker/api.py`: expose memory management endpoints and include message memory references where needed.
-- `riskmodel_checker/pipeline.py`: trigger candidate extraction after validation completion, failure, and report stages.
-- `riskmodel_checker/agent/service.py`: retrieve bounded memory context for Agent analysis/chat and persist used references.
-- `riskmodel_checker/agent/prompts.py`: tell Agent how memory may and may not be used.
-- `riskmodel_checker/static/app.js`: render expandable memory references on Agent messages and management view actions.
-- `riskmodel_checker/static/styles.css`: style inline references and management view with existing platform tokens.
-- `riskmodel_checker/static/index.html`: add management view/modal shell only if needed.
+- `marvis/db.py`: create memory tables and repository hooks or delegate to `agent_memory.store`.
+- `marvis/domain.py`: add memory reference payloads only if shared typed records are needed.
+- `marvis/api.py`: expose memory management endpoints and include message memory references where needed.
+- `marvis/pipeline.py`: trigger candidate extraction after validation completion, failure, and report stages.
+- `marvis/agent/service.py`: retrieve bounded memory context for Agent analysis/chat and persist used references.
+- `marvis/agent/prompts.py`: tell Agent how memory may and may not be used.
+- `marvis/static/app.js`: render expandable memory references on Agent messages and management view actions.
+- `marvis/static/styles.css`: style inline references and management view with existing platform tokens.
+- `marvis/static/index.html`: add management view/modal shell only if needed.
 - `tests/test_agent_service.py`: memory context and deterministic-result guard tests.
 - `tests/test_agent_api.py`: Agent message metadata tests.
 - `tests/test_frontend_static_v2.py`: static UI contract tests, including no permanent memory block.
@@ -58,8 +58,8 @@ Modify during implementation:
 - Create: `tests/test_agent_memory_store.py`
 - Create: `tests/test_agent_memory_extractors.py`
 - Create: `tests/test_agent_memory_retrieval.py`
-- Create: `riskmodel_checker/agent_memory/models.py`
-- Create: `riskmodel_checker/agent_memory/policy.py`
+- Create: `marvis/agent_memory/models.py`
+- Create: `marvis/agent_memory/policy.py`
 
 - [ ] Write tests for memory types: `user_preference`, `field_convention`, `validation_pitfall`, `task_experience`, `model_experience`, `skill_experience_reserved`.
 - [ ] Write tests for statuses: `active`, `disabled`, `deleted`, `rejected`.
@@ -72,8 +72,8 @@ Modify during implementation:
 ## Task 2: SQLite Store and Audit Events
 
 **Files:**
-- Create: `riskmodel_checker/agent_memory/store.py`
-- Modify: `riskmodel_checker/db.py`
+- Create: `marvis/agent_memory/store.py`
+- Modify: `marvis/db.py`
 - Test: `tests/test_agent_memory_store.py`
 
 - [ ] Add failing tests for creating active memory entries with structured payload JSON.
@@ -88,8 +88,8 @@ Modify during implementation:
 ## Task 3: Candidate Extraction
 
 **Files:**
-- Create: `riskmodel_checker/agent_memory/extractors.py`
-- Modify: `riskmodel_checker/pipeline.py`
+- Create: `marvis/agent_memory/extractors.py`
+- Modify: `marvis/pipeline.py`
 - Test: `tests/test_agent_memory_extractors.py`
 
 - [ ] Add failing tests for extracting model experience from validation results.
@@ -103,7 +103,7 @@ Modify during implementation:
 ## Task 4: Retrieval, Fuzzy Matching, and Comparison Confidence
 
 **Files:**
-- Create: `riskmodel_checker/agent_memory/retrieval.py`
+- Create: `marvis/agent_memory/retrieval.py`
 - Test: `tests/test_agent_memory_retrieval.py`
 
 - [ ] Add failing tests for high-confidence exact model/scope/channel/month matches.
@@ -117,9 +117,9 @@ Modify during implementation:
 ## Task 5: Agent Prompt Integration
 
 **Files:**
-- Create: `riskmodel_checker/agent_memory/prompting.py`
-- Modify: `riskmodel_checker/agent/service.py`
-- Modify: `riskmodel_checker/agent/prompts.py`
+- Create: `marvis/agent_memory/prompting.py`
+- Modify: `marvis/agent/service.py`
+- Modify: `marvis/agent/prompts.py`
 - Test: `tests/test_agent_service.py`
 - Test: `tests/test_agent_api.py`
 
@@ -134,8 +134,8 @@ Modify during implementation:
 ## Task 6: Runtime Memory Capture Hooks
 
 **Files:**
-- Modify: `riskmodel_checker/pipeline.py`
-- Modify: `riskmodel_checker/api.py`
+- Modify: `marvis/pipeline.py`
+- Modify: `marvis/api.py`
 - Test: `tests/test_agent_memory_extractors.py`
 - Test: `tests/test_pipeline_v2.py`
 
@@ -149,7 +149,7 @@ Modify during implementation:
 ## Task 7: Memory Management API
 
 **Files:**
-- Modify: `riskmodel_checker/api.py`
+- Modify: `marvis/api.py`
 - Test: `tests/test_agent_memory_api.py`
 
 - [ ] Add failing tests for listing memories with type/status/source/model/channel/month filters.
@@ -162,9 +162,9 @@ Modify during implementation:
 ## Task 8: Frontend Inline References and Management View
 
 **Files:**
-- Modify: `riskmodel_checker/static/app.js`
-- Modify: `riskmodel_checker/static/styles.css`
-- Modify: `riskmodel_checker/static/index.html`
+- Modify: `marvis/static/app.js`
+- Modify: `marvis/static/styles.css`
+- Modify: `marvis/static/index.html`
 - Test: `tests/test_frontend_static_v2.py`
 
 - [ ] Add failing static tests that no permanent task-level memory block exists.
@@ -172,7 +172,7 @@ Modify during implementation:
 - [ ] Add failing static tests for memory management actions: inspect, disable, re-enable, delete.
 - [ ] Implement inline references and management UI.
 - [ ] Keep memory UI compact and consistent with existing workbench styling.
-- [ ] Run frontend static tests and `node --check riskmodel_checker/static/app.js`.
+- [ ] Run frontend static tests and `node --check marvis/static/app.js`.
 
 ## Task 9: End-to-End Regression
 
