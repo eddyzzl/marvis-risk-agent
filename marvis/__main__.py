@@ -190,9 +190,9 @@ def _update(args: argparse.Namespace) -> dict[str, str]:
         raise RuntimeError(
             f"marvis update expected branch {args.branch}; current branch is {current_branch}"
         )
-    if _git_output(repo, "status", "--short"):
+    if _git_output(repo, "status", "--short", "--untracked-files=no"):
         raise RuntimeError(
-            "marvis update found uncommitted changes; commit or stash them before updating"
+            "marvis update found tracked uncommitted changes; commit or stash them before updating"
         )
 
     _run_git(repo, "fetch", args.remote)

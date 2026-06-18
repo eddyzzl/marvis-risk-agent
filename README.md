@@ -166,7 +166,7 @@ The command runs `git fetch origin`, `git pull --ff-only origin main`, then refr
 python -m pip install -e .
 ```
 
-If local changes exist, `marvis update` refuses to continue. Commit, stash, or back up local changes before updating.
+If tracked local files have uncommitted changes, `marvis update` refuses to continue. Commit, stash, or back up those tracked changes before updating. Untracked local files are allowed unless Git itself detects that a pull would overwrite them.
 
 If your current older install does not have `marvis update` yet, run one manual upgrade from the repository directory:
 

@@ -96,15 +96,54 @@ def test_update_rejects_dirty_worktree(monkeypatch, tmp_path):
             return str(tmp_path)
         if args == ("branch", "--show-current"):
             return "main"
-        if args == ("status", "--short"):
+        if args == ("status", "--short", "--untracked-files=no"):
             return " M README.md"
         raise AssertionError(args)
 
     monkeypatch.setattr(cli, "_git_output", fake_git_output)
     args = cli._parse_args(["update", "--repo", str(tmp_path)])
 
-    with pytest.raises(RuntimeError, match="uncommitted changes"):
+    with pytest.raises(RuntimeError, match="tracked uncommitted changes"):
         cli._update(args)
+
+
+def test_update_ignores_untracked_files_when_checked_tree_is_clean(monkeypatch, tmp_path):
+    git_commands = []
+    process_commands = []
+
+    def fake_git_output(repo, *args):
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path)
+        if args == ("branch", "--show-current"):
+            return "main"
+        if args == ("status", "--short", "--untracked-files=no"):
+            return ""
+        if args == ("describe", "--tags", "--always"):
+            return "V1.1.4"
+        raise AssertionError(args)
+
+    def fake_run_git(repo, *args):
+        git_commands.append(args)
+
+    def fake_run_process(command, *, cwd):
+        process_commands.append((command, cwd))
+
+    monkeypatch.setattr(cli, "_git_output", fake_git_output)
+    monkeypatch.setattr(cli, "_run_git", fake_run_git)
+    monkeypatch.setattr(cli, "_run_process", fake_run_process)
+
+    args = cli._parse_args(["update", "--repo", str(tmp_path)])
+    result = cli._update(args)
+
+    assert git_commands == [
+        ("fetch", "origin"),
+        ("pull", "--ff-only", "origin", "main"),
+    ]
+    assert process_commands == [
+        ([sys.executable, "-m", "pip", "install", "-e", "."], tmp_path)
+    ]
+    assert result["repo"] == str(tmp_path)
+    assert result["version"] == "V1.1.4"
 
 
 def test_update_fetches_fast_forwards_and_refreshes_editable_install(monkeypatch, tmp_path):
@@ -116,7 +155,7 @@ def test_update_fetches_fast_forwards_and_refreshes_editable_install(monkeypatch
             return str(tmp_path)
         if args == ("branch", "--show-current"):
             return "main"
-        if args == ("status", "--short"):
+        if args == ("status", "--short", "--untracked-files=no"):
             return ""
         if args == ("describe", "--tags", "--always"):
             return "V1.1.0"

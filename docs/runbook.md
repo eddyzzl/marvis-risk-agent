@@ -111,7 +111,7 @@ git pull --ff-only origin main
 python -m pip install -e .
 ```
 
-如果本地有未提交改动，升级会被拒绝。先 commit、stash 或备份后再重新运行。
+如果已跟踪文件有未提交改动，升级会被拒绝。先 commit、stash 或备份这些 tracked 改动后再重新运行。未跟踪的本地文件允许保留，除非 Git 判断本次 pull 会覆盖它们。
 
 如果当前旧版本还没有 `marvis update`，第一次升级需要在仓库目录手动执行一次：
 
