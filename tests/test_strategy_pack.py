@@ -1,0 +1,192 @@
+import sys
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
+from marvis.domain import TaskCreate
+from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
+from marvis.plugins.runner import ToolRunner
+from marvis.settings import build_settings
+
+
+def _runtime(tmp_path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    plugin_repo = PluginRepository(settings.db_path)
+    plugin_registry = PluginRegistry(plugin_repo)
+    packs_root = Path(__file__).parents[1] / "marvis" / "packs"
+    load_builtin_packs(plugin_registry, packs_root)
+    runner = ToolRunner(
+        ToolRegistry(plugin_registry),
+        plugin_repo,
+        python_executable=sys.executable,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+    data_repo = DatasetRepository(settings.db_path)
+    backend = DataBackend(settings.datasets_dir)
+    registry = DatasetRegistry(data_repo, backend, settings.datasets_dir)
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="策略能力包样例",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="bad",
+            score_col="score",
+            split_col="split",
+            time_col="month",
+            feature_columns=["score", "segment"],
+        )
+    )
+    return runner, plugin_registry, registry, task
+
+
+def _register_strategy_sample(registry, tmp_path, task_id: str):
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A", "B", "B", "C", "C"],
+        "month": ["2026-01", "2026-02", "2026-01", "2026-02", "2026-01", "2026-02"],
+        "status": ["C", "M1", "C", "C", "M3+", "M3+"],
+        "cohort": ["202601", "202601", "202602", "202602", "202603", "202603"],
+        "mob": [0, 1, 0, 1, 0, 1],
+        "bad": [1, 1, 0, 0, 1, 1],
+        "score": [580, 620, 730, 760, 590, 800],
+        "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0, 800.0],
+        "pd": [0.20, 0.05, 0.02, 0.10, 0.15, 0.03],
+        "segment": ["A", "A", "B", "B", "A", "B"],
+    })
+    path = tmp_path / "strategy_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return registry.register_existing(path, task_id=task_id, role="strategy_sample")
+
+
+def test_strategy_manifest_registers_expected_tools(tmp_path):
+    _runner, plugin_registry, _registry, _task = _runtime(tmp_path)
+
+    manifest = plugin_registry.get("strategy")
+    tool_names = {tool.name for tool in manifest.tools}
+    build_tool = next(tool for tool in manifest.tools if tool.name == "build_strategy")
+    backtest_tool = next(tool for tool in manifest.tools if tool.name == "backtest_strategy")
+
+    assert tool_names == {
+        "vintage_curve",
+        "roll_rate_matrix",
+        "profit_calc",
+        "build_strategy",
+        "backtest_strategy",
+        "tradeoff_view",
+    }
+    assert build_tool.determinism == "deterministic"
+    assert "write:strategy" in build_tool.side_effects
+    assert "write:backtest" in backtest_tool.side_effects
+
+
+def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    dataset = _register_strategy_sample(registry, tmp_path, task.id)
+    params = {
+        "annual_rate": 0.12,
+        "funding_rate": 0.03,
+        "lgd": 0.5,
+        "operating_cost_per_loan": 10.0,
+        "term_months": 6,
+    }
+
+    vintage = runner.invoke(
+        ToolRef("strategy", "vintage_curve"),
+        {
+            "dataset_id": dataset.id,
+            "cohort_col": "cohort",
+            "mob_col": "mob",
+            "bad_col": "bad",
+            "mob_max": 2,
+        },
+        task_id=task.id,
+    )
+    roll = runner.invoke(
+        ToolRef("strategy", "roll_rate_matrix"),
+        {
+            "dataset_id": dataset.id,
+            "id_col": "customer_id",
+            "time_col": "month",
+            "status_col": "status",
+            "states": ["C", "M1", "M3+"],
+        },
+        task_id=task.id,
+    )
+    profit = runner.invoke(
+        ToolRef("strategy", "profit_calc"),
+        {
+            "dataset_id": dataset.id,
+            "segment_col": "segment",
+            "ead_col": "ead",
+            "pd_col": "pd",
+            "params": params,
+        },
+        task_id=task.id,
+    )
+    built = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {
+            "strategy_type": "approval",
+            "rules": [{"condition": "score < 600", "decision": "reject"}],
+            "score_col": "score",
+            "default_decision": "approve",
+            "description": "reject low scores",
+        },
+        task_id=task.id,
+    )
+
+    assert vintage.ok is True, vintage.error
+    assert vintage.output["cohorts"] == ["2026-01", "2026-02", "2026-03"]
+    assert vintage.output["summary"]["trend"] in {"deteriorating", "stable", "improving"}
+    assert roll.ok is True, roll.error
+    assert roll.output["base_counts"] == {"C": 2, "M1": 0, "M3+": 1}
+    assert profit.ok is True, profit.error
+    assert {row["segment"] for row in profit.output["results"]} == {"A", "B"}
+    assert built.ok is True, built.error
+    assert built.output["strategy_id"]
+
+    backtest = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {
+            "dataset_id": dataset.id,
+            "strategy_id": built.output["strategy_id"],
+            "target_col": "bad",
+            "profit_params": params,
+            "ead_col": "ead",
+            "pd_col": "pd",
+        },
+        task_id=task.id,
+    )
+    tradeoff = runner.invoke(
+        ToolRef("strategy", "tradeoff_view"),
+        {
+            "dataset_id": dataset.id,
+            "score_col": "score",
+            "target_col": "bad",
+            "cutoffs": [600, 700],
+            "profit_params": params,
+            "ead_col": "ead",
+            "pd_col": "pd",
+            "max_bad_rate": 0.7,
+            "objective": "max_profit",
+        },
+        task_id=task.id,
+    )
+
+    assert backtest.ok is True, backtest.error
+    assert backtest.output["backtest_id"]
+    assert backtest.output["approval_rate"] == pytest.approx(4 / 6)
+    assert "by_segment" in backtest.output
+    assert tradeoff.ok is True, tradeoff.error
+    assert [point["cutoff"] for point in tradeoff.output["points"]] == [600.0, 700.0]
+    assert tradeoff.output["recommended"]["cutoff"] in {600.0, 700.0}

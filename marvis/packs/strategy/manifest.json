@@ -1,0 +1,230 @@
+{
+  "name": "strategy",
+  "version": "0.1.0",
+  "display_name": "Strategy Pack",
+  "description": "Vintage, roll-rate, profitability, strategy construction, backtesting, and tradeoff analysis tools.",
+  "module": "marvis.packs.strategy.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "vintage_curve",
+      "summary": "Compute a strategy-facing vintage curve from the shared deterministic vintage core.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "cohort_col": {"type": "string", "minLength": 1},
+          "mob_col": {"type": "string", "minLength": 1},
+          "bad_col": {"type": "string", "minLength": 1},
+          "mob_max": {"type": "integer", "minimum": 1},
+          "ref_mob": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "cohort_col", "mob_col", "bad_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "cohorts": {"type": "array", "items": {"type": "string"}},
+          "curves": {"type": "object"},
+          "counts": {"type": "object"},
+          "summary": {"type": "object"}
+        },
+        "required": ["cohorts", "curves", "counts", "summary"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_vintage_curve",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "roll_rate_matrix",
+      "summary": "Compute a roll-rate transition matrix from customer status sequences.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "id_col": {"type": "string", "minLength": 1},
+          "time_col": {"type": "string", "minLength": 1},
+          "status_col": {"type": "string", "minLength": 1},
+          "states": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+        },
+        "required": ["dataset_id", "id_col", "time_col", "status_col", "states"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "states": {"type": "array", "items": {"type": "string"}},
+          "matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+          "base_counts": {"type": "object"}
+        },
+        "required": ["states", "matrix", "base_counts"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_roll_rate",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "profit_calc",
+      "summary": "Calculate deterministic segment profitability from EAD, PD, and cost parameters.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "segment_col": {"type": "string", "minLength": 1},
+          "ead_col": {"type": "string", "minLength": 1},
+          "pd_col": {"type": "string", "minLength": 1},
+          "params": {"$ref": "#/$defs/profit_params"}
+        },
+        "required": ["dataset_id", "ead_col", "pd_col", "params"],
+        "additionalProperties": false,
+        "$defs": {
+          "profit_params": {
+            "type": "object",
+            "properties": {
+              "annual_rate": {"type": "number"},
+              "funding_rate": {"type": "number"},
+              "lgd": {"type": "number"},
+              "operating_cost_per_loan": {"type": "number"},
+              "term_months": {"type": "integer", "minimum": 1}
+            },
+            "required": ["annual_rate", "funding_rate", "lgd", "operating_cost_per_loan", "term_months"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "results": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["results"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_profit_calc",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "build_strategy",
+      "summary": "Validate and persist a deterministic strategy rule set.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {"type": "string", "enum": ["approval", "limit", "pricing", "reject", "segmentation"]},
+          "rules": {"type": "array", "items": {"type": "object"}, "minItems": 1},
+          "score_col": {"type": "string", "minLength": 1},
+          "default_decision": {},
+          "description": {"type": "string"}
+        },
+        "required": ["strategy_type", "rules", "default_decision"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {"type": "string"}
+        },
+        "required": ["strategy_id"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_strategy",
+      "side_effects": ["write:strategy"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "backtest_strategy",
+      "summary": "Backtest a persisted strategy on a dataset and persist aggregate results.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "strategy_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "baseline_strategy_id": {"type": "string", "minLength": 1},
+          "profit_params": {"type": "object"},
+          "ead_col": {"type": "string", "minLength": 1},
+          "pd_col": {"type": "string", "minLength": 1}
+        },
+        "required": ["dataset_id", "strategy_id", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "backtest_id": {"type": "string"},
+          "strategy_id": {"type": "string"},
+          "approval_rate": {"type": "number"},
+          "approved_count": {"type": "integer"},
+          "approved_bad_rate": {"type": "number"},
+          "rejected_bad_rate": {"type": "number"},
+          "expected_profit": {"type": "number"},
+          "swap_in_count": {"type": "integer"},
+          "swap_out_count": {"type": "integer"},
+          "swap_in_bad_rate": {"type": "number"},
+          "swap_out_bad_rate": {"type": "number"},
+          "by_segment": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["backtest_id", "strategy_id", "approval_rate", "approved_count", "approved_bad_rate", "rejected_bad_rate", "expected_profit", "swap_in_count", "swap_out_count", "swap_in_bad_rate", "swap_out_bad_rate", "by_segment"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_backtest_strategy",
+      "side_effects": ["read:dataset", "read:strategy", "write:backtest"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "tradeoff_view",
+      "summary": "Scan score cutoffs and recommend an operating point under risk constraints.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "score_col": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "cutoffs": {"type": "array", "items": {"type": "number"}},
+          "profit_params": {"type": "object"},
+          "ead_col": {"type": "string", "minLength": 1},
+          "pd_col": {"type": "string", "minLength": 1},
+          "objective": {"type": "string", "enum": ["max_profit", "max_approval"]},
+          "max_bad_rate": {"type": "number"}
+        },
+        "required": ["dataset_id", "score_col", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "points": {"type": "array", "items": {"type": "object"}},
+          "recommended": {"type": ["object", "null"]}
+        },
+        "required": ["points", "recommended"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_tradeoff_view",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "read:strategy", "write:strategy", "write:backtest"]
+}
