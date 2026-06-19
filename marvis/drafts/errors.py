@@ -6,4 +6,8 @@ class DraftStateError(DraftError):
     pass
 
 
-__all__ = ["DraftError", "DraftStateError"]
+class DraftNotFound(DraftError):
+    pass
+
+
+__all__ = ["DraftError", "DraftNotFound", "DraftStateError"]

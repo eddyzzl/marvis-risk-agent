@@ -10,7 +10,8 @@ from marvis.drafts.contracts import (
     PromotionCheck,
     assert_draft_status_transition,
 )
-from marvis.drafts.errors import DraftError, DraftStateError
+from marvis.drafts.errors import DraftError, DraftNotFound, DraftStateError
+from marvis.drafts.registry import DraftRegistry
 
 __all__ = [
     "DRAFT_STATUS_DRAFT",
@@ -19,6 +20,8 @@ __all__ = [
     "DRAFT_STATUS_TESTED",
     "DRAFT_STATUSES",
     "DraftError",
+    "DraftNotFound",
+    "DraftRegistry",
     "DraftRun",
     "DraftStateError",
     "DraftTool",
