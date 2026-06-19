@@ -24,6 +24,12 @@ from marvis.domain import (
     TaskRecord,
     TaskStatus,
 )
+from marvis.drafts.contracts import (
+    DraftRun,
+    DraftTool,
+    LearningNote,
+    assert_draft_status_transition,
+)
 from marvis.model_algorithms import normalize_algorithm
 from marvis.packs.modeling.contracts import (
     Experiment,
@@ -478,6 +484,50 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS learning_notes (
+                id TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                sources_json TEXT NOT NULL,
+                distilled TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_tools (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                code TEXT NOT NULL,
+                input_schema_json TEXT NOT NULL,
+                output_schema_json TEXT NOT NULL,
+                determinism TEXT NOT NULL,
+                source TEXT NOT NULL,
+                learning_note_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_runs (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                inputs_hash TEXT NOT NULL,
+                ok INTEGER NOT NULL,
+                output_json TEXT,
+                error TEXT,
+                at TEXT NOT NULL,
+                FOREIGN KEY (draft_id) REFERENCES draft_tools(id) ON DELETE CASCADE
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
@@ -486,6 +536,8 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_model_artifacts_experiment ON model_artifacts(experiment_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_task ON strategies(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_backtests_strategy ON backtests(strategy_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_task ON draft_tools(task_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_runs_draft ON draft_runs(draft_id)")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -1766,6 +1818,130 @@ class StrategyRepository:
         return [_backtest_result_from_row(row) for row in rows]
 
 
+class DraftRepository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def save_learning_note(self, note: LearningNote) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO learning_notes(
+                    id, query, sources_json, distilled, created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                _learning_note_insert_values(note),
+            )
+
+    def get_learning_note(self, note_id: str) -> LearningNote | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, query, sources_json, distilled, created_at
+                  FROM learning_notes
+                 WHERE id = ?
+                """,
+                (note_id,),
+            ).fetchone()
+        return None if row is None else _learning_note_from_row(row)
+
+    def save_draft(self, draft: DraftTool) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO draft_tools(
+                    id, task_id, name, summary, code, input_schema_json,
+                    output_schema_json, determinism, source, learning_note_id,
+                    status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _draft_tool_insert_values(draft),
+            )
+
+    def get_draft(self, draft_id: str) -> DraftTool | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, name, summary, code, input_schema_json,
+                       output_schema_json, determinism, source, learning_note_id,
+                       status, created_at
+                  FROM draft_tools
+                 WHERE id = ?
+                """,
+                (draft_id,),
+            ).fetchone()
+        return None if row is None else _draft_tool_from_row(row)
+
+    def list_drafts(self, task_id: str, *, status: str | None = None) -> list[DraftTool]:
+        with connect(self.db_path) as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, name, summary, code, input_schema_json,
+                           output_schema_json, determinism, source, learning_note_id,
+                           status, created_at
+                      FROM draft_tools
+                     WHERE task_id = ?
+                     ORDER BY created_at, id
+                    """,
+                    (task_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, name, summary, code, input_schema_json,
+                           output_schema_json, determinism, source, learning_note_id,
+                           status, created_at
+                      FROM draft_tools
+                     WHERE task_id = ? AND status = ?
+                     ORDER BY created_at, id
+                    """,
+                    (task_id, status),
+                ).fetchall()
+        return [_draft_tool_from_row(row) for row in rows]
+
+    def set_status(self, draft_id: str, status: str) -> None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT status FROM draft_tools WHERE id = ?",
+                (draft_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(draft_id)
+            assert_draft_status_transition(str(row["status"]), status)
+            conn.execute(
+                "UPDATE draft_tools SET status = ? WHERE id = ?",
+                (status, draft_id),
+            )
+
+    def save_draft_run(self, run: DraftRun) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO draft_runs(
+                    id, draft_id, task_id, inputs_hash, ok, output_json, error, at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _draft_run_insert_values(run),
+            )
+
+    def list_runs(self, draft_id: str) -> list[DraftRun]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, draft_id, task_id, inputs_hash, ok, output_json, error, at
+                  FROM draft_runs
+                 WHERE draft_id = ?
+                 ORDER BY at, id
+                """,
+                (draft_id,),
+            ).fetchall()
+        return [_draft_run_from_row(row) for row in rows]
+
+
 class PluginRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -2321,6 +2497,87 @@ def _backtest_result_from_dict(payload: dict) -> BacktestResult:
         swap_in_bad_rate=float(payload["swap_in_bad_rate"]),
         swap_out_bad_rate=float(payload["swap_out_bad_rate"]),
         by_segment=tuple(dict(item) for item in payload.get("by_segment") or ()),
+    )
+
+
+def _learning_note_insert_values(note: LearningNote) -> tuple:
+    return (
+        note.id,
+        note.query,
+        _dump_json_any(list(note.sources)),
+        note.distilled,
+        note.created_at,
+    )
+
+
+def _learning_note_from_row(row: sqlite3.Row) -> LearningNote:
+    return LearningNote(
+        id=str(row["id"]),
+        query=str(row["query"]),
+        sources=tuple(str(item) for item in _load_json_array(row["sources_json"])),
+        distilled=str(row["distilled"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _draft_tool_insert_values(draft: DraftTool) -> tuple:
+    return (
+        draft.id,
+        draft.task_id,
+        draft.name,
+        draft.summary,
+        draft.code,
+        _dump_json_any(draft.input_schema),
+        _dump_json_any(draft.output_schema),
+        draft.determinism,
+        draft.source,
+        draft.learning_note_id,
+        draft.status,
+        draft.created_at,
+    )
+
+
+def _draft_tool_from_row(row: sqlite3.Row) -> DraftTool:
+    return DraftTool(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        name=str(row["name"]),
+        summary=str(row["summary"]),
+        code=str(row["code"]),
+        input_schema=_load_json_object(row["input_schema_json"]),
+        output_schema=_load_json_object(row["output_schema_json"]),
+        determinism=str(row["determinism"]),
+        source=str(row["source"]),
+        learning_note_id=_optional_str(row["learning_note_id"]),
+        status=str(row["status"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _draft_run_insert_values(run: DraftRun) -> tuple:
+    return (
+        run.id,
+        run.draft_id,
+        run.task_id,
+        run.inputs_hash,
+        1 if run.ok else 0,
+        None if run.output is None else _dump_json_any(run.output),
+        run.error,
+        run.at,
+    )
+
+
+def _draft_run_from_row(row: sqlite3.Row) -> DraftRun:
+    output_json = row["output_json"]
+    return DraftRun(
+        id=str(row["id"]),
+        draft_id=str(row["draft_id"]),
+        task_id=str(row["task_id"]),
+        inputs_hash=str(row["inputs_hash"]),
+        ok=bool(row["ok"]),
+        output=None if output_json is None else _load_json_object(output_json),
+        error=_optional_str(row["error"]),
+        at=str(row["at"]),
     )
 
 
