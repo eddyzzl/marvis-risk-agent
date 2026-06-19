@@ -10,13 +10,17 @@ from marvis.agent_memory.models import (
 from marvis.agent_memory.distillation import (
     CONFIDENCE_THRESHOLDS,
     DISTILLATION_STATUSES,
+    DISTILL_SYS,
+    DistillationEngine,
     MAX_DISTILLED_SUMMARY_CHARS,
     MemoryDistillation,
+    build_distill_prompt,
     confidence_from_support,
     new_distillation,
     normalize_distillation_confidence,
     normalize_distillation_status,
 )
+from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.policy import (
     MemoryPolicyDecision,
     classify_memory_candidate,
@@ -50,6 +54,9 @@ __all__ = [
     "CONFIDENCE_THRESHOLDS",
     "DISTILLATION_STATUSES",
     "MAX_DISTILLED_SUMMARY_CHARS",
+    "DISTILL_SYS",
+    "DistillationEngine",
+    "EvolutionManager",
     "MemoryCandidate",
     "MemoryDistillation",
     "MemoryPolicyDecision",
@@ -59,6 +66,7 @@ __all__ = [
     "AUDIT_EVENT_TYPES",
     "AgentMemoryStore",
     "classify_memory_candidate",
+    "build_distill_prompt",
     "confidence_from_support",
     "compare_model_experience",
     "ensure_agent_memory_schema",
