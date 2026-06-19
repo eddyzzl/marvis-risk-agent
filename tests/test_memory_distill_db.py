@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from marvis.agent_memory.distillation import (
     MAX_DISTILLED_SUMMARY_CHARS,
     confidence_from_support,
@@ -100,6 +102,68 @@ def test_store_supersede_support_status_and_consolidation_state(tmp_path):
     assert store.last_consolidated_at("field_convention") == "2026-06-19T10:00:00+00:00"
     assert rolled_back.id == new.id
     assert store.get_active_distillation("field_convention:score") is None
+    assert [event["event_type"] for event in store.list_distillation_events(new.id)] == [
+        "create",
+        "rollback",
+    ]
+    assert [event["event_type"] for event in store.list_distillation_events(old.id)] == [
+        "create",
+        "supersede",
+    ]
 
     store.clear_superseded(old.id)
     assert store.get_distillation(old.id).superseded_by is None
+    assert store.list_distillation_events(old.id)[-1]["event_type"] == "restore"
+
+
+def test_store_distillation_status_round_trips_and_use_is_audited(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    rolled_back = replace(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="目标字段常见取值包括 bad_flag。",
+            structured={"fields": {"target_col": ["bad_flag"]}},
+            source_memory_ids=("mem-1",),
+            support_count=4,
+        ),
+        status="rolled_back",
+    )
+    created_rolled_back = store.create_distillation(rolled_back)
+    active = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:score_col",
+            distilled_summary="分数字段常见取值包括 score。",
+            structured={"fields": {"score_col": ["score"]}},
+            source_memory_ids=("mem-2",),
+            support_count=4,
+        )
+    )
+
+    store.record_distillation_use(
+        active.id,
+        task_id="task-1",
+        message_id="msg-1",
+        use_reason="chat",
+    )
+
+    assert created_rolled_back.status == "rolled_back"
+    assert store.get_distillation(created_rolled_back.id).status == "rolled_back"
+    assert created_rolled_back.id not in {
+        item.id for item in store.list_distillations(category="field_convention")
+    }
+    assert created_rolled_back.id in {
+        item.id
+        for item in store.list_distillations(
+            category="field_convention",
+            include_superseded=True,
+        )
+    }
+    use_event = store.list_distillation_events(active.id)[-1]
+    assert use_event["event_type"] == "use"
+    assert use_event["task_id"] == "task-1"
+    assert use_event["message_id"] == "msg-1"
+    assert use_event["details"] == {"use_reason": "chat"}

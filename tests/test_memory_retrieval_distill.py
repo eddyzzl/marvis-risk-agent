@@ -1,6 +1,6 @@
 from marvis.agent_memory.distillation import new_distillation
 from marvis.agent_memory.models import MemoryCandidate
-from marvis.agent_memory.prompting import normalize_memory_context
+from marvis.agent_memory.prompting import memory_references, normalize_memory_context
 from marvis.agent_memory.retrieval import retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import init_db
@@ -55,7 +55,7 @@ def test_retrieve_with_distillations_prefers_high_confidence_and_backfills_raw(t
 
 
 def test_distillation_prompt_packet_preserves_audit_fields():
-    normalized = normalize_memory_context({
+    context = {
         "memories": [
             {
                 "kind": "distillation",
@@ -68,10 +68,24 @@ def test_distillation_prompt_packet_preserves_audit_fields():
                 "source_memory_ids": ["mem-1", "mem-2"],
             }
         ]
-    })
+    }
+    normalized = normalize_memory_context(context)
 
     packet = normalized["memories"][0]
     assert packet["kind"] == "distillation"
     assert packet["support_count"] == 4
     assert packet["source_memory_ids"] == ["mem-1", "mem-2"]
     assert packet["payload"] == {"fields": {"target_col": ["bad_flag"]}}
+    references = memory_references(context, use_reason="chat")
+    assert references == [
+        {
+            "kind": "distillation",
+            "id": "dist-1",
+            "memory_type": "field_convention",
+            "source_task_id": None,
+            "confidence": "high",
+            "use_reason": "chat",
+            "support_count": 4,
+            "source_memory_ids": ["mem-1", "mem-2"],
+        }
+    ]

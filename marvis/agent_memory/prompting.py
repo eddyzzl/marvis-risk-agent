@@ -44,15 +44,21 @@ def memory_references(
         return []
     references: list[dict[str, Any]] = []
     for memory in normalized["memories"]:
-        references.append(
-            {
-                "id": memory["id"],
-                "memory_type": memory.get("memory_type"),
-                "source_task_id": memory.get("source_task_id"),
-                "confidence": memory.get("confidence") or "medium",
-                "use_reason": use_reason,
-            }
-        )
+        reference = {
+            "kind": memory.get("kind") or "raw",
+            "id": memory["id"],
+            "memory_type": memory.get("memory_type"),
+            "source_task_id": memory.get("source_task_id"),
+            "confidence": memory.get("confidence") or "medium",
+            "use_reason": use_reason,
+        }
+        if memory.get("support_count") is not None:
+            reference["support_count"] = int(memory.get("support_count") or 0)
+        if isinstance(memory.get("source_memory_ids"), list):
+            reference["source_memory_ids"] = [
+                str(item) for item in memory["source_memory_ids"]
+            ]
+        references.append(reference)
     return references
 
 

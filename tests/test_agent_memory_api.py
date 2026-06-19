@@ -2,10 +2,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from marvis.api import _agent_memory_context_from_store, _audit_agent_memory_use_from_store
+from marvis.agent_memory.distillation import new_distillation
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.app import create_app
-from marvis.db import TaskRepository
+from marvis.db import TaskRepository, init_db
 from marvis.domain import TaskCreate
 
 
@@ -135,6 +137,185 @@ def test_memory_api_cannot_enable_rejected_memory(tmp_path):
     assert response.status_code == 422
     assert "terminal" in response.json()["detail"]
     assert store.get_entry(rejected.id, include_deleted=True, audit=False).status == "rejected"
+
+
+def test_memory_api_manages_distillations_and_rolls_back_superseding_version(tmp_path):
+    client = _client(tmp_path)
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
+    source = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="A卡验证里目标字段常用 bad_flag。",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-history",
+            confidence="high",
+        )
+    )
+    old = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="目标字段常见取值包括 bad_flag。",
+            structured={"fields": {"target_col": ["bad_flag"]}},
+            source_memory_ids=(source.id,),
+            support_count=2,
+        )
+    )
+    new = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="A卡目标字段常见取值包括 bad_flag 和 overdue_flag。",
+            structured={"fields": {"target_col": ["bad_flag", "overdue_flag"]}},
+            source_memory_ids=(source.id,),
+            support_count=4,
+        )
+    )
+    store.set_superseded(old.id, by=new.id)
+
+    listed = client.get("/api/agent-memory/distillations")
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()["items"]] == [new.id]
+
+    detail = client.get(f"/api/agent-memory/distillations/{new.id}")
+    assert detail.status_code == 200, detail.text
+    payload = detail.json()
+    assert payload["distillation"]["status"] == "active"
+    assert payload["predecessor"]["id"] == old.id
+    assert payload["source_memories"][0]["id"] == source.id
+    assert payload["events"][0]["event_type"] == "create"
+
+    rollback = client.post(f"/api/agent-memory/distillations/{new.id}/rollback")
+    assert rollback.status_code == 200, rollback.text
+    rollback_payload = rollback.json()
+    assert rollback_payload["distillation"]["status"] == "rolled_back"
+    assert rollback_payload["restored"]["id"] == old.id
+    assert rollback_payload["restored"]["superseded_by"] is None
+
+    relisted = client.get("/api/agent-memory/distillations")
+    assert [item["id"] for item in relisted.json()["items"]] == [old.id]
+    history = client.get(
+        "/api/agent-memory/distillations",
+        params={"include_superseded": True},
+    )
+    statuses = {item["id"]: item["status"] for item in history.json()["items"]}
+    assert statuses[new.id] == "rolled_back"
+    assert statuses[old.id] == "active"
+
+
+def test_memory_distillation_references_are_use_audited(tmp_path):
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    distillation = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="A卡坏样本字段常见取值包括 bad_flag。",
+            structured={"fields": {"target_col": ["bad_flag"]}},
+            source_memory_ids=("mem-a", "mem-b", "mem-c", "mem-d"),
+            support_count=4,
+        )
+    )
+    message = repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="历史字段口径显示 bad_flag 常作为坏样本字段。",
+        metadata={
+            "memory_references": [
+                {
+                    "kind": "distillation",
+                    "id": distillation.id,
+                    "memory_type": "field_convention",
+                    "confidence": "high",
+                    "use_reason": "chat",
+                }
+            ]
+        },
+    )
+
+    _audit_agent_memory_use_from_store(store, message, task_id=task.id)
+
+    events = store.list_distillation_events(distillation.id)
+    assert [event["event_type"] for event in events] == ["create", "use"]
+    assert events[-1]["task_id"] == task.id
+    assert events[-1]["message_id"] == message["id"]
+    assert events[-1]["details"] == {"use_reason": "chat"}
+
+
+def test_memory_api_can_trigger_manual_consolidation(tmp_path):
+    client = _client(tmp_path)
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
+    store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="字段口径：目标字段=bad_flag",
+            payload={"target_col": "bad_flag"},
+            confidence="high",
+        )
+    )
+
+    response = client.post(
+        "/api/agent-memory/consolidate",
+        params={"category": "field_convention"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["consolidated"] == {"field_convention": 1}
+    listed = client.get(
+        "/api/agent-memory/distillations",
+        params={"category": "field_convention"},
+    )
+    assert listed.json()["items"][0]["scope_key"] == "field_convention:target_col"
+
+
+def test_agent_memory_context_uses_distillations_without_raw_memories(tmp_path):
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    distilled = store.create_distillation(
+        new_distillation(
+            category="field_convention",
+            scope_key="field_convention:target_col",
+            distilled_summary="A卡坏样本字段常见取值包括 bad_flag。",
+            structured={"fields": {"target_col": ["bad_flag"]}},
+            source_memory_ids=("mem-a", "mem-b", "mem-c", "mem-d"),
+            support_count=4,
+        )
+    )
+
+    context = _agent_memory_context_from_store(
+        store,
+        task,
+        stage="chat",
+        user_message="bad_flag 字段怎么处理？",
+    )
+
+    assert context is not None
+    assert context["memories"][0]["kind"] == "distillation"
+    assert context["memories"][0]["id"] == distilled.id
+    assert context["memories"][0]["support_count"] == 4
 
 
 def test_memory_api_lists_references_attached_to_agent_message(tmp_path):

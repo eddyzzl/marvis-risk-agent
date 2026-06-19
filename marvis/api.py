@@ -41,9 +41,12 @@ from marvis.agent.service import (
     is_stop_validation_intent,
     summarize_stage,
 )
+from marvis.agent_memory.consolidation import ConsolidationScheduler
+from marvis.agent_memory.distillation import DistillationEngine
+from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.retrieval import (
     MemoryQuery,
-    retrieve_relevant_memories,
+    retrieve_with_distillations,
 )
 from marvis.agent_memory.extractors import extract_user_preference
 from marvis.agent_memory.store import AgentMemoryStore
@@ -1101,6 +1104,73 @@ def list_agent_memory(
         )
     ]
     return {"items": items}
+
+
+@router.get("/agent-memory/distillations")
+def list_agent_memory_distillations(
+    request: Request,
+    category: str | None = None,
+    include_superseded: bool = False,
+) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        distillations = store.list_distillations(
+            category=category,
+            include_superseded=include_superseded,
+            limit=500,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid distillation filter: {exc}") from exc
+    return {"items": [_memory_distillation_payload(item) for item in distillations]}
+
+
+@router.post("/agent-memory/consolidate")
+def consolidate_agent_memory(
+    request: Request,
+    category: str | None = None,
+) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    scheduler = ConsolidationScheduler(
+        DistillationEngine(store),
+        EvolutionManager(store),
+        store,
+        async_mode=False,
+    )
+    try:
+        result = scheduler.consolidate_all([category] if category else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"consolidated": result}
+
+
+@router.get("/agent-memory/distillations/{distillation_id}")
+def get_agent_memory_distillation(distillation_id: str, request: Request) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        distillation = store.get_distillation(distillation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory distillation not found") from exc
+    return _memory_distillation_detail(store, distillation)
+
+
+@router.post("/agent-memory/distillations/{distillation_id}/rollback")
+def rollback_agent_memory_distillation(distillation_id: str, request: Request) -> dict:
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    predecessor = store.find_superseded_by(distillation_id)
+    try:
+        EvolutionManager(store).rollback(distillation_id)
+        distillation = store.get_distillation(distillation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory distillation not found") from exc
+    restored = (
+        _memory_distillation_payload(store.get_distillation(predecessor.id))
+        if predecessor is not None
+        else None
+    )
+    return {
+        "distillation": _memory_distillation_payload(distillation),
+        "restored": restored,
+    }
 
 
 @router.get("/agent-memory/{memory_id}")
@@ -2843,6 +2913,49 @@ def _memory_entry_payload(entry) -> dict:
     }
 
 
+def _memory_distillation_payload(distillation) -> dict:
+    return {
+        "id": distillation.id,
+        "kind": "distillation",
+        "category": distillation.category,
+        "memory_type": distillation.category,
+        "scope_key": distillation.scope_key,
+        "status": distillation.status,
+        "summary": distillation.distilled_summary,
+        "payload": distillation.structured,
+        "source_memory_ids": list(distillation.source_memory_ids),
+        "support_count": distillation.support_count,
+        "confidence": distillation.confidence,
+        "superseded_by": distillation.superseded_by,
+        "created_at": distillation.created_at,
+        "updated_at": distillation.updated_at,
+    }
+
+
+def _memory_distillation_detail(
+    store: AgentMemoryStore,
+    distillation,
+) -> dict:
+    source_memories = []
+    for memory_id in distillation.source_memory_ids:
+        try:
+            source = store.get_entry(memory_id, include_deleted=True, audit=False)
+        except KeyError:
+            continue
+        source_memories.append(_memory_entry_payload(source))
+    predecessor = store.find_superseded_by(distillation.id)
+    return {
+        "distillation": _memory_distillation_payload(distillation),
+        "source_memories": source_memories,
+        "predecessor": (
+            _memory_distillation_payload(predecessor)
+            if predecessor is not None
+            else None
+        ),
+        "events": store.list_distillation_events(distillation.id),
+    }
+
+
 def _memory_api_filter_match(
     item: dict,
     *,
@@ -2872,22 +2985,27 @@ def _agent_memory_context_from_store(
     user_message: str = "",
     evidence: dict | None = None,
 ) -> dict | None:
-    entries = store.list_entries(limit=200)
-    if not entries:
-        return None
     query = _agent_memory_query(task, user_message=user_message, evidence=evidence)
-    results = retrieve_relevant_memories(entries, query, limit=6)
-    memory_packets: list[tuple[str, dict]] = []
-    for result in results:
-        memory_id = result.context_packet.get("id")
-        if not memory_id:
+    packets = retrieve_with_distillations(store, query, limit=6)
+    if not packets:
+        return None
+    raw_packets: list[tuple[str, dict]] = []
+    for packet in packets:
+        if packet.get("kind") == "distillation":
             continue
-        memory_packets.append((str(memory_id), result.context_packet))
+        memory_id = packet.get("id")
+        if memory_id:
+            raw_packets.append((str(memory_id), packet))
     found_ids = store.record_retrievals(
-        [memory_id for memory_id, _ in memory_packets],
+        [memory_id for memory_id, _ in raw_packets],
         task_id=task.id,
     )
-    memories = [packet for memory_id, packet in memory_packets if memory_id in found_ids]
+    memories = [
+        packet
+        for packet in packets
+        if packet.get("kind") == "distillation"
+        or str(packet.get("id") or "") in found_ids
+    ]
     if not memories:
         return None
     return {
@@ -2995,6 +3113,17 @@ def _audit_agent_memory_use_from_store(
             continue
         memory_id = reference.get("id")
         if not memory_id:
+            continue
+        if reference.get("kind") == "distillation":
+            try:
+                store.record_distillation_use(
+                    str(memory_id),
+                    task_id=task_id,
+                    message_id=message.get("id"),
+                    use_reason=str(reference.get("use_reason") or "agent"),
+                )
+            except (KeyError, ValueError):
+                continue
             continue
         try:
             store.record_use(

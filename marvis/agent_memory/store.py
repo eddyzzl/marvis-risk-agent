@@ -33,6 +33,13 @@ AUDIT_EVENT_TYPES = (
     "delete",
     "reject",
 )
+DISTILLATION_AUDIT_EVENT_TYPES = (
+    "create",
+    "use",
+    "supersede",
+    "restore",
+    "rollback",
+)
 
 
 @dataclass(frozen=True)
@@ -258,7 +265,7 @@ class AgentMemoryStore:
                     source_memory_ids_json, support_count, confidence,
                     superseded_by, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     distillation.id,
@@ -270,9 +277,20 @@ class AgentMemoryStore:
                     int(distillation.support_count),
                     distillation.confidence,
                     distillation.superseded_by,
+                    distillation.status,
                     created_at,
                     updated_at,
                 ),
+            )
+            self._append_distillation_event(
+                conn,
+                distillation.id,
+                "create",
+                details={
+                    "category": distillation.category,
+                    "scope_key": distillation.scope_key,
+                    "support_count": distillation.support_count,
+                },
             )
             row = self._select_distillation(conn, distillation.id)
         return _row_to_distillation(row)
@@ -305,20 +323,22 @@ class AgentMemoryStore:
         include_superseded: bool = False,
         limit: int = 100,
     ) -> list[MemoryDistillation]:
-        clauses = ["status = 'active'"]
+        clauses: list[str] = []
         params: list[Any] = []
         if not include_superseded:
+            clauses.append("status = 'active'")
             clauses.append("superseded_by IS NULL")
         if category is not None:
             clauses.append("category = ?")
             params.append(normalize_memory_type(category))
         params.append(max(1, int(limit)))
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with connect(self.db_path) as conn:
             rows = conn.execute(
                 f"""
                 SELECT *
                   FROM memory_distillations
-                 WHERE {" AND ".join(clauses)}
+                  {where_sql}
                  ORDER BY updated_at DESC, id DESC
                  LIMIT ?
                 """,
@@ -339,6 +359,12 @@ class AgentMemoryStore:
                 """,
                 (by, now, distillation_id),
             )
+            self._append_distillation_event(
+                conn,
+                distillation_id,
+                "supersede",
+                details={"superseded_by": by},
+            )
 
     def clear_superseded(self, distillation_id: str) -> None:
         now = _now()
@@ -352,6 +378,12 @@ class AgentMemoryStore:
                  WHERE id = ?
                 """,
                 (now, distillation_id),
+            )
+            self._append_distillation_event(
+                conn,
+                distillation_id,
+                "restore",
+                details={},
             )
 
     def update_distillation_support(self, distillation_id: str, support_count: int) -> MemoryDistillation:
@@ -386,8 +418,49 @@ class AgentMemoryStore:
                 """,
                 (normalized, now, distillation_id),
             )
+            self._append_distillation_event(
+                conn,
+                distillation_id,
+                "rollback" if normalized == "rolled_back" else "restore",
+                details={"status": normalized},
+            )
             row = self._select_distillation(conn, distillation_id)
         return _row_to_distillation(row)
+
+    def record_distillation_use(
+        self,
+        distillation_id: str,
+        *,
+        task_id: str | None = None,
+        message_id: str | None = None,
+        use_reason: str = "",
+    ) -> None:
+        with connect(self.db_path) as conn:
+            row = self._select_distillation(conn, distillation_id)
+            if row["status"] != "active":
+                raise ValueError("rolled back memory distillations cannot be used")
+            self._append_distillation_event(
+                conn,
+                distillation_id,
+                "use",
+                task_id=task_id,
+                message_id=message_id,
+                details={"use_reason": use_reason},
+            )
+
+    def list_distillation_events(self, distillation_id: str) -> list[dict[str, Any]]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, distillation_id, event_type, task_id, message_id,
+                       details_json, created_at
+                  FROM memory_distillation_events
+                 WHERE distillation_id = ?
+                 ORDER BY created_at ASC, id ASC
+                """,
+                (distillation_id,),
+            ).fetchall()
+        return [_row_to_distillation_event(row) for row in rows]
 
     def find_superseded_by(self, distillation_id: str) -> MemoryDistillation | None:
         with connect(self.db_path) as conn:
@@ -628,6 +701,35 @@ class AgentMemoryStore:
             ),
         )
 
+    def _append_distillation_event(
+        self,
+        conn: sqlite3.Connection,
+        distillation_id: str,
+        event_type: str,
+        *,
+        task_id: str | None = None,
+        message_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if event_type not in DISTILLATION_AUDIT_EVENT_TYPES:
+            raise ValueError(f"unsupported distillation audit event: {event_type}")
+        conn.execute(
+            """
+            INSERT INTO memory_distillation_events
+            (id, distillation_id, event_type, task_id, message_id, details_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                distillation_id,
+                event_type,
+                task_id,
+                message_id,
+                _dump_json_object(details or {}),
+                _now(),
+            ),
+        )
+
 
 def ensure_agent_memory_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -718,6 +820,32 @@ def ensure_agent_memory_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS memory_distillation_events (
+            id TEXT PRIMARY KEY,
+            distillation_id TEXT,
+            event_type TEXT NOT NULL,
+            task_id TEXT,
+            message_id TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(distillation_id) REFERENCES memory_distillations(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_distill_events_distillation
+            ON memory_distillation_events(distillation_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_distill_events_type
+            ON memory_distillation_events(event_type, created_at)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS memory_consolidation_state (
             category TEXT PRIMARY KEY,
             last_consolidated_at TEXT NOT NULL
@@ -755,6 +883,7 @@ def _row_to_distillation(row: sqlite3.Row) -> MemoryDistillation:
         support_count=int(row["support_count"]),
         confidence=row["confidence"],
         superseded_by=row["superseded_by"],
+        status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -786,6 +915,18 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "memory_id": row["memory_id"],
+        "event_type": row["event_type"],
+        "task_id": row["task_id"],
+        "message_id": row["message_id"],
+        "details": _load_json_object(row["details_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _row_to_distillation_event(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "distillation_id": row["distillation_id"],
         "event_type": row["event_type"],
         "task_id": row["task_id"],
         "message_id": row["message_id"],

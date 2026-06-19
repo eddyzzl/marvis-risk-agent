@@ -30,6 +30,7 @@ class MemoryDistillation:
     support_count: int = 0
     confidence: str = "low"
     superseded_by: str | None = None
+    status: str = "active"
     created_at: str = ""
     updated_at: str = ""
 
@@ -48,6 +49,7 @@ class MemoryDistillation:
         )
         object.__setattr__(self, "support_count", int(self.support_count))
         object.__setattr__(self, "confidence", normalize_distillation_confidence(self.confidence))
+        object.__setattr__(self, "status", normalize_distillation_status(self.status))
 
 
 def new_distillation(
