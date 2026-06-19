@@ -8,6 +8,7 @@ def test_static_es_modules_are_declared_as_package_data():
 
     assert "static/js/*" in package_data
     assert "static/css/*" in package_data
+    assert "packs/*/manifest.json" in package_data
 
 
 def test_package_discovery_is_limited_to_marvis_runtime_package():

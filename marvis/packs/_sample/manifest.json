@@ -1,0 +1,107 @@
+{
+  "name": "_sample",
+  "version": "0.1.0",
+  "display_name": "Sample Runtime Pack",
+  "description": "Runtime smoke-test pack for Plugin/Tool execution.",
+  "module": "marvis.packs._sample.tools",
+  "tools": [
+    {
+      "name": "echo",
+      "summary": "Echo back the given message",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"}
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "echoed": {"type": "string"}
+        },
+        "required": ["echoed"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 10,
+      "failure_policy": "fail",
+      "entrypoint": "tool_echo",
+      "side_effects": []
+    },
+    {
+      "name": "fail",
+      "summary": "Raise a sample runtime error",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ok": {"type": "boolean"}
+        },
+        "required": ["ok"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 10,
+      "failure_policy": "fail",
+      "entrypoint": "tool_fail",
+      "side_effects": []
+    },
+    {
+      "name": "bad_output",
+      "summary": "Return output that intentionally violates schema",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "echoed": {"type": "string"}
+        },
+        "required": ["echoed"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 10,
+      "failure_policy": "fail",
+      "entrypoint": "tool_bad_output",
+      "side_effects": []
+    },
+    {
+      "name": "sleep",
+      "summary": "Sleep for timeout testing",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "seconds": {"type": "number", "minimum": 0}
+        },
+        "required": ["seconds"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "slept": {"type": "boolean"}
+        },
+        "required": ["slept"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 1,
+      "failure_policy": "fail",
+      "entrypoint": "tool_sleep",
+      "side_effects": []
+    }
+  ],
+  "hooks": [],
+  "permissions": []
+}

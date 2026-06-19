@@ -73,6 +73,10 @@ class ToolRegistry:
         self._plugins = plugin_registry
 
     def resolve(self, ref: ToolRef) -> ToolSpec:
+        _manifest, tool = self.resolve_with_manifest(ref)
+        return tool
+
+    def resolve_with_manifest(self, ref: ToolRef) -> tuple[PluginManifest, ToolSpec]:
         try:
             manifest = self._plugins.get(ref.plugin)
         except PluginNotFoundError:
@@ -85,7 +89,7 @@ class ToolRegistry:
             )
         for tool in manifest.tools:
             if tool.name == ref.tool:
-                return tool
+                return manifest, tool
         raise ToolNotFoundError(ref.label())
 
     def catalog_for_planner(self) -> list[dict]:
