@@ -3,9 +3,11 @@ import pytest
 
 from marvis.feature.binning import (
     assign_bins,
+    chimerge_edges,
     equal_frequency_edges,
     equal_width_edges,
     manual_edges,
+    tree_edges,
 )
 from marvis.feature.errors import BinningError
 
@@ -51,3 +53,29 @@ def test_assign_bins_rejects_invalid_edges():
         assign_bins(np.array([1, 2]), np.array([0.0]))
     with pytest.raises(BinningError):
         assign_bins(np.array([1, 2]), np.array([float("-inf"), 1.0, 1.0, float("inf")]))
+
+
+def test_chimerge_edges_reduce_to_max_bins_and_keep_open_endpoints():
+    values = np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=float)
+    target = np.array([0, 0, 0, 1, 1, 1, 1, 1])
+
+    edges = chimerge_edges(values, target, max_bins=3, init_bins=8)
+
+    assert edges[0] == float("-inf")
+    assert edges[-1] == float("inf")
+    assert len(edges) <= 4
+    assert np.all(np.diff(edges) > 0)
+
+
+def test_tree_edges_find_supervised_split_and_handle_constant_target():
+    values = np.arange(10, dtype=float)
+    target = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+
+    edges = tree_edges(values, target, max_bins=2, seed=7)
+    constant = tree_edges(values, np.zeros_like(values), max_bins=3, seed=7)
+
+    assert edges[0] == float("-inf")
+    assert edges[-1] == float("inf")
+    assert len(edges) == 3
+    assert 4.0 < edges[1] < 5.0
+    assert constant.tolist() == [float("-inf"), float("inf")]
