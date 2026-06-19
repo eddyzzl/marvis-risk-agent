@@ -34,6 +34,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "plan_confirm.js",
         "join_review.js",
         "plugin_manager.js",
+        "skill_manager.js",
     ):
         assert (static_v2 / module_name).is_file()
 
