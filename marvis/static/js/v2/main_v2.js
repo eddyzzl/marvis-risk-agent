@@ -1,9 +1,13 @@
+import { renderPlanView } from "./plan_view.js";
+
 const panelDefinitions = [
   { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
   { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 sub agents" },
   { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 plugins" },
   { id: "artifactPanel", className: "v2-artifact-panel", label: "V2 artifacts" },
 ];
+
+const mountStateKey = "__marvisV2MountState";
 
 function documentFor(root) {
   if (root?.ownerDocument?.createElement) {
@@ -38,10 +42,29 @@ export function mountV2(root) {
   for (const definition of panelDefinitions) {
     panels[definition.id] = ensurePanel(root, definition);
   }
+  if (!root[mountStateKey]) {
+    root[mountStateKey] = {
+      cleanups: [renderPlanView(panels.planPanel)],
+    };
+  }
   if (root.dataset) {
     root.dataset.v2Mounted = "true";
   }
-  return { root, panels };
+  return { root, panels, unmount: () => unmountV2(root) };
+}
+
+export function unmountV2(root) {
+  const state = root?.[mountStateKey];
+  if (!state) {
+    return;
+  }
+  for (const cleanup of state.cleanups || []) {
+    cleanup();
+  }
+  delete root[mountStateKey];
+  if (root.dataset) {
+    delete root.dataset.v2Mounted;
+  }
 }
 
 export const v2PanelDefinitions = panelDefinitions.map((definition) => ({ ...definition }));

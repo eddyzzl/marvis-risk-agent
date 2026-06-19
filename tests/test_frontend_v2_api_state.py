@@ -30,6 +30,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "api_v2.js",
         "state_v2.js",
         "main_v2.js",
+        "plan_view.js",
     ):
         assert (static_v2 / module_name).is_file()
 
@@ -268,11 +269,16 @@ def test_v2_mount_creates_stable_panels_idempotently():
         """
         import assert from "node:assert/strict";
         import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import {
+          resetV2State,
+          setPlan,
+        } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
           return {
             tagName: tagName.toUpperCase(),
             id: "",
+            innerHTML: "",
             className: "",
             dataset: {},
             attributes: {},
@@ -287,6 +293,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
           };
         }
 
+        resetV2State();
         const root = makeElement("div");
         root.ownerDocument = { createElement: makeElement };
         root.querySelector = (selector) => {
@@ -312,5 +319,9 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "artifactPanel",
         ]);
         assert.equal(root.dataset.v2Mounted, "true");
+        assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
+
+        setPlan({ id: "plan-1", goal: "Mounted plan", status: "validated", steps: [] });
+        assert.ok(first.panels.planPanel.innerHTML.includes("Mounted plan"));
         """
     )
