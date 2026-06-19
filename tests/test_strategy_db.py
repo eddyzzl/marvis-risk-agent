@@ -1,0 +1,75 @@
+from marvis.db import StrategyRepository, connect, init_db
+from marvis.packs.strategy import BacktestResult, build_strategy
+
+
+def _strategy():
+    return build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="baseline cutoff",
+    )
+
+
+def _backtest_result(strategy_id: str) -> BacktestResult:
+    return BacktestResult(
+        strategy_id=strategy_id,
+        approval_rate=0.7,
+        approved_count=70,
+        approved_bad_rate=0.04,
+        rejected_bad_rate=0.22,
+        expected_profit=2300.0,
+        swap_in_count=5,
+        swap_out_count=8,
+        swap_in_bad_rate=0.12,
+        swap_out_bad_rate=0.01,
+        by_segment=(
+            {"decision": "approve", "count": 70, "bad_count": 3, "bad_rate": 0.04},
+            {"decision": "reject", "count": 30, "bad_count": 7, "bad_rate": 0.22},
+        ),
+    )
+
+
+def test_strategy_repository_round_trips_strategy_and_backtest(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    result = _backtest_result(strategy.id)
+
+    repo.create_strategy("task-1", strategy, created_at="2026-06-19T00:00:00Z")
+    repo.save_backtest(
+        "backtest-1",
+        strategy.id,
+        "dataset-1",
+        result,
+        created_at="2026-06-19T00:01:00Z",
+    )
+
+    assert repo.get_strategy(strategy.id) == strategy
+    assert repo.list_for_task("task-1") == [strategy]
+    assert repo.get_backtest("backtest-1") == result
+    assert repo.list_backtests(strategy.id) == [result]
+
+
+def test_strategy_backtests_cascade_when_strategy_is_deleted(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy = _strategy()
+    result = _backtest_result(strategy.id)
+    repo.create_strategy("task-1", strategy, created_at="2026-06-19T00:00:00Z")
+    repo.save_backtest(
+        "backtest-1",
+        strategy.id,
+        "dataset-1",
+        result,
+        created_at="2026-06-19T00:01:00Z",
+    )
+
+    with connect(db_path) as conn:
+        conn.execute("DELETE FROM strategies WHERE id = ?", (strategy.id,))
+
+    assert repo.get_strategy(strategy.id) is None
+    assert repo.get_backtest("backtest-1") is None
