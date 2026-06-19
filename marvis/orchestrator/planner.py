@@ -4,7 +4,7 @@ import json
 from typing import Any
 import uuid
 
-from marvis.orchestrator.capability import CapabilityTier
+from marvis.orchestrator.capability import CapabilityTier, resolve_tier
 from marvis.orchestrator.context.budget import fit_to_budget
 from marvis.orchestrator.context.ledger import build_progress_ledger
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
@@ -21,6 +21,11 @@ REPLAN_SYS = (
     "你在修订一个 MARVIS 执行计划的剩余步骤。已完成步骤和结果在进度里，"
     "不要重做。只能从工具目录选工具。不要计算任何指标。不要偏离原始目标。"
     "输出严格 JSON，格式为 {\"steps\": [...]}。"
+)
+EXPLORE_SYS = (
+    "你在 MARVIS explore 模式下规划下一小段步骤。基于进度判断目标是否已完成。"
+    "若已完成，输出 {\"done\": true, \"steps\": []}；否则只输出下一小段 steps。"
+    "只能从工具目录选工具，不计算指标，输出严格 JSON。"
 )
 MAX_REPLAN_PARSE_RETRY = 1
 
@@ -96,8 +101,17 @@ class Planner:
         *,
         memory_context: dict,
         task_context: dict,
+        tier: CapabilityTier | None = None,
+        novel_mode: str = "plan_ahead",
         max_retries: int = 2,
     ) -> Plan:
+        tier = tier or resolve_tier(None)
+        effective_mode = _effective_novel_mode(novel_mode, tier)
+        max_steps = (
+            tier.explore_segment_size
+            if effective_mode == "explore"
+            else tier.max_plan_depth
+        )
         catalog = self._tools.catalog_for_planner()
         last_error = None
         for _attempt in range(max_retries + 1):
@@ -107,6 +121,8 @@ class Planner:
                 memory_context,
                 task_context,
                 last_error,
+                novel_mode=effective_mode,
+                max_steps=max_steps,
             )
             raw = self._llm_factory().complete(
                 system_prompt=PLAN_SYS,
@@ -115,7 +131,14 @@ class Planner:
                 stream=False,
             )
             try:
-                plan = self._parse_plan_json(str(raw), goal, task_id)
+                plan = self._parse_plan_json(
+                    str(raw),
+                    goal,
+                    task_id,
+                    tier=tier,
+                    novel_mode=effective_mode,
+                    max_steps=max_steps,
+                )
             except PlanningError as exc:
                 last_error = str(exc)
                 continue
@@ -179,7 +202,63 @@ class Planner:
             last_error = "; ".join(problems)
         raise ReplanError(f"replan could not produce valid plan: {last_error}")
 
-    def _parse_plan_json(self, raw: str, goal: str, task_id: str) -> Plan:
+    def next_explore_segment(
+        self,
+        plan: Plan,
+        *,
+        completed_summaries: dict[str, dict],
+        tier: CapabilityTier,
+    ) -> tuple[list[PlanStep], bool]:
+        if plan.replan_count >= tier.max_replan_iterations:
+            return [], True
+
+        catalog = self._tools.catalog_for_planner()
+        ledger = build_progress_ledger(plan, completed_summaries)
+        last_error = None
+        for _attempt in range(MAX_REPLAN_PARSE_RETRY + 1):
+            prompt = build_explore_prompt(
+                plan,
+                catalog,
+                ledger,
+                max_steps=tier.explore_segment_size,
+                last_error=last_error,
+            )
+            raw = self._llm_factory().complete(
+                system_prompt=EXPLORE_SYS,
+                user_prompt=prompt,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            try:
+                data = _parse_json_object(str(raw), label="explore JSON")
+                if bool(data.get("done", False)):
+                    return [], True
+                steps = _parse_steps_json(
+                    str(raw),
+                    plan_id=plan.id,
+                    start_index=_next_append_index(plan),
+                    max_steps=tier.explore_segment_size,
+                )
+                candidate = _append_segment_plan(plan, steps, tier)
+            except PlanningError as exc:
+                last_error = str(exc)
+                continue
+            problems = self._validator.validate(candidate)
+            if not problems:
+                return steps, False
+            last_error = "; ".join(problems)
+        raise ReplanError(f"explore could not produce valid segment: {last_error}")
+
+    def _parse_plan_json(
+        self,
+        raw: str,
+        goal: str,
+        task_id: str,
+        *,
+        tier: CapabilityTier,
+        novel_mode: str,
+        max_steps: int,
+    ) -> Plan:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -193,7 +272,7 @@ class Planner:
         plan_id = uuid.uuid4().hex
         steps = [
             _step_from_json(item, index=index, plan_id=plan_id)
-            for index, item in enumerate(raw_steps)
+            for index, item in enumerate(raw_steps[:max_steps])
         ]
         return Plan(
             id=plan_id,
@@ -202,7 +281,9 @@ class Planner:
             source="generated",
             template_id=None,
             steps=steps,
-            autonomy_level=int(data.get("autonomy_level", 1)),
+            autonomy_level=int(data.get("autonomy_level", tier.default_autonomy_level)),
+            novel_mode=novel_mode,
+            tier=tier.name,
         )
 
 
@@ -212,6 +293,9 @@ def build_plan_prompt(
     memory_context: dict,
     task_context: dict,
     last_error: str | None,
+    *,
+    novel_mode: str = "plan_ahead",
+    max_steps: int | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -219,10 +303,37 @@ def build_plan_prompt(
             "available_tools": catalog,
             "memory_context": memory_context,
             "task_context": task_context,
+            "novel_mode": novel_mode,
+            "max_steps": max_steps,
             "last_error": last_error,
             "instruction": (
                 "Return a JSON object with steps. Each step chooses a tool and inputs; "
                 "do not compute metrics yourself."
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def build_explore_prompt(
+    plan: Plan,
+    catalog: list[dict],
+    ledger: str,
+    *,
+    max_steps: int,
+    last_error: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "goal": plan.goal,
+            "available_tools": catalog,
+            "progress_ledger": ledger,
+            "max_steps": max_steps,
+            "last_error": last_error,
+            "instruction": (
+                "Return {done: true, steps: []} if the goal is complete. Otherwise "
+                "return only the next segment steps, no more than max_steps."
             ),
         },
         ensure_ascii=False,
@@ -282,6 +393,16 @@ def _parse_steps_json(
     ]
 
 
+def _parse_json_object(raw: str, *, label: str) -> dict:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PlanningError(f"not json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PlanningError(f"{label} must be an object")
+    return data
+
+
 def _next_remaining_index(plan: Plan) -> int:
     preserved = [
         step.index
@@ -289,6 +410,10 @@ def _next_remaining_index(plan: Plan) -> int:
         if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
     ]
     return (max(preserved) + 1) if preserved else 0
+
+
+def _next_append_index(plan: Plan) -> int:
+    return max((step.index for step in plan.steps), default=-1) + 1
 
 
 def _splice_remaining(plan: Plan, revised_remaining: list[PlanStep], tier: CapabilityTier) -> Plan:
@@ -312,6 +437,30 @@ def _splice_remaining(plan: Plan, revised_remaining: list[PlanStep], tier: Capab
         tier=tier.name,
         replan_count=plan.replan_count + 1,
     )
+
+
+def _append_segment_plan(plan: Plan, segment: list[PlanStep], tier: CapabilityTier) -> Plan:
+    return Plan(
+        id=plan.id,
+        task_id=plan.task_id,
+        goal=plan.goal,
+        source=plan.source,
+        template_id=plan.template_id,
+        steps=list(plan.steps) + segment,
+        autonomy_level=plan.autonomy_level,
+        status=plan.status,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+        novel_mode="explore",
+        tier=tier.name,
+        replan_count=plan.replan_count + 1,
+    )
+
+
+def _effective_novel_mode(novel_mode: str, tier: CapabilityTier) -> str:
+    if str(novel_mode or "").strip().lower() == "explore" and tier.allow_explore_mode:
+        return "explore"
+    return "plan_ahead"
 
 
 def _step_from_json(item: Any, *, index: int, plan_id: str) -> PlanStep:

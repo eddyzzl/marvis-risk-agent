@@ -6,7 +6,14 @@ import pytest
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.capability import resolve_tier
 from marvis.orchestrator.contracts import PlanStatus, PostCheck, StepStatus
-from marvis.orchestrator.planner import PLAN_SYS, REPLAN_SYS, Planner, PlanningError, ReplanError
+from marvis.orchestrator.planner import (
+    EXPLORE_SYS,
+    PLAN_SYS,
+    REPLAN_SYS,
+    Planner,
+    PlanningError,
+    ReplanError,
+)
 from marvis.orchestrator.templates import SlotSpec, StepTemplate, WorkflowTemplate
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.loader import load_builtin_packs
@@ -93,6 +100,38 @@ def _replanned_steps(tool: dict | None = None) -> str:
     })
 
 
+def _multi_step_plan(count: int) -> str:
+    return json.dumps({
+        "steps": [
+            {
+                "id": f"step-{index + 1}",
+                "title": f"Echo {index + 1}",
+                "tool": {"plugin": "_sample", "tool": "echo"},
+                "inputs": {"message": f"message-{index + 1}"},
+                "depends_on": [],
+                "post_checks": [{"kind": "nonempty", "spec": {"field": "echoed"}}],
+            }
+            for index in range(count)
+        ],
+    })
+
+
+def _explore_response(*, done: bool = False) -> str:
+    return json.dumps({
+        "done": done,
+        "steps": [] if done else [
+            {
+                "id": "step-3",
+                "title": "Explore Echo",
+                "tool": {"plugin": "_sample", "tool": "echo"},
+                "inputs": {"message": "$ref:step-1.output.echoed"},
+                "depends_on": ["step-1"],
+                "post_checks": [{"kind": "nonempty", "spec": {"field": "echoed"}}],
+            }
+        ],
+    })
+
+
 def test_planner_from_template_fills_slots_and_rewrites_refs(tmp_path):
     llm = FakeLLM([])
 
@@ -166,6 +205,44 @@ def test_planner_generate_retries_validator_failures_and_then_raises(tmp_path):
 
     assert len(llm.calls) == 2
     assert "missing" in llm.calls[1]["user_prompt"]
+
+
+def test_planner_generate_explore_limits_first_segment_and_sets_mode(tmp_path):
+    tier = resolve_tier("balanced")
+    llm = FakeLLM([_multi_step_plan(5)])
+
+    plan = _planner(tmp_path, llm).generate(
+        "explore echo",
+        "task-1",
+        memory_context={},
+        task_context={},
+        tier=tier,
+        novel_mode="explore",
+    )
+
+    assert plan.novel_mode == "explore"
+    assert plan.tier == "balanced"
+    assert len(plan.steps) == tier.explore_segment_size
+    assert "explore" in llm.calls[0]["user_prompt"]
+    assert str(tier.explore_segment_size) in llm.calls[0]["user_prompt"]
+
+
+def test_planner_generate_conservative_reverts_explore_to_plan_ahead(tmp_path):
+    tier = resolve_tier("conservative")
+    llm = FakeLLM([_multi_step_plan(2)])
+
+    plan = _planner(tmp_path, llm).generate(
+        "explore echo",
+        "task-1",
+        memory_context={},
+        task_context={},
+        tier=tier,
+        novel_mode="explore",
+    )
+
+    assert plan.novel_mode == "plan_ahead"
+    assert plan.tier == "conservative"
+    assert len(plan.steps) == 2
 
 
 def test_planner_replan_replaces_remaining_steps_and_preserves_done(tmp_path):
@@ -246,3 +323,61 @@ def test_planner_replan_rejects_exhausted_budget_without_llm_call(tmp_path):
         )
 
     assert llm.calls == []
+
+
+def test_planner_next_explore_segment_returns_valid_segment(tmp_path):
+    tier = resolve_tier("balanced")
+    llm = FakeLLM([_explore_response()])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+    plan.novel_mode = "explore"
+    plan.steps[0].status = StepStatus.DONE
+
+    segment, done = planner.next_explore_segment(
+        plan,
+        completed_summaries={"step-1": {"echoed": "hello"}},
+        tier=tier,
+    )
+
+    assert "下一小段" in EXPLORE_SYS
+    assert done is False
+    assert len(segment) == 1
+    assert segment[0].index == 2
+    assert segment[0].depends_on == ["step-1"]
+    assert "Two Step Echo" in llm.calls[0]["user_prompt"]
+
+
+def test_planner_next_explore_segment_done_and_budget_exhaustion(tmp_path):
+    tier = resolve_tier("balanced")
+    llm = FakeLLM([_explore_response(done=True)])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+
+    segment, done = planner.next_explore_segment(
+        plan,
+        completed_summaries={},
+        tier=tier,
+    )
+
+    assert segment == []
+    assert done is True
+    assert len(llm.calls) == 1
+
+    plan.replan_count = tier.max_replan_iterations
+    exhausted_segment, exhausted_done = planner.next_explore_segment(
+        plan,
+        completed_summaries={},
+        tier=tier,
+    )
+
+    assert exhausted_segment == []
+    assert exhausted_done is True
+    assert len(llm.calls) == 1
