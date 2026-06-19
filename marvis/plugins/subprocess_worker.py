@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import importlib
 import json
+import os
 from pathlib import Path
 import random
 import sys
@@ -18,7 +19,7 @@ def worker_main() -> None:
         job = json.loads(raw)
     except Exception as exc:
         _emit({"ok": False, "error_kind": "protocol", "error": f"bad job json: {exc}"})
-        sys.exit(1)
+        _hard_exit(1)
 
     _apply_resource_limits(job.get("memory_limit_mb"))
     stdout_buffer = StringIO()
@@ -35,7 +36,7 @@ def worker_main() -> None:
             "stderr": stderr_buffer.getvalue(),
             "traceback": traceback.format_exc(),
         })
-        return
+        _hard_exit(0)
     except Exception as exc:
         _emit({
             "ok": False,
@@ -45,7 +46,7 @@ def worker_main() -> None:
             "stderr": stderr_buffer.getvalue(),
             "traceback": traceback.format_exc(),
         })
-        return
+        _hard_exit(0)
 
     _emit({
         "ok": True,
@@ -53,6 +54,7 @@ def worker_main() -> None:
         "stdout": stdout_buffer.getvalue(),
         "stderr": stderr_buffer.getvalue(),
     })
+    _hard_exit(0)
 
 
 def _run_tool(job: dict) -> dict:
@@ -97,6 +99,13 @@ def _apply_resource_limits(memory_mb: int | None) -> None:
 def _emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def _hard_exit(code: int) -> None:
+    # Tool workers are isolated one-shot subprocesses. Some native data
+    # libraries can leave interpreter shutdown waiting after the JSON protocol
+    # line has been flushed; exit immediately so the parent can consume it.
+    os._exit(code)
 
 
 if __name__ == "__main__":
