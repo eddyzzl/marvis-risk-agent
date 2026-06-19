@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import textwrap
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_node(script: str) -> None:
+    subprocess.run(
+        ["node", "--input-type=module", "-e", textwrap.dedent(script)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_v2_static_modules_are_packaged_and_present():
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]["marvis"]
+
+    assert "static/js/v2/*" in package_data
+
+    static_v2 = Path("marvis/static/js/v2")
+    for module_name in (
+        "api_v2.js",
+        "state_v2.js",
+        "main_v2.js",
+    ):
+        assert (static_v2 / module_name).is_file()
+
+
+def test_api_wrappers_keep_formdata_boundary_under_fetch_control():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { apiDelete, apiGet, apiPost } from "./marvis/static/js/api.js";
+
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          calls.push({ url, options });
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => "application/json" },
+            json: async () => ({ ok: true }),
+            text: async () => "",
+          };
+        };
+
+        await apiGet("api/tasks");
+        assert.equal(calls.at(-1).url, "/api/tasks");
+        assert.equal(calls.at(-1).options.method, "GET");
+
+        await apiPost("/api/plans/p1/confirm", { approved: true });
+        assert.equal(calls.at(-1).options.method, "POST");
+        assert.equal(calls.at(-1).options.headers["Content-Type"], "application/json");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { approved: true });
+
+        const formData = new FormData();
+        formData.append("file", new Blob(["zip"]), "plugin.zip");
+        await apiPost("/api/plugins", formData);
+        assert.equal(calls.at(-1).options.method, "POST");
+        assert.ok(calls.at(-1).options.body instanceof FormData);
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(calls.at(-1).options.headers ?? {}, "Content-Type"),
+          false,
+        );
+
+        await apiDelete("/api/plugins/demo");
+        assert.equal(calls.at(-1).url, "/api/plugins/demo");
+        assert.equal(calls.at(-1).options.method, "DELETE");
+        """
+    )
+
+
+def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          cancelPlan,
+          confirmJoinSpec,
+          confirmPlan,
+          confirmStep,
+          createPlan,
+          executeJoin,
+          getJoinPlan,
+          getPlan,
+          listCapabilityTiers,
+          listDatasets,
+          listPluginTools,
+          listPlugins,
+          listSkills,
+          previewDataset,
+          proposeJoin,
+          reloadSkills,
+          removePlugin,
+          runPlan,
+          setPluginEnabled,
+          uploadDataset,
+          uploadPlugin,
+          validateSkill,
+        } from "./marvis/static/js/v2/api_v2.js";
+
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          calls.push({ url, options });
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => "application/json" },
+            json: async () => ({ ok: true }),
+            text: async () => "",
+          };
+        };
+
+        await createPlan("task id", { goal: "build plan" });
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/plans");
+        assert.equal(calls.at(-1).options.method, "POST");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { goal: "build plan" });
+
+        await getPlan("plan/1");
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1");
+        await confirmPlan("plan/1");
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/confirm");
+        await runPlan("plan/1");
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/run");
+        await confirmStep("plan/1", "step/a");
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/confirm");
+        await cancelPlan("plan/1");
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/cancel");
+
+        await listPlugins(true);
+        assert.equal(calls.at(-1).url, "/api/plugins?include_disabled=true");
+        await uploadPlugin(new Blob(["zip"]));
+        assert.equal(calls.at(-1).url, "/api/plugins");
+        assert.ok(calls.at(-1).options.body instanceof FormData);
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(calls.at(-1).options.headers ?? {}, "Content-Type"),
+          false,
+        );
+        await setPluginEnabled("plugin/demo", false);
+        assert.equal(calls.at(-1).url, "/api/plugins/plugin%2Fdemo/disable");
+        await removePlugin("plugin/demo");
+        assert.equal(calls.at(-1).url, "/api/plugins/plugin%2Fdemo");
+        assert.equal(calls.at(-1).options.method, "DELETE");
+        await listPluginTools("plugin/demo");
+        assert.equal(calls.at(-1).url, "/api/plugins/plugin%2Fdemo/tools");
+
+        await listSkills();
+        assert.equal(calls.at(-1).url, "/api/skills");
+        await reloadSkills();
+        assert.equal(calls.at(-1).url, "/api/skills/reload");
+        await validateSkill({ id: "workflow_template" });
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          skill: { id: "workflow_template" },
+        });
+
+        await listDatasets("task id");
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/datasets");
+        await uploadDataset("task id", new Blob(["csv"]), { role: "sample", sheet: "Sheet 1" });
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/datasets/upload");
+        assert.ok(calls.at(-1).options.body instanceof FormData);
+        assert.equal(calls.at(-1).options.body.get("role"), "sample");
+        assert.equal(calls.at(-1).options.body.get("sheet"), "Sheet 1");
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(calls.at(-1).options.headers ?? {}, "Content-Type"),
+          false,
+        );
+        await previewDataset("dataset/1", 25);
+        assert.equal(calls.at(-1).url, "/api/datasets/dataset%2F1/preview?rows=25");
+        await proposeJoin("task id", { anchor_dataset_id: "sample" });
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/joins/propose");
+        await getJoinPlan("join/1");
+        assert.equal(calls.at(-1).url, "/api/joins/join%2F1");
+        await confirmJoinSpec("join/1", { feature_dataset_id: "feature" });
+        assert.equal(calls.at(-1).url, "/api/joins/join%2F1/confirm");
+        await executeJoin("join/1");
+        assert.equal(calls.at(-1).url, "/api/joins/join%2F1/execute");
+
+        await listCapabilityTiers();
+        assert.equal(calls.at(-1).url, "/api/capability-tiers");
+        """
+    )
+
+
+def test_v2_state_store_is_keyed_subscribable_and_resettable():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          getCapabilityTiers,
+          getCurrentJoin,
+          getDatasets,
+          getLoopEvents,
+          getPlan,
+          getPlugins,
+          getSelectedStepId,
+          getSelectedTier,
+          getState,
+          onPlanChange,
+          resetV2State,
+          setCapabilityTiers,
+          setCurrentJoin,
+          setDatasets,
+          setLoopEvents,
+          setPlan,
+          setPlugins,
+          setSelectedStepId,
+          setSelectedTier,
+          setState,
+          subscribe,
+        } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const planEvents = [];
+        const unsubscribePlan = onPlanChange((next, previous) => {
+          planEvents.push({ next, previous });
+        });
+
+        setPlan({ id: "p1", status: "draft" });
+        assert.equal(getPlan().id, "p1");
+        assert.equal(planEvents.length, 1);
+        assert.equal(planEvents[0].next.id, "p1");
+        assert.equal(planEvents[0].previous, null);
+
+        unsubscribePlan();
+        setPlan({ id: "p2" });
+        assert.equal(planEvents.length, 1);
+
+        const stepEvents = [];
+        const unsubscribeStep = subscribe("v2.selectedStepId", (next) => stepEvents.push(next));
+        setSelectedStepId("s1");
+        assert.equal(getSelectedStepId(), "s1");
+        assert.deepEqual(stepEvents, ["s1"]);
+        unsubscribeStep();
+
+        setPlugins([{ name: "demo" }]);
+        setDatasets([{ id: "dataset-1" }]);
+        setCurrentJoin({ id: "join-1" });
+        setCapabilityTiers([{ name: "balanced" }]);
+        setSelectedTier("balanced");
+        setLoopEvents([{ type: "replan" }]);
+
+        assert.equal(getPlugins()[0].name, "demo");
+        assert.equal(getDatasets()[0].id, "dataset-1");
+        assert.equal(getCurrentJoin().id, "join-1");
+        assert.equal(getCapabilityTiers()[0].name, "balanced");
+        assert.equal(getSelectedTier(), "balanced");
+        assert.equal(getLoopEvents()[0].type, "replan");
+        assert.equal(getState("v2.selectedTier"), "balanced");
+
+        assert.throws(() => setState("v1.currentPlan", {}), /Unknown v2 state key/);
+        resetV2State();
+        assert.equal(getPlan(), null);
+        assert.deepEqual(getPlugins(), []);
+        """
+    )
+
+
+def test_v2_mount_creates_stable_panels_idempotently():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+
+        function makeElement(tagName) {
+          return {
+            tagName: tagName.toUpperCase(),
+            id: "",
+            className: "",
+            dataset: {},
+            attributes: {},
+            children: [],
+            setAttribute(name, value) {
+              this.attributes[name] = String(value);
+            },
+            appendChild(child) {
+              this.children.push(child);
+              return child;
+            },
+          };
+        }
+
+        const root = makeElement("div");
+        root.ownerDocument = { createElement: makeElement };
+        root.querySelector = (selector) => {
+          const id = selector.startsWith("#") ? selector.slice(1) : selector;
+          return root.children.find((child) => child.id === id) ?? null;
+        };
+
+        const first = mountV2(root);
+        const second = mountV2(root);
+
+        assert.deepEqual(Object.keys(first.panels), [
+          "planPanel",
+          "subAgentPanel",
+          "pluginPanel",
+          "artifactPanel",
+        ]);
+        assert.equal(second.panels.planPanel, first.panels.planPanel);
+        assert.equal(root.children.length, 4);
+        assert.deepEqual(root.children.map((child) => child.id), [
+          "planPanel",
+          "subAgentPanel",
+          "pluginPanel",
+          "artifactPanel",
+        ]);
+        assert.equal(root.dataset.v2Mounted, "true");
+        """
+    )

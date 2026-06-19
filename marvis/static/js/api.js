@@ -17,14 +17,40 @@ export async function readErrorMessage(response) {
   return (await response.text()) || "请求失败";
 }
 
+function isFormDataBody(body) {
+  return typeof FormData !== "undefined" && body instanceof FormData;
+}
+
+function hasContentType(headers) {
+  return Object.keys(headers || {}).some((name) => name.toLowerCase() === "content-type");
+}
+
+function requestBodyOptions(body, headers = {}) {
+  if (body === undefined) {
+    return { headers };
+  }
+  if (isFormDataBody(body)) {
+    return { body, headers };
+  }
+  const nextHeaders = hasContentType(headers)
+    ? { ...headers }
+    : { "Content-Type": "application/json", ...headers };
+  return {
+    body: typeof body === "string" ? body : JSON.stringify(body),
+    headers: nextHeaders,
+  };
+}
+
 export async function api(endpoint, options = {}) {
   const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
     ? endpoint
     : `/${endpoint}`;
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {}),
-  };
+  const headers = isFormDataBody(options.body)
+    ? { ...(options.headers || {}) }
+    : {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      };
   const response = await fetch(normalizedEndpoint, {
     ...options,
     headers,
@@ -36,6 +62,30 @@ export async function api(endpoint, options = {}) {
     return null;
   }
   return response.json();
+}
+
+export function apiGet(endpoint, options = {}) {
+  return api(endpoint, {
+    ...options,
+    method: "GET",
+  });
+}
+
+export function apiPost(endpoint, body = {}, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const bodyOptions = requestBodyOptions(body, headers);
+  return api(endpoint, {
+    ...options,
+    method: "POST",
+    ...bodyOptions,
+  });
+}
+
+export function apiDelete(endpoint, options = {}) {
+  return api(endpoint, {
+    ...options,
+    method: "DELETE",
+  });
 }
 
 export function sleep(ms) {

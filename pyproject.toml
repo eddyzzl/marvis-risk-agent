@@ -58,4 +58,4 @@ where = ["."]
 include = ["marvis*"]
 
 [tool.setuptools.package-data]
-marvis = ["static/*", "static/js/*", "static/css/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*", "packs/*/manifest.json"]
+marvis = ["static/*", "static/js/*", "static/js/v2/*", "static/css/*", "static/brand/*", "static/pets/*", "static/pets/naitang/*", "static/pets/xiaojiu/*", "packs/*/manifest.json"]
