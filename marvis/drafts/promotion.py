@@ -75,8 +75,15 @@ def promote_draft(
     return manifest
 
 
-def reject_draft(draft: DraftTool, *, drafts, reason: str) -> None:
+def reject_draft(draft: DraftTool, *, drafts, reason: str, audit_repo=None) -> None:
     drafts.set_status(draft.id, "rejected")
+    if audit_repo is not None:
+        audit_repo.write_audit(
+            kind="draft.reject",
+            target_ref=draft.id,
+            outcome="succeeded",
+            detail={"reason": str(reason)},
+        )
 
 
 def _manifest_from_draft(draft: DraftTool, plugin_name: str, *, checksum: str) -> PluginManifest:

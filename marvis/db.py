@@ -1902,6 +1902,32 @@ class DraftRepository:
                 ).fetchall()
         return [_draft_tool_from_row(row) for row in rows]
 
+    def list_all_drafts(self, *, status: str | None = None) -> list[DraftTool]:
+        with connect(self.db_path) as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, name, summary, code, input_schema_json,
+                           output_schema_json, determinism, source, learning_note_id,
+                           status, created_at
+                      FROM draft_tools
+                     ORDER BY created_at, id
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, name, summary, code, input_schema_json,
+                           output_schema_json, determinism, source, learning_note_id,
+                           status, created_at
+                      FROM draft_tools
+                     WHERE status = ?
+                     ORDER BY created_at, id
+                    """,
+                    (status,),
+                ).fetchall()
+        return [_draft_tool_from_row(row) for row in rows]
+
     def set_status(self, draft_id: str, status: str) -> None:
         with connect(self.db_path) as conn:
             row = conn.execute(

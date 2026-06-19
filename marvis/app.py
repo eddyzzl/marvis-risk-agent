@@ -22,7 +22,9 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.db import PlanRepository, PluginRepository, init_db
+from marvis.db import DraftRepository, PlanRepository, PluginRepository, init_db
+from marvis.drafts.registry import DraftRegistry
+from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
@@ -40,6 +42,7 @@ from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
+from marvis.routers.drafts import router as drafts_router
 from marvis.routers.plans import router as plans_router
 from marvis.routers.plugins import router as plugins_router
 from marvis.routers.skills import router as skills_router
@@ -157,6 +160,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app.include_router(api_router)
     app.include_router(plugins_router)
+    app.include_router(drafts_router)
     app.include_router(plans_router)
     app.include_router(skills_router)
 
@@ -216,6 +220,9 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     )
     hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
+    draft_repo = DraftRepository(settings.db_path)
+    draft_registry = DraftRegistry(draft_repo)
+    draft_sandbox = DraftSandbox(tool_runner, draft_registry, draft_repo)
     memory_store = AgentMemoryStore(settings.db_path)
     memory_consolidation_scheduler = ConsolidationScheduler(
         DistillationEngine(memory_store),
@@ -229,6 +236,9 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.tool_registry = tool_registry
     app.state.tool_runner = tool_runner
     app.state.hook_dispatcher = hook_dispatcher
+    app.state.draft_repo = draft_repo
+    app.state.draft_registry = draft_registry
+    app.state.draft_sandbox = draft_sandbox
     app.state.memory_consolidation_scheduler = memory_consolidation_scheduler
     app.state.plugin_python_executable = python_executable
     app.state.plugin_paths = [settings.plugins_dir]

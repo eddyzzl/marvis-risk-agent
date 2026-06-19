@@ -1,0 +1,113 @@
+{
+  "name": "drafts",
+  "version": "0.1.0",
+  "display_name": "Draft Zone",
+  "description": "Governed web learning, draft authoring, and isolated draft execution tools.",
+  "module": "marvis.drafts.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "web_search",
+      "summary": "Search external references when network is available, or return an offline guidance payload.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "minLength": 1},
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 10}
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {"type": "string"},
+                "url": {"type": "string"},
+                "snippet": {"type": "string"}
+              },
+              "required": ["title", "url", "snippet"],
+              "additionalProperties": false
+            }
+          },
+          "offline": {"type": "boolean"},
+          "guidance": {"type": "string"}
+        },
+        "required": ["results"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_web_search",
+      "side_effects": ["network:optional"],
+      "memory_limit_mb": 1024
+    },
+    {
+      "name": "draft_script",
+      "summary": "Generate a Draft Zone tool script from a goal and optional learning note.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "goal": {"type": "string", "minLength": 1},
+          "learning_note_id": {"type": "string", "minLength": 1},
+          "model_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["goal"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "draft_id": {"type": "string"},
+          "name": {"type": "string"},
+          "has_schema": {"type": "boolean"}
+        },
+        "required": ["draft_id", "name", "has_schema"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_draft_script",
+      "side_effects": ["write:draft", "llm"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "run_draft",
+      "summary": "Run a saved draft tool in the same subprocess isolation path as formal tools.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "draft_id": {"type": "string", "minLength": 1},
+          "inputs": {"type": "object"}
+        },
+        "required": ["draft_id", "inputs"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string"},
+          "ok": {"type": "boolean"},
+          "output": {"type": ["object", "null"]},
+          "error": {"type": ["string", "null"]}
+        },
+        "required": ["run_id", "ok", "output", "error"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_run_draft",
+      "side_effects": ["read:draft", "write:draft_run"],
+      "memory_limit_mb": 2048
+    }
+  ],
+  "hooks": [],
+  "permissions": ["network:optional", "write:draft", "read:draft", "write:draft_run", "llm"]
+}
