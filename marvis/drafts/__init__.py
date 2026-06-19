@@ -17,6 +17,7 @@ from marvis.drafts.errors import (
     FetchError,
     OfflineError,
 )
+from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "OfflineError",
     "PromotionCheck",
     "assert_draft_status_transition",
+    "distill_learning",
 ]
