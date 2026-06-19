@@ -16,6 +16,7 @@ dependencies = [
   "jupyter-client>=8.6,<9",
   "openpyxl>=3.1,<4",
   "xlrd>=2.0,<3",
+  "duckdb>=0.9,<2",
   "pyarrow>=15,<25",
   "python-docx>=1.1,<2",
   "pydantic>=2.7,<3",

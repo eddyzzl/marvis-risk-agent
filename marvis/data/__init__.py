@@ -14,6 +14,7 @@ from marvis.data.contracts import (
     JoinSpec,
     KeyPair,
 )
+from marvis.data.errors import DataBackendError, DataLayerError, DataSecurityError
 
 __all__ = [
     "DATE_FORMATS",
@@ -30,4 +31,7 @@ __all__ = [
     "JoinPlan",
     "JoinSpec",
     "KeyPair",
+    "DataBackendError",
+    "DataLayerError",
+    "DataSecurityError",
 ]
