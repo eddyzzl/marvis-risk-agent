@@ -181,6 +181,36 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     ]
 
 
+def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
+    plan = _plan(_step("step-1"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "hi"})])
+    hooks = FakeHooks()
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "summary": "Needs human review.",
+                "open_items": [],
+                "goal_doubt": True,
+            }
+        )
+    )
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.REVIEW
+    assert loaded.status == PlanStatus.REVIEW
+    assert result.summary_ref is not None
+    assert repo.load_plan_summary(result.summary_ref)["goal_doubt"] is True
+    assert [call[0] for call in hooks.calls] == ["step.completed"]
+
+
 def test_plan_executor_pauses_for_confirmation_and_resumes_from_db(tmp_path):
     repo = _repo(tmp_path, _plan(_step("step-1", needs_confirmation=True)))
     runner = FakeRunner([_ok({"echoed": "hi"})])

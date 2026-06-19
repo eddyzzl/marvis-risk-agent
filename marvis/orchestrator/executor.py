@@ -211,6 +211,8 @@ class PlanExecutor:
         }
         review = self._reviewer.final_review(plan, outputs, plan.goal)
         summary_ref = self._repo.store_plan_summary(plan.id, review)
+        if review.goal_doubt:
+            return ExecutionResult(plan.id, PlanStatus.REVIEW, summary_ref, review)
         final_status = PlanStatus.DONE if review.goal_met else PlanStatus.FAILED
         self._set_plan_status(plan, final_status)
         self._dispatch(
