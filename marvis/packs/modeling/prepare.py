@@ -7,14 +7,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.packs.modeling.errors import ModelingError
+
 
 DEFAULT_TEST_SIZE = 0.30
 DEFAULT_OOT_SIZE = 0.20
 SPLIT_COLUMN = "split"
-
-
-class ModelingError(ValueError):
-    pass
 
 
 def prepare_modeling_frame(
