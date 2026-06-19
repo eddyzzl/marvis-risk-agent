@@ -1,0 +1,253 @@
+{
+  "name": "modeling",
+  "version": "0.1.0",
+  "display_name": "Modeling Pack",
+  "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, PMML export, and V1 validation handoff tools.",
+  "module": "marvis.packs.modeling.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "check_data_quality",
+      "summary": "Check modeling data quality issues without changing deterministic metrics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1}
+        },
+        "required": ["dataset_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "issues": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["issues"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_check_data_quality",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "modeling_readiness",
+      "summary": "Evaluate whether a dataset is ready for binary modeling.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "split_col": {"type": "string", "minLength": 1}
+        },
+        "required": ["dataset_id", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ready": {"type": "boolean"},
+          "blockers": {"type": "array", "items": {"type": "string"}},
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "stats": {"type": "object"}
+        },
+        "required": ["ready", "blockers", "warnings", "stats"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_modeling_readiness",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "prepare_modeling_frame",
+      "summary": "Create a derived modeling frame with selected columns and deterministic splits.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "feature_cols": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "split_col": {"type": "string", "minLength": 1},
+          "split_config": {"type": "object"},
+          "seed": {"type": "integer"}
+        },
+        "required": ["dataset_id", "target_col", "feature_cols"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "split_counts": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "split_counts"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_prepare_modeling_frame",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "select_features",
+      "summary": "Select modeling features using IV, correlation, VIF, and optional top-k filters.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "iv_min": {"type": "number"},
+          "corr_max": {"type": "number"},
+          "vif_max": {"type": "number"},
+          "top_k": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "features", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected": {"type": "array", "items": {"type": "string"}},
+          "dropped": {"type": "array", "items": {"type": "array"}},
+          "scores": {"type": "object"}
+        },
+        "required": ["selected", "dropped", "scores"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_select_features",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "train_model",
+      "summary": "Train one modeling recipe and persist experiment metrics plus model artifacts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "recipe": {"type": "string", "enum": ["lgb", "xgb", "lr", "scorecard"]},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "split_col": {"type": "string", "minLength": 1},
+          "split_values": {"type": "object"},
+          "params": {"type": "object"},
+          "seed": {"type": "integer"},
+          "scenario": {"type": "string", "minLength": 1},
+          "early_stopping_rounds": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "recipe", "features", "target_col", "split_col", "split_values", "seed"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {"type": "string"},
+          "artifact_id": {"type": "string"},
+          "metrics": {"type": "object"},
+          "feature_importance": {"type": "array", "items": {"type": "array"}}
+        },
+        "required": ["experiment_id", "artifact_id", "metrics", "feature_importance"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 180,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_model",
+      "side_effects": ["read:dataset", "write:model", "write:dataset", "write:experiment"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "compare_experiments",
+      "summary": "Compare persisted modeling experiments by deterministic metrics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+        },
+        "required": ["experiment_ids"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiments": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["experiments"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compare_experiments",
+      "side_effects": ["read:experiment"],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "export_pmml",
+      "summary": "Export an LR modeling artifact to PMML for V1 validation handoff.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["artifact_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "pmml_path": {"type": "string"}
+        },
+        "required": ["pmml_path"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_export_pmml",
+      "side_effects": ["read:model", "read:dataset", "write:model"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "handoff_to_validation",
+      "summary": "Create a V1 validation task from a trained modeling experiment and sample dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {"type": "string", "minLength": 1},
+          "sample_dataset_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["experiment_id", "sample_dataset_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "validation_task_id": {"type": "string"}
+        },
+        "required": ["validation_task_id"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_handoff_to_validation",
+      "side_effects": ["read:model", "read:dataset", "write:task", "write:model"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task"]
+}
