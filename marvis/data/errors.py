@@ -9,8 +9,12 @@ class DataBackendError(DataLayerError):
     """Raised when the tabular backend cannot complete a data operation."""
 
 
+class DataIngestError(DataLayerError):
+    """Raised when a source file cannot be normalized into a dataset."""
+
+
 class DataSecurityError(DataLayerError):
     """Raised when untrusted input would enter a backend query."""
 
 
-__all__ = ["DataBackendError", "DataLayerError", "DataSecurityError"]
+__all__ = ["DataBackendError", "DataIngestError", "DataLayerError", "DataSecurityError"]
