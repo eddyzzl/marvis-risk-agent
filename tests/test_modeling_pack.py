@@ -80,6 +80,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "compare_experiments",
         "export_pmml",
         "handoff_to_validation",
+        "generate_model_report",
     }
     assert "reject_inference" not in tool_names
     assert train_tool.determinism == "stochastic"

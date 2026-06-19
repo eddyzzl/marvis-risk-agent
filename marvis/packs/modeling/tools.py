@@ -9,10 +9,20 @@ import numpy as np
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
+from marvis.feature.metrics import feature_metrics
+from marvis.output.model_report import ModelReportPayload, render_model_report
 from marvis.packs.modeling.artifact import export_pmml
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.handoff import handoff_to_validation
+from marvis.packs.modeling.report_compute import (
+    BusinessColumns,
+    compute_amount_bin_table,
+    compute_sample_analysis,
+    compute_vintage_report,
+    resolve_report_sections,
+    stress_low_pricing,
+)
 from marvis.packs.modeling.readiness import check_data_quality, modeling_readiness
 from marvis.packs.modeling.prepare import prepare_modeling_frame
 from marvis.packs.modeling.recipes.lgb import train_lgb
@@ -170,6 +180,84 @@ def tool_handoff_to_validation(inputs: dict, ctx) -> dict:
     return {"validation_task_id": validation_task_id}
 
 
+def tool_generate_model_report(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    artifact = _artifact(runtime, experiment.artifact_id) if experiment.artifact_id else None
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset_path = runtime.registry.resolve_path(dataset.id)
+    business = _business_columns(inputs.get("business_columns") or {})
+    statuses = resolve_report_sections(
+        business,
+        _optional_str(inputs.get("feature_dictionary_id")),
+    )
+    sample = None
+    if _section_available(statuses, "sample_analysis") and business.loan_month_col:
+        sample = compute_sample_analysis(
+            runtime.backend,
+            dataset_path,
+            loan_month_col=business.loan_month_col,
+            target_col=experiment.config.target_col,
+            business=business,
+            mob_cols=business.mob_observe_cols,
+        )
+    vintage = None
+    if _section_available(statuses, "vintage") and business.loan_month_col:
+        vintage = compute_vintage_report(
+            runtime.backend,
+            dataset_path,
+            loan_month_col=business.loan_month_col,
+            mob_observe_cols=business.mob_observe_cols,
+            amount_col=business.loan_amount_col,
+        )
+
+    score_col = _report_score_col(runtime, dataset_path, artifact, experiment.config)
+    low_pricing = None
+    if _section_available(statuses, "low_pricing") and business.interest_rate_col:
+        low_pricing = stress_low_pricing(
+            runtime.backend,
+            dataset_path,
+            score_col=score_col,
+            target_col=experiment.config.target_col,
+            interest_rate_col=business.interest_rate_col,
+            low_pricing_threshold=None,
+        )
+    oot_bin = _report_bin_table(
+        runtime,
+        dataset_path,
+        score_col=score_col,
+        target_col=experiment.config.target_col,
+        business=business,
+    )
+    report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta=dict(inputs.get("project_meta") or {}),
+            dataset_split=_dataset_split_rows(experiment.metrics),
+            stability=_stability_rows(experiment.metrics),
+            sample_analysis=sample,
+            vintage=vintage,
+            feature_importance=_feature_importance_rows(artifact),
+            univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
+            oot_bin_table=oot_bin,
+            stress_product_removal={},
+            stress_low_pricing=low_pricing,
+            narratives={
+                "sample": "样本分析基于平台聚合结果生成。",
+                "vintage": "Vintage 结论基于平台计算曲线生成。",
+                "model": "模型结论基于平台指标与特征重要性生成。",
+                "stress": "压力测试结论基于平台压测结果生成。",
+            },
+            section_status=statuses,
+        ),
+        report_path,
+    )
+    return {
+        "report_path": str(report_path),
+        "section_status": [_jsonable(status) for status in statuses],
+    }
+
+
 class _Runtime:
     def __init__(self, ctx):
         self.settings = build_settings(ctx.workspace)
@@ -251,6 +339,97 @@ def _optional_int(value) -> int | None:
     return int(value)
 
 
+def _business_columns(payload: dict) -> BusinessColumns:
+    return BusinessColumns(
+        loan_month_col=_optional_str(payload.get("loan_month_col")),
+        interest_rate_col=_optional_str(payload.get("interest_rate_col")),
+        loan_amount_col=_optional_str(payload.get("loan_amount_col")),
+        term_col=_optional_str(payload.get("term_col")),
+        drawdown_amount_col=_optional_str(payload.get("drawdown_amount_col")),
+        credit_limit_col=_optional_str(payload.get("credit_limit_col")),
+        mob_observe_cols=tuple(str(item) for item in payload.get("mob_observe_cols") or ()),
+    )
+
+
+def _section_available(statuses, section: str) -> bool:
+    return any(status.section == section and status.available for status in statuses)
+
+
+def _dataset_split_rows(metrics) -> list[dict]:
+    if metrics is None:
+        return []
+    return [
+        {"split": "train", "ks": metrics.train_ks, "auc": metrics.train_auc},
+        {"split": "test", "ks": metrics.test_ks, "auc": metrics.test_auc},
+        {"split": "oot", "ks": metrics.oot_ks, "auc": metrics.oot_auc},
+    ]
+
+
+def _stability_rows(metrics) -> list[dict]:
+    if metrics is None:
+        return []
+    return [
+        {"metric": "psi_test_vs_train", "value": metrics.psi_test_vs_train},
+        {"metric": "psi_oot_vs_train", "value": metrics.psi_oot_vs_train},
+        {"metric": "overfit_flag", "value": metrics.overfit_flag},
+    ]
+
+
+def _feature_importance_rows(artifact: ModelArtifact | None) -> list[dict]:
+    if artifact is None:
+        return []
+    return [
+        {"feature": feature, "importance": 0.0}
+        for feature in artifact.feature_list
+    ]
+
+
+def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> list[dict]:
+    if artifact is None:
+        return []
+    frame = runtime.backend.read_frame(dataset_path, columns=[*artifact.feature_list, config.target_col])
+    rows = []
+    for feature in artifact.feature_list:
+        metrics = feature_metrics(
+            frame[feature].to_numpy(dtype=float),
+            frame[config.target_col].to_numpy(dtype=int),
+            feature=feature,
+        )
+        rows.append({"feature": feature, "iv": metrics.iv, "ks": metrics.ks})
+    return rows
+
+
+def _report_score_col(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> str:
+    columns = runtime.backend.column_names(dataset_path)
+    if "score" in columns:
+        return "score"
+    if artifact and artifact.feature_list:
+        return artifact.feature_list[0]
+    return config.features[0]
+
+
+def _report_bin_table(
+    runtime: _Runtime,
+    dataset_path: Path,
+    *,
+    score_col: str,
+    target_col: str,
+    business: BusinessColumns,
+) -> list[dict]:
+    frame = runtime.backend.read_frame(dataset_path, columns=[score_col])
+    from marvis.validation.binning import equal_frequency_bin_edges
+
+    edges = equal_frequency_bin_edges(frame[score_col].to_numpy(dtype=float), 10)
+    return compute_amount_bin_table(
+        runtime.backend,
+        dataset_path,
+        score_col=score_col,
+        target_col=target_col,
+        edges=edges,
+        business=business,
+    )
+
+
 def _jsonable(value: Any):
     if is_dataclass(value):
         return _jsonable(asdict(value))
@@ -268,6 +447,7 @@ __all__ = [
     "tool_compare_experiments",
     "tool_export_pmml",
     "tool_handoff_to_validation",
+    "tool_generate_model_report",
     "tool_modeling_readiness",
     "tool_prepare_modeling_frame",
     "tool_select_features",

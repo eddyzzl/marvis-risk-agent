@@ -246,8 +246,39 @@
       "entrypoint": "tool_handoff_to_validation",
       "side_effects": ["read:model", "read:dataset", "write:task", "write:model"],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "generate_model_report",
+      "summary": "Render a 7-sheet model development report from platform-computed modeling outputs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {"type": "string", "minLength": 1},
+          "dataset_id": {"type": "string", "minLength": 1},
+          "business_columns": {"type": "object"},
+          "feature_dictionary_id": {"type": "string", "minLength": 1},
+          "project_meta": {"type": "object"}
+        },
+        "required": ["experiment_id", "dataset_id", "project_meta"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "report_path": {"type": "string"},
+          "section_status": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["report_path", "section_status"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_model_report",
+      "side_effects": ["read:model", "read:dataset", "write:report"],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],
-  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task"]
+  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task", "write:report"]
 }
