@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
-from marvis.db import PlanRepository, init_db
+from marvis.db import PlanRepository, TaskRepository, connect, init_db
+from marvis.domain import TaskCreate
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 from marvis.routers.plans import router
 from marvis.plugins.manifest import ToolRef
@@ -50,6 +51,7 @@ class FakeExecutor:
 
     def run(self, plan_id):
         self.calls.append(plan_id)
+        return SimpleNamespace(status=PlanStatus.DONE)
 
 
 def _client(tmp_path, *, validator=None, intent=None):
@@ -140,7 +142,8 @@ def test_create_plan_endpoint_uses_generated_path_for_novel_goal(tmp_path):
 def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo
-    repo.create_plan(_plan(status=PlanStatus.VALIDATED))
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
 
     confirmed = client.post("/api/plans/plan-1/confirm")
     assert confirmed.status_code == 200
@@ -148,19 +151,38 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
 
     run = client.post("/api/plans/plan-1/run")
     assert run.status_code == 202
+    assert run.json()["job_id"]
     assert client.app.state.plan_executor.calls == ["plan-1"]
+    assert _job_statuses(repo.db_path) == ["succeeded"]
 
     step_confirm = client.post("/api/plans/plan-1/steps/step-1/confirm")
     assert step_confirm.status_code == 202
+    assert step_confirm.json()["job_id"]
     assert client.app.state.plan_executor.calls == ["plan-1", "plan-1"]
     assert repo.is_step_confirmed("step-1") is True
+    assert _job_statuses(repo.db_path) == ["succeeded", "succeeded"]
 
     cancel_client = _client(tmp_path / "cancel")
     cancel_repo = cancel_client.app.state.plan_repo
-    cancel_repo.create_plan(_plan(status=PlanStatus.CONFIRMED))
+    cancel_task_id = _create_task(cancel_repo.db_path)
+    cancel_repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=cancel_task_id))
     cancelled = cancel_client.post("/api/plans/plan-1/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["plan"]["status"] == "cancelled"
+
+
+def test_plan_run_rejects_active_task_job(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=task_id))
+    TaskRepository(repo.db_path).start_job(task_id, "plan")
+
+    response = client.post("/api/plans/plan-1/run")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "task already has an active job"
+    assert client.app.state.plan_executor.calls == []
 
 
 def test_create_app_wires_plan_runtime_and_router(tmp_path):
@@ -173,3 +195,21 @@ def test_create_app_wires_plan_runtime_and_router(tmp_path):
     assert hasattr(app.state, "plan_repo")
     assert hasattr(app.state, "plan_executor")
     assert hasattr(app.state, "intent_router")
+
+
+def _job_statuses(db_path):
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT status FROM jobs ORDER BY created_at, id").fetchall()
+    return [row["status"] for row in rows]
+
+
+def _create_task(db_path) -> str:
+    task = TaskRepository(db_path).create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(db_path.parent),
+        )
+    )
+    return task.id
