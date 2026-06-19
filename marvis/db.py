@@ -4,6 +4,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -314,6 +315,17 @@ def init_db(db_path: Path) -> None:
                 output_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_summaries (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
             )
             """
         )
@@ -1030,6 +1042,31 @@ class PlanRepository:
         if row is None:
             raise KeyError(step_id)
         value = json.loads(row["output_json"])
+        return value if isinstance(value, dict) else {}
+
+    def store_plan_summary(self, plan_id: str, summary) -> str:
+        summary_id = uuid.uuid4().hex
+        payload = asdict(summary) if is_dataclass(summary) else dict(summary)
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO plan_summaries(id, plan_id, summary_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (summary_id, plan_id, _dump_json_any(payload), _now()),
+            )
+        return f"artifact:{summary_id}"
+
+    def load_plan_summary(self, summary_ref: str) -> dict:
+        summary_id = summary_ref.split(":", 1)[1] if summary_ref.startswith("artifact:") else summary_ref
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT summary_json FROM plan_summaries WHERE id = ?",
+                (summary_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(summary_ref)
+        value = json.loads(row["summary_json"])
         return value if isinstance(value, dict) else {}
 
     def upsert_sub_agent(self, sub: SubAgent) -> None:
