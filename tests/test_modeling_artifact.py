@@ -2,6 +2,7 @@ import lightgbm as lgb
 import pandas as pd
 import pytest
 import xgboost as xgb
+from pypmml import Model
 from sklearn.linear_model import LogisticRegression
 
 from marvis.packs.modeling.artifact import export_pmml, load_model, save_model
@@ -47,7 +48,26 @@ def test_save_and_load_lgb_and_xgb_models(tmp_path):
     assert isinstance(load_model(xgb_artifact, base_dir=tmp_path), xgb.Booster)
 
 
-def test_save_scorecard_model_preserves_woe_maps_and_pmml_error_is_clear(tmp_path):
+def test_export_lr_pmml_can_be_loaded_by_pypmml(tmp_path):
+    frame = pd.DataFrame({"x1": [0.1, 0.2, 0.8, 0.9], "y": [0, 0, 1, 1]})
+    sample_path = tmp_path / "sample.parquet"
+    frame.to_parquet(sample_path, index=False)
+    model = LogisticRegression().fit(frame[["x1"]], frame["y"])
+    artifact = save_model(
+        model,
+        "lr",
+        tmp_path,
+        feature_list=("x1",),
+        params={"C": 1.0},
+    )
+
+    pmml_path = export_pmml(artifact, sample_path, tmp_path / "model.pmml", base_dir=tmp_path)
+
+    assert pmml_path.exists()
+    assert Model.load(pmml_path.as_posix()) is not None
+
+
+def test_save_scorecard_model_preserves_woe_maps_and_unsupported_pmml_error_is_clear(tmp_path):
     model = LogisticRegression().fit([[0.1], [0.2], [0.8], [0.9]], [0, 0, 1, 1])
     artifact = save_model(
         model,
@@ -60,5 +80,5 @@ def test_save_scorecard_model_preserves_woe_maps_and_pmml_error_is_clear(tmp_pat
 
     assert artifact.woe_maps == {"x1": {"edges": [-float("inf"), 0.5, float("inf")]}}
     assert isinstance(load_model(artifact, base_dir=tmp_path), LogisticRegression)
-    with pytest.raises(ModelingError, match="PMML export is not available"):
+    with pytest.raises(ModelingError, match="PMML export is not supported"):
         export_pmml(artifact, tmp_path / "sample.parquet", tmp_path / "model.pmml", base_dir=tmp_path)

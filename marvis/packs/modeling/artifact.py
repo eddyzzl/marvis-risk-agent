@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
+import pandas as pd
 
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
@@ -80,8 +81,47 @@ def export_pmml(
     *,
     base_dir: Path,
 ) -> Path:
-    del artifact, dataset_path, out_path, base_dir
-    raise ModelingError("PMML export is not available until sklearn2pmml integration is installed")
+    if artifact.algorithm != "lr":
+        raise ModelingError(f"PMML export is not supported for algorithm: {artifact.algorithm}")
+    try:
+        from nyoka.skl.skl_to_pmml import skl_to_pmml
+        from sklearn.pipeline import Pipeline
+    except ImportError as exc:
+        raise ModelingError("PMML export requires nyoka") from exc
+
+    model = load_model(artifact, base_dir=base_dir)
+    _read_schema_sample(Path(dataset_path), list(artifact.feature_list))
+    pipeline = Pipeline([("classifier", model)])
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    skl_to_pmml(
+        pipeline,
+        list(artifact.feature_list),
+        target_name=_target_name(Path(dataset_path), list(artifact.feature_list)),
+        pmml_f_name=out_path.as_posix(),
+    )
+    return out_path
+
+
+def _read_schema_sample(path: Path, columns: list[str]) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return pd.read_parquet(path, columns=columns)
+    if suffix == ".csv":
+        return pd.read_csv(path, usecols=columns, nrows=100)
+    raise ModelingError(f"unsupported dataset format for PMML export: {path.suffix}")
+
+
+def _target_name(path: Path, feature_list: list[str]) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        columns = list(pd.read_parquet(path).columns)
+    elif suffix == ".csv":
+        columns = list(pd.read_csv(path, nrows=0).columns)
+    else:
+        return "target"
+    features = set(feature_list)
+    return next((column for column in columns if column not in features), "target")
 
 
 __all__ = ["export_pmml", "load_model", "save_model"]
