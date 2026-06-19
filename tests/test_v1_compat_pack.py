@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
+from marvis.app import create_app
 from marvis.db import PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate, TaskStatus
 from marvis.orchestrator.planner import Planner
@@ -185,6 +188,37 @@ def test_model_validation_template_resolves_v1_compat_tools(tmp_path):
     assert [step.tool_ref.plugin for step in plan.steps] == ["v1_compat"] * 4
     assert plan.steps[-1].needs_confirmation is True
     assert problems == []
+
+
+def test_model_validation_plan_api_uses_v1_compat_template(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    source_dir = tmp_path / "materials"
+    _write_materials(source_dir)
+    task = TaskRepository(tmp_path / "marvis.sqlite").create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+        )
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/plans",
+        json={"goal": "模型验证"},
+    )
+
+    assert response.status_code == 201, response.text
+    plan = response.json()["plan"]
+    assert plan["template_id"] == "model_validation"
+    assert [step["tool_ref"]["plugin"] for step in plan["steps"]] == ["v1_compat"] * 4
+    assert [step["tool_ref"]["tool"] for step in plan["steps"]] == [
+        "scan_materials",
+        "run_notebook",
+        "compute_validation_metrics",
+        "render_reports",
+    ]
 
 
 class _NoLLM:
