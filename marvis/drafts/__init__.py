@@ -21,6 +21,7 @@ from marvis.drafts.errors import (
 )
 from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
+from marvis.drafts.sandbox import DraftSandbox
 
 __all__ = [
     "DRAFT_STATUS_DRAFT",
@@ -33,6 +34,7 @@ __all__ = [
     "DraftNotFound",
     "DraftRegistry",
     "DraftRun",
+    "DraftSandbox",
     "DraftStateError",
     "DraftTool",
     "FetchError",
