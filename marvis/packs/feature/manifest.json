@@ -1,0 +1,329 @@
+{
+  "name": "feature",
+  "version": "0.1.0",
+  "display_name": "Feature Engineering Pack",
+  "description": "Deterministic feature metrics, binning, encoding, transformation, and derivation tools.",
+  "module": "marvis.packs.feature.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "compute_feature_metrics",
+      "summary": "Compute deterministic IV, KS, AUC, PSI, lift, and coverage metrics for features.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "bins": {"type": "integer", "minimum": 1},
+          "compare_dataset_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["dataset_id", "features", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "metrics": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["dataset_id", "metrics"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compute_feature_metrics",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "bin_feature",
+      "summary": "Bin one feature and compute WOE/IV payloads.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "feature": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "method": {"type": "string", "enum": ["equal_frequency", "quantile", "equal_width", "manual", "chimerge", "tree"]},
+          "max_bins": {"type": "integer", "minimum": 1},
+          "bins": {"type": "integer", "minimum": 1},
+          "breakpoints": {"type": "array", "items": {"type": "number"}}
+        },
+        "required": ["dataset_id", "feature", "target_col", "method"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "feature": {"type": "string"},
+          "method": {"type": "string"},
+          "bins": {"type": "array", "items": {"type": "object"}},
+          "edges": {"type": "array", "items": {"type": "number"}},
+          "total_iv": {"type": "number"},
+          "monotonic": {"type": "boolean"},
+          "na_bin": {"type": ["object", "null"]}
+        },
+        "required": ["feature", "method", "bins", "edges", "total_iv", "monotonic", "na_bin"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_bin_feature",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "compute_psi",
+      "summary": "Compute PSI for one feature across two deterministic filters.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "feature": {"type": "string", "minLength": 1},
+          "base_filter": {"type": "object"},
+          "compare_filter": {"type": "object"},
+          "bins": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "feature"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "feature": {"type": "string"},
+          "psi": {"type": "number", "minimum": 0},
+          "edges": {"type": "array", "items": {"type": "number"}},
+          "bin_distributions": {"type": "object"}
+        },
+        "required": ["dataset_id", "feature", "psi", "edges", "bin_distributions"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compute_psi",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "correlation_analysis",
+      "summary": "Compute correlation matrix, collinear pairs, and VIF diagnostics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "method": {"type": "string", "enum": ["pearson", "spearman"]},
+          "threshold": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["dataset_id", "features"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "features": {"type": "array", "items": {"type": "string"}},
+          "matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+          "collinear_pairs": {"type": "array", "items": {"type": "array"}},
+          "vif": {"type": "object"}
+        },
+        "required": ["dataset_id", "features", "matrix", "collinear_pairs", "vif"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_correlation_analysis",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "woe_encode",
+      "summary": "Create a derived dataset with WOE-encoded feature columns and returned WOE maps.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "method": {"type": "string", "enum": ["equal_frequency", "quantile", "equal_width", "manual", "chimerge", "tree"]},
+          "max_bins": {"type": "integer", "minimum": 1},
+          "breakpoints": {"type": "array", "items": {"type": "number"}}
+        },
+        "required": ["dataset_id", "features", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "new_columns": {"type": "array", "items": {"type": "string"}},
+          "woe_maps": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "new_columns", "woe_maps"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_woe_encode",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "onehot_encode",
+      "summary": "Create a derived dataset with one-hot encoded categorical columns.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "max_categories": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "columns"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "mapping": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "mapping"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_onehot_encode",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "normalize",
+      "summary": "Create a derived dataset with min-max normalized or z-score standardized columns.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "method": {"type": "string", "enum": ["minmax", "zscore"]},
+          "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+        },
+        "required": ["dataset_id", "columns", "method"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "scaler_params": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "scaler_params"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_normalize",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "impute_missing",
+      "summary": "Create a derived dataset with missing values imputed using reusable fill values.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "strategy": {"type": "string", "enum": ["mean", "median", "mode", "constant"]},
+          "fill_value": {}
+        },
+        "required": ["dataset_id", "columns", "strategy"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "fill_values": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "fill_values"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_impute_missing",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "cap_outliers",
+      "summary": "Create a derived dataset with numeric outliers capped and returned capping bounds.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "method": {"type": "string", "enum": ["iqr", "quantile"]},
+          "lower_q": {"type": "number", "minimum": 0, "maximum": 1},
+          "upper_q": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "required": ["dataset_id", "columns"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "bounds": {"type": "object"}
+        },
+        "required": ["result_dataset_id", "bounds"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_cap_outliers",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "cross_features",
+      "summary": "Create a derived dataset from explicit feature derivation recipes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "recipe": {"type": "array", "items": {"type": "object"}, "minItems": 1}
+        },
+        "required": ["dataset_id", "recipe"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "new_columns": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["result_dataset_id", "new_columns"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_cross_features",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "write:dataset"]
+}
