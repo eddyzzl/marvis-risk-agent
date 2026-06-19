@@ -7,6 +7,7 @@ from marvis.packs.strategy.contracts import (
     TradeoffPoint,
     VintageCurve,
 )
+from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 
 __all__ = [
     "BacktestResult",
@@ -16,4 +17,6 @@ __all__ = [
     "StrategyRule",
     "TradeoffPoint",
     "VintageCurve",
+    "vintage_curve",
+    "vintage_summary",
 ]
