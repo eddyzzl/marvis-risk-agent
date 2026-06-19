@@ -2124,6 +2124,10 @@ def _train_config_from_dict(payload: dict) -> TrainConfig:
         params=dict(payload.get("params") or {}),
         seed=int(payload["seed"]),
         early_stopping_rounds=_optional_int(payload.get("early_stopping_rounds")),
+        recipe_id=_optional_str(payload.get("recipe_id")),
+        scenario_id=_optional_str(payload.get("scenario_id")),
+        target_type=str(payload.get("target_type") or "binary"),
+        eval_metric=str(payload.get("eval_metric") or "ks_auc"),
     )
 
 

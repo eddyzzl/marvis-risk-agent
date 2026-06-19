@@ -12,6 +12,12 @@ from marvis.packs.modeling.readiness import (
     check_data_quality,
     modeling_readiness,
 )
+from marvis.packs.modeling.scenarios import (
+    ScenarioTemplate,
+    apply_scenario,
+    get_scenario,
+    list_scenarios,
+)
 from marvis.packs.modeling.prepare import prepare_modeling_frame
 from marvis.packs.modeling.select import SelectionResult, select_features
 
@@ -22,10 +28,14 @@ __all__ = [
     "ModelMetrics",
     "ModelRecipe",
     "QualityIssue",
+    "ScenarioTemplate",
     "SelectionResult",
     "TrainConfig",
     "TrainResult",
+    "apply_scenario",
     "check_data_quality",
+    "get_scenario",
+    "list_scenarios",
     "modeling_readiness",
     "prepare_modeling_frame",
     "select_features",

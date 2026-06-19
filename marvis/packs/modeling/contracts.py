@@ -23,6 +23,10 @@ class TrainConfig:
     params: dict[str, Any]
     seed: int
     early_stopping_rounds: int | None
+    recipe_id: str | None = None
+    scenario_id: str | None = None
+    target_type: str = "binary"
+    eval_metric: str = "ks_auc"
 
 
 @dataclass(frozen=True)
