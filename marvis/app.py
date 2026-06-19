@@ -15,13 +15,25 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.db import PluginRepository, init_db
+from marvis.db import PlanRepository, PluginRepository, init_db
 from marvis.execution_environment import load_execution_environment
+from marvis.llm_client import OpenAICompatibleLLMClient
+from marvis.llm_settings import resolve_llm_model
+from marvis.orchestrator.executor import PlanExecutor
+from marvis.orchestrator.harness_state import HarnessState
+from marvis.orchestrator.intent import IntentRouter
+from marvis.orchestrator.planner import Planner
+from marvis.orchestrator.reviewer import Reviewer
+from marvis.orchestrator.subagent import SubAgentDispatcher
+from marvis.orchestrator.templates import load_builtin_templates
+from marvis.orchestrator.templates.skills import load_user_skill_templates
+from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.hooks import HookDispatcher
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
+from marvis.routers.plans import router as plans_router
 from marvis.routers.plugins import router as plugins_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
@@ -108,6 +120,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app = FastAPI(title="MARVIS Risk Agent")
     app.state.settings = settings
     _configure_plugin_runtime(app, settings)
+    _configure_orchestrator(app, settings)
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
@@ -134,6 +147,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app.include_router(api_router)
     app.include_router(plugins_router)
+    app.include_router(plans_router)
 
     @app.exception_handler(IllegalTransition)
     def _illegal_transition(_request, exc: IllegalTransition):
@@ -196,3 +210,71 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.tool_registry = tool_registry
     app.state.tool_runner = tool_runner
     app.state.hook_dispatcher = hook_dispatcher
+    app.state.plugin_python_executable = python_executable
+    app.state.plugin_paths = [settings.plugins_dir]
+
+
+def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
+    load_builtin_templates()
+    plan_repo = PlanRepository(settings.db_path)
+    plan_validator = PlanValidator(app.state.tool_registry)
+    skill_report = load_user_skill_templates(
+        settings.workspace,
+        app.state.tool_registry,
+        plan_validator,
+    )
+    llm_factory = _llm_factory(settings)
+    intent_router = IntentRouter(llm_factory, app.state.tool_registry)
+    planner = Planner(app.state.tool_registry, llm_factory, plan_validator)
+    reviewer = Reviewer(llm_factory)
+    harness_state = HarnessState(plan_repo)
+
+    def executor_factory(restricted_registry):
+        restricted_runner = ToolRunner(
+            restricted_registry,
+            app.state.plugin_repo,
+            python_executable=app.state.plugin_python_executable,
+            datasets_root=settings.datasets_dir,
+            workspace=settings.workspace,
+            plugin_paths=app.state.plugin_paths,
+        )
+        return PlanExecutor(
+            plan_repo,
+            restricted_runner,
+            reviewer,
+            None,
+            app.state.hook_dispatcher,
+            harness_state,
+        )
+
+    subagent_dispatcher = SubAgentDispatcher(
+        plan_repo,
+        planner,
+        executor_factory,
+        app.state.tool_registry,
+        intent_router,
+    )
+    plan_executor = PlanExecutor(
+        plan_repo,
+        app.state.tool_runner,
+        reviewer,
+        subagent_dispatcher,
+        app.state.hook_dispatcher,
+        harness_state,
+    )
+    app.state.plan_repo = plan_repo
+    app.state.plan_validator = plan_validator
+    app.state.skill_report = skill_report
+    app.state.intent_router = intent_router
+    app.state.planner = planner
+    app.state.reviewer = reviewer
+    app.state.harness_state = harness_state
+    app.state.subagent_dispatcher = subagent_dispatcher
+    app.state.plan_executor = plan_executor
+
+
+def _llm_factory(settings: Settings):
+    def factory():
+        return OpenAICompatibleLLMClient(resolve_llm_model(settings.workspace))
+
+    return factory

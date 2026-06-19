@@ -45,6 +45,12 @@ class PlanExecutor:
         plan = self._repo.load_plan(plan_id)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             return ExecutionResult(plan.id, plan.status, None, None)
+        if plan.status not in {
+            PlanStatus.CONFIRMED,
+            PlanStatus.AWAITING_CONFIRM,
+            PlanStatus.RUNNING,
+        }:
+            return ExecutionResult(plan.id, plan.status, None, None)
         if plan.status in {PlanStatus.CONFIRMED, PlanStatus.AWAITING_CONFIRM}:
             self._set_plan_status(plan, PlanStatus.RUNNING)
         self._recover_inflight_steps(plan)
