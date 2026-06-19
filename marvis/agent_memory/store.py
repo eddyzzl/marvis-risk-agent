@@ -12,6 +12,11 @@ from marvis.agent_memory.models import (
     normalize_memory_status,
     normalize_memory_type,
 )
+from marvis.agent_memory.distillation import (
+    MemoryDistillation,
+    confidence_from_support,
+    normalize_distillation_status,
+)
 from marvis.agent_memory.policy import (
     MemoryPolicyDecision,
     classify_memory_candidate,
@@ -240,6 +245,222 @@ class AgentMemoryStore:
             ).fetchall()
         return [_row_to_event(row) for row in rows]
 
+    def create_distillation(self, distillation: MemoryDistillation) -> MemoryDistillation:
+        now = _now()
+        created_at = distillation.created_at or now
+        updated_at = distillation.updated_at or now
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_distillations
+                (
+                    id, category, scope_key, distilled_summary, structured_json,
+                    source_memory_ids_json, support_count, confidence,
+                    superseded_by, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (
+                    distillation.id,
+                    normalize_memory_type(distillation.category),
+                    distillation.scope_key,
+                    distillation.distilled_summary,
+                    _dump_json_object(distillation.structured),
+                    json.dumps(list(distillation.source_memory_ids), ensure_ascii=False, separators=(",", ":")),
+                    int(distillation.support_count),
+                    distillation.confidence,
+                    distillation.superseded_by,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            row = self._select_distillation(conn, distillation.id)
+        return _row_to_distillation(row)
+
+    def get_distillation(self, distillation_id: str) -> MemoryDistillation:
+        with connect(self.db_path) as conn:
+            row = self._select_distillation(conn, distillation_id)
+        return _row_to_distillation(row)
+
+    def get_active_distillation(self, scope_key: str) -> MemoryDistillation | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                  FROM memory_distillations
+                 WHERE scope_key = ?
+                   AND status = 'active'
+                   AND superseded_by IS NULL
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (scope_key,),
+            ).fetchone()
+        return _row_to_distillation(row) if row is not None else None
+
+    def list_distillations(
+        self,
+        *,
+        category: str | None = None,
+        include_superseded: bool = False,
+        limit: int = 100,
+    ) -> list[MemoryDistillation]:
+        clauses = ["status = 'active'"]
+        params: list[Any] = []
+        if not include_superseded:
+            clauses.append("superseded_by IS NULL")
+        if category is not None:
+            clauses.append("category = ?")
+            params.append(normalize_memory_type(category))
+        params.append(max(1, int(limit)))
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                  FROM memory_distillations
+                 WHERE {" AND ".join(clauses)}
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [_row_to_distillation(row) for row in rows]
+
+    def set_superseded(self, distillation_id: str, *, by: str) -> None:
+        now = _now()
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, distillation_id)
+            conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET superseded_by = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (by, now, distillation_id),
+            )
+
+    def clear_superseded(self, distillation_id: str) -> None:
+        now = _now()
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, distillation_id)
+            conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET superseded_by = NULL,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (now, distillation_id),
+            )
+
+    def update_distillation_support(self, distillation_id: str, support_count: int) -> MemoryDistillation:
+        now = _now()
+        support = int(support_count)
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, distillation_id)
+            conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET support_count = ?,
+                       confidence = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (support, confidence_from_support(support), now, distillation_id),
+            )
+            row = self._select_distillation(conn, distillation_id)
+        return _row_to_distillation(row)
+
+    def set_status_distillation(self, distillation_id: str, status: str) -> MemoryDistillation:
+        normalized = normalize_distillation_status(status)
+        now = _now()
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, distillation_id)
+            conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET status = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (normalized, now, distillation_id),
+            )
+            row = self._select_distillation(conn, distillation_id)
+        return _row_to_distillation(row)
+
+    def find_superseded_by(self, distillation_id: str) -> MemoryDistillation | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                  FROM memory_distillations
+                 WHERE superseded_by = ?
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (distillation_id,),
+            ).fetchone()
+        return _row_to_distillation(row) if row is not None else None
+
+    def search_distillations(
+        self,
+        query_context: dict[str, Any],
+        *,
+        active_only: bool = True,
+        limit: int = 6,
+    ) -> list[MemoryDistillation]:
+        category = query_context.get("category")
+        keywords = [
+            str(item).lower()
+            for item in query_context.get("keywords", [])
+            if str(item).strip()
+        ]
+        scope_text = str(query_context.get("scope_key") or query_context.get("scope") or "").lower()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if active_only:
+            clauses.extend(["status = 'active'", "superseded_by IS NULL"])
+        if category:
+            clauses.append("category = ?")
+            params.append(normalize_memory_type(str(category)))
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                  FROM memory_distillations
+                  {where_sql}
+                """,
+                params,
+            ).fetchall()
+        scored = [
+            (distillation, _distillation_score(distillation, keywords, scope_text))
+            for distillation in (_row_to_distillation(row) for row in rows)
+        ]
+        scored = [item for item in scored if item[1] > 0 or not (keywords or scope_text)]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [item[0] for item in scored[: max(1, int(limit))]]
+
+    def mark_consolidated(self, category: str, *, at: str) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_consolidation_state (category, last_consolidated_at)
+                VALUES (?, ?)
+                ON CONFLICT(category) DO UPDATE SET last_consolidated_at = excluded.last_consolidated_at
+                """,
+                (normalize_memory_type(category), at),
+            )
+
+    def last_consolidated_at(self, category: str) -> str | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT last_consolidated_at FROM memory_consolidation_state WHERE category = ?",
+                (normalize_memory_type(category),),
+            ).fetchone()
+        return str(row["last_consolidated_at"]) if row is not None else None
+
     def record_use(
         self,
         entry_id: str,
@@ -365,6 +586,19 @@ class AgentMemoryStore:
             raise KeyError(f"Memory entry not found: {entry_id}")
         return row
 
+    def _select_distillation(
+        self,
+        conn: sqlite3.Connection,
+        distillation_id: str,
+    ) -> sqlite3.Row:
+        row = conn.execute(
+            "SELECT * FROM memory_distillations WHERE id = ?",
+            (distillation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Memory distillation not found: {distillation_id}")
+        return row
+
     def _append_event(
         self,
         conn: sqlite3.Connection,
@@ -452,6 +686,44 @@ def ensure_agent_memory_schema(conn: sqlite3.Connection) -> None:
             ON agent_memory_events(event_type, created_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_distillations (
+            id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            distilled_summary TEXT NOT NULL,
+            structured_json TEXT NOT NULL,
+            source_memory_ids_json TEXT NOT NULL,
+            support_count INTEGER NOT NULL,
+            confidence TEXT NOT NULL,
+            superseded_by TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_distill_scope
+            ON memory_distillations(scope_key, status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_distill_category
+            ON memory_distillations(category, status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_consolidation_state (
+            category TEXT PRIMARY KEY,
+            last_consolidated_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def _row_to_entry(row: sqlite3.Row) -> MemoryEntry:
@@ -469,6 +741,45 @@ def _row_to_entry(row: sqlite3.Row) -> MemoryEntry:
         updated_at=row["updated_at"],
         deleted_at=row["deleted_at"],
     )
+
+
+def _row_to_distillation(row: sqlite3.Row) -> MemoryDistillation:
+    source_ids = json.loads(row["source_memory_ids_json"] or "[]")
+    return MemoryDistillation(
+        id=row["id"],
+        category=row["category"],
+        scope_key=row["scope_key"],
+        distilled_summary=row["distilled_summary"],
+        structured=_load_json_object(row["structured_json"]),
+        source_memory_ids=tuple(str(item) for item in source_ids),
+        support_count=int(row["support_count"]),
+        confidence=row["confidence"],
+        superseded_by=row["superseded_by"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _distillation_score(
+    distillation: MemoryDistillation,
+    keywords: list[str],
+    scope_text: str,
+) -> int:
+    confidence_score = {"high": 300, "medium": 200, "low": 100}.get(distillation.confidence, 0)
+    score = confidence_score + min(int(distillation.support_count), 50)
+    match_score = 0
+    searchable = (
+        f"{distillation.category} {distillation.scope_key} {distillation.distilled_summary} "
+        f"{json.dumps(distillation.structured, ensure_ascii=False, sort_keys=True)}"
+    ).lower()
+    if scope_text and scope_text in searchable:
+        match_score += 80
+    for keyword in keywords:
+        if keyword in searchable:
+            match_score += 40
+    if (keywords or scope_text) and match_score == 0:
+        return 0
+    return score + match_score
 
 
 def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:

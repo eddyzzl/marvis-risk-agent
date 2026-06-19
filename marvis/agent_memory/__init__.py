@@ -7,6 +7,16 @@ from marvis.agent_memory.models import (
     normalize_memory_type,
     validate_model_experience_payload,
 )
+from marvis.agent_memory.distillation import (
+    CONFIDENCE_THRESHOLDS,
+    DISTILLATION_STATUSES,
+    MAX_DISTILLED_SUMMARY_CHARS,
+    MemoryDistillation,
+    confidence_from_support,
+    new_distillation,
+    normalize_distillation_confidence,
+    normalize_distillation_status,
+)
 from marvis.agent_memory.policy import (
     MemoryPolicyDecision,
     classify_memory_candidate,
@@ -37,7 +47,11 @@ __all__ = [
     "MEMORY_STATUSES",
     "MEMORY_TYPES",
     "MODEL_EXPERIENCE_REQUIRED_FIELDS",
+    "CONFIDENCE_THRESHOLDS",
+    "DISTILLATION_STATUSES",
+    "MAX_DISTILLED_SUMMARY_CHARS",
     "MemoryCandidate",
+    "MemoryDistillation",
     "MemoryPolicyDecision",
     "MemoryQuery",
     "MemorySearchResult",
@@ -45,6 +59,7 @@ __all__ = [
     "AUDIT_EVENT_TYPES",
     "AgentMemoryStore",
     "classify_memory_candidate",
+    "confidence_from_support",
     "compare_model_experience",
     "ensure_agent_memory_schema",
     "extract_field_convention",
@@ -56,6 +71,9 @@ __all__ = [
     "normalize_model_family",
     "normalize_memory_status",
     "normalize_memory_type",
+    "new_distillation",
+    "normalize_distillation_confidence",
+    "normalize_distillation_status",
     "retrieve_relevant_memories",
     "validate_model_experience_payload",
 ]
