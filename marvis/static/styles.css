@@ -3410,6 +3410,256 @@ body[data-theme="dark"] .progress-rail {
   gap: 8px;
 }
 
+.draft-tools-dialog {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.draft-tools-section {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.draft-tools-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.draft-tools-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.draft-tools-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1.6fr);
+  gap: 12px;
+  min-height: 420px;
+}
+
+.draft-tools-list,
+.draft-tool-detail {
+  min-width: 0;
+  min-height: 0;
+  max-height: min(64vh, 620px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.draft-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.draft-tool-item {
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.draft-tool-item:hover,
+.draft-tool-item:focus-visible,
+.draft-tool-item.selected {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.draft-tool-item:focus-visible {
+  outline: 3px solid var(--option-focus-ring);
+  outline-offset: 2px;
+}
+
+.draft-tool-item-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.draft-tool-item-main strong,
+.draft-tool-head h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.draft-tool-item-main span,
+.draft-tool-meta,
+.draft-run-item span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.draft-tool-item-main p,
+.draft-tool-summary {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.draft-tool-detail {
+  padding: 12px;
+}
+
+.draft-tool-empty {
+  padding: 22px 12px;
+  color: var(--text-muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+.draft-tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.draft-tool-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.draft-tool-head p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.draft-status-chip {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.draft-status-chip[data-status="tested"],
+.draft-status-chip[data-status="promoted"] {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.draft-status-chip[data-status="rejected"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.draft-learning-note {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.draft-learning-note strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.draft-learning-note p {
+  margin: 0 0 6px;
+}
+
+.draft-learning-note ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.draft-code-block {
+  max-width: 100%;
+  max-height: 220px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.draft-schema-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.draft-schema-grid strong,
+.draft-tool-detail > strong,
+.draft-tool-body strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.draft-run-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.draft-run-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.draft-run-item code {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.draft-governance-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .draft-tools-toolbar,
+  .draft-tools-layout,
+  .draft-schema-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-tools-layout {
+    min-height: 0;
+  }
+}
+
 /* Agent conversation — a frosted-glass chat surface that echoes the status
    card material (.task-hero). The transcript scrolls behind a translucent
    composer, so message content catches light as it slides past the glass. */

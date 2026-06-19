@@ -260,6 +260,91 @@
       </form>
     </dialog>
 
+    <dialog id="draftToolsDialog" class="task-dialog environment-dialog draft-tools-dialog" aria-labelledby="draftToolsTitle">
+      <form class="task-dialog-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="draftToolsTitle">草稿工具</h2>
+          <button id="closeDraftToolsButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form">
+          <section class="task-form-section draft-tools-section">
+            <div class="draft-tools-toolbar">
+              <label class="wide-field">
+                <span>状态</span>
+                <select id="draftStatusFilter">
+                  <option value="">全部</option>
+                  <option value="draft">草稿</option>
+                  <option value="tested">已测试</option>
+                  <option value="promoted">已转正</option>
+                  <option value="rejected">已拒绝</option>
+                </select>
+              </label>
+              <button id="refreshDraftToolsButton" class="button secondary" type="button">
+                刷新
+              </button>
+            </div>
+            <p class="draft-tools-hint">无网时请在外部产出工具后通过插件上传导入。</p>
+            <div class="draft-tools-layout">
+              <div id="draftToolsList" class="draft-tools-list" role="list"></div>
+              <section id="draftToolDetail" class="draft-tool-detail" aria-live="polite">
+                <div id="draftToolEmpty" class="draft-tool-empty">选择一个草稿查看详情。</div>
+                <div id="draftToolBody" class="draft-tool-body hidden">
+                  <div class="draft-tool-head">
+                    <div>
+                      <h3 id="draftToolName">未选择</h3>
+                      <p id="draftToolSummary"></p>
+                    </div>
+                    <span id="draftToolStatus" class="draft-status-chip"></span>
+                  </div>
+                  <div id="draftToolMeta" class="draft-tool-meta"></div>
+                  <div id="draftLearningNote" class="draft-learning-note"></div>
+                  <pre class="draft-code-block"><code id="draftToolCode"></code></pre>
+                  <div class="draft-schema-grid">
+                    <div>
+                      <strong>Input schema</strong>
+                      <pre class="draft-code-block"><code id="draftInputSchema"></code></pre>
+                    </div>
+                    <div>
+                      <strong>Output schema</strong>
+                      <pre class="draft-code-block"><code id="draftOutputSchema"></code></pre>
+                    </div>
+                  </div>
+                  <div>
+                    <strong>运行历史</strong>
+                    <div id="draftRunHistory" class="draft-run-history"></div>
+                  </div>
+                  <label class="wide-field">
+                    <span>试运行输入 JSON</span>
+                    <textarea id="draftRunInputs" rows="5" spellcheck="false">{}</textarea>
+                  </label>
+                  <button id="runDraftButton" class="button secondary" type="button">
+                    试运行
+                  </button>
+                  <label class="wide-field">
+                    <span>转正测试用例 JSON</span>
+                    <textarea id="draftPromotionTestCases" rows="5" spellcheck="false">[
+  {"inputs": {}, "expect": {}}
+]</textarea>
+                  </label>
+                  <div class="draft-governance-actions">
+                    <button id="promoteDraftButton" class="button primary" type="button">
+                      转正
+                    </button>
+                    <button id="rejectDraftButton" class="button secondary danger" type="button">
+                      拒绝
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+          <div id="draftToolsStatus" class="status" role="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="wordPreviewDialog" class="task-dialog word-preview-dialog" aria-labelledby="wordPreviewTitle">
       <div class="task-dialog-panel word-preview-panel">
         <header class="dialog-head">
@@ -451,6 +536,12 @@
                 <span class="settings-row-title">Agent 记忆</span>
                 <button id="openAgentMemoryButton" class="settings-environment-button" type="button">
                   <span>管理与审计</span>
+                </button>
+              </div>
+              <div class="settings-row" data-settings-row="draft-tools">
+                <span class="settings-row-title">草稿工具</span>
+                <button id="openDraftToolsButton" class="settings-environment-button" type="button">
+                  <span>试运行与转正</span>
                 </button>
               </div>
             </div>

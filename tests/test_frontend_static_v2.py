@@ -3893,6 +3893,51 @@ def test_llm_settings_dialog_and_agent_model_selector_exist():
     assert ".checkbox-field" in styles_css
 
 
+def test_draft_tools_dialog_and_governance_controls_exist():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    assert 'data-settings-row="draft-tools"' in settings_markup
+    assert 'id="openDraftToolsButton"' in settings_markup
+    assert "草稿工具" in settings_markup
+    assert 'id="draftToolsDialog"' in index_html
+    assert 'id="draftToolsList"' in index_html
+    assert 'id="draftToolDetail"' in index_html
+    assert 'id="draftStatusFilter"' in index_html
+    assert 'id="refreshDraftToolsButton"' in index_html
+    assert 'id="draftRunInputs"' in index_html
+    assert 'id="draftPromotionTestCases"' in index_html
+    assert 'id="runDraftButton"' in index_html
+    assert 'id="promoteDraftButton"' in index_html
+    assert 'id="rejectDraftButton"' in index_html
+    assert "无网时请在外部产出工具后通过插件上传导入" in index_html
+
+    assert "let draftTools = [];" in app_js
+    assert "function openDraftToolsDialog" in app_js
+    assert "async function loadDraftTools" in app_js
+    assert "async function inspectDraftTool" in app_js
+    assert "async function runDraftTool" in app_js
+    assert "async function promoteDraftTool" in app_js
+    assert "async function rejectDraftTool" in app_js
+    assert 'api("/api/drafts' in app_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in app_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in app_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in app_js
+    assert '"X-MARVIS-Plugin-Admin": "local-dev"' in app_js
+    assert "请填写转正测试用例。" in app_js
+    assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in app_js
+
+    assert ".draft-tools-dialog" in styles_css
+    assert ".draft-tools-layout" in styles_css
+    assert ".draft-tool-detail" in styles_css
+    assert ".draft-code-block" in styles_css
+
+
 def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
