@@ -13,6 +13,14 @@ from marvis.plugins.schema_validation import validate_against_schema
 
 
 METRIC_FIELDS = frozenset({"ks", "auc", "psi", "iv", "lift", "gini"})
+POST_CHECK_KINDS = frozenset({
+    "schema",
+    "range",
+    "rowcount",
+    "invariant",
+    "nonempty",
+    "match_rate",
+})
 _SLOT_PLACEHOLDER_RE = re.compile(r"^\{slot:[A-Za-z_][A-Za-z0-9_:-]*\}$")
 
 
@@ -26,9 +34,11 @@ class PlanValidator:
         problems.extend(self._check_inputs_schema(plan))
         problems.extend(self._check_dag(plan))
         problems.extend(self._check_ref_compatibility(plan))
+        problems.extend(self._check_post_check_kinds(plan))
         problems.extend(self._check_join_gates(plan))
         problems.extend(self._check_determinism_checks(plan))
         problems.extend(self._check_subagent_grants(plan))
+        problems.extend(self._check_decision_points(plan))
         return problems
 
     def _check_tools_exist(self, plan: Plan) -> list[str]:
@@ -109,6 +119,16 @@ class PlanValidator:
             if step.tool_ref.tool == "execute_join" and not step.needs_confirmation
         ]
 
+    def _check_post_check_kinds(self, plan: Plan) -> list[str]:
+        problems = []
+        for step in plan.steps:
+            for check in step.post_checks:
+                if check.kind not in POST_CHECK_KINDS:
+                    problems.append(
+                        f"step {step.title}: unknown post_check kind {check.kind}"
+                    )
+        return problems
+
     def _check_determinism_checks(self, plan: Plan) -> list[str]:
         problems = []
         for step in plan.steps:
@@ -143,6 +163,13 @@ class PlanValidator:
                         f"sub-agent step {step.title}: granted tool {ref.label()} {exc}"
                     )
         return problems
+
+    def _check_decision_points(self, plan: Plan) -> list[str]:
+        return [
+            f"decision_point is not allowed on safety step {step.title}"
+            for step in plan.steps
+            if step.decision_point and _is_safety_step(step)
+        ]
 
     def _resolve_step_tool(self, step: PlanStep):
         try:
@@ -199,6 +226,12 @@ def _schema_fields(schema: dict) -> set[str]:
 
 def _metric_fields_in(schema: dict) -> set[str]:
     return _schema_fields(schema) & METRIC_FIELDS
+
+
+def _is_safety_step(step: PlanStep) -> bool:
+    if step.tool_ref.tool == "execute_join":
+        return True
+    return any(check.kind == "range" for check in step.post_checks)
 
 
 def _has_cycle(steps: list[PlanStep]) -> bool:

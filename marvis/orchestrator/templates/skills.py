@@ -113,6 +113,7 @@ def _dry_instantiate(template: WorkflowTemplate) -> Plan:
                 ],
                 post_checks=list(step_template.post_checks),
                 needs_confirmation=step_template.needs_confirmation,
+                decision_point=step_template.decision_point,
                 sub_agent_scope=step_template.sub_agent_scope,
                 granted_tools=list(step_template.granted_tools),
             )
@@ -198,6 +199,7 @@ def _parse_step(item: Any, index: int) -> StepTemplate:
             for check_index, check in enumerate(item.get("post_checks") or [])
         ),
         needs_confirmation=bool(item.get("needs_confirmation", False)),
+        decision_point=bool(item.get("decision_point", False)),
         sub_agent_scope=_optional_text(item.get("sub_agent_scope")),
         granted_tools=tuple(
             _parse_tool_ref(ref, f"steps[{index}].granted_tools")

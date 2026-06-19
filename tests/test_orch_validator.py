@@ -283,3 +283,38 @@ def test_plan_validator_requires_subagent_tool_grants(tmp_path):
     assert any("empty granted_tools" in problem for problem in _validator(tmp_path).validate(_plan(no_grants)))
     assert any("granted tool" in problem for problem in _validator(tmp_path).validate(_plan(bad_grant)))
     assert _validator(tmp_path).validate(_plan(ok)) == []
+
+
+def test_plan_validator_rejects_unknown_post_check_kind(tmp_path):
+    step = _step(
+        "step-1",
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        post_checks=[PostCheck("mystery", {"field": "echoed"})],
+    )
+
+    problems = _validator(tmp_path).validate(_plan(step))
+
+    assert any("unknown post_check kind mystery" in problem for problem in problems)
+
+
+def test_plan_validator_rejects_decision_point_on_safety_steps(tmp_path):
+    metric_step = _step(
+        "step-1",
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        post_checks=[PostCheck("range", {"field": "ks", "max": 1.0})],
+    )
+    metric_step.decision_point = True
+    join_step = _step(
+        "step-2",
+        ToolRef("join_pack", "execute_join"),
+        {"left": "a", "right": "b"},
+        needs_confirmation=True,
+    )
+    join_step.decision_point = True
+
+    problems = _validator(tmp_path).validate(_plan(metric_step, join_step))
+
+    assert any("safety step step-1" in problem for problem in problems)
+    assert any("safety step step-2" in problem for problem in problems)

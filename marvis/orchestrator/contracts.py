@@ -63,6 +63,7 @@ class PlanStep:
     depends_on: list[str]
     post_checks: list[PostCheck]
     needs_confirmation: bool = False
+    decision_point: bool = False
     sub_agent_scope: str | None = None
     granted_tools: list[ToolRef] = field(default_factory=list)
     status: StepStatus = StepStatus.PENDING
@@ -84,6 +85,17 @@ class Plan:
     status: PlanStatus = PlanStatus.DRAFT
     created_at: str = ""
     updated_at: str = ""
+    novel_mode: str = "plan_ahead"
+    tier: str = "balanced"
+    replan_count: int = 0
+
+
+@dataclass
+class ExploreCursor:
+    plan_id: str
+    segment_index: int
+    open_goal: str
+    done: bool
 
 
 @dataclass
@@ -132,6 +144,9 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "status": plan.status.value,
         "created_at": plan.created_at,
         "updated_at": plan.updated_at,
+        "novel_mode": plan.novel_mode,
+        "tier": plan.tier,
+        "replan_count": plan.replan_count,
     }
 
 
@@ -147,6 +162,9 @@ def plan_from_dict(payload: dict[str, Any]) -> Plan:
         status=PlanStatus(payload.get("status", PlanStatus.DRAFT.value)),
         created_at=str(payload.get("created_at") or ""),
         updated_at=str(payload.get("updated_at") or ""),
+        novel_mode=str(payload.get("novel_mode") or "plan_ahead"),
+        tier=str(payload.get("tier") or "balanced"),
+        replan_count=int(payload.get("replan_count") or 0),
     )
 
 
@@ -161,6 +179,7 @@ def _step_to_dict(step: PlanStep) -> dict[str, Any]:
         "depends_on": list(step.depends_on),
         "post_checks": [_post_check_to_dict(check) for check in step.post_checks],
         "needs_confirmation": step.needs_confirmation,
+        "decision_point": step.decision_point,
         "sub_agent_scope": step.sub_agent_scope,
         "granted_tools": [_tool_ref_to_dict(ref) for ref in step.granted_tools],
         "status": step.status.value,
@@ -185,6 +204,7 @@ def _step_from_dict(payload: dict[str, Any]) -> PlanStep:
             for item in payload.get("post_checks") or []
         ],
         needs_confirmation=bool(payload.get("needs_confirmation", False)),
+        decision_point=bool(payload.get("decision_point", False)),
         sub_agent_scope=_optional_str(payload.get("sub_agent_scope")),
         granted_tools=[
             _tool_ref_from_dict(item)
@@ -243,4 +263,3 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
-

@@ -35,6 +35,7 @@ def _plan() -> Plan:
         depends_on=[],
         post_checks=[PostCheck(kind="schema", spec={"required": ["echoed"]})],
         needs_confirmation=True,
+        decision_point=True,
         sub_agent_scope="summarize",
         granted_tools=[ToolRef("_sample", "echo")],
         status=StepStatus.AWAITING_CONFIRM,
@@ -60,6 +61,9 @@ def _plan() -> Plan:
         status=PlanStatus.VALIDATED,
         created_at="2026-06-19T00:00:00+00:00",
         updated_at="2026-06-19T00:01:00+00:00",
+        novel_mode="explore",
+        tier="autonomous",
+        replan_count=2,
     )
 
 
@@ -70,13 +74,44 @@ def test_plan_contract_round_trips_to_json_safe_dict():
     reparsed = plan_from_dict(payload)
 
     assert payload["status"] == "validated"
+    assert payload["novel_mode"] == "explore"
+    assert payload["tier"] == "autonomous"
+    assert payload["replan_count"] == 2
     assert payload["steps"][0]["status"] == "awaiting_confirm"
+    assert payload["steps"][0]["decision_point"] is True
     assert payload["steps"][0]["tool_ref"] == {
         "plugin": "_sample",
         "tool": "echo",
         "version": "0.1.0",
     }
     assert reparsed == plan
+
+
+def test_adaptive_contract_defaults_do_not_change_plain_dag_behavior():
+    step = PlanStep(
+        id="step-1",
+        plan_id="plan-1",
+        index=0,
+        title="Echo",
+        tool_ref=ToolRef("_sample", "echo"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+    )
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="run echo",
+        source="template",
+        template_id="sample_echo",
+        steps=[step],
+        autonomy_level=1,
+    )
+
+    assert step.decision_point is False
+    assert plan.novel_mode == "plan_ahead"
+    assert plan.tier == "balanced"
+    assert plan.replan_count == 0
 
 
 def test_subagent_contract_defaults_and_tool_refs():

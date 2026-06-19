@@ -142,6 +142,28 @@ def test_validate_skill_template_rejects_builtin_shadow_and_plan_problems(tmp_pa
     assert any("ks" in problem for problem in metric_problems)
 
 
+def test_validate_skill_template_rejects_unknown_post_check_kind(tmp_path):
+    tool_registry, plan_validator = _registry_and_validator(tmp_path)
+    template = parse_skill_template(
+        _skill_data(
+            id="bad_post_check",
+            steps=[
+                {
+                    "title": "Echo",
+                    "tool": {"plugin": "_sample", "tool": "echo"},
+                    "inputs": {"message": "{slot:message}"},
+                    "depends_on": [],
+                    "post_checks": [{"kind": "mystery", "spec": {"field": "echoed"}}],
+                }
+            ],
+        )
+    )
+
+    problems = validate_skill_template(template, tool_registry, plan_validator)
+
+    assert any("unknown post_check kind mystery" in problem for problem in problems)
+
+
 def test_load_user_skill_templates_registers_active_and_reports_rejected(tmp_path):
     clear_user_templates()
     load_builtin_templates()

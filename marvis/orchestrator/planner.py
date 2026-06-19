@@ -61,6 +61,7 @@ class Planner:
                     ],
                     post_checks=list(step_template.post_checks),
                     needs_confirmation=step_template.needs_confirmation,
+                    decision_point=step_template.decision_point,
                     sub_agent_scope=step_template.sub_agent_scope,
                     granted_tools=list(step_template.granted_tools),
                 )
@@ -178,6 +179,7 @@ def _step_from_json(item: Any, *, index: int, plan_id: str) -> PlanStep:
             for check_index, check in enumerate(item.get("post_checks") or [])
         ],
         needs_confirmation=bool(item.get("needs_confirmation", False)),
+        decision_point=bool(item.get("decision_point", False)),
         sub_agent_scope=_optional_text(item.get("sub_agent_scope")),
         granted_tools=[
             _tool_ref_from_json(ref, f"steps[{index}].granted_tools")

@@ -4,7 +4,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -43,7 +43,7 @@ AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:final_validation_conclusion",
 })
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MIGRATION_TABLES = frozenset({"tasks"})
+_MIGRATION_TABLES = frozenset({"tasks", "plans", "plan_steps"})
 
 
 def _now() -> str:
@@ -277,10 +277,31 @@ def init_db(db_path: Path) -> None:
                 template_id TEXT,
                 autonomy_level INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                novel_mode TEXT NOT NULL DEFAULT 'plan_ahead',
+                tier TEXT NOT NULL DEFAULT 'balanced',
+                replan_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="plans",
+            column="novel_mode",
+            definition="TEXT NOT NULL DEFAULT 'plan_ahead'",
+        )
+        _ensure_column(
+            conn,
+            table="plans",
+            column="tier",
+            definition="TEXT NOT NULL DEFAULT 'balanced'",
+        )
+        _ensure_column(
+            conn,
+            table="plans",
+            column="replan_count",
+            definition="INTEGER NOT NULL DEFAULT 0",
         )
         conn.execute(
             """
@@ -296,6 +317,7 @@ def init_db(db_path: Path) -> None:
                 depends_on_json TEXT NOT NULL,
                 post_checks_json TEXT NOT NULL,
                 needs_confirmation INTEGER NOT NULL,
+                decision_point INTEGER NOT NULL DEFAULT 0,
                 sub_agent_scope TEXT,
                 granted_tools_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL,
@@ -307,6 +329,12 @@ def init_db(db_path: Path) -> None:
                 FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="plan_steps",
+            column="decision_point",
+            definition="INTEGER NOT NULL DEFAULT 0",
         )
         conn.execute(
             """
@@ -883,9 +911,9 @@ class PlanRepository:
                 """
                 INSERT INTO plans(
                     id, task_id, goal, source, template_id, autonomy_level,
-                    status, created_at, updated_at
+                    status, novel_mode, tier, replan_count, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["id"],
@@ -895,6 +923,9 @@ class PlanRepository:
                     payload["template_id"],
                     payload["autonomy_level"],
                     payload["status"],
+                    payload["novel_mode"],
+                    payload["tier"],
+                    payload["replan_count"],
                     created_at,
                     updated_at,
                 ),
@@ -914,7 +945,7 @@ class PlanRepository:
             plan_row = conn.execute(
                 """
                 SELECT id, task_id, goal, source, template_id, autonomy_level,
-                       status, created_at, updated_at
+                       status, novel_mode, tier, replan_count, created_at, updated_at
                   FROM plans
                  WHERE id = ?
                 """,
@@ -926,7 +957,7 @@ class PlanRepository:
                 """
                 SELECT id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                        inputs_json, depends_on_json, post_checks_json,
-                       needs_confirmation, sub_agent_scope, granted_tools_json,
+                       needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
                        status, sub_agent_id, output_ref, review_json, error
                   FROM plan_steps
                  WHERE plan_id = ?
@@ -961,6 +992,7 @@ class PlanRepository:
                        depends_on_json = ?,
                        post_checks_json = ?,
                        needs_confirmation = ?,
+                       decision_point = ?,
                        sub_agent_scope = ?,
                        granted_tools_json = ?,
                        status = ?,
@@ -1043,6 +1075,100 @@ class PlanRepository:
             raise KeyError(step_id)
         value = json.loads(row["output_json"])
         return value if isinstance(value, dict) else {}
+
+    def replace_remaining_steps(self, plan_id: str, new_plan: Plan) -> None:
+        payload = plan_to_dict(new_plan)
+        with connect(self.db_path) as conn:
+            if conn.execute("SELECT 1 FROM plans WHERE id = ?", (plan_id,)).fetchone() is None:
+                raise PlanNotFoundError(plan_id)
+            completed_rows = conn.execute(
+                """
+                SELECT id
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                   AND status IN ('done', 'skipped')
+                """,
+                (plan_id,),
+            ).fetchall()
+            completed_ids = {row["id"] for row in completed_rows}
+            conn.execute(
+                """
+                DELETE FROM plan_steps
+                 WHERE plan_id = ?
+                   AND status NOT IN ('done', 'skipped')
+                """,
+                (plan_id,),
+            )
+            for step in payload["steps"]:
+                if step["id"] in completed_ids or step["status"] in {"done", "skipped"}:
+                    continue
+                step["plan_id"] = plan_id
+                self._insert_step(conn, step)
+            conn.execute(
+                """
+                UPDATE plans
+                   SET replan_count = replan_count + 1,
+                       tier = ?,
+                       novel_mode = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (payload["tier"], payload["novel_mode"], _now(), plan_id),
+            )
+            _write_audit_row(
+                conn,
+                kind="plan.replan",
+                target_ref=plan_id,
+                outcome="succeeded",
+                detail={"step_count": len(payload["steps"])},
+            )
+
+    def append_steps(self, plan_id: str, steps: list) -> None:
+        with connect(self.db_path) as conn:
+            if conn.execute("SELECT 1 FROM plans WHERE id = ?", (plan_id,)).fetchone() is None:
+                raise PlanNotFoundError(plan_id)
+            row = conn.execute(
+                "SELECT COALESCE(MAX(idx), -1) AS max_idx FROM plan_steps WHERE plan_id = ?",
+                (plan_id,),
+            ).fetchone()
+            next_index = int(row["max_idx"]) + 1
+            for offset, step in enumerate(steps):
+                normalized = dataclass_replace(
+                    step,
+                    plan_id=plan_id,
+                    index=next_index + offset,
+                )
+                payload = plan_to_dict(
+                    Plan(
+                        id=plan_id,
+                        task_id="",
+                        goal="",
+                        source="generated",
+                        template_id=None,
+                        steps=[normalized],
+                        autonomy_level=0,
+                    )
+                )["steps"][0]
+                self._insert_step(conn, payload)
+            conn.execute(
+                "UPDATE plans SET updated_at = ? WHERE id = ?",
+                (_now(), plan_id),
+            )
+
+    def recent_failed_tool_refs(self, plan_id: str, *, limit: int) -> list[str]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT tool_plugin, tool_name
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                   AND status = 'failed'
+                 ORDER BY idx DESC, id DESC
+                 LIMIT ?
+                """,
+                (plan_id, int(limit)),
+            ).fetchall()
+        return [f"{row['tool_plugin']}.{row['tool_name']}" for row in rows]
 
     def store_plan_summary(self, plan_id: str, summary) -> str:
         summary_id = uuid.uuid4().hex
@@ -1160,10 +1286,10 @@ class PlanRepository:
             INSERT INTO plan_steps(
                 id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                 inputs_json, depends_on_json, post_checks_json,
-                needs_confirmation, sub_agent_scope, granted_tools_json,
+                needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
                 status, sub_agent_id, output_ref, review_json, error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _step_insert_values(step),
         )
@@ -1413,6 +1539,9 @@ def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row])
         "status": plan_row["status"],
         "created_at": plan_row["created_at"],
         "updated_at": plan_row["updated_at"],
+        "novel_mode": plan_row["novel_mode"],
+        "tier": plan_row["tier"],
+        "replan_count": int(plan_row["replan_count"]),
     }
 
 
@@ -1431,6 +1560,7 @@ def _step_payload_from_row(row: sqlite3.Row) -> dict:
         "depends_on": _load_json_array(row["depends_on_json"]),
         "post_checks": _load_json_array(row["post_checks_json"]),
         "needs_confirmation": bool(row["needs_confirmation"]),
+        "decision_point": bool(row["decision_point"]),
         "sub_agent_scope": row["sub_agent_scope"],
         "granted_tools": _load_json_array(row["granted_tools_json"]),
         "status": row["status"],
@@ -1455,6 +1585,7 @@ def _step_insert_values(step: dict) -> tuple:
         _dump_json_any(step.get("depends_on") or []),
         _dump_json_any(step.get("post_checks") or []),
         int(bool(step.get("needs_confirmation"))),
+        int(bool(step.get("decision_point"))),
         step.get("sub_agent_scope"),
         _dump_json_any(step.get("granted_tools") or []),
         step["status"],

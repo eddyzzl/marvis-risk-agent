@@ -23,6 +23,7 @@ class StepTemplate:
     depends_on_titles: tuple[str, ...]
     post_checks: tuple[PostCheck, ...]
     needs_confirmation: bool = False
+    decision_point: bool = False
     sub_agent_scope: str | None = None
     granted_tools: tuple[ToolRef, ...] = ()
 
@@ -107,4 +108,3 @@ def _with_source(template: WorkflowTemplate, source: str) -> WorkflowTemplate:
         default_autonomy=template.default_autonomy,
         source=source,
     )
-
