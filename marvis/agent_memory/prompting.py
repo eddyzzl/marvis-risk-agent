@@ -85,6 +85,7 @@ def add_memory_to_prompt_payload(
 
 def _memory_packet(memory: dict[str, Any]) -> dict[str, Any]:
     packet = {
+        "kind": memory.get("kind") or "raw",
         "id": str(memory.get("id")),
         "memory_type": memory.get("memory_type"),
         "summary": _truncate_text(memory.get("summary"), MEMORY_PROMPT_SUMMARY_MAX_CHARS),
@@ -92,9 +93,17 @@ def _memory_packet(memory: dict[str, Any]) -> dict[str, Any]:
         "confidence": memory.get("confidence") or "medium",
         "match_reason": memory.get("match_reason") or "",
     }
+    if memory.get("support_count") is not None:
+        packet["support_count"] = int(memory.get("support_count") or 0)
+    if isinstance(memory.get("source_memory_ids"), list):
+        packet["source_memory_ids"] = [str(item) for item in memory["source_memory_ids"]]
     payload = memory.get("payload")
     if isinstance(payload, dict):
-        packet["payload"] = _bounded_payload(payload, memory.get("memory_type"))
+        packet["payload"] = (
+            payload
+            if packet["kind"] == "distillation"
+            else _bounded_payload(payload, memory.get("memory_type"))
+        )
     return packet
 
 

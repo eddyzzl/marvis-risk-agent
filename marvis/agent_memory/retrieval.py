@@ -98,6 +98,31 @@ def retrieve_relevant_memories(
     return sorted(results, key=lambda result: result.score, reverse=True)[:limit]
 
 
+def retrieve_with_distillations(
+    store,
+    query_context: dict[str, Any] | MemoryQuery,
+    *,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    query = _query_from_context(query_context)
+    context = _query_context_dict(query)
+    packets: list[dict[str, Any]] = []
+    distillations = store.search_distillations(context, active_only=True, limit=limit)
+    for distillation in distillations:
+        if distillation.confidence == "low":
+            continue
+        packets.append(_distillation_packet(distillation))
+        if len(packets) >= limit:
+            return packets[:limit]
+
+    remaining = limit - len(packets)
+    if remaining <= 0:
+        return packets[:limit]
+    raw_results = retrieve_relevant_memories(store.list_entries(limit=200), query, limit=remaining)
+    packets.extend(_raw_packet(result.context_packet) for result in raw_results)
+    return packets[:limit]
+
+
 def compare_model_experience(
     current_payload: dict[str, Any],
     history_entries: Iterable[Any],
@@ -304,6 +329,50 @@ def _context_packet(
         "source_task_id": record.source_task_id,
         "confidence": confidence,
         "match_reason": match_reason,
+    }
+
+
+def _distillation_packet(distillation) -> dict[str, Any]:
+    return {
+        "kind": "distillation",
+        "id": distillation.id,
+        "memory_type": distillation.category,
+        "category": distillation.category,
+        "summary": distillation.distilled_summary,
+        "payload": distillation.structured,
+        "confidence": distillation.confidence,
+        "support_count": distillation.support_count,
+        "source_memory_ids": list(distillation.source_memory_ids),
+        "source_task_id": None,
+        "match_reason": "distilled memory",
+    }
+
+
+def _raw_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    out = dict(packet)
+    out["kind"] = "raw"
+    return out
+
+
+def _query_from_context(query_context: dict[str, Any] | MemoryQuery) -> MemoryQuery:
+    if isinstance(query_context, MemoryQuery):
+        return query_context
+    return MemoryQuery(
+        model_name=_optional_text(query_context.get("model_name")),
+        scope=_optional_text(query_context.get("scope")),
+        channel=_optional_text(query_context.get("channel")),
+        month=_optional_text(query_context.get("month")),
+        keywords=tuple(str(item) for item in query_context.get("keywords", ()) if str(item).strip()),
+    )
+
+
+def _query_context_dict(query: MemoryQuery) -> dict[str, Any]:
+    return {
+        "model_name": query.model_name,
+        "scope": query.scope,
+        "channel": query.channel,
+        "month": query.month,
+        "keywords": list(query.keywords),
     }
 
 

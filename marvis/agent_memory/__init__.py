@@ -21,6 +21,10 @@ from marvis.agent_memory.distillation import (
     normalize_distillation_status,
 )
 from marvis.agent_memory.evolution import EvolutionManager
+from marvis.agent_memory.consolidation import (
+    CONSOLIDATION_TRIGGERS,
+    ConsolidationScheduler,
+)
 from marvis.agent_memory.policy import (
     MemoryPolicyDecision,
     classify_memory_candidate,
@@ -39,6 +43,7 @@ from marvis.agent_memory.retrieval import (
     compare_model_experience,
     normalize_model_family,
     retrieve_relevant_memories,
+    retrieve_with_distillations,
 )
 from marvis.agent_memory.store import (
     AUDIT_EVENT_TYPES,
@@ -55,6 +60,8 @@ __all__ = [
     "DISTILLATION_STATUSES",
     "MAX_DISTILLED_SUMMARY_CHARS",
     "DISTILL_SYS",
+    "CONSOLIDATION_TRIGGERS",
+    "ConsolidationScheduler",
     "DistillationEngine",
     "EvolutionManager",
     "MemoryCandidate",
@@ -83,5 +90,6 @@ __all__ = [
     "normalize_distillation_confidence",
     "normalize_distillation_status",
     "retrieve_relevant_memories",
+    "retrieve_with_distillations",
     "validate_model_experience_payload",
 ]
