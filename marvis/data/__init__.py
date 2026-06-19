@@ -19,6 +19,9 @@ from marvis.data.errors import (
     DataIngestError,
     DataLayerError,
     DataSecurityError,
+    DedupRequiredError,
+    FanOutError,
+    JoinNotConfirmedError,
 )
 
 __all__ = [
@@ -40,4 +43,7 @@ __all__ = [
     "DataIngestError",
     "DataLayerError",
     "DataSecurityError",
+    "DedupRequiredError",
+    "FanOutError",
+    "JoinNotConfirmedError",
 ]

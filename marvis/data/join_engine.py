@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+from marvis.data.align import ColumnAligner
+from marvis.data.backend import DataBackend
+from marvis.data.contracts import (
+    SHRINK_WARN_THRESHOLD,
+    SMALL_SAMPLE_N,
+    ColumnProfile,
+    Dataset,
+    JoinDiagnostics,
+    JoinPlan,
+    JoinSpec,
+    KeyPair,
+)
+from marvis.data.errors import (
+    DataBackendError,
+    DedupRequiredError,
+    FanOutError,
+    JoinNotConfirmedError,
+)
+
+
+class JoinEngine:
+    def __init__(
+        self,
+        backend: DataBackend,
+        aligner: ColumnAligner,
+        registry,
+        repo,
+    ):
+        self._backend = backend
+        self._aligner = aligner
+        self._registry = registry
+        self._repo = repo
+
+    def propose_join_plan(
+        self,
+        anchor_id: str,
+        feature_ids: list[str],
+        task_id: str,
+        *,
+        seed: int = 0,
+    ) -> JoinPlan:
+        anchor = self._registry.get(anchor_id)
+        anchor_path = self._registry.resolve_path(anchor_id)
+        specs = []
+        for feature_id in feature_ids:
+            feature = self._registry.get(feature_id)
+            feature_path = self._registry.resolve_path(feature_id)
+            key_pairs = self._aligner.align(
+                anchor,
+                anchor_path,
+                feature,
+                feature_path,
+                seed=seed,
+            )
+            diagnostics = self.diagnose_join(
+                anchor,
+                anchor_path,
+                feature,
+                feature_path,
+                key_pairs,
+                seed=seed,
+            )
+            specs.append(
+                JoinSpec(
+                    feature_dataset_id=feature_id,
+                    key_pairs=key_pairs,
+                    diagnostics=diagnostics,
+                    dedup_strategy=None,
+                    confirmed=False,
+                ),
+            )
+        plan = JoinPlan(
+            id=_new_id("join_plan"),
+            task_id=task_id,
+            anchor_dataset_id=anchor_id,
+            joins=specs,
+            status="draft",
+        )
+        self._repo.create_join_plan(plan)
+        return plan
+
+    def diagnose_join(
+        self,
+        anchor: Dataset,
+        anchor_path: Path,
+        feature: Dataset,
+        feature_path: Path,
+        key_pairs: list[KeyPair],
+        *,
+        seed: int,
+    ) -> JoinDiagnostics:
+        anchor_rows = anchor.row_count
+        feature_rows = feature.row_count
+        if not key_pairs:
+            return JoinDiagnostics(
+                anchor_rows=anchor_rows,
+                feature_rows=feature_rows,
+                feature_key_unique=False,
+                matched_rows=0,
+                match_rate=0.0,
+                joined_rows_preview=0,
+                fan_out_detected=False,
+                shrink_detected=True,
+                new_columns=0,
+                new_columns_null_rate=1.0,
+            )
+
+        anchor_keys = [pair.anchor_col for pair in key_pairs]
+        feature_keys = [pair.feature_col for pair in key_pairs]
+        key_unique = self._backend.is_key_unique(feature_path, feature_keys)
+        if len(key_pairs) == 1:
+            match_rate = key_pairs[0].match_rate
+            sampled = min(SMALL_SAMPLE_N, anchor_rows)
+            matched = int(round(match_rate * sampled))
+        else:
+            method = key_pairs[0].match_method
+            matched, sampled = self._backend.match_rate_for_method(
+                anchor_path,
+                anchor_keys,
+                feature_path,
+                feature_keys,
+                method=method,
+                key_fingerprints=_key_fps(anchor, feature, key_pairs),
+                sample_n=SMALL_SAMPLE_N,
+                seed=seed,
+            )
+            match_rate = matched / sampled if sampled else 0.0
+
+        if key_unique:
+            joined_preview = anchor_rows
+            fan_out = False
+        else:
+            distinct_keys = self._backend.distinct_count(feature_path, feature_keys)
+            duplicate_factor = feature_rows / max(1, distinct_keys)
+            joined_preview = int(
+                anchor_rows * match_rate * duplicate_factor
+                + anchor_rows * (1 - match_rate),
+            )
+            fan_out = joined_preview > anchor_rows
+
+        anchor_column_names = {column.name for column in anchor.columns}
+        new_columns = len([
+            column
+            for column in feature.columns
+            if column.name not in anchor_column_names
+        ])
+        return JoinDiagnostics(
+            anchor_rows=anchor_rows,
+            feature_rows=feature_rows,
+            feature_key_unique=key_unique,
+            matched_rows=matched,
+            match_rate=round(match_rate, 4),
+            joined_rows_preview=joined_preview,
+            fan_out_detected=fan_out,
+            shrink_detected=match_rate < SHRINK_WARN_THRESHOLD,
+            new_columns=new_columns,
+            new_columns_null_rate=round(1 - match_rate, 4),
+        )
+
+    def confirm_join_spec(
+        self,
+        join_plan_id: str,
+        feature_dataset_id: str,
+        *,
+        dedup_strategy: str | None,
+    ) -> None:
+        plan = self._repo.load_join_plan(join_plan_id)
+        spec = _find_spec(plan, feature_dataset_id)
+        if not spec.diagnostics.feature_key_unique and dedup_strategy in (None, "abort"):
+            raise DedupRequiredError(
+                f"feature {feature_dataset_id} key is not unique; choose dedup strategy",
+            )
+        spec.dedup_strategy = dedup_strategy
+        spec.confirmed = True
+        self._repo.update_join_spec(join_plan_id, spec)
+
+    def execute_join_plan(self, join_plan_id: str, *, out_dir: Path) -> Dataset:
+        plan = self._repo.load_join_plan(join_plan_id)
+        if any(not join.confirmed for join in plan.joins):
+            raise JoinNotConfirmedError("all joins must be confirmed before execute")
+
+        anchor = self._registry.get(plan.anchor_dataset_id)
+        anchor_rows = anchor.row_count
+        current_path = self._registry.resolve_path(plan.anchor_dataset_id)
+        for spec in plan.joins:
+            if (
+                not spec.diagnostics.feature_key_unique
+                and spec.dedup_strategy in (None, "abort")
+            ):
+                raise DedupRequiredError(
+                    f"feature {spec.feature_dataset_id} key is not unique; choose dedup strategy",
+                )
+            feature_path = self._registry.resolve_path(spec.feature_dataset_id)
+            out_path = Path(out_dir) / f"join_{uuid.uuid4().hex}.parquet"
+            try:
+                joined_rows = self._backend.left_join(
+                    current_path,
+                    feature_path,
+                    spec.key_pairs,
+                    dedup_strategy=spec.dedup_strategy,
+                    out_path=out_path,
+                )
+            except DataBackendError as exc:
+                if "produced" in str(exc) and "anchor" in str(exc):
+                    raise FanOutError(str(exc)) from exc
+                raise
+            if joined_rows > anchor_rows:
+                out_path.unlink(missing_ok=True)
+                raise FanOutError(
+                    f"join produced {joined_rows} > anchor {anchor_rows} rows",
+                )
+            current_path = out_path
+
+        result = self._registry.register_existing(
+            current_path,
+            task_id=plan.task_id,
+            role="derived",
+            anchor_target=plan.anchor_dataset_id,
+        )
+        plan.status = "executed"
+        plan.result_dataset_id = result.id
+        self._repo.set_join_plan_executed(join_plan_id, result.id)
+        return result
+
+
+def _find_spec(plan: JoinPlan, feature_dataset_id: str) -> JoinSpec:
+    for spec in plan.joins:
+        if spec.feature_dataset_id == feature_dataset_id:
+            return spec
+    raise KeyError(f"join spec not found for feature dataset: {feature_dataset_id}")
+
+
+def _key_fps(
+    anchor: Dataset,
+    feature: Dataset,
+    key_pairs: list[KeyPair],
+) -> list[tuple]:
+    anchor_profiles = _profiles_by_name(anchor.columns)
+    feature_profiles = _profiles_by_name(feature.columns)
+    return [
+        (
+            anchor_profiles[pair.anchor_col].fingerprint,
+            feature_profiles[pair.feature_col].fingerprint,
+        )
+        for pair in key_pairs
+    ]
+
+
+def _profiles_by_name(columns: tuple[ColumnProfile, ...]) -> dict[str, ColumnProfile]:
+    return {column.name: column for column in columns}
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+__all__ = ["JoinEngine"]

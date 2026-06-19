@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Sequence
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
@@ -364,7 +365,7 @@ class DataBackend:
     ) -> str | None:
         if pd.isna(value):
             return None
-        text = str(value).strip()
+        text = _value_text(value)
         if not text:
             return None
         if method == "exact":
@@ -383,6 +384,16 @@ class DataBackend:
 
 def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+
+def _value_text(value: Any) -> str:
+    if isinstance(value, Integral) and not isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, Real) and not isinstance(value, bool):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+    return str(value).strip()
 
 
 def _sql_transform(method: str, expression: str, *, side: str, pair: KeyPair) -> str:
