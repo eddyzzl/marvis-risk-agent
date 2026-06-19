@@ -38,6 +38,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "workflow_create.js",
         "artifact_view.js",
         "capability.js",
+        "subagent_view.js",
     ):
         assert (static_v2 / module_name).is_file()
 
