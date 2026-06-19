@@ -36,6 +36,7 @@ class ExecutionEnvironmentRequest(BaseModel):
 
 class LLMSettingsRequest(BaseModel):
     default_model_id: str = ""
+    capability_tier: str = ""
     models: list[dict] = Field(default_factory=list)
 
 

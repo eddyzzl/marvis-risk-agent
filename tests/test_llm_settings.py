@@ -10,6 +10,7 @@ def test_llm_settings_round_trip_masks_api_key(tmp_path):
         tmp_path,
         {
             "default_model_id": "model-a",
+            "capability_tier": "autonomous",
             "models": [
                 {
                     "model_id": "model-a",
@@ -37,6 +38,7 @@ def test_llm_settings_round_trip_masks_api_key(tmp_path):
     )
 
     assert saved["default_model_id"] == "model-a"
+    assert saved["capability_tier"] == "autonomous"
     assert saved["models"][0]["has_api_key"] is True
     assert saved["models"][0]["enable_thinking"] is True
     assert "api_key" not in saved["models"][0]

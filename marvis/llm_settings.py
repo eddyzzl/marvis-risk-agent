@@ -78,6 +78,9 @@ def save_llm_settings(workspace: str | Path, payload: dict) -> dict:
         )
     private_settings = {
         "default_model_id": default_model_id,
+        "capability_tier": str(
+            payload.get("capability_tier") or existing.get("capability_tier") or ""
+        ).strip(),
         "models": models,
     }
     path = _settings_path(workspace_path)
@@ -131,6 +134,7 @@ def _load_private_settings(workspace: Path) -> dict:
         raise LLMSettingsError("大模型配置必须是 JSON 对象")
     return {
         "default_model_id": str(payload.get("default_model_id") or ""),
+        "capability_tier": str(payload.get("capability_tier") or ""),
         "models": [
             model for model in payload.get("models", [])
             if isinstance(model, dict)
@@ -143,6 +147,7 @@ def _public_settings(private_settings: dict) -> dict:
     enabled_models = [model for model in models if model["enabled"]]
     return {
         "default_model_id": str(private_settings.get("default_model_id") or ""),
+        "capability_tier": str(private_settings.get("capability_tier") or ""),
         "models": models,
         "enabled_models": enabled_models,
     }

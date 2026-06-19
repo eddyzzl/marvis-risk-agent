@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import sqlite3
 import traceback
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from marvis.db import TaskRepository
+from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
 from marvis.orchestrator.contracts import PlanStatus, plan_to_dict
 from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
 from marvis.orchestrator.planner import PlanningError
@@ -23,6 +26,8 @@ ACTIVE_JOB_DETAIL = "task already has an active job"
 class CreatePlanRequest(BaseModel):
     goal: str
     autonomy_level: int | None = None
+    novel_mode: Literal["plan_ahead", "explore"] = "plan_ahead"
+    tier: str | None = None
     slots: dict = Field(default_factory=dict)
     task_context: dict = Field(default_factory=dict)
     memory_context: dict = Field(default_factory=dict)
@@ -35,6 +40,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
     validator = request.app.state.plan_validator
     repo = request.app.state.plan_repo
     task_context = _task_context(task_id, body)
+    tier = _requested_tier(request, body.tier)
 
     try:
         intent = intent_router.route(body.goal, task_context)
@@ -45,12 +51,15 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
                 task_id,
                 autonomy=body.autonomy_level,
             )
+            plan.tier = tier.name
         else:
             plan = planner.generate(
                 body.goal,
                 task_id,
                 memory_context=dict(body.memory_context),
                 task_context=task_context,
+                tier=tier,
+                novel_mode=body.novel_mode,
             )
     except (KeyError, PlanningError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -65,6 +74,14 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="plan already exists") from exc
     return _plan_payload(plan)
+
+
+@router.get("/capability-tiers")
+def list_capability_tiers() -> dict:
+    return {
+        "tiers": [asdict(tier) for tier in TIERS.values()],
+        "default": "balanced",
+    }
 
 
 @router.get("/plans/{plan_id}")
@@ -157,6 +174,15 @@ def _task_context(task_id: str, body: CreatePlanRequest) -> dict:
     context.update(dict(body.task_context))
     context.update(dict(body.slots))
     return context
+
+
+def _requested_tier(request: Request, tier_name: str | None):
+    if tier_name:
+        return resolve_tier(tier_name)
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return resolve_tier(None)
+    return tier_from_settings(settings)
 
 
 def _start_plan_job(request: Request, task_id: str) -> str:

@@ -32,8 +32,17 @@ class FakePlanner:
         self.from_template_calls.append((template.id, slots, task_id, autonomy))
         return _plan(task_id=task_id, autonomy=autonomy or 1)
 
-    def generate(self, goal, task_id, *, memory_context, task_context):
-        self.generated.append((goal, task_id, memory_context, task_context))
+    def generate(
+        self,
+        goal,
+        task_id,
+        *,
+        memory_context,
+        task_context,
+        tier=None,
+        novel_mode="plan_ahead",
+    ):
+        self.generated.append((goal, task_id, memory_context, task_context, tier, novel_mode))
         return _plan(task_id=task_id, source="generated", template_id=None)
 
 
@@ -137,6 +146,39 @@ def test_create_plan_endpoint_uses_generated_path_for_novel_goal(tmp_path):
     assert response.status_code == 201
     assert response.json()["plan"]["source"] == "generated"
     assert client.app.state.planner.generated
+
+
+def test_create_plan_endpoint_passes_capability_tier_and_novel_mode(tmp_path):
+    client = _client(tmp_path, intent=FakeIntentRouter(kind="novel"))
+
+    response = client.post(
+        "/api/tasks/task-1/plans",
+        json={
+            "goal": "custom analysis",
+            "tier": "autonomous",
+            "novel_mode": "explore",
+        },
+    )
+
+    assert response.status_code == 201
+    call = client.app.state.planner.generated[0]
+    assert call[4].name == "autonomous"
+    assert call[5] == "explore"
+
+
+def test_capability_tiers_endpoint_lists_defaults(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.get("/api/capability-tiers")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["default"] == "balanced"
+    assert {tier["name"] for tier in payload["tiers"]} == {
+        "conservative",
+        "balanced",
+        "autonomous",
+    }
 
 
 def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
