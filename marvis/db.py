@@ -8,6 +8,15 @@ from dataclasses import asdict, is_dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from marvis.data.contracts import (
+    ColumnFingerprint,
+    ColumnProfile,
+    Dataset,
+    JoinDiagnostics,
+    JoinPlan,
+    JoinSpec,
+    KeyPair,
+)
 from marvis.domain import (
     TASK_TYPE_VALIDATION,
     VALID_TASK_TYPES,
@@ -372,9 +381,40 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS datasets (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                format TEXT NOT NULL,
+                sheet TEXT,
+                row_count INTEGER NOT NULL,
+                columns_json TEXT NOT NULL,
+                has_target INTEGER NOT NULL,
+                target_col TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS joins (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                anchor_dataset_id TEXT NOT NULL,
+                joins_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_dataset_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -1301,6 +1341,134 @@ class PlanRepository:
         )
 
 
+class DatasetRepository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def create_dataset(self, dataset: Dataset) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO datasets(
+                    id, task_id, role, source_path, format, sheet, row_count,
+                    columns_json, has_target, target_col, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _dataset_insert_values(dataset),
+            )
+
+    def get_dataset(self, dataset_id: str) -> Dataset | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, role, source_path, format, sheet, row_count,
+                       columns_json, has_target, target_col, created_at
+                  FROM datasets
+                 WHERE id = ?
+                """,
+                (dataset_id,),
+            ).fetchone()
+        return None if row is None else _dataset_from_row(row)
+
+    def list_datasets(self, task_id: str) -> list[Dataset]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task_id, role, source_path, format, sheet, row_count,
+                       columns_json, has_target, target_col, created_at
+                  FROM datasets
+                 WHERE task_id = ?
+                 ORDER BY created_at, id
+                """,
+                (task_id,),
+            ).fetchall()
+        return [_dataset_from_row(row) for row in rows]
+
+    def set_dataset_role(self, dataset_id: str, role: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE datasets SET role = ? WHERE id = ?",
+                (role, dataset_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(dataset_id)
+
+    def create_join_plan(self, plan: JoinPlan) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO joins(
+                    id, task_id, anchor_dataset_id, joins_json, status,
+                    result_dataset_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan.id,
+                    plan.task_id,
+                    plan.anchor_dataset_id,
+                    _dump_json_any([_join_spec_to_dict(spec) for spec in plan.joins]),
+                    plan.status,
+                    plan.result_dataset_id,
+                    _now(),
+                ),
+            )
+
+    def load_join_plan(self, plan_id: str) -> JoinPlan:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, anchor_dataset_id, joins_json, status,
+                       result_dataset_id
+                  FROM joins
+                 WHERE id = ?
+                """,
+                (plan_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(plan_id)
+        return _join_plan_from_row(row)
+
+    def update_join_spec(self, plan_id: str, spec: JoinSpec) -> None:
+        plan = self.load_join_plan(plan_id)
+        replaced = False
+        joins = []
+        for item in plan.joins:
+            if item.feature_dataset_id == spec.feature_dataset_id:
+                joins.append(spec)
+                replaced = True
+            else:
+                joins.append(item)
+        if not replaced:
+            raise KeyError(spec.feature_dataset_id)
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE joins
+                   SET joins_json = ?
+                 WHERE id = ?
+                """,
+                (_dump_json_any([_join_spec_to_dict(item) for item in joins]), plan_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(plan_id)
+
+    def set_join_plan_executed(self, plan_id: str, result_dataset_id: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE joins
+                   SET status = 'executed',
+                       result_dataset_id = ?
+                 WHERE id = ?
+                """,
+                (result_dataset_id, plan_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(plan_id)
+
+
 class PluginRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -1616,6 +1784,121 @@ def _tool_ref_from_dict(payload: dict) -> ToolRef:
         tool=str(payload["tool"]),
         version=str(payload.get("version") or ""),
     )
+
+
+def _dataset_insert_values(dataset: Dataset) -> tuple:
+    return (
+        dataset.id,
+        dataset.task_id,
+        dataset.role,
+        dataset.source_path,
+        dataset.format,
+        dataset.sheet,
+        dataset.row_count,
+        _dump_json_any([_column_profile_to_dict(column) for column in dataset.columns]),
+        1 if dataset.has_target else 0,
+        dataset.target_col,
+        dataset.created_at,
+    )
+
+
+def _dataset_from_row(row: sqlite3.Row) -> Dataset:
+    return Dataset(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        role=str(row["role"]),
+        source_path=str(row["source_path"]),
+        format=str(row["format"]),
+        sheet=row["sheet"],
+        row_count=int(row["row_count"]),
+        columns=tuple(
+            _column_profile_from_dict(item)
+            for item in _load_json_array(row["columns_json"])
+        ),
+        has_target=bool(row["has_target"]),
+        target_col=row["target_col"],
+        created_at=str(row["created_at"]),
+    )
+
+
+def _column_profile_to_dict(profile: ColumnProfile) -> dict:
+    return asdict(profile)
+
+
+def _column_profile_from_dict(payload: dict) -> ColumnProfile:
+    fingerprint_payload = dict(payload["fingerprint"])
+    return ColumnProfile(
+        name=str(payload["name"]),
+        dtype=str(payload["dtype"]),
+        semantic_role=str(payload["semantic_role"]),
+        fingerprint=ColumnFingerprint(
+            value_kind=str(fingerprint_payload["value_kind"]),
+            length_mode=_optional_int(fingerprint_payload.get("length_mode")),
+            regex_pattern=_optional_str(fingerprint_payload.get("regex_pattern")),
+            is_hashed=bool(fingerprint_payload["is_hashed"]),
+            hash_type=_optional_str(fingerprint_payload.get("hash_type")),
+            hex_case=_optional_str(fingerprint_payload.get("hex_case")),
+            date_format=_optional_str(fingerprint_payload.get("date_format")),
+        ),
+        null_rate=float(payload["null_rate"]),
+        cardinality=int(payload["cardinality"]),
+        sample_values=tuple(payload.get("sample_values") or ()),
+    )
+
+
+def _join_spec_to_dict(spec: JoinSpec) -> dict:
+    return {
+        "feature_dataset_id": spec.feature_dataset_id,
+        "key_pairs": [asdict(pair) for pair in spec.key_pairs],
+        "diagnostics": asdict(spec.diagnostics),
+        "dedup_strategy": spec.dedup_strategy,
+        "confirmed": spec.confirmed,
+    }
+
+
+def _join_plan_from_row(row: sqlite3.Row) -> JoinPlan:
+    return JoinPlan(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        anchor_dataset_id=str(row["anchor_dataset_id"]),
+        joins=[
+            _join_spec_from_dict(item)
+            for item in _load_json_array(row["joins_json"])
+        ],
+        status=str(row["status"]),
+        result_dataset_id=_optional_str(row["result_dataset_id"]),
+    )
+
+
+def _join_spec_from_dict(payload: dict) -> JoinSpec:
+    return JoinSpec(
+        feature_dataset_id=str(payload["feature_dataset_id"]),
+        key_pairs=[
+            KeyPair(
+                anchor_col=str(item["anchor_col"]),
+                feature_col=str(item["feature_col"]),
+                match_method=str(item["match_method"]),
+                transform_side=str(item["transform_side"]),
+                match_rate=float(item["match_rate"]),
+                resolved_by=str(item["resolved_by"]),
+            )
+            for item in payload.get("key_pairs") or []
+        ],
+        diagnostics=JoinDiagnostics(**dict(payload["diagnostics"])),
+        dedup_strategy=_optional_str(payload.get("dedup_strategy")),
+        confirmed=bool(payload.get("confirmed", False)),
+    )
+
+
+def _optional_str(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
+def _optional_int(value) -> int | None:
+    return None if value is None else int(value)
 
 
 def _dump_json_any(value) -> str:
