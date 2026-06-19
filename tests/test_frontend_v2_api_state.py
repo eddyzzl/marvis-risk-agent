@@ -39,6 +39,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "artifact_view.js",
         "capability.js",
         "subagent_view.js",
+        "loop_progress.js",
     ):
         assert (static_v2 / module_name).is_file()
 
