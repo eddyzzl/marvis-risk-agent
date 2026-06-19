@@ -1,3 +1,4 @@
+import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
 
 const panelDefinitions = [
@@ -43,9 +44,11 @@ export function mountV2(root) {
     panels[definition.id] = ensurePanel(root, definition);
   }
   if (!root[mountStateKey]) {
-    root[mountStateKey] = {
-      cleanups: [renderPlanView(panels.planPanel)],
-    };
+    const cleanups = [renderPlanView(panels.planPanel)];
+    if (typeof root.addEventListener === "function") {
+      cleanups.push(attachPlanConfirmHandlers(root));
+    }
+    root[mountStateKey] = { cleanups };
   }
   if (root.dataset) {
     root.dataset.v2Mounted = "true";

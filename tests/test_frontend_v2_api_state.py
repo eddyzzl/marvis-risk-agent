@@ -31,6 +31,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "state_v2.js",
         "main_v2.js",
         "plan_view.js",
+        "plan_confirm.js",
     ):
         assert (static_v2 / module_name).is_file()
 
