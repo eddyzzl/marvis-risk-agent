@@ -1,11 +1,13 @@
 import pandas as pd
 import pytest
 
+from marvis.data.backend import DataBackend
 from marvis.feature.metrics import feature_auc, feature_ks
 from marvis.packs.modeling import ModelingError
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.lr import train_lr
 
 
 def _config() -> TrainConfig:
@@ -65,3 +67,39 @@ def test_compute_model_metrics_uses_platform_feature_metrics_and_overfitting():
     assert metrics.psi_test_vs_train is not None
     assert metrics.psi_oot_vs_train is not None
     assert metrics.overfit_flag is False
+
+
+def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
+    rows = 180
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "lr_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"C": 0.7},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    backend = DataBackend(tmp_path)
+    first = train_lr(backend, path, config, out_dir=tmp_path / "models_a")
+    second = train_lr(backend, path, config, out_dir=tmp_path / "models_b")
+
+    assert (tmp_path / "models_a" / first.artifact.model_path).exists()
+    assert first.artifact.algorithm == "lr"
+    assert first.artifact.params["C"] == 0.7
+    assert first.artifact.feature_list == ("x1", "x2")
+    assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)
+    assert [item[0] for item in first.feature_importance] == [item[0] for item in second.feature_importance]
+    assert [item[1] for item in first.feature_importance] == pytest.approx(
+        [item[1] for item in second.feature_importance],
+    )
