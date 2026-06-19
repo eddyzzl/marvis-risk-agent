@@ -1,0 +1,203 @@
+from pathlib import Path
+
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+
+from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db import DatasetRepository, ModelingRepository, TaskRepository, init_db
+from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
+from marvis.notebook_contract import precheck_notebook_contract
+from marvis.packs.modeling.artifact import save_model
+from marvis.packs.modeling.contracts import ModelMetrics, TrainConfig, TrainResult
+from marvis.packs.modeling.experiment import ExperimentStore
+from marvis.packs.modeling.handoff import (
+    handoff_to_validation,
+    mark_validated_from_validation_task,
+)
+from marvis.settings import build_settings
+
+
+def _metrics() -> ModelMetrics:
+    return ModelMetrics(
+        train_ks=0.40,
+        test_ks=0.34,
+        oot_ks=0.31,
+        train_auc=0.78,
+        test_auc=0.73,
+        oot_auc=0.70,
+        psi_test_vs_train=0.02,
+        psi_oot_vs_train=0.04,
+        overfit_train_test_gap=0.05,
+        overfit_train_oot_gap=0.09,
+        overfit_flag=False,
+    )
+
+
+def _config(dataset_id: str) -> TrainConfig:
+    return TrainConfig(
+        dataset_id=dataset_id,
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"time_col": "apply_month"},
+        seed=19,
+        early_stopping_rounds=None,
+    )
+
+
+def _create_source_task(repo: TaskRepository, source_dir: Path):
+    return repo.create_task(
+        TaskCreate(
+            model_name="贷前建模样例",
+            model_version="dev",
+            validator="建模平台",
+            source_dir=str(source_dir),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+            feature_columns=["x1", "x2"],
+        )
+    )
+
+
+def _seed_experiment(tmp_path: Path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_task = _create_source_task(TaskRepository(settings.db_path), source_dir)
+    frame = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9, 0.15, 0.85],
+        "x2": [0.3, 0.4, 0.7, 0.6, 0.35, 0.75],
+        "y": [0, 0, 1, 1, 0, 1],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+        "apply_month": ["2026-01", "2026-01", "2026-02", "2026-02", "2026-03", "2026-03"],
+    })
+    upload_path = tmp_path / "sample.parquet"
+    frame.to_parquet(upload_path, index=False)
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    dataset = registry.register_existing(upload_path, task_id=source_task.id, role="modeling_sample")
+    model = LogisticRegression().fit(frame[["x1", "x2"]], frame["y"])
+    model_dir = settings.tasks_dir / source_task.id / "modeling_artifacts"
+    artifact = save_model(
+        model,
+        "lr",
+        model_dir,
+        feature_list=("x1", "x2"),
+        params={"C": 1.0},
+    )
+    store = ExperimentStore(settings.db_path)
+    experiment_id = store.create(source_task.id, "lr", _config(dataset.id))
+    store.attach_result(
+        experiment_id,
+        TrainResult(
+            artifact=artifact,
+            metrics=_metrics(),
+            feature_importance=(("x1", 0.8), ("x2", 0.2)),
+            experiment_id="",
+        ),
+    )
+    stored_artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact.id)
+    assert stored_artifact is not None
+    return settings, store, source_task, dataset, stored_artifact
+
+
+def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
+    settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    validation_task = TaskRepository(settings.db_path).get_task(validation_task_id)
+    material_dir = Path(validation_task.source_dir)
+    persisted_artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact.id)
+    assert persisted_artifact is not None
+    assert validation_task.task_type == TASK_TYPE_VALIDATION
+    assert validation_task.model_name == source_task.model_name
+    assert validation_task.model_version == artifact.id
+    assert validation_task.algorithm == "lr"
+    assert validation_task.run_mode == "agent"
+    assert validation_task.target_col == "y"
+    assert validation_task.split_col == "split"
+    assert validation_task.time_col == "apply_month"
+    assert validation_task.feature_columns == ["x1", "x2"]
+    assert validation_task.sample_path == "sample.parquet"
+    assert validation_task.pmml_path == "model.pmml"
+    assert validation_task.notebook_path == "scoring_notebook.ipynb"
+    assert validation_task.dictionary_path == "dictionary.csv"
+    assert (material_dir / "sample.parquet").exists()
+    assert (material_dir / "model.pmml").exists()
+    assert (material_dir / "dictionary.csv").exists()
+    precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
+    assert persisted_artifact.pmml_path == f"{artifact.id}.pmml"
+    assert store.get(artifact.experiment_id).status == "handed_off"
+
+
+def test_mark_validated_from_validation_task_updates_completed_experiment(tmp_path):
+    settings, store, _, dataset, artifact = _seed_experiment(tmp_path)
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+    task_repo = TaskRepository(settings.db_path)
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.SCANNED,
+        "source scanned",
+        expected=TaskStatus.CREATED,
+    )
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.RUNNING,
+        "notebook running",
+        expected=TaskStatus.SCANNED,
+    )
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.EXECUTED,
+        "notebook executed",
+        expected=TaskStatus.RUNNING,
+    )
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.COMPUTING_METRICS,
+        "computing metrics",
+        expected=TaskStatus.EXECUTED,
+    )
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.WRITING_ARTIFACTS,
+        "writing artifacts",
+        expected=TaskStatus.COMPUTING_METRICS,
+    )
+    task_repo.update_status(
+        validation_task_id,
+        TaskStatus.SUCCEEDED,
+        "pipeline succeeded",
+        expected=TaskStatus.WRITING_ARTIFACTS,
+    )
+
+    did_update = mark_validated_from_validation_task(
+        store,
+        artifact,
+        validation_task_id=validation_task_id,
+        settings=settings,
+    )
+
+    assert did_update is True
+    assert store.get(artifact.experiment_id).status == "validated"

@@ -40,6 +40,9 @@ class ExperimentStore:
             status="trained",
         )
 
+    def set_artifact_pmml_path(self, artifact_id: str, pmml_path: str) -> None:
+        self._repo.set_model_artifact_pmml_path(artifact_id, pmml_path)
+
     def set_status(self, experiment_id: str, status: str) -> None:
         self._repo.set_experiment_status(experiment_id, status)
 

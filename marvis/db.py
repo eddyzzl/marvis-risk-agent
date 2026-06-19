@@ -1604,6 +1604,19 @@ class ModelingRepository:
                 _model_artifact_insert_values(artifact),
             )
 
+    def set_model_artifact_pmml_path(self, artifact_id: str, pmml_path: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE model_artifacts
+                   SET pmml_path = ?
+                 WHERE id = ?
+                """,
+                (pmml_path, artifact_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(artifact_id)
+
     def get_model_artifact(self, artifact_id: str) -> ModelArtifact | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
