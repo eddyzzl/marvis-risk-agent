@@ -9,19 +9,25 @@ from marvis.plugins.runner import ToolRunner
 
 
 def _runner(tmp_path):
+    runner, _repo = _runtime(tmp_path)
+    return runner
+
+
+def _runtime(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = PluginRepository(db_path)
     registry = PluginRegistry(repo)
     packs_root = Path(__file__).parents[1] / "marvis" / "packs"
     load_builtin_packs(registry, packs_root)
-    return ToolRunner(
+    runner = ToolRunner(
         ToolRegistry(registry),
         repo,
         python_executable=sys.executable,
         datasets_root=tmp_path / "datasets",
         workspace=tmp_path / "workspace",
     )
+    return runner, repo
 
 
 def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
@@ -33,6 +39,19 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.output == {"echoed": "hi"}
     assert result.error is None
     assert result.duration_ms >= 0
+
+
+def test_tool_runner_records_invocation_audit(tmp_path):
+    runner, repo = _runtime(tmp_path)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    audits = repo.list_audit(kind="tool.invoke")
+    assert result.ok is True
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "_sample.echo"
+    assert audits[0]["outcome"] == "succeeded"
+    assert audits[0]["inputs_hash"]
 
 
 def test_tool_runner_returns_schema_error_before_worker(tmp_path):
