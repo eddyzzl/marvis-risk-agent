@@ -3,8 +3,19 @@ from __future__ import annotations
 import math
 from typing import Any
 
-OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD = 0.10
-OVERFITTING_TRAIN_OOT_ABS_THRESHOLD = 0.05
+OVERFIT_TRAIN_TEST_REL = 0.10
+OVERFIT_TRAIN_OOT_ABS = 0.05
+OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD = OVERFIT_TRAIN_TEST_REL
+OVERFITTING_TRAIN_OOT_ABS_THRESHOLD = OVERFIT_TRAIN_OOT_ABS
+
+
+def overfitting_check(train_ks: float, test_ks: float, oot_ks: float | None) -> tuple[float, float | None, bool]:
+    train_test_gap = abs(train_ks - test_ks) / abs(train_ks) if abs(train_ks) > 1e-12 else 0.0
+    train_oot_gap = abs(train_ks - oot_ks) if oot_ks is not None else None
+    flag = train_test_gap > OVERFIT_TRAIN_TEST_REL or (
+        train_oot_gap is not None and train_oot_gap > OVERFIT_TRAIN_OOT_ABS
+    )
+    return train_test_gap, train_oot_gap, flag
 
 
 def overfitting_check_from_validation_results(validation_results: dict[str, Any]) -> dict[str, Any]:
@@ -24,16 +35,14 @@ def overfitting_check_from_validation_results(validation_results: dict[str, Any]
     train_ks = by_split.get("train")
     test_ks = by_split.get("test")
     oot_ks = by_split.get("oot")
-    train_test_relative_diff = (
-        None
-        if train_ks is None or test_ks is None or abs(train_ks) <= 1e-12
-        else abs(train_ks - test_ks) / abs(train_ks)
-    )
-    train_oot_abs_diff = (
-        None
-        if train_ks is None or oot_ks is None
-        else abs(train_ks - oot_ks)
-    )
+    if train_ks is None:
+        train_test_relative_diff = None
+        train_oot_abs_diff = None
+    elif test_ks is None or abs(train_ks) <= 1e-12:
+        train_test_relative_diff = None
+        train_oot_abs_diff = abs(train_ks - oot_ks) if oot_ks is not None else None
+    else:
+        train_test_relative_diff, train_oot_abs_diff, _flag = overfitting_check(train_ks, test_ks, oot_ks)
     train_test_status = _threshold_status(
         train_test_relative_diff,
         OVERFITTING_TRAIN_TEST_RELATIVE_THRESHOLD,

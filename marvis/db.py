@@ -25,6 +25,12 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.model_algorithms import normalize_algorithm
+from marvis.packs.modeling.contracts import (
+    Experiment,
+    ModelArtifact,
+    ModelMetrics,
+    TrainConfig,
+)
 from marvis.plugins.errors import PluginNotFoundError
 from marvis.plugins.manifest import PluginManifest, ToolRef, manifest_to_dict
 from marvis.orchestrator.contracts import (
@@ -411,10 +417,42 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS experiments (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                recipe_id TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                metrics_json TEXT,
+                artifact_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS model_artifacts (
+                id TEXT PRIMARY KEY,
+                experiment_id TEXT NOT NULL,
+                algorithm TEXT NOT NULL,
+                model_path TEXT NOT NULL,
+                pmml_path TEXT,
+                feature_list_json TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                woe_maps_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_model_artifacts_experiment ON model_artifacts(experiment_id)")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -1469,6 +1507,77 @@ class DatasetRepository:
                 raise KeyError(plan_id)
 
 
+class ModelingRepository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def create_experiment(self, experiment: Experiment) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO experiments(
+                    id, task_id, recipe_id, config_json, metrics_json,
+                    artifact_id, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _experiment_insert_values(experiment),
+            )
+
+    def get_experiment(self, experiment_id: str) -> Experiment | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, recipe_id, config_json, metrics_json,
+                       artifact_id, status, created_at
+                  FROM experiments
+                 WHERE id = ?
+                """,
+                (experiment_id,),
+            ).fetchone()
+        return None if row is None else _experiment_from_row(row)
+
+    def list_experiments(self, task_id: str) -> list[Experiment]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task_id, recipe_id, config_json, metrics_json,
+                       artifact_id, status, created_at
+                  FROM experiments
+                 WHERE task_id = ?
+                 ORDER BY created_at, id
+                """,
+                (task_id,),
+            ).fetchall()
+        return [_experiment_from_row(row) for row in rows]
+
+    def create_model_artifact(self, artifact: ModelArtifact) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO model_artifacts(
+                    id, experiment_id, algorithm, model_path, pmml_path,
+                    feature_list_json, params_json, woe_maps_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _model_artifact_insert_values(artifact),
+            )
+
+    def get_model_artifact(self, artifact_id: str) -> ModelArtifact | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, experiment_id, algorithm, model_path, pmml_path,
+                       feature_list_json, params_json, woe_maps_json, created_at
+                  FROM model_artifacts
+                 WHERE id = ?
+                """,
+                (artifact_id,),
+            ).fetchone()
+        return None if row is None else _model_artifact_from_row(row)
+
+
 class PluginRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -1890,6 +1999,101 @@ def _join_spec_from_dict(payload: dict) -> JoinSpec:
     )
 
 
+def _experiment_insert_values(experiment: Experiment) -> tuple:
+    return (
+        experiment.id,
+        experiment.task_id,
+        experiment.recipe_id,
+        _dump_json_any(_train_config_to_dict(experiment.config)),
+        None if experiment.metrics is None else _dump_json_any(_model_metrics_to_dict(experiment.metrics)),
+        experiment.artifact_id,
+        experiment.status,
+        experiment.created_at,
+    )
+
+
+def _experiment_from_row(row: sqlite3.Row) -> Experiment:
+    metrics_json = row["metrics_json"]
+    return Experiment(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        recipe_id=str(row["recipe_id"]),
+        config=_train_config_from_dict(_load_json_object(row["config_json"])),
+        metrics=None if metrics_json is None else _model_metrics_from_dict(_load_json_object(metrics_json)),
+        artifact_id=_optional_str(row["artifact_id"]),
+        status=str(row["status"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
+    return (
+        artifact.id,
+        artifact.experiment_id,
+        artifact.algorithm,
+        artifact.model_path,
+        artifact.pmml_path,
+        _dump_json_any(list(artifact.feature_list)),
+        _dump_json_any(artifact.params),
+        None if artifact.woe_maps is None else _dump_json_any(artifact.woe_maps),
+        artifact.created_at,
+    )
+
+
+def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
+    woe_maps_json = row["woe_maps_json"]
+    return ModelArtifact(
+        id=str(row["id"]),
+        experiment_id=str(row["experiment_id"]),
+        algorithm=str(row["algorithm"]),
+        model_path=str(row["model_path"]),
+        pmml_path=_optional_str(row["pmml_path"]),
+        feature_list=tuple(str(item) for item in _load_json_array(row["feature_list_json"])),
+        params=_load_json_object(row["params_json"]),
+        woe_maps=None if woe_maps_json is None else _load_json_object(woe_maps_json),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _train_config_to_dict(config: TrainConfig) -> dict:
+    payload = asdict(config)
+    payload["features"] = list(config.features)
+    return payload
+
+
+def _train_config_from_dict(payload: dict) -> TrainConfig:
+    return TrainConfig(
+        dataset_id=str(payload["dataset_id"]),
+        features=tuple(str(item) for item in payload.get("features") or ()),
+        target_col=str(payload["target_col"]),
+        split_col=str(payload["split_col"]),
+        split_values=dict(payload.get("split_values") or {}),
+        params=dict(payload.get("params") or {}),
+        seed=int(payload["seed"]),
+        early_stopping_rounds=_optional_int(payload.get("early_stopping_rounds")),
+    )
+
+
+def _model_metrics_to_dict(metrics: ModelMetrics) -> dict:
+    return asdict(metrics)
+
+
+def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
+    return ModelMetrics(
+        train_ks=float(payload["train_ks"]),
+        test_ks=float(payload["test_ks"]),
+        oot_ks=_optional_float(payload.get("oot_ks")),
+        train_auc=float(payload["train_auc"]),
+        test_auc=float(payload["test_auc"]),
+        oot_auc=_optional_float(payload.get("oot_auc")),
+        psi_test_vs_train=_optional_float(payload.get("psi_test_vs_train")),
+        psi_oot_vs_train=_optional_float(payload.get("psi_oot_vs_train")),
+        overfit_train_test_gap=float(payload["overfit_train_test_gap"]),
+        overfit_train_oot_gap=_optional_float(payload.get("overfit_train_oot_gap")),
+        overfit_flag=bool(payload["overfit_flag"]),
+    )
+
+
 def _optional_str(value) -> str | None:
     if value is None:
         return None
@@ -1899,6 +2103,10 @@ def _optional_str(value) -> str | None:
 
 def _optional_int(value) -> int | None:
     return None if value is None else int(value)
+
+
+def _optional_float(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def _dump_json_any(value) -> str:
