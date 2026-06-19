@@ -1,8 +1,14 @@
-from marvis.agent_memory.consolidation import ConsolidationScheduler
+from fastapi.testclient import TestClient
+
+from marvis.agent_memory.consolidation import (
+    CONSOLIDATION_TRIGGERS,
+    ConsolidationScheduler,
+)
 from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore
+from marvis.app import create_app
 from marvis.db import init_db
 
 
@@ -49,6 +55,19 @@ def test_consolidate_all_returns_counts_and_failures_do_not_escape(tmp_path):
 
     scheduler.on_event("memory.after_save", {"memory_type": "field_convention"})
     assert scheduler.consolidate_all(["field_convention"]) == {"field_convention": 0}
+
+
+def test_app_registers_memory_consolidation_hooks(tmp_path):
+    client = TestClient(create_app(tmp_path))
+
+    scheduler = client.app.state.memory_consolidation_scheduler
+    dispatcher = client.app.state.hook_dispatcher
+
+    assert isinstance(scheduler, ConsolidationScheduler)
+    assert {
+        event: dispatcher.listener_count(event)
+        for event in CONSOLIDATION_TRIGGERS
+    } == {event: 1 for event in CONSOLIDATION_TRIGGERS}
 
 
 class _BrokenDistiller:

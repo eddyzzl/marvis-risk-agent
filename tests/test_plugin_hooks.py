@@ -70,13 +70,68 @@ def test_hook_dispatcher_invokes_tools_registered_for_event(tmp_path):
     assert len(results) == 1
     assert results[0].ok is True
     assert runner.calls == [
-        (ToolRef("hook_pack", "on_task_created", "0.1.0"), {"task_id": "t1"}, "t1", None)
+        (
+            ToolRef("hook_pack", "on_task_created", "0.1.0"),
+            {"task_id": "t1"},
+            "t1",
+            None,
+        )
     ]
     audits = repo.list_audit(kind="hook.dispatch")
     assert len(audits) == 1
     assert audits[0]["target_ref"] == "hook_pack.on_task_created@0.1.0"
     assert audits[0]["outcome"] == "succeeded"
     assert audits[0]["detail"]["event"] == "task.created"
+
+
+def test_hook_dispatcher_invokes_builtin_listeners_without_plugin_results(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    runner = FakeRunner()
+    dispatcher = HookDispatcher(registry, runner)
+    calls = []
+    dispatcher.register_listener(
+        "validation.completed",
+        lambda event, payload: calls.append((event, payload)),
+    )
+
+    results = dispatcher.dispatch(
+        "validation.completed",
+        {"task_id": "t1", "status": "succeeded"},
+        task_id="t1",
+    )
+
+    assert results == []
+    assert runner.calls == []
+    assert calls == [
+        ("validation.completed", {"task_id": "t1", "status": "succeeded"})
+    ]
+    assert dispatcher.listener_count("validation.completed") == 1
+
+
+def test_hook_dispatcher_isolates_failed_builtin_listener(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
+    registry.register(_manifest(), enabled=True)
+    runner = FakeRunner()
+    dispatcher = HookDispatcher(registry, runner, repo)
+    dispatcher.rebuild_index()
+
+    def broken_listener(_event, _payload):
+        raise RuntimeError("boom")
+
+    dispatcher.register_listener("task.created", broken_listener)
+
+    results = dispatcher.dispatch("task.created", {"task_id": "t1"}, task_id="t1")
+
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert runner.calls == [
+        (ToolRef("hook_pack", "on_task_created", "0.1.0"), {"task_id": "t1"}, "t1", None)
+    ]
 
 
 def test_hook_dispatcher_skips_disabled_plugins_after_rebuild(tmp_path):

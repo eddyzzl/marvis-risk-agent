@@ -8,6 +8,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from marvis import __version__
+from marvis.agent_memory.consolidation import (
+    CONSOLIDATION_TRIGGERS,
+    ConsolidationScheduler,
+)
+from marvis.agent_memory.distillation import DistillationEngine
+from marvis.agent_memory.evolution import EvolutionManager
+from marvis.agent_memory.store import AgentMemoryStore
 from marvis.api import router as api_router
 from marvis.branding import (
     DEFAULT_BRANDING,
@@ -209,11 +216,20 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     )
     hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
+    memory_store = AgentMemoryStore(settings.db_path)
+    memory_consolidation_scheduler = ConsolidationScheduler(
+        DistillationEngine(memory_store),
+        EvolutionManager(memory_store),
+        memory_store,
+    )
+    for event in CONSOLIDATION_TRIGGERS:
+        hook_dispatcher.register_listener(event, memory_consolidation_scheduler.on_event)
     app.state.plugin_repo = plugin_repo
     app.state.plugin_registry = plugin_registry
     app.state.tool_registry = tool_registry
     app.state.tool_runner = tool_runner
     app.state.hook_dispatcher = hook_dispatcher
+    app.state.memory_consolidation_scheduler = memory_consolidation_scheduler
     app.state.plugin_python_executable = python_executable
     app.state.plugin_paths = [settings.plugins_dir]
 

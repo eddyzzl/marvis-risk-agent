@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
+import logging
 
 from marvis.db import PluginRepository
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry
 from marvis.plugins.runner import ToolResult
+
+
+logger = logging.getLogger(__name__)
+HookListener = Callable[[str, dict], None]
 
 
 class HookDispatcher:
@@ -19,6 +25,7 @@ class HookDispatcher:
         self._runner = tool_runner
         self._repo = repo
         self._index: dict[str, list[ToolRef]] = {}
+        self._listeners: dict[str, list[HookListener]] = defaultdict(list)
 
     def rebuild_index(self) -> None:
         index: dict[str, list[ToolRef]] = defaultdict(list)
@@ -29,7 +36,23 @@ class HookDispatcher:
                 )
         self._index = dict(index)
 
+    def register_listener(self, event: str, listener: HookListener) -> None:
+        self._listeners[str(event)].append(listener)
+
+    def listener_count(self, event: str) -> int:
+        return len(self._listeners.get(str(event), []))
+
     def dispatch(self, event: str, payload: dict, *, task_id: str) -> list[ToolResult]:
+        for listener in self._listeners.get(event, []):
+            try:
+                listener(event, payload)
+            except Exception as exc:
+                logger.warning(
+                    "builtin hook listener failed for %s/%s: %s",
+                    event,
+                    task_id,
+                    exc,
+                )
         results: list[ToolResult] = []
         for ref in self._index.get(event, []):
             try:
