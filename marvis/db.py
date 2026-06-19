@@ -15,6 +15,8 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.model_algorithms import normalize_algorithm
+from marvis.plugins.errors import PluginNotFoundError
+from marvis.plugins.manifest import PluginManifest, manifest_to_dict
 from marvis.report_texts import COMPUTED_REPORT_TEXT_KEYS
 from marvis.state_machine import (
     ConflictError,
@@ -205,6 +207,57 @@ def init_db(db_path: Path) -> None:
                 ON agent_messages(task_id, created_at, id)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plugins (
+                name TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                module TEXT NOT NULL,
+                manifest_json TEXT NOT NULL,
+                checksum TEXT NOT NULL DEFAULT '',
+                builtin INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                installed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tools (
+                plugin TEXT NOT NULL,
+                name TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                input_schema_json TEXT NOT NULL,
+                output_schema_json TEXT NOT NULL,
+                determinism TEXT NOT NULL,
+                timeout_seconds INTEGER NOT NULL,
+                failure_policy TEXT NOT NULL,
+                side_effects_json TEXT NOT NULL DEFAULT '[]',
+                entrypoint TEXT NOT NULL DEFAULT '',
+                memory_limit_mb INTEGER NOT NULL DEFAULT 2048,
+                PRIMARY KEY (plugin, name),
+                FOREIGN KEY(plugin) REFERENCES plugins(name) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                actor TEXT,
+                target_ref TEXT,
+                inputs_hash TEXT,
+                outcome TEXT,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -727,6 +780,180 @@ class TaskRepository:
         return new_revision
 
 
+class PluginRepository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def upsert_plugin(self, manifest: PluginManifest, *, enabled: bool) -> None:
+        manifest_json = json.dumps(
+            manifest_to_dict(manifest),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        now = _now()
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO plugins(
+                    name, version, display_name, description, module,
+                    manifest_json, checksum, builtin, enabled, installed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    version = excluded.version,
+                    display_name = excluded.display_name,
+                    description = excluded.description,
+                    module = excluded.module,
+                    manifest_json = excluded.manifest_json,
+                    checksum = excluded.checksum,
+                    builtin = excluded.builtin,
+                    enabled = excluded.enabled,
+                    installed_at = excluded.installed_at
+                """,
+                (
+                    manifest.name,
+                    manifest.version,
+                    manifest.display_name,
+                    manifest.description,
+                    manifest.module,
+                    manifest_json,
+                    manifest.checksum,
+                    int(manifest.builtin),
+                    int(enabled),
+                    now,
+                ),
+            )
+            conn.execute("DELETE FROM tools WHERE plugin = ?", (manifest.name,))
+            for tool in manifest.tools:
+                conn.execute(
+                    """
+                    INSERT INTO tools(
+                        plugin, name, summary, input_schema_json,
+                        output_schema_json, determinism, timeout_seconds,
+                        failure_policy, side_effects_json, entrypoint,
+                        memory_limit_mb
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        manifest.name,
+                        tool.name,
+                        tool.summary,
+                        json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(tool.output_schema, ensure_ascii=False, separators=(",", ":")),
+                        tool.determinism,
+                        tool.timeout_seconds,
+                        tool.failure_policy,
+                        json.dumps(list(tool.side_effects), ensure_ascii=False, separators=(",", ":")),
+                        tool.entrypoint,
+                        tool.memory_limit_mb,
+                    ),
+                )
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE plugins SET enabled = ? WHERE name = ?",
+                (int(enabled), name),
+            )
+            if cursor.rowcount == 0:
+                raise PluginNotFoundError(name)
+
+    def delete_plugin(self, name: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute("DELETE FROM plugins WHERE name = ?", (name,))
+            if cursor.rowcount == 0:
+                raise PluginNotFoundError(name)
+
+    def get_plugin(self, name: str) -> dict | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT p.*, COUNT(t.name) AS tool_count
+                  FROM plugins p
+                  LEFT JOIN tools t ON t.plugin = p.name
+                 WHERE p.name = ?
+                 GROUP BY p.name
+                """,
+                (name,),
+            ).fetchone()
+        return _plugin_row_to_dict(row) if row is not None else None
+
+    def list_plugins(self, *, include_disabled: bool = False) -> list[dict]:
+        where = "" if include_disabled else "WHERE p.enabled = 1"
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT p.*, COUNT(t.name) AS tool_count
+                  FROM plugins p
+                  LEFT JOIN tools t ON t.plugin = p.name
+                  {where}
+                 GROUP BY p.name
+                 ORDER BY p.name
+                """
+            ).fetchall()
+        return [_plugin_row_to_dict(row) for row in rows]
+
+    def list_tools(self) -> list[dict]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT plugin, name, summary, input_schema_json,
+                       output_schema_json, determinism, timeout_seconds,
+                       failure_policy, side_effects_json, entrypoint,
+                       memory_limit_mb
+                  FROM tools
+                 ORDER BY plugin, name
+                """
+            ).fetchall()
+        return [_tool_row_to_dict(row) for row in rows]
+
+    def write_audit(
+        self,
+        *,
+        kind: str,
+        target_ref: str,
+        actor: str = "system",
+        inputs_hash: str | None = None,
+        outcome: str | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO audit(
+                    id, kind, actor, target_ref, inputs_hash, outcome,
+                    detail_json, at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    kind,
+                    actor,
+                    target_ref,
+                    inputs_hash,
+                    outcome,
+                    json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
+                    _now(),
+                ),
+            )
+
+    def list_audit(self, *, kind: str | None = None) -> list[dict]:
+        query = (
+            "SELECT id, kind, actor, target_ref, inputs_hash, outcome, detail_json, at "
+            "FROM audit"
+        )
+        params: tuple[str, ...] = ()
+        if kind is not None:
+            query += " WHERE kind = ?"
+            params = (kind,)
+        query += " ORDER BY at, id"
+        with connect(self.db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_audit_row_to_dict(row) for row in rows]
+
+
 def _row_to_agent_message(row: sqlite3.Row) -> dict:
     metadata = _load_json_object(row["metadata_json"])
     return {
@@ -737,6 +964,51 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
         "content": row["content"],
         "created_at": row["created_at"],
         "metadata": metadata,
+    }
+
+
+def _plugin_row_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "name": row["name"],
+        "version": row["version"],
+        "display_name": row["display_name"],
+        "description": row["description"],
+        "module": row["module"],
+        "manifest_json": row["manifest_json"],
+        "checksum": row["checksum"],
+        "builtin": bool(row["builtin"]),
+        "enabled": bool(row["enabled"]),
+        "installed_at": row["installed_at"],
+        "tool_count": int(row["tool_count"]),
+    }
+
+
+def _tool_row_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "plugin": row["plugin"],
+        "name": row["name"],
+        "summary": row["summary"],
+        "input_schema_json": row["input_schema_json"],
+        "output_schema_json": row["output_schema_json"],
+        "determinism": row["determinism"],
+        "timeout_seconds": int(row["timeout_seconds"]),
+        "failure_policy": row["failure_policy"],
+        "side_effects_json": row["side_effects_json"],
+        "entrypoint": row["entrypoint"],
+        "memory_limit_mb": int(row["memory_limit_mb"]),
+    }
+
+
+def _audit_row_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "actor": row["actor"],
+        "target_ref": row["target_ref"],
+        "inputs_hash": row["inputs_hash"],
+        "outcome": row["outcome"],
+        "detail": _load_json_object(row["detail_json"]),
+        "at": row["at"],
     }
 
 
