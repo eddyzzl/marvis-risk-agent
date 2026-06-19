@@ -330,7 +330,77 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(root.dataset.v2Mounted, "true");
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
 
-        setPlan({ id: "plan-1", goal: "Mounted plan", status: "validated", steps: [] });
+        setPlan({
+          id: "plan-1",
+          goal: "Mounted plan",
+          status: "validated",
+          steps: [],
+          sub_agents: [
+            {
+              scope: "Mounted subagent",
+              status: "running",
+              granted_tools: [{ plugin: "data_ops", tool: "profile" }],
+            },
+          ],
+        });
         assert.ok(first.panels.planPanel.innerHTML.includes("Mounted plan"));
+        assert.ok(first.panels.subAgentPanel.innerHTML.includes("Mounted subagent"));
+        """
+    )
+
+
+def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        function makeElement(tagName) {
+          return {
+            tagName: tagName.toUpperCase(),
+            id: "",
+            innerHTML: "",
+            className: "",
+            dataset: {},
+            attributes: {},
+            children: [],
+            setAttribute(name, value) {
+              this.attributes[name] = String(value);
+            },
+            appendChild(child) {
+              this.children.push(child);
+              return child;
+            },
+          };
+        }
+
+        resetV2State();
+        const listeners = {};
+        const root = makeElement("div");
+        root.ownerDocument = { createElement: makeElement };
+        root.querySelector = (selector) => {
+          const id = selector.startsWith("#") ? selector.slice(1) : selector;
+          return root.children.find((child) => child.id === id) ?? null;
+        };
+        root.addEventListener = (type, handler) => {
+          listeners[type] = [...(listeners[type] || []), handler];
+        };
+        root.removeEventListener = (type, handler) => {
+          listeners[type] = (listeners[type] || []).filter((candidate) => candidate !== handler);
+        };
+
+        const mounted = mountV2(root);
+        mountV2(root);
+
+        assert.equal((listeners.click || []).length, 4);
+        assert.equal((listeners.change || []).length, 2);
+        assert.equal((listeners.input || []).length, 1);
+
+        mounted.unmount();
+
+        assert.equal((listeners.click || []).length, 0);
+        assert.equal((listeners.change || []).length, 0);
+        assert.equal((listeners.input || []).length, 0);
         """
     )

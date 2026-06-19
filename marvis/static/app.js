@@ -3,6 +3,7 @@ import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import { mountV2 } from "./js/v2/main_v2.js";
 import {
   columnFractions,
   columnHeatColors,
@@ -5967,6 +5968,11 @@ function handleWorkflowStepperKeydown(event) {
   scrollStepTarget(step.dataset.stepTarget);
 }
 
+function mountV2Runtime() {
+  const root = $("v2RuntimeMount");
+  if (root) mountV2(root);
+}
+
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
 $("welcomeModelValidationCard").onclick = openTaskDialog;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
@@ -6158,6 +6164,7 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
+mountV2Runtime();
 materialSourceController.bindTabs();
 materialSourceController.bindDropzone();
 const pet = $("petCompanion");

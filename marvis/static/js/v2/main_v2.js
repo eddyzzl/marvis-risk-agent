@@ -1,5 +1,10 @@
+import { attachCapabilityHandlers } from "./capability.js";
+import { attachJoinHandlers } from "./join_review.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
+import { attachPluginHandlers } from "./plugin_manager.js";
+import { attachSkillHandlers } from "./skill_manager.js";
+import { renderSubAgentView } from "./subagent_view.js";
 
 const panelDefinitions = [
   { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
@@ -44,9 +49,18 @@ export function mountV2(root) {
     panels[definition.id] = ensurePanel(root, definition);
   }
   if (!root[mountStateKey]) {
-    const cleanups = [renderPlanView(panels.planPanel)];
+    const cleanups = [
+      renderPlanView(panels.planPanel),
+      renderSubAgentView(panels.subAgentPanel),
+    ];
     if (typeof root.addEventListener === "function") {
-      cleanups.push(attachPlanConfirmHandlers(root));
+      cleanups.push(
+        attachCapabilityHandlers(root),
+        attachJoinHandlers(root),
+        attachPlanConfirmHandlers(root),
+        attachPluginHandlers(root),
+        attachSkillHandlers(root),
+      );
     }
     root[mountStateKey] = { cleanups };
   }

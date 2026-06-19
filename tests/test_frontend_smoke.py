@@ -21,9 +21,12 @@ class _ModuleScriptParser(HTMLParser):
         super().__init__()
         self.module_srcs: list[str] = []
         self.stylesheet_hrefs: list[str] = []
+        self.v2_runtime_mount_attrs: dict[str, str | None] = {}
 
     def handle_starttag(self, tag: str, attrs) -> None:
         attr_map = {name: value for name, value in attrs}
+        if tag == "div" and attr_map.get("id") == "v2RuntimeMount":
+            self.v2_runtime_mount_attrs = attr_map
         if tag != "script":
             if tag == "link" and attr_map.get("rel") == "stylesheet":
                 self.stylesheet_hrefs.append(str(attr_map.get("href") or ""))
@@ -43,6 +46,8 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     parser = _ModuleScriptParser()
     parser.feed(index_response.text)
     assert parser.module_srcs == [f"static/app.js?v={__version__}"]
+    assert "hidden" in parser.v2_runtime_mount_attrs
+    assert parser.v2_runtime_mount_attrs["aria-hidden"] == "true"
     assert parser.stylesheet_hrefs == [
         f"static/styles.css?v={__version__}",
         f"static/css/welcome.css?v={__version__}",
@@ -76,6 +81,9 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "/static/js/render-agent.js" in loaded_modules
     assert "/static/js/state.js" in loaded_modules
     assert "/static/js/ui-utils.js" in loaded_modules
+    assert "/static/js/v2/main_v2.js" in loaded_modules
+    assert "/static/js/v2/plan_view.js" in loaded_modules
+    assert "/static/js/v2/subagent_view.js" in loaded_modules
 
 
 def _resolve_relative_module(base_path: str, specifier: str) -> str:
