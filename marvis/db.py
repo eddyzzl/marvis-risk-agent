@@ -16,7 +16,17 @@ from marvis.domain import (
 )
 from marvis.model_algorithms import normalize_algorithm
 from marvis.plugins.errors import PluginNotFoundError
-from marvis.plugins.manifest import PluginManifest, manifest_to_dict
+from marvis.plugins.manifest import PluginManifest, ToolRef, manifest_to_dict
+from marvis.orchestrator.contracts import (
+    AgentStatus,
+    Plan,
+    PlanStatus,
+    SubAgent,
+    plan_from_dict,
+    plan_to_dict,
+)
+from marvis.orchestrator.errors import PlanNotFoundError
+from marvis.orchestrator.harness_state import assert_plan_transition
 from marvis.report_texts import COMPUTED_REPORT_TEXT_KEYS
 from marvis.state_machine import (
     ConflictError,
@@ -256,8 +266,75 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plans (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                source TEXT NOT NULL,
+                template_id TEXT,
+                autonomy_level INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_steps (
+                id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                tool_plugin TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_version TEXT,
+                inputs_json TEXT NOT NULL,
+                depends_on_json TEXT NOT NULL,
+                post_checks_json TEXT NOT NULL,
+                needs_confirmation INTEGER NOT NULL,
+                sub_agent_scope TEXT,
+                granted_tools_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                sub_agent_id TEXT,
+                output_ref TEXT,
+                review_json TEXT NOT NULL DEFAULT '[]',
+                error TEXT,
+                confirmed INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_step_outputs (
+                step_id TEXT PRIMARY KEY,
+                output_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sub_agents (
+                id TEXT PRIMARY KEY,
+                parent_task_id TEXT NOT NULL,
+                parent_step_id TEXT,
+                scope TEXT NOT NULL,
+                granted_tools_json TEXT NOT NULL DEFAULT '[]',
+                context_budget INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                result_ref TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -780,6 +857,281 @@ class TaskRepository:
         return new_revision
 
 
+class PlanRepository:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def create_plan(self, plan: Plan) -> None:
+        payload = plan_to_dict(plan)
+        now = _now()
+        created_at = payload.get("created_at") or now
+        updated_at = payload.get("updated_at") or now
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO plans(
+                    id, task_id, goal, source, template_id, autonomy_level,
+                    status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["id"],
+                    payload["task_id"],
+                    payload["goal"],
+                    payload["source"],
+                    payload["template_id"],
+                    payload["autonomy_level"],
+                    payload["status"],
+                    created_at,
+                    updated_at,
+                ),
+            )
+            for step in payload["steps"]:
+                self._insert_step(conn, step)
+            _write_audit_row(
+                conn,
+                kind="plan.create",
+                target_ref=plan.id,
+                outcome="succeeded",
+                detail={"task_id": plan.task_id, "step_count": len(plan.steps)},
+            )
+
+    def load_plan(self, plan_id: str) -> Plan:
+        with connect(self.db_path) as conn:
+            plan_row = conn.execute(
+                """
+                SELECT id, task_id, goal, source, template_id, autonomy_level,
+                       status, created_at, updated_at
+                  FROM plans
+                 WHERE id = ?
+                """,
+                (plan_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise PlanNotFoundError(plan_id)
+            step_rows = conn.execute(
+                """
+                SELECT id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
+                       inputs_json, depends_on_json, post_checks_json,
+                       needs_confirmation, sub_agent_scope, granted_tools_json,
+                       status, sub_agent_id, output_ref, review_json, error
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                 ORDER BY idx, id
+                """,
+                (plan_id,),
+            ).fetchall()
+        return plan_from_dict(_plan_payload_from_rows(plan_row, step_rows))
+
+    def update_step(self, step) -> None:
+        payload = plan_to_dict(
+            Plan(
+                id=step.plan_id,
+                task_id="",
+                goal="",
+                source="template",
+                template_id=None,
+                steps=[step],
+                autonomy_level=0,
+            )
+        )["steps"][0]
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE plan_steps
+                   SET idx = ?,
+                       title = ?,
+                       tool_plugin = ?,
+                       tool_name = ?,
+                       tool_version = ?,
+                       inputs_json = ?,
+                       depends_on_json = ?,
+                       post_checks_json = ?,
+                       needs_confirmation = ?,
+                       sub_agent_scope = ?,
+                       granted_tools_json = ?,
+                       status = ?,
+                       sub_agent_id = ?,
+                       output_ref = ?,
+                       review_json = ?,
+                       error = ?
+                 WHERE id = ?
+                """,
+                _step_update_values(payload),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(step.id)
+
+    def set_plan_status(self, plan_id: str, status: PlanStatus) -> None:
+        current = self.load_plan(plan_id).status
+        assert_plan_transition(current, status)
+        with connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
+                (status.value, _now(), plan_id),
+            )
+            _write_audit_row(
+                conn,
+                kind="plan.status",
+                target_ref=plan_id,
+                outcome="succeeded",
+                detail={"from": current.value, "to": status.value},
+            )
+
+    def confirm_plan(self, plan_id: str) -> None:
+        self.set_plan_status(plan_id, PlanStatus.CONFIRMED)
+
+    def confirm_step(self, step_id: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "UPDATE plan_steps SET confirmed = 1 WHERE id = ?",
+                (step_id,),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(step_id)
+            _write_audit_row(
+                conn,
+                kind="plan.step.confirm",
+                target_ref=step_id,
+                outcome="succeeded",
+            )
+
+    def is_step_confirmed(self, step_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT confirmed FROM plan_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(step_id)
+        return bool(row["confirmed"])
+
+    def store_step_output(self, step_id: str, output: dict) -> str:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO plan_step_outputs(step_id, output_json, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(step_id) DO UPDATE SET
+                    output_json = excluded.output_json,
+                    created_at = excluded.created_at
+                """,
+                (step_id, _dump_json_any(output), _now()),
+            )
+        return f"metrics:{step_id}"
+
+    def load_step_output(self, step_id: str) -> dict:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT output_json FROM plan_step_outputs WHERE step_id = ?",
+                (step_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(step_id)
+        value = json.loads(row["output_json"])
+        return value if isinstance(value, dict) else {}
+
+    def upsert_sub_agent(self, sub: SubAgent) -> None:
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sub_agents(
+                    id, parent_task_id, parent_step_id, scope, granted_tools_json,
+                    context_budget, status, result_ref, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    parent_task_id = excluded.parent_task_id,
+                    parent_step_id = excluded.parent_step_id,
+                    scope = excluded.scope,
+                    granted_tools_json = excluded.granted_tools_json,
+                    context_budget = excluded.context_budget,
+                    status = excluded.status,
+                    result_ref = excluded.result_ref
+                """,
+                (
+                    sub.id,
+                    sub.parent_task_id,
+                    sub.parent_step_id,
+                    sub.scope,
+                    _dump_json_any([_tool_ref_to_dict(ref) for ref in sub.granted_tools]),
+                    sub.context_budget,
+                    sub.status.value,
+                    sub.result_ref,
+                    _now(),
+                ),
+            )
+
+    def set_sub_agent_status(
+        self,
+        sub_id: str,
+        status: AgentStatus,
+        *,
+        result_ref: str | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE sub_agents
+                   SET status = ?,
+                       result_ref = COALESCE(?, result_ref)
+                 WHERE id = ?
+                """,
+                (status.value, result_ref, sub_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(sub_id)
+
+    def get_sub_agent(self, sub_id: str) -> SubAgent:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, parent_task_id, parent_step_id, scope, granted_tools_json,
+                       context_budget, status, result_ref
+                  FROM sub_agents
+                 WHERE id = ?
+                """,
+                (sub_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(sub_id)
+        return SubAgent(
+            id=row["id"],
+            parent_task_id=row["parent_task_id"],
+            parent_step_id=row["parent_step_id"],
+            scope=row["scope"],
+            granted_tools=[
+                _tool_ref_from_dict(item)
+                for item in _load_json_array(row["granted_tools_json"])
+            ],
+            context_budget=int(row["context_budget"]),
+            status=AgentStatus(row["status"]),
+            result_ref=row["result_ref"],
+        )
+
+    def write_audit(self, **kwargs) -> None:
+        with connect(self.db_path) as conn:
+            _write_audit_row(conn, **kwargs)
+
+    def list_audit(self, *, kind: str | None = None) -> list[dict]:
+        return _list_audit_rows(self.db_path, kind=kind)
+
+    def _insert_step(self, conn: sqlite3.Connection, step: dict) -> None:
+        conn.execute(
+            """
+            INSERT INTO plan_steps(
+                id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
+                inputs_json, depends_on_json, post_checks_json,
+                needs_confirmation, sub_agent_scope, granted_tools_json,
+                status, sub_agent_id, output_ref, review_json, error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            _step_insert_values(step),
+        )
+
+
 class PluginRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -1010,6 +1362,150 @@ def _audit_row_to_dict(row: sqlite3.Row) -> dict:
         "detail": _load_json_object(row["detail_json"]),
         "at": row["at"],
     }
+
+
+def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row]) -> dict:
+    return {
+        "id": plan_row["id"],
+        "task_id": plan_row["task_id"],
+        "goal": plan_row["goal"],
+        "source": plan_row["source"],
+        "template_id": plan_row["template_id"],
+        "steps": [_step_payload_from_row(row) for row in step_rows],
+        "autonomy_level": int(plan_row["autonomy_level"]),
+        "status": plan_row["status"],
+        "created_at": plan_row["created_at"],
+        "updated_at": plan_row["updated_at"],
+    }
+
+
+def _step_payload_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "plan_id": row["plan_id"],
+        "index": int(row["idx"]),
+        "title": row["title"],
+        "tool_ref": {
+            "plugin": row["tool_plugin"],
+            "tool": row["tool_name"],
+            "version": row["tool_version"] or "",
+        },
+        "inputs": _load_json_object_unchecked(row["inputs_json"]),
+        "depends_on": _load_json_array(row["depends_on_json"]),
+        "post_checks": _load_json_array(row["post_checks_json"]),
+        "needs_confirmation": bool(row["needs_confirmation"]),
+        "sub_agent_scope": row["sub_agent_scope"],
+        "granted_tools": _load_json_array(row["granted_tools_json"]),
+        "status": row["status"],
+        "sub_agent_id": row["sub_agent_id"],
+        "output_ref": row["output_ref"],
+        "review_verdicts": _load_json_array(row["review_json"]),
+        "error": row["error"],
+    }
+
+
+def _step_insert_values(step: dict) -> tuple:
+    tool_ref = step["tool_ref"]
+    return (
+        step["id"],
+        step["plan_id"],
+        step["index"],
+        step["title"],
+        tool_ref["plugin"],
+        tool_ref["tool"],
+        tool_ref.get("version") or "",
+        _dump_json_any(step.get("inputs") or {}),
+        _dump_json_any(step.get("depends_on") or []),
+        _dump_json_any(step.get("post_checks") or []),
+        int(bool(step.get("needs_confirmation"))),
+        step.get("sub_agent_scope"),
+        _dump_json_any(step.get("granted_tools") or []),
+        step["status"],
+        step.get("sub_agent_id"),
+        step.get("output_ref"),
+        _dump_json_any(step.get("review_verdicts") or []),
+        step.get("error"),
+    )
+
+
+def _step_update_values(step: dict) -> tuple:
+    return (*_step_insert_values(step)[2:], step["id"])
+
+
+def _tool_ref_to_dict(ref: ToolRef) -> dict[str, str]:
+    return {"plugin": ref.plugin, "tool": ref.tool, "version": ref.version}
+
+
+def _tool_ref_from_dict(payload: dict) -> ToolRef:
+    return ToolRef(
+        plugin=str(payload["plugin"]),
+        tool=str(payload["tool"]),
+        version=str(payload.get("version") or ""),
+    )
+
+
+def _dump_json_any(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_json_object_unchecked(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    return value if isinstance(value, dict) else {}
+
+
+def _load_json_array(raw: str | None) -> list:
+    if not raw:
+        return []
+    value = json.loads(raw)
+    return value if isinstance(value, list) else []
+
+
+def _write_audit_row(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    target_ref: str,
+    actor: str = "system",
+    inputs_hash: str | None = None,
+    outcome: str | None = None,
+    detail: dict | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO audit(
+            id, kind, actor, target_ref, inputs_hash, outcome,
+            detail_json, at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            uuid.uuid4().hex,
+            kind,
+            actor,
+            target_ref,
+            inputs_hash,
+            outcome,
+            json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
+            _now(),
+        ),
+    )
+
+
+def _list_audit_rows(db_path: Path, *, kind: str | None = None) -> list[dict]:
+    query = (
+        "SELECT id, kind, actor, target_ref, inputs_hash, outcome, detail_json, at "
+        "FROM audit"
+    )
+    params: tuple[str, ...] = ()
+    if kind is not None:
+        query += " WHERE kind = ?"
+        params = (kind,)
+    query += " ORDER BY at, id"
+    with connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_audit_row_to_dict(row) for row in rows]
 
 
 def _row_to_task(row: sqlite3.Row) -> TaskRecord:

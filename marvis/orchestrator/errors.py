@@ -18,3 +18,6 @@ class IllegalStepTransition(OrchestratorError):
         self.current = current
         self.target = target
 
+
+class PlanNotFoundError(OrchestratorError):
+    pass
