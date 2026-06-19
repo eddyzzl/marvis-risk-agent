@@ -7,7 +7,9 @@ from marvis.packs.modeling import ModelingError
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lr import train_lr
+from marvis.packs.modeling.recipes.xgb import train_xgb
 
 
 def _config() -> TrainConfig:
@@ -103,3 +105,51 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     assert [item[1] for item in first.feature_importance] == pytest.approx(
         [item[1] for item in second.feature_importance],
     )
+
+
+def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "tree_sample.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    lgb_config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 6, "learning_rate": 0.1, "num_leaves": 4},
+        seed=31,
+        early_stopping_rounds=None,
+    )
+    xgb_config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 6, "max_depth": 2, "eta": 0.1},
+        seed=31,
+        early_stopping_rounds=None,
+    )
+
+    first_lgb = train_lgb(backend, path, lgb_config, out_dir=tmp_path / "lgb_a")
+    second_lgb = train_lgb(backend, path, lgb_config, out_dir=tmp_path / "lgb_b")
+    first_xgb = train_xgb(backend, path, xgb_config, out_dir=tmp_path / "xgb_a")
+    second_xgb = train_xgb(backend, path, xgb_config, out_dir=tmp_path / "xgb_b")
+
+    assert (tmp_path / "lgb_a" / first_lgb.artifact.model_path).exists()
+    assert (tmp_path / "xgb_a" / first_xgb.artifact.model_path).exists()
+    assert first_lgb.artifact.algorithm == "lgb"
+    assert first_xgb.artifact.algorithm == "xgb"
+    assert first_lgb.metrics.test_auc == pytest.approx(second_lgb.metrics.test_auc)
+    assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
+    assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
+    assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
