@@ -22,6 +22,10 @@ class AuthoringError(DraftError):
     pass
 
 
+class PromotionError(DraftError):
+    pass
+
+
 __all__ = [
     "AuthoringError",
     "DraftError",
@@ -29,4 +33,5 @@ __all__ = [
     "DraftStateError",
     "FetchError",
     "OfflineError",
+    "PromotionError",
 ]

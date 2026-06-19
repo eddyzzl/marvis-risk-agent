@@ -18,6 +18,7 @@ from marvis.drafts.errors import (
     DraftStateError,
     FetchError,
     OfflineError,
+    PromotionError,
 )
 from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
@@ -41,6 +42,7 @@ __all__ = [
     "LearningNote",
     "OfflineError",
     "PromotionCheck",
+    "PromotionError",
     "assert_draft_status_transition",
     "distill_learning",
     "draft_script",
