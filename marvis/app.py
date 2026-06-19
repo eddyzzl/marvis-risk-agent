@@ -247,12 +247,20 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             harness_state,
         )
 
+    def subagent_planner_factory(restricted_registry):
+        return Planner(
+            restricted_registry,
+            llm_factory,
+            PlanValidator(restricted_registry),
+        )
+
     subagent_dispatcher = SubAgentDispatcher(
         plan_repo,
         planner,
         executor_factory,
         app.state.tool_registry,
         intent_router,
+        planner_factory=subagent_planner_factory,
     )
     plan_executor = PlanExecutor(
         plan_repo,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from marvis.orchestrator.contracts import AgentStatus, PlanStep, SubAgent
+from marvis.orchestrator.contracts import AgentStatus, PlanStatus, PlanStep, SubAgent
 from marvis.orchestrator.templates import get_template
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.errors import ToolNotFoundError
@@ -61,12 +61,21 @@ class RestrictedToolRegistry:
 
 
 class SubAgentDispatcher:
-    def __init__(self, plan_repo, planner, executor_factory, tool_registry, intent_router):
+    def __init__(
+        self,
+        plan_repo,
+        planner,
+        executor_factory,
+        tool_registry,
+        intent_router,
+        planner_factory=None,
+    ):
         self._repo = plan_repo
         self._planner = planner
         self._executor_factory = executor_factory
         self._tools = tool_registry
         self._intent_router = intent_router
+        self._planner_factory = planner_factory
 
     def spawn(self, step: PlanStep, *, parent_task_id: str) -> SubAgent:
         if not step.sub_agent_scope:
@@ -101,16 +110,17 @@ class SubAgentDispatcher:
         try:
             self._repo.set_sub_agent_status(sub.id, AgentStatus.RUNNING)
             restricted = RestrictedToolRegistry(self._tools, sub.granted_tools)
+            planner = self._planner_factory(restricted) if self._planner_factory else self._planner
             intent = self._intent_router.route(sub.scope, goal_inputs)
             if intent.kind == "template":
                 template = get_template(intent.template_id)
-                mini_plan = self._planner.from_template(
+                mini_plan = planner.from_template(
                     template,
                     intent.slots,
                     sub.parent_task_id,
                 )
             else:
-                mini_plan = self._planner.generate(
+                mini_plan = planner.generate(
                     sub.scope,
                     sub.parent_task_id,
                     memory_context={},
@@ -121,6 +131,7 @@ class SubAgentDispatcher:
             if problems:
                 raise RuntimeError("; ".join(problems))
 
+            mini_plan.status = PlanStatus.CONFIRMED
             self._repo.create_plan(mini_plan)
             execution = self._executor_factory(restricted).run(mini_plan.id)
             result_ref = execution.summary_ref

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from marvis.db import PlanRepository, PluginRepository, init_db
-from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStep
+from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStatus, PlanStep
 from marvis.orchestrator.subagent import SubAgentDispatcher
 from marvis.orchestrator.templates import load_builtin_templates
 from marvis.plugins.loader import load_builtin_packs
@@ -141,6 +141,66 @@ def test_subagent_run_uses_template_path_and_restricted_registry(tmp_path):
     assert planner.generate_calls == []
     assert {tool["tool"] for tool in seen_catalogs[0]} == {"echo"}
     assert repo.get_sub_agent(sub.id).status == AgentStatus.RETURNED
+
+
+def test_subagent_run_confirms_mini_plan_before_executor_run(tmp_path):
+    load_builtin_templates()
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    seen_statuses = []
+
+    def executor_factory(_restricted_registry):
+        def run(plan_id):
+            seen_statuses.append(repo.load_plan(plan_id).status)
+            return SimpleNamespace(summary_ref="artifact:summary")
+
+        return SimpleNamespace(run=run)
+
+    dispatcher = SubAgentDispatcher(
+        repo,
+        FakePlanner(),
+        executor_factory,
+        _tool_registry(tmp_path),
+        FakeIntentRouter(kind="template"),
+    )
+    sub = dispatcher.spawn(_step(), parent_task_id="task-1")
+
+    result = dispatcher.run(sub, goal_inputs={"message": "hi"})
+
+    assert result.ok is True
+    assert seen_statuses == [PlanStatus.CONFIRMED]
+
+
+def test_subagent_run_uses_restricted_planner_factory_for_novel_plans(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    restricted_catalogs = []
+    planner = FakePlanner()
+
+    def planner_factory(restricted_registry):
+        restricted_catalogs.append(restricted_registry.catalog_for_planner())
+        return planner
+
+    def executor_factory(_restricted_registry):
+        return SimpleNamespace(run=lambda _plan_id: SimpleNamespace(summary_ref="artifact:summary"))
+
+    dispatcher = SubAgentDispatcher(
+        repo,
+        FakePlanner(),
+        executor_factory,
+        _tool_registry(tmp_path),
+        FakeIntentRouter(kind="novel"),
+        planner_factory=planner_factory,
+    )
+    sub = dispatcher.spawn(_step(), parent_task_id="task-1")
+
+    result = dispatcher.run(sub, goal_inputs={})
+
+    assert result.ok is True
+    assert planner.generate_calls
+    assert {tool["tool"] for tool in restricted_catalogs[0]} == {"echo"}
 
 
 def test_subagent_run_isolates_executor_failures(tmp_path):
