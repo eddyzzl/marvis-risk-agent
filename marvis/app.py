@@ -25,7 +25,7 @@ from marvis.orchestrator.intent import IntentRouter
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.reviewer import Reviewer
 from marvis.orchestrator.subagent import SubAgentDispatcher
-from marvis.orchestrator.templates import load_builtin_templates
+from marvis.orchestrator.templates import clear_user_templates, load_builtin_templates
 from marvis.orchestrator.templates.skills import load_user_skill_templates
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.hooks import HookDispatcher
@@ -35,6 +35,7 @@ from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
 from marvis.routers.plans import router as plans_router
 from marvis.routers.plugins import router as plugins_router
+from marvis.routers.skills import router as skills_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
@@ -108,6 +109,8 @@ def _is_local_only_path(path: str) -> bool:
     return (
         path == "/api/branding"
         or path.startswith("/api/settings")
+        or path == "/api/skills/reload"
+        or path == "/api/skills/validate"
         or path.startswith("/branding/")
     )
 
@@ -148,6 +151,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(api_router)
     app.include_router(plugins_router)
     app.include_router(plans_router)
+    app.include_router(skills_router)
 
     @app.exception_handler(IllegalTransition)
     def _illegal_transition(_request, exc: IllegalTransition):
@@ -216,6 +220,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
 
 def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     load_builtin_templates()
+    clear_user_templates()
     plan_repo = PlanRepository(settings.db_path)
     plan_validator = PlanValidator(app.state.tool_registry)
     skill_report = load_user_skill_templates(

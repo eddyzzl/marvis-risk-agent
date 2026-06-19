@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from marvis.app import create_app
 from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.templates import (
     clear_user_templates,
@@ -186,3 +189,39 @@ def test_load_user_skill_templates_registers_active_and_reports_rejected(tmp_pat
     assert report.disabled == ["disabled_echo"]
     assert report.rejected[0][0] == "sample_echo"
     assert get_template("user_echo").source == "user"
+
+
+def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    initial = client.get("/api/skills")
+    assert initial.status_code == 200
+    assert initial.json()["counts"] == {"active": 0, "disabled": 0, "rejected": 0}
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    (skills_dir / "active.json").write_text(json.dumps(_skill_data()), encoding="utf-8")
+    (skills_dir / "disabled.json").write_text(
+        json.dumps(_skill_data(id="disabled_echo", enabled=False)),
+        encoding="utf-8",
+    )
+    (skills_dir / "rejected.json").write_text(
+        json.dumps(_skill_data(id="sample_echo")),
+        encoding="utf-8",
+    )
+
+    reloaded = client.post("/api/skills/reload")
+    skills = reloaded.json()["skills"]
+
+    assert reloaded.status_code == 200
+    assert reloaded.json()["counts"] == {"active": 1, "disabled": 1, "rejected": 1}
+    assert {"id": "user_echo", "status": "active", "problems": []} in skills
+    assert any(skill["id"] == "sample_echo" and skill["status"] == "rejected" for skill in skills)
+
+    valid = client.post("/api/skills/validate", json=_skill_data(id="preview_echo"))
+    invalid = client.post("/api/skills/validate", json=_skill_data(id="sample_echo"))
+
+    assert valid.json() == {"valid": True, "id": "preview_echo", "problems": []}
+    assert invalid.json()["valid"] is False
+    assert any("shadows a builtin" in problem for problem in invalid.json()["problems"])
