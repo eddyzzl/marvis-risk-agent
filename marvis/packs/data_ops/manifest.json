@@ -1,0 +1,324 @@
+{
+  "name": "data_ops",
+  "version": "0.1.0",
+  "display_name": "Data Operations Pack",
+  "description": "Deterministic dataset ingestion, profiling, alignment, and guarded join tools.",
+  "module": "marvis.packs.data_ops.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "ingest_excel",
+      "summary": "Ingest one or more Excel sheets into registered parquet datasets.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sheets": {"type": "array", "items": {"type": "string"}},
+          "role": {"type": "string", "enum": ["sample", "feature", "derived", "unknown"]}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "datasets": {"type": "array", "items": {"type": "object"}},
+          "reports": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["datasets", "reports"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_ingest_excel",
+      "side_effects": ["read:materials", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "infer_schema",
+      "summary": "Return stored schema and target metadata for a registered dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"dataset_id": {"type": "string", "minLength": 1}},
+        "required": ["dataset_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "columns": {"type": "array", "items": {"type": "object"}},
+          "has_target": {"type": "boolean"},
+          "target_col": {"type": ["string", "null"]}
+        },
+        "required": ["dataset_id", "columns", "has_target", "target_col"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_infer_schema",
+      "side_effects": ["read:dataset"]
+    },
+    {
+      "name": "align_columns",
+      "summary": "Empirically align anchor and feature dataset columns.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "anchor_id": {"type": "string", "minLength": 1},
+          "feature_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+        },
+        "required": ["anchor_id", "feature_ids"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "alignments": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["alignments"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_align_columns",
+      "side_effects": ["read:dataset"]
+    },
+    {
+      "name": "propose_join",
+      "summary": "Create a draft join plan with deterministic diagnostics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "anchor_id": {"type": "string", "minLength": 1},
+          "feature_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+        },
+        "required": ["anchor_id", "feature_ids"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "join_plan_id": {"type": "string"},
+          "status": {"type": "string"},
+          "joins": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["join_plan_id", "status", "joins"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_propose_join",
+      "side_effects": ["read:dataset", "write:join_plan"]
+    },
+    {
+      "name": "execute_join",
+      "summary": "Execute an explicitly confirmed join plan.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"join_plan_id": {"type": "string", "minLength": 1}},
+        "required": ["join_plan_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "anchor_rows": {"type": "integer"},
+          "joined_rows": {"type": "integer"},
+          "fan_out": {"type": "boolean"},
+          "warnings": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["result_dataset_id", "anchor_rows", "joined_rows", "fan_out", "warnings"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_execute_join",
+      "side_effects": ["read:dataset", "read:join_plan", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "clean_format",
+      "summary": "Create a cleaned derived dataset by applying column format operations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "ops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "col": {"type": "string", "minLength": 1},
+                "op": {"type": "string", "enum": ["strip", "lower", "upper", "to_numeric", "to_datetime"]}
+              },
+              "required": ["col", "op"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["dataset_id", "ops"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "changed_columns": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["dataset_id", "changed_columns"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_clean_format",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "dedup_rows",
+      "summary": "Create a derived dataset by dropping duplicate rows by key.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "keys": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "strategy": {"type": "string", "enum": ["first", "last"]}
+        },
+        "required": ["dataset_id", "keys", "strategy"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string"},
+          "removed_rows": {"type": "integer"}
+        },
+        "required": ["dataset_id", "removed_rows"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_dedup_rows",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "write:dataset", "read:join_plan", "write:join_plan", "read:materials"],
+  "$defs": {
+    "column": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "dtype": {"type": "string"},
+        "semantic_role": {"type": "string"},
+        "null_rate": {"type": "number"},
+        "cardinality": {"type": "integer"},
+        "sample_values": {"type": "array"},
+        "fingerprint": {"type": "object"}
+      },
+      "required": ["name", "dtype", "semantic_role", "null_rate", "cardinality", "sample_values", "fingerprint"],
+      "additionalProperties": false
+    },
+    "dataset": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "task_id": {"type": "string"},
+        "role": {"type": "string"},
+        "source_path": {"type": "string"},
+        "format": {"type": "string"},
+        "sheet": {"type": ["string", "null"]},
+        "row_count": {"type": "integer"},
+        "columns": {"type": "array", "items": {"$ref": "#/$defs/column"}},
+        "has_target": {"type": "boolean"},
+        "target_col": {"type": ["string", "null"]}
+      },
+      "required": ["id", "task_id", "role", "source_path", "format", "sheet", "row_count", "columns", "has_target", "target_col"],
+      "additionalProperties": false
+    },
+    "key_pair": {
+      "type": "object",
+      "properties": {
+        "anchor_col": {"type": "string"},
+        "feature_col": {"type": "string"},
+        "match_method": {"type": "string"},
+        "transform_side": {"type": "string"},
+        "match_rate": {"type": "number"},
+        "resolved_by": {"type": "string"}
+      },
+      "required": ["anchor_col", "feature_col", "match_method", "transform_side", "match_rate", "resolved_by"],
+      "additionalProperties": false
+    },
+    "join": {
+      "type": "object",
+      "properties": {
+        "feature_id": {"type": "string"},
+        "key_pairs": {"type": "array", "items": {"$ref": "#/$defs/key_pair"}},
+        "diagnostics": {"type": "object"},
+        "dedup_strategy": {"type": ["string", "null"]},
+        "confirmed": {"type": "boolean"}
+      },
+      "required": ["feature_id", "key_pairs", "diagnostics", "dedup_strategy", "confirmed"],
+      "additionalProperties": false
+    },
+    "ingest_output": {
+      "type": "object",
+      "properties": {
+        "datasets": {"type": "array", "items": {"$ref": "#/$defs/dataset"}},
+        "reports": {"type": "array", "items": {"type": "object"}}
+      },
+      "required": ["datasets", "reports"],
+      "additionalProperties": false
+    },
+    "schema_output": {
+      "type": "object",
+      "properties": {
+        "dataset_id": {"type": "string"},
+        "columns": {"type": "array", "items": {"$ref": "#/$defs/column"}},
+        "has_target": {"type": "boolean"},
+        "target_col": {"type": ["string", "null"]}
+      },
+      "required": ["dataset_id", "columns", "has_target", "target_col"],
+      "additionalProperties": false
+    },
+    "align_output": {
+      "type": "object",
+      "properties": {
+        "alignments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "feature_id": {"type": "string"},
+              "key_pairs": {"type": "array", "items": {"$ref": "#/$defs/key_pair"}}
+            },
+            "required": ["feature_id", "key_pairs"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["alignments"],
+      "additionalProperties": false
+    },
+    "join_plan_output": {
+      "type": "object",
+      "properties": {
+        "join_plan_id": {"type": "string"},
+        "status": {"type": "string"},
+        "joins": {"type": "array", "items": {"$ref": "#/$defs/join"}}
+      },
+      "required": ["join_plan_id", "status", "joins"],
+      "additionalProperties": false
+    }
+  }
+}
