@@ -1551,6 +1551,46 @@ class ModelingRepository:
             ).fetchall()
         return [_experiment_from_row(row) for row in rows]
 
+    def attach_experiment_result(
+        self,
+        experiment_id: str,
+        *,
+        metrics: ModelMetrics,
+        artifact_id: str,
+        status: str = "trained",
+    ) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE experiments
+                   SET metrics_json = ?,
+                       artifact_id = ?,
+                       status = ?
+                 WHERE id = ?
+                """,
+                (
+                    _dump_json_any(_model_metrics_to_dict(metrics)),
+                    artifact_id,
+                    status,
+                    experiment_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(experiment_id)
+
+    def set_experiment_status(self, experiment_id: str, status: str) -> None:
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE experiments
+                   SET status = ?
+                 WHERE id = ?
+                """,
+                (status, experiment_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(experiment_id)
+
     def create_model_artifact(self, artifact: ModelArtifact) -> None:
         with connect(self.db_path) as conn:
             conn.execute(
