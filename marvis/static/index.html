@@ -281,6 +281,14 @@
           </button>
         </header>
         <div class="task-form agent-memory-dialog-body">
+          <div class="agent-memory-view-switch" role="tablist" aria-label="Agent 记忆视图">
+            <button id="agentMemoryRawTab" class="agent-memory-view-tab selected" type="button" role="tab" aria-selected="true" data-agent-memory-view="raw">
+              原始记忆
+            </button>
+            <button id="agentMemoryDistillationTab" class="agent-memory-view-tab" type="button" role="tab" aria-selected="false" data-agent-memory-view="distillation">
+              进化沉淀
+            </button>
+          </div>
           <section class="task-form-section agent-memory-toolbar">
             <label>
               <span>类型</span>
@@ -303,11 +311,11 @@
                 <option value="rejected">已拒绝</option>
               </select>
             </label>
-            <label>
+            <label id="agentMemorySourceTaskFilterRow">
               <span>来源任务</span>
               <input id="agentMemorySourceTaskFilter" placeholder="task_id" autocomplete="off" />
             </label>
-            <label>
+            <label id="agentMemoryModelFilterRow">
               <span>模型</span>
               <input id="agentMemoryModelFilter" placeholder="model_name" autocomplete="off" />
             </label>

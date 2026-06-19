@@ -1416,8 +1416,39 @@ body.is-resizing {
   gap: 12px;
 }
 
+.agent-memory-view-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(320px, 100%);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.agent-memory-view-tab {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.agent-memory-view-tab.selected {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
 .agent-memory-toolbar {
   align-items: end;
+}
+
+.agent-memory-filter-hidden {
+  display: none !important;
 }
 
 .agent-memory-toolbar .button {
@@ -1487,15 +1518,24 @@ body.is-resizing {
 }
 
 .agent-memory-detail-inner p,
-.agent-memory-detail-inner ol {
+.agent-memory-detail-inner ol,
+.agent-memory-source-list {
   margin: 0;
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
 
-.agent-memory-detail-inner ol {
+.agent-memory-detail-inner ol,
+.agent-memory-source-list ul {
   padding-left: 1.2em;
+}
+
+.agent-memory-source-list strong {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 12px;
 }
 
 .task-form {

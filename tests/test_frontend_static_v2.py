@@ -4175,6 +4175,38 @@ def test_agent_message_renderer_outputs_inline_memory_references():
     assert "沿用坏样本字段口径" in html
 
 
+def test_agent_message_renderer_outputs_distillation_reference_audit_fields():
+    app_js = _read_static("app.js")
+    references_start = app_js.index("function agentMemoryReferencesHtml")
+    references_end = app_js.index("function agentMessageHtml", references_start)
+    script = "\n".join(
+        [
+            "function escapeHtml(value) {",
+            "  return String(value || '').replace(/[&<>\"']/g, (char) => ({",
+            "    '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;',",
+            "  }[char]));",
+            "}",
+            "function formatMemoryConfidence(value) { return String(value); }",
+            app_js[references_start:references_end],
+            "const html = agentMemoryReferencesHtml([{",
+            "  kind: 'distillation',",
+            "  id: 'dist-1',",
+            "  memory_type: 'field_convention',",
+            "  confidence: 'high',",
+            "  support_count: 4,",
+            "  source_memory_ids: ['mem-1', 'mem-2'],",
+            "}]);",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    html = result.stdout
+    assert "进化沉淀" in html
+    assert "支持 4" in html
+    assert "来源记忆 2" in html
+    assert 'data-agent-memory-inline-kind="distillation"' in html
+
+
 def test_agent_memory_management_view_wires_actions_and_api_paths():
     app_js = _read_static("app.js")
     index_html = _read_static("index.html")
@@ -4183,6 +4215,8 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'id="openAgentMemoryButton"' in index_html
     assert 'id="agentMemoryDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
+    assert 'id="agentMemoryRawTab"' in index_html
+    assert 'id="agentMemoryDistillationTab"' in index_html
     status_filter_start = index_html.index('id="agentMemoryStatusFilter"')
     status_filter_end = index_html.index("</select>", status_filter_start)
     status_filter = index_html[status_filter_start:status_filter_end]
@@ -4194,22 +4228,30 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'data-agent-memory-action="disable"' in app_js
     assert 'data-agent-memory-action="enable"' in app_js
     assert 'data-agent-memory-action="delete"' in app_js
+    assert 'data-agent-memory-action="rollback"' in app_js
+    assert 'memoryStatus === "active" && !memory.superseded_by' in app_js
 
-    assert 'api("api/agent-memory' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`)' in app_js
+    assert '"api/agent-memory"' in app_js
+    assert '"api/agent-memory/distillations"' in app_js
+    assert '`api/agent-memory/distillations/${encodeURIComponent(memoryId)}`' in app_js
+    assert 'api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" })' in app_js
+    assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in app_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in app_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in app_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in app_js
     assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
+    assert "function syncAgentMemoryViewControls" in app_js
+    assert "function setAgentMemoryViewMode" in app_js
     assert ".agent-memory-dialog" in styles_css
+    assert ".agent-memory-view-switch" in styles_css
     assert ".agent-memory-references" in styles_css
 
 
 def test_agent_memory_delete_keeps_audit_detail_visible():
     app_js = _read_static("app.js")
     delete_start = app_js.index("async function deleteAgentMemory")
-    delete_end = app_js.index("async function loadAgentMessageMemoryReferences", delete_start)
+    delete_end = app_js.index("async function rollbackAgentMemoryDistillation", delete_start)
     delete_body = app_js[delete_start:delete_end]
 
     assert "renderAgentMemoryDetail(payload?.memory || null, payload?.events || [])" in delete_body
