@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -62,7 +63,7 @@ def _run_tool(job: dict) -> dict:
         path_text = str(path)
         if path_text and path_text not in sys.path:
             sys.path.insert(0, path_text)
-    module = importlib.import_module(job["module"])
+    module = _load_module(job)
     func = getattr(module, job["entrypoint"])
     ctx = ToolContext(
         task_id=str(job["task_id"]),
@@ -82,6 +83,21 @@ def _run_tool(job: dict) -> dict:
     if not isinstance(result, dict):
         raise TypeError(f"tool must return dict, got {type(result).__name__}")
     return result
+
+
+def _load_module(job: dict):
+    module_path = job.get("module_path")
+    if module_path:
+        path = Path(str(module_path))
+        module_name = f"_marvis_adhoc_{path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    return importlib.import_module(job["module"])
 
 
 def _apply_resource_limits(memory_mb: int | None) -> None:

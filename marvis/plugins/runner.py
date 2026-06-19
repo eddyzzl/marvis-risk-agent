@@ -156,6 +156,110 @@ class ToolRunner:
         self._write_audit(target_ref, inputs, result, seed=effective_seed)
         return result
 
+    def invoke_adhoc(
+        self,
+        *,
+        module: Path,
+        entrypoint: str,
+        inputs: dict,
+        input_schema: dict,
+        output_schema: dict,
+        timeout_seconds: int,
+        task_id: str,
+        mode: str = "adhoc",
+        seed: int | None = None,
+        memory_limit_mb: int = 2048,
+    ) -> ToolResult:
+        started = time.monotonic()
+        target_ref = f"{mode}.{entrypoint}"
+        audit_kind = f"{mode}.invoke"
+        try:
+            validate_against_schema(inputs, input_schema, label="inputs")
+        except SchemaValidationError as exc:
+            result = _failed_result(started, "schema", str(exc))
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+            return result
+
+        job = {
+            "module_path": str(Path(module)),
+            "entrypoint": entrypoint,
+            "inputs": inputs,
+            "task_id": task_id,
+            "seed": seed,
+            "datasets_root": str(self._datasets_root),
+            "workspace": str(self._workspace),
+            "memory_limit_mb": int(memory_limit_mb),
+            "plugin_paths": [str(path) for path in self._plugin_paths],
+        }
+        try:
+            completed = subprocess.run(
+                [self._python_executable, "-m", "marvis.plugins.subprocess_worker"],
+                input=json.dumps(job, ensure_ascii=False),
+                text=True,
+                capture_output=True,
+                timeout=int(timeout_seconds),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            result = _failed_result(
+                started,
+                "timeout",
+                f"tool {target_ref} timed out after {timeout_seconds}s",
+                stdout_tail=_tail(exc.stdout),
+                stderr_tail=_tail(exc.stderr),
+            )
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+            return result
+
+        protocol = _parse_worker_result(completed.stdout)
+        if protocol is None:
+            result = _failed_result(
+                started,
+                "protocol",
+                f"worker returned invalid protocol with exit code {completed.returncode}",
+                stdout_tail=_tail(completed.stdout),
+                stderr_tail=_tail(completed.stderr),
+            )
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+            return result
+
+        if not protocol.get("ok"):
+            result = _failed_result(
+                started,
+                str(protocol.get("error_kind") or "execution"),
+                str(protocol.get("error") or "tool execution failed"),
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
+            )
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+            return result
+
+        output = protocol.get("output")
+        try:
+            validate_against_schema(output, output_schema, label=f"output:{target_ref}")
+        except SchemaValidationError as exc:
+            result = _failed_result(
+                started,
+                "schema",
+                str(exc),
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+            )
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+            return result
+
+        result = ToolResult(
+            ok=True,
+            output=output,
+            error=None,
+            error_kind=None,
+            duration_ms=_duration_ms(started),
+            stdout_tail=_tail(protocol.get("stdout") or ""),
+            stderr_tail=_tail(protocol.get("stderr") or ""),
+        )
+        self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+        return result
+
     def _write_audit(
         self,
         target_ref: str,
@@ -163,17 +267,22 @@ class ToolRunner:
         result: ToolResult,
         *,
         seed: int | None = None,
+        kind: str = "tool.invoke",
+        mode: str | None = None,
     ) -> None:
+        detail = {
+            "error_kind": result.error_kind,
+            "duration_ms": result.duration_ms,
+            "seed": seed,
+        }
+        if mode:
+            detail["mode"] = mode
         self._repo.write_audit(
-            kind="tool.invoke",
+            kind=kind,
             target_ref=target_ref,
             inputs_hash=_hash_inputs(inputs),
             outcome="succeeded" if result.ok else "failed",
-            detail={
-                "error_kind": result.error_kind,
-                "duration_ms": result.duration_ms,
-                "seed": seed,
-            },
+            detail=detail,
         )
 
 

@@ -105,3 +105,90 @@ def test_tool_runner_kills_timed_out_worker(tmp_path):
     assert result.ok is False
     assert result.error_kind == "timeout"
     assert "timed out" in result.error
+
+
+def test_tool_runner_invokes_adhoc_module_in_subprocess_and_audits_draft(tmp_path):
+    runner, repo = _runtime(tmp_path)
+    module_path = tmp_path / "draft_calc.py"
+    module_path.write_text(
+        "def calc_margin(inputs, ctx):\n"
+        "    return {'margin': inputs['revenue'] - inputs['cost'], 'task_id': ctx.task_id}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="calc_margin",
+        inputs={"revenue": 10, "cost": 3},
+        input_schema={
+            "type": "object",
+            "properties": {"revenue": {"type": "number"}, "cost": {"type": "number"}},
+            "required": ["revenue", "cost"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"margin": {"type": "number"}, "task_id": {"type": "string"}},
+            "required": ["margin", "task_id"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output == {"margin": 7, "task_id": "task-1"}
+    audits = repo.list_audit(kind="draft.invoke")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "draft.calc_margin"
+    assert audits[0]["outcome"] == "succeeded"
+
+
+def test_tool_runner_adhoc_validates_input_and_output_schema(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "draft_bad.py"
+    module_path.write_text(
+        "def bad_output(inputs, ctx):\n"
+        "    return {'wrong': True}\n",
+        encoding="utf-8",
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "required": ["message"],
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {"echoed": {"type": "string"}},
+        "required": ["echoed"],
+        "additionalProperties": False,
+    }
+
+    missing = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="bad_output",
+        inputs={},
+        input_schema=input_schema,
+        output_schema=output_schema,
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+    mismatch = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="bad_output",
+        inputs={"message": "hi"},
+        input_schema=input_schema,
+        output_schema=output_schema,
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert missing.ok is False
+    assert missing.error_kind == "schema"
+    assert mismatch.ok is False
+    assert mismatch.error_kind == "schema"
+    assert "echoed" in mismatch.error
