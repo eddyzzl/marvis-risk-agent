@@ -36,6 +36,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "plugin_manager.js",
         "skill_manager.js",
         "workflow_create.js",
+        "artifact_view.js",
     ):
         assert (static_v2 / module_name).is_file()
 
