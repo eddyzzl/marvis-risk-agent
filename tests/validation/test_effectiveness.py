@@ -185,15 +185,15 @@ def test_split_bin_tables_follow_model_analysis_auto_sort_direction():
     assert train_bins[0].bad_rate < train_bins[-1].bad_rate
 
 
-def test_bin_table_uses_each_split_edges():
+def test_bin_table_reuses_train_edges_for_each_split():
     sample = _build_sample()
     result = run_effectiveness(sample=sample, config=_config(bin_count=5))
     assert set(result.bin_tables.keys()) == {"train", "test", "oot"}
     edges_train = [row.score_upper for row in result.bin_tables["train"]]
     edges_test = [row.score_upper for row in result.bin_tables["test"]]
-    assert edges_train != edges_test
+    edges_oot = [row.score_upper for row in result.bin_tables["oot"]]
+    assert edges_train == edges_test == edges_oot
     assert len(edges_train) == 5
-    assert len(edges_test) == 5
 
 
 def test_psi_stability_uses_train_test_bins_against_oot_distribution():

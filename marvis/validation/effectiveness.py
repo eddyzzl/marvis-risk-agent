@@ -6,7 +6,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.feature.correlation import safe_correlation
 from marvis.validation.binning import (
+    assign_bins,
     bin_distribution,
     bin_table,
     compute_ks,
@@ -149,10 +151,9 @@ def compute_bin_tables(
         if rows_split.empty:
             bin_tables[split_key] = []
             continue
-        edges = equal_frequency_bin_edges(rows_split[score_col].to_numpy(dtype=float), config.bin_count)
         bin_tables[split_key] = _model_analysis_eval_table(
             rows_split,
-            edges=edges,
+            edges=context.edges,
             score_col=score_col,
             target_col=target_col,
         )
@@ -174,7 +175,7 @@ def compute_psi_stability_table(
 
     expected_scores = expected_rows[score_col].to_numpy(dtype=float)
     actual_scores = actual_rows[score_col].to_numpy(dtype=float)
-    edges = _psi_reference_edges(expected_scores, config.bin_count)
+    edges = equal_frequency_bin_edges(expected_scores, config.bin_count)
     expected_bins = _bin_counts(expected_scores, edges)
     actual_bins = _bin_counts(actual_scores, edges)
     expected_total = int(expected_bins.sum())
@@ -269,15 +270,8 @@ def _should_reverse_eval_bins(
         return False
     scores = valid[score_col].to_numpy(dtype=float)
     labels = valid[target_col].to_numpy(dtype=float)
-    if np.std(scores) == 0.0 or np.std(labels) == 0.0:
-        return False
-    correlation = np.corrcoef(
-        scores,
-        labels,
-    )[0, 1]
-    if not np.isfinite(correlation):
-        return False
-    return not bool(correlation > 0)
+    correlation = safe_correlation(scores, labels)
+    return bool(correlation < 0)
 
 
 def _recompute_cumulative_bin_metrics(rows: list[BinRow]) -> list[BinRow]:
@@ -429,25 +423,10 @@ def build_effectiveness_result(
     )
 
 
-def _psi_reference_edges(scores, bin_count: int) -> np.ndarray:
-    scores = np.asarray(scores, dtype=float)
-    scores = scores[np.isfinite(scores)]
-    if len(scores) == 0:
-        return np.asarray([-np.inf, np.inf], dtype=float)
-    quantiles = np.linspace(0.0, 1.0, bin_count + 1)
-    edges = np.unique(np.quantile(scores, quantiles))
-    if len(edges) < 2:
-        return np.asarray([-np.inf, np.inf], dtype=float)
-    edges = edges.astype(float)
-    edges[0] = -np.inf
-    edges[-1] = np.inf
-    return edges
-
-
 def _bin_counts(scores, edges) -> np.ndarray:
-    bins = np.searchsorted(np.asarray(edges, dtype=float)[1:-1], np.asarray(scores, dtype=float), side="left")
-    bins = np.clip(bins, 0, len(edges) - 2)
-    return np.bincount(bins, minlength=len(edges) - 1)
+    bins = assign_bins(scores, edges)
+    valid = bins > 0
+    return np.bincount(bins[valid], minlength=len(edges))[1:len(edges)]
 
 
 def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:

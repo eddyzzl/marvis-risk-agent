@@ -16,23 +16,23 @@ def test_equal_frequency_bin_edges_uses_quantiles():
     scores = np.arange(0, 100)
     edges = equal_frequency_bin_edges(scores, bin_count=10)
     assert len(edges) == 11
-    assert edges[0] == 0
-    assert edges[-1] == 99
+    assert edges[0] == -np.inf
+    assert edges[-1] == np.inf
     assert edges[5] == pytest.approx(49.5, abs=1.0)
 
 
 def test_equal_frequency_bin_edges_dedupes_when_many_ties():
     scores = np.array([0.0] * 50 + [1.0] * 50)
     edges = equal_frequency_bin_edges(scores, bin_count=10)
-    assert len(set(edges)) < 11
+    assert len(edges) < 11
+    assert len(edges) == len(set(edges))
 
 
 def test_equal_frequency_bin_edges_filters_non_finite_scores():
     scores = np.array([0.0, 1.0, np.nan, np.inf, -np.inf])
     edges = equal_frequency_bin_edges(scores, bin_count=2)
 
-    assert np.isfinite(edges).all()
-    assert edges.tolist() == [0.0, 0.5, 1.0]
+    assert edges.tolist() == [-np.inf, 0.5, np.inf]
 
 
 def test_equal_frequency_bin_edges_returns_catchall_when_no_finite_scores():
@@ -84,8 +84,8 @@ def test_bin_table_basic_shape():
     rows = bin_table(df, edges, score_col="score", target_col="y")
     assert len(rows) == 2
     assert rows[0].bin_index == 1
-    assert rows[0].sample_count == 5
-    assert rows[0].bad_count == 1
-    assert rows[0].bad_rate == pytest.approx(0.2)
-    assert rows[1].sample_count == 5
-    assert rows[1].bad_count == 4
+    assert rows[0].sample_count == 4
+    assert rows[0].bad_count == 0
+    assert rows[0].bad_rate == pytest.approx(0.0)
+    assert rows[1].sample_count == 6
+    assert rows[1].bad_count == 5
