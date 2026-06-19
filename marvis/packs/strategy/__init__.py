@@ -7,6 +7,7 @@ from marvis.packs.strategy.contracts import (
     TradeoffPoint,
     VintageCurve,
 )
+from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "StrategyRule",
     "TradeoffPoint",
     "VintageCurve",
+    "roll_rate_matrix",
     "vintage_curve",
     "vintage_summary",
 ]
