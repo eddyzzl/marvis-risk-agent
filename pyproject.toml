@@ -31,6 +31,7 @@ dependencies = [
   "xgboost>=2.0,<4",
   "lightgbm>=4.0,<5",
   "catboost>=1.2,<2",
+  "jsonschema>=4.0,<5",
 ]
 
 [project.scripts]
