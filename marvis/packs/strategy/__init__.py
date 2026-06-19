@@ -1,3 +1,4 @@
+from marvis.packs.strategy.backtest import backtest_strategy
 from marvis.packs.strategy.contracts import (
     BacktestResult,
     ProfitResult,
@@ -24,6 +25,7 @@ __all__ = [
     "TradeoffPoint",
     "VintageCurve",
     "apply_strategy",
+    "backtest_strategy",
     "build_strategy",
     "profit_calc",
     "roll_rate_matrix",
