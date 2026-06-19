@@ -196,6 +196,21 @@ def _fail_queued_job(repo: TaskRepository, job_id: str, exc: Exception) -> None:
     )
 
 
+def _dispatch_platform_hook(
+    hook_dispatcher,
+    event: str | None,
+    payload: dict,
+    *,
+    task_id: str | None,
+) -> None:
+    if hook_dispatcher is None or not event or not task_id:
+        return
+    try:
+        hook_dispatcher.dispatch(event, payload, task_id=task_id)
+    except Exception as exc:
+        logger.warning("platform hook dispatch failed for %s/%s: %s", event, task_id, exc)
+
+
 def _run_stage_job(
     job_id: str,
     db_path: Path,
@@ -203,9 +218,20 @@ def _run_stage_job(
     kwargs: dict,
     *,
     success_agent_notice: str | None = None,
+    hook_dispatcher=None,
+    before_hook_event: str | None = None,
+    after_hook_event: str | None = None,
 ) -> None:
     repo = TaskRepository(db_path)
     repo.mark_job_running(job_id)
+    task_id = kwargs.get("task_id")
+    task_id_text = str(task_id) if task_id else None
+    _dispatch_platform_hook(
+        hook_dispatcher,
+        before_hook_event,
+        _stage_hook_payload(job_id, task_id_text),
+        task_id=task_id_text,
+    )
     try:
         stage_func(**kwargs)
     except Exception as exc:
@@ -218,15 +244,61 @@ def _run_stage_job(
         )
         raise
     else:
-        task_id = kwargs.get("task_id")
         job_status = (
             "cancelled"
             if _stage_returned_cancelled_task(repo, task_id)
             else "succeeded"
         )
         repo.finish_job(job_id, status=job_status)
+        if job_status == "succeeded":
+            _dispatch_platform_hook(
+                hook_dispatcher,
+                after_hook_event,
+                _stage_hook_payload(job_id, task_id_text, status=job_status),
+                task_id=task_id_text,
+            )
         if job_status == "succeeded" and success_agent_notice == "word_report_ready":
             _add_agent_report_ready_message(repo, task_id)
+
+
+def _stage_hook_payload(
+    job_id: str,
+    task_id: str | None,
+    *,
+    status: str | None = None,
+) -> dict:
+    payload = {"job_id": job_id}
+    if task_id:
+        payload["task_id"] = task_id
+    if status:
+        payload["status"] = status
+    return payload
+
+
+def _task_hook_payload(task: TaskRecord) -> dict:
+    return {
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "status": task.status.value,
+        "run_mode": task.run_mode,
+        "algorithm": task.algorithm,
+    }
+
+
+def _scan_hook_payload(payload: dict) -> dict:
+    checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
+    failed_codes = [
+        str(check.get("code") or "")
+        for check in checks
+        if isinstance(check, dict) and check.get("status") != "pass"
+    ]
+    return {
+        "task_id": str(payload.get("task_id") or ""),
+        "status": str(payload.get("status") or ""),
+        "status_message": str(payload.get("status_message") or ""),
+        "check_count": len(checks),
+        "failed_check_codes": [code for code in failed_codes if code],
+    }
 
 
 def _add_agent_report_ready_message(repo: TaskRepository, task_id: str | None) -> None:
@@ -378,6 +450,12 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             report_values=payload.report_values,
         )
     )
+    _dispatch_platform_hook(
+        getattr(request.app.state, "hook_dispatcher", None),
+        "task.created",
+        _task_hook_payload(task),
+        task_id=task.id,
+    )
     return _task_payload(repo, task, request.app.state.settings.tasks_dir)
 
 
@@ -428,7 +506,15 @@ def scan_task(task_id: str, request: Request) -> dict:
             detail=f"cannot scan task in status {task.status.value}",
         )
     try:
-        return _perform_scan_task(repo, task, request.app.state.settings)
+        payload = _perform_scan_task(repo, task, request.app.state.settings)
+        if payload.get("status") == TaskStatus.SCANNED.value:
+            _dispatch_platform_hook(
+                getattr(request.app.state, "hook_dispatcher", None),
+                "task.scanned",
+                _scan_hook_payload(payload),
+                task_id=task_id,
+            )
+        return payload
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         # ValueError covers scan-limit breaches (max_files / max_depth) from
         # scan_source_dir; all three are client-side "bad source dir" conditions
@@ -548,6 +634,7 @@ def post_agent_message(
             text_values=pending_report_draft["values"],
             expected_revision=pending_report_draft["report_revision"],
             background_tasks=background_tasks,
+            hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
         )
     model_profile = _resolve_agent_model(request, payload.model_id, payload.effort)
     rerun_stage = agent_rerun_stage(content)
@@ -839,6 +926,7 @@ def confirm_agent_report_conclusions(
         text_values=payload.text_values,
         expected_revision=payload.revision,
         background_tasks=background_tasks,
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
     )
 
 
@@ -852,6 +940,7 @@ def _confirm_agent_report_conclusions(
     expected_revision: int | None,
     background_tasks: BackgroundTasks,
     model_profile: dict | None = None,
+    hook_dispatcher=None,
 ) -> dict:
     latest_task = _get_task_or_404(repo, task_id)
     if latest_task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
@@ -905,6 +994,9 @@ def _confirm_agent_report_conclusions(
             ),
         },
         success_agent_notice="word_report_ready",
+        hook_dispatcher=hook_dispatcher,
+        before_hook_event="report.before_generate",
+        after_hook_event="report.after_generate",
     )
     return {
         "task_id": task_id,
@@ -1009,6 +1101,8 @@ def run_task_notebook(
             "settings": _pipeline_settings(request, task, payload.feature_columns),
             "stage_claimed": True,
         },
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
+        after_hook_event="notebook.completed",
     )
     return {
         "task_id": task_id,
@@ -1150,6 +1244,8 @@ def run_task_metrics(
             "settings": _pipeline_settings(request, task, None),
             "stage_claimed": True,
         },
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
+        after_hook_event="validation.completed",
     )
     return {
         "task_id": task_id,
@@ -1183,6 +1279,9 @@ def run_task_report(
             "task_id": task_id,
             "settings": _pipeline_settings(request, task, None),
         },
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
+        before_hook_event="report.before_generate",
+        after_hook_event="report.after_generate",
     )
     return {
         "task_id": task_id,

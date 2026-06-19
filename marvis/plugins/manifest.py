@@ -22,6 +22,14 @@ PLATFORM_HOOK_EVENTS = frozenset({
     "step.completed",
 })
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
+)
+_PYTHON_REQUIRES_RE = re.compile(
+    r"^(?:>=|>|<=|<|==|~=|!=)\s*\d+(?:\.\d+){0,2}(?:\.\*)?"
+    r"(?:\s*,\s*(?:>=|>|<=|<|==|~=|!=)\s*\d+(?:\.\d+){0,2}(?:\.\*)?)*$"
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,7 @@ class PluginManifest:
     display_name: str
     description: str
     module: str
+    python_requires: str
     tools: tuple[ToolSpec, ...]
     hooks: tuple[HookSpec, ...] = ()
     permissions: tuple[str, ...] = ()
@@ -77,7 +86,10 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
     display_name = _optional_text(data, "display_name", name)
     description = _optional_text(data, "description", "")
     module = _required_text(data, "module")
+    python_requires = _optional_text(data, "python_requires", "")
     _validate_identifier(name, "name")
+    _validate_semver(version)
+    _validate_python_requires(python_requires)
 
     tools_data = data.get("tools")
     if not isinstance(tools_data, list) or not tools_data:
@@ -102,6 +114,7 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
         display_name=display_name,
         description=description,
         module=module,
+        python_requires=python_requires,
         tools=tuple(tools),
         hooks=hooks,
         permissions=permissions,
@@ -117,6 +130,7 @@ def manifest_to_dict(manifest: PluginManifest) -> dict[str, Any]:
         "display_name": manifest.display_name,
         "description": manifest.description,
         "module": manifest.module,
+        "python_requires": manifest.python_requires,
         "tools": [
             {
                 "name": tool.name,
@@ -241,3 +255,13 @@ def _positive_int(value: Any, label: str) -> int:
 def _validate_identifier(value: str, label: str) -> None:
     if not _IDENTIFIER_RE.match(value):
         raise ManifestError(f"{label} must be an identifier")
+
+
+def _validate_semver(version: str) -> None:
+    if not _SEMVER_RE.fullmatch(version):
+        raise ManifestError("version must be a semantic version like 1.2.3")
+
+
+def _validate_python_requires(value: str) -> None:
+    if value and not _PYTHON_REQUIRES_RE.fullmatch(value):
+        raise ManifestError("python_requires must be a Python version specifier")

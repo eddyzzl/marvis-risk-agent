@@ -46,12 +46,14 @@ class ToolRunner:
         python_executable: str,
         datasets_root: Path,
         workspace: Path,
+        plugin_paths: list[Path] | None = None,
     ):
         self._tools = tool_registry
         self._repo = repo
         self._python_executable = python_executable
         self._datasets_root = datasets_root
         self._workspace = workspace
+        self._plugin_paths = tuple(Path(path) for path in (plugin_paths or ()))
 
     def invoke(
         self,
@@ -70,16 +72,20 @@ class ToolRunner:
             result = _failed_result(started, "schema", str(exc))
             self._write_audit(target_ref, inputs, result)
             return result
+        effective_seed = seed
+        if effective_seed is None and tool.determinism == "stochastic":
+            effective_seed = _derive_seed(target_ref, task_id, inputs)
 
         job = {
             "module": manifest.module,
             "entrypoint": tool.entrypoint,
             "inputs": inputs,
             "task_id": task_id,
-            "seed": seed,
+            "seed": effective_seed,
             "datasets_root": str(self._datasets_root),
             "workspace": str(self._workspace),
             "memory_limit_mb": tool.memory_limit_mb,
+            "plugin_paths": [str(path) for path in self._plugin_paths],
         }
         try:
             completed = subprocess.run(
@@ -98,7 +104,7 @@ class ToolRunner:
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
-            self._write_audit(target_ref, inputs, result)
+            self._write_audit(target_ref, inputs, result, seed=effective_seed)
             return result
 
         protocol = _parse_worker_result(completed.stdout)
@@ -110,7 +116,7 @@ class ToolRunner:
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
             )
-            self._write_audit(target_ref, inputs, result)
+            self._write_audit(target_ref, inputs, result, seed=effective_seed)
             return result
 
         if not protocol.get("ok"):
@@ -121,7 +127,7 @@ class ToolRunner:
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
             )
-            self._write_audit(target_ref, inputs, result)
+            self._write_audit(target_ref, inputs, result, seed=effective_seed)
             return result
 
         output = protocol.get("output")
@@ -135,7 +141,7 @@ class ToolRunner:
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
             )
-            self._write_audit(target_ref, inputs, result)
+            self._write_audit(target_ref, inputs, result, seed=effective_seed)
             return result
 
         result = ToolResult(
@@ -147,10 +153,17 @@ class ToolRunner:
             stdout_tail=_tail(protocol.get("stdout") or ""),
             stderr_tail=_tail(protocol.get("stderr") or ""),
         )
-        self._write_audit(target_ref, inputs, result)
+        self._write_audit(target_ref, inputs, result, seed=effective_seed)
         return result
 
-    def _write_audit(self, target_ref: str, inputs: dict, result: ToolResult) -> None:
+    def _write_audit(
+        self,
+        target_ref: str,
+        inputs: dict,
+        result: ToolResult,
+        *,
+        seed: int | None = None,
+    ) -> None:
         self._repo.write_audit(
             kind="tool.invoke",
             target_ref=target_ref,
@@ -159,6 +172,7 @@ class ToolRunner:
             detail={
                 "error_kind": result.error_kind,
                 "duration_ms": result.duration_ms,
+                "seed": seed,
             },
         )
 
@@ -210,3 +224,13 @@ def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
 def _hash_inputs(inputs: dict) -> str:
     raw = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _derive_seed(target_ref: str, task_id: str, inputs: dict) -> int:
+    raw = json.dumps(
+        {"target_ref": target_ref, "task_id": task_id, "inputs": inputs},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8], 16)

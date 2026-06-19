@@ -32,20 +32,42 @@ class PluginRegistry:
         existing = self._plugins.get(manifest.name)
         if existing is not None and existing[0].version == manifest.version:
             raise DuplicatePluginError(f"{manifest.name}@{manifest.version} already registered")
-        self._plugins[manifest.name] = (manifest, bool(enabled))
         self._repo.upsert_plugin(manifest, enabled=enabled)
+        self._repo.write_audit(
+            kind="plugin.register",
+            target_ref=manifest.name,
+            outcome="succeeded",
+            detail={
+                "version": manifest.version,
+                "builtin": manifest.builtin,
+                "enabled": bool(enabled),
+            },
+        )
+        self._plugins[manifest.name] = (manifest, bool(enabled))
 
     def remove(self, name: str) -> None:
         manifest, _enabled = self._require(name)
         if manifest.builtin:
             raise ValueError("cannot remove builtin plugin")
-        del self._plugins[name]
         self._repo.delete_plugin(name)
+        self._repo.write_audit(
+            kind="plugin.remove",
+            target_ref=name,
+            outcome="succeeded",
+            detail={"version": manifest.version},
+        )
+        del self._plugins[name]
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         manifest, _current = self._require(name)
-        self._plugins[name] = (manifest, bool(enabled))
         self._repo.set_enabled(name, enabled)
+        self._repo.write_audit(
+            kind="plugin.enable" if enabled else "plugin.disable",
+            target_ref=name,
+            outcome="succeeded",
+            detail={"version": manifest.version, "enabled": bool(enabled)},
+        )
+        self._plugins[name] = (manifest, bool(enabled))
 
     def get(self, name: str) -> PluginManifest:
         return self._require(name)[0]
@@ -104,6 +126,5 @@ class ToolRegistry:
                     "input_schema": tool.input_schema,
                     "output_schema": tool.output_schema,
                     "determinism": tool.determinism,
-                    "side_effects": list(tool.side_effects),
                 })
         return catalog

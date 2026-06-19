@@ -17,6 +17,8 @@ from marvis.plugins.manifest import PluginManifest, ToolSpec
 
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
+PLUGIN_ADMIN_HEADER = "x-marvis-plugin-admin"
+PLUGIN_ADMIN_VALUE = "local-dev"
 
 
 @router.get("")
@@ -32,6 +34,7 @@ def list_plugins(request: Request, include_disabled: bool = False) -> dict:
 
 @router.post("", status_code=201)
 async def upload_plugin(request: Request) -> dict:
+    _require_plugin_admin(request)
     settings = request.app.state.settings
     registry = request.app.state.plugin_registry
     filename, content = await _read_plugin_upload(request)
@@ -58,16 +61,19 @@ async def upload_plugin(request: Request) -> dict:
 
 @router.post("/{name}/enable")
 def enable_plugin(request: Request, name: str) -> dict:
+    _require_plugin_admin(request)
     return _set_enabled(request, name, True)
 
 
 @router.post("/{name}/disable")
 def disable_plugin(request: Request, name: str) -> dict:
+    _require_plugin_admin(request)
     return _set_enabled(request, name, False)
 
 
 @router.delete("/{name}")
 def remove_plugin(request: Request, name: str) -> dict:
+    _require_plugin_admin(request)
     try:
         request.app.state.plugin_registry.remove(name)
     except PluginNotFoundError as exc:
@@ -94,6 +100,11 @@ def _set_enabled(request: Request, name: str, enabled: bool) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
     return {"ok": True}
+
+
+def _require_plugin_admin(request: Request) -> None:
+    if request.headers.get(PLUGIN_ADMIN_HEADER) != PLUGIN_ADMIN_VALUE:
+        raise HTTPException(status_code=403, detail="plugin admin confirmation required")
 
 
 def _public_plugin(manifest: PluginManifest, enabled: bool) -> dict:
@@ -139,9 +150,12 @@ async def _read_plugin_upload(request: Request) -> tuple[str, bytes]:
         if b'name="file"' not in header_blob:
             continue
         filename = _filename_from_content_disposition(header_blob) or "plugin.zip"
-        payload = payload.rstrip(b"\r\n")
+        if payload.endswith(b"\r\n"):
+            payload = payload[:-2]
         if payload.endswith(b"--"):
-            payload = payload[:-2].rstrip(b"\r\n")
+            payload = payload[:-2]
+            if payload.endswith(b"\r\n"):
+                payload = payload[:-2]
         return filename, payload
     raise HTTPException(status_code=400, detail="file field is required")
 

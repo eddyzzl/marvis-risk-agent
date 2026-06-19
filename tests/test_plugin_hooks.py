@@ -58,10 +58,11 @@ def _manifest(name: str = "hook_pack"):
 def test_hook_dispatcher_invokes_tools_registered_for_event(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
-    registry = PluginRegistry(PluginRepository(db_path))
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
     registry.register(_manifest(), enabled=True)
     runner = FakeRunner()
-    dispatcher = HookDispatcher(registry, runner)
+    dispatcher = HookDispatcher(registry, runner, repo)
     dispatcher.rebuild_index()
 
     results = dispatcher.dispatch("task.created", {"task_id": "t1"}, task_id="t1")
@@ -71,6 +72,11 @@ def test_hook_dispatcher_invokes_tools_registered_for_event(tmp_path):
     assert runner.calls == [
         (ToolRef("hook_pack", "on_task_created", "0.1.0"), {"task_id": "t1"}, "t1", None)
     ]
+    audits = repo.list_audit(kind="hook.dispatch")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "hook_pack.on_task_created@0.1.0"
+    assert audits[0]["outcome"] == "succeeded"
+    assert audits[0]["detail"]["event"] == "task.created"
 
 
 def test_hook_dispatcher_skips_disabled_plugins_after_rebuild(tmp_path):
@@ -90,10 +96,11 @@ def test_hook_dispatcher_skips_disabled_plugins_after_rebuild(tmp_path):
 def test_hook_dispatcher_isolates_failed_hook_results(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
-    registry = PluginRegistry(PluginRepository(db_path))
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
     registry.register(_manifest(), enabled=True)
     runner = FakeRunner()
-    dispatcher = HookDispatcher(registry, runner)
+    dispatcher = HookDispatcher(registry, runner, repo)
     dispatcher.rebuild_index()
 
     results = dispatcher.dispatch("task.created", {"fail": True}, task_id="t1")
@@ -101,6 +108,9 @@ def test_hook_dispatcher_isolates_failed_hook_results(tmp_path):
     assert len(results) == 1
     assert results[0].ok is False
     assert runner.calls[0][0] == ToolRef("hook_pack", "on_task_created", "0.1.0")
+    audits = repo.list_audit(kind="hook.dispatch")
+    assert audits[0]["outcome"] == "failed"
+    assert audits[0]["detail"]["error_kind"] == "execution"
 
 
 def test_hook_dispatcher_unknown_event_is_noop(tmp_path):

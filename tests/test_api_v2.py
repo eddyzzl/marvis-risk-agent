@@ -194,6 +194,14 @@ class FakeTaskRepository:
         return new_revision
 
 
+class FakeHookDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, event: str, payload: dict, *, task_id: str) -> None:
+        self.calls.append((event, payload, task_id))
+
+
 def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.tasks = {}
     FakeTaskRepository.deleted = []
@@ -264,6 +272,77 @@ def test_create_then_get_task(tmp_path: Path, monkeypatch):
     assert got.json()["task_type"] == "validation"
     assert got.json()["active_job_kind"] is None
     assert got.json()["report_available"] is False
+
+
+def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+            "algorithm": "lgb",
+            "run_mode": "agent",
+        },
+    )
+
+    assert response.status_code == 200
+    task = response.json()
+    assert dispatcher.calls == [
+        (
+            "task.created",
+            {
+                "task_id": task["id"],
+                "task_type": "validation",
+                "status": "created",
+                "run_mode": "agent",
+                "algorithm": "lgb",
+            },
+            task["id"],
+        )
+    ]
+
+
+def test_scan_task_dispatches_task_scanned_hook(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    dispatcher.calls.clear()
+
+    def fake_scan(repo, task, _settings):
+        return {
+            "task_id": task.id,
+            "status": "scanned",
+            "status_message": "材料扫描完成。",
+            "checks": [{"code": "notebook_contract", "status": "pass"}],
+        }
+
+    monkeypatch.setattr("marvis.api._perform_scan_task", fake_scan)
+
+    response = client.post(f"/api/tasks/{task_id}/scan")
+
+    assert response.status_code == 200
+    assert dispatcher.calls == [
+        (
+            "task.scanned",
+            {
+                "task_id": task_id,
+                "status": "scanned",
+                "status_message": "材料扫描完成。",
+                "check_count": 1,
+                "failed_check_codes": [],
+            },
+            task_id,
+        )
+    ]
 
 
 def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
@@ -1466,6 +1545,41 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
     )
 
     assert FakeTaskRepository.jobs[job_id]["status"] == "cancelled"
+
+
+def test_stage_job_dispatches_before_and_after_hooks(tmp_path: Path, monkeypatch):
+    from marvis.api import _run_stage_job
+
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    repo = FakeTaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "report")
+    dispatcher = FakeHookDispatcher()
+
+    def stage(*, task_id: str) -> None:
+        assert task_id
+
+    _run_stage_job(
+        job_id,
+        tmp_path / "marvis.sqlite",
+        stage,
+        {"task_id": task_id},
+        hook_dispatcher=dispatcher,
+        before_hook_event="report.before_generate",
+        after_hook_event="report.after_generate",
+    )
+
+    assert dispatcher.calls == [
+        ("report.before_generate", {"job_id": job_id, "task_id": task_id}, task_id),
+        (
+            "report.after_generate",
+            {"job_id": job_id, "task_id": task_id, "status": "succeeded"},
+            task_id,
+        ),
+    ]
 
 
 def test_metrics_endpoint_claims_computing_before_dispatching_stage(

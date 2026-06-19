@@ -6,6 +6,7 @@ import json
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
+import uuid
 import zipfile
 
 from jsonschema import Draft202012Validator
@@ -20,10 +21,20 @@ MAX_PLUGIN_ZIP_BYTES = 50 * 1024 * 1024
 
 def compute_checksum(path: Path) -> str:
     digest = hashlib.sha256()
+    if path.is_dir():
+        for child in sorted(item for item in path.rglob("*") if item.is_file()):
+            digest.update(child.relative_to(path).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            _update_file_digest(digest, child)
+        return digest.hexdigest()
+    _update_file_digest(digest, path)
+    return digest.hexdigest()
+
+
+def _update_file_digest(digest, path: Path) -> None:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
 
 
 def load_manifest(plugin_dir: Path, *, builtin: bool) -> PluginManifest:
@@ -49,20 +60,38 @@ def install_plugin(
     if zip_path.stat().st_size > MAX_PLUGIN_ZIP_BYTES:
         raise PluginError("plugin zip is too large")
 
-    checksum = compute_checksum(zip_path)
     with tempfile.TemporaryDirectory(prefix="marvis-plugin-") as temp_name:
         temp_dir = Path(temp_name)
         _safe_extract_zip(zip_path, temp_dir)
         unpacked_dir = _plugin_root_from_extract(temp_dir)
+        checksum = compute_checksum(unpacked_dir)
         manifest = replace(load_manifest(unpacked_dir, builtin=False), checksum=checksum)
         _raise_if_duplicate_same_version(registry, manifest)
 
         plugins_dir.mkdir(parents=True, exist_ok=True)
         destination = plugins_dir / manifest.name
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(unpacked_dir, destination)
-        registry.register(manifest, enabled=True)
+        backup = None
+        with tempfile.TemporaryDirectory(
+            prefix=f".{manifest.name}-staging-",
+            dir=plugins_dir,
+        ) as staging_parent_name:
+            staging_parent = Path(staging_parent_name)
+            staged = staging_parent / manifest.name
+            shutil.copytree(unpacked_dir, staged)
+            try:
+                if destination.exists():
+                    backup = plugins_dir / f".{manifest.name}-backup-{uuid.uuid4().hex}"
+                    destination.rename(backup)
+                staged.rename(destination)
+                registry.register(manifest, enabled=True)
+            except Exception:
+                _remove_path(destination)
+                if backup is not None and backup.exists():
+                    backup.rename(destination)
+                raise
+            else:
+                if backup is not None and backup.exists():
+                    _remove_path(backup)
         return manifest
 
 
@@ -94,10 +123,20 @@ def _assert_valid_jsonschema(schema: dict) -> None:
 
 
 def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
-    with zipfile.ZipFile(zip_path) as archive:
-        for info in archive.infolist():
-            _assert_safe_zip_member(info.filename)
-        archive.extractall(destination)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for info in archive.infolist():
+                _assert_safe_zip_member(info.filename)
+            archive.extractall(destination)
+    except zipfile.BadZipFile as exc:
+        raise PluginError("invalid plugin zip") from exc
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
 
 
 def _assert_safe_zip_member(filename: str) -> None:

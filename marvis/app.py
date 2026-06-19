@@ -187,8 +187,9 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
         python_executable=python_executable,
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
+        plugin_paths=[settings.plugins_dir],
     )
-    hook_dispatcher = HookDispatcher(plugin_registry, tool_runner)
+    hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
     app.state.plugin_repo = plugin_repo
     app.state.plugin_registry = plugin_registry

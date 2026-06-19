@@ -46,6 +46,41 @@ def _manifest(version: str = "0.1.0", *, tool_name: str = "echo"):
     )
 
 
+def _uploaded_manifest():
+    return parse_manifest(
+        {
+            "name": "uploaded_pack",
+            "version": "0.1.0",
+            "display_name": "Uploaded Pack",
+            "description": "Uploaded runtime pack",
+            "module": "uploaded_pack.tools",
+            "tools": [
+                {
+                    "name": "echo",
+                    "summary": "Echo a message",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"],
+                    },
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {"echoed": {"type": "string"}},
+                        "required": ["echoed"],
+                    },
+                    "determinism": "deterministic",
+                    "timeout_seconds": 10,
+                    "failure_policy": "fail",
+                    "entrypoint": "tool_echo",
+                }
+            ],
+            "hooks": [],
+            "permissions": [],
+        },
+        builtin=False,
+    )
+
+
 def test_plugin_registry_registers_and_loads_from_repository(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -60,6 +95,7 @@ def test_plugin_registry_registers_and_loads_from_repository(tmp_path):
     assert loaded.get("_sample").version == "0.1.0"
     assert loaded.is_enabled("_sample") is True
     assert [plugin.name for plugin in loaded.list()] == ["_sample"]
+    assert repo.list_audit(kind="plugin.register")[0]["target_ref"] == "_sample"
 
 
 def test_plugin_registry_rejects_same_name_and_version_duplicate(tmp_path):
@@ -75,7 +111,8 @@ def test_plugin_registry_rejects_same_name_and_version_duplicate(tmp_path):
 def test_plugin_registry_upgrade_replaces_existing_manifest(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
-    registry = PluginRegistry(PluginRepository(db_path))
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
     registry.register(_manifest(), enabled=True)
 
     registry.register(_manifest("0.2.0", tool_name="reverse"), enabled=False)
@@ -83,6 +120,10 @@ def test_plugin_registry_upgrade_replaces_existing_manifest(tmp_path):
     assert registry.get("_sample").version == "0.2.0"
     assert registry.is_enabled("_sample") is False
     assert registry.get("_sample").tools[0].name == "reverse"
+    assert [audit["target_ref"] for audit in repo.list_audit(kind="plugin.register")] == [
+        "_sample",
+        "_sample",
+    ]
 
 
 def test_plugin_registry_remove_builtin_is_rejected(tmp_path):
@@ -93,6 +134,32 @@ def test_plugin_registry_remove_builtin_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="builtin"):
         registry.remove("_sample")
+
+
+def test_plugin_registry_enable_disable_and_remove_write_audit(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
+    registry.register(_uploaded_manifest(), enabled=True)
+
+    registry.set_enabled("uploaded_pack", False)
+    registry.set_enabled("uploaded_pack", True)
+    registry.remove("uploaded_pack")
+
+    audits = repo.list_audit()
+    assert [audit["kind"] for audit in audits] == [
+        "plugin.register",
+        "plugin.disable",
+        "plugin.enable",
+        "plugin.remove",
+    ]
+    assert [audit["target_ref"] for audit in audits] == [
+        "uploaded_pack",
+        "uploaded_pack",
+        "uploaded_pack",
+        "uploaded_pack",
+    ]
 
 
 def test_tool_registry_resolves_enabled_tools_and_rejects_disabled_or_wrong_version(tmp_path):
@@ -138,7 +205,7 @@ def test_tool_registry_catalog_for_planner_is_compact_and_safe(tmp_path):
                 "required": ["echoed"],
             },
             "determinism": "deterministic",
-            "side_effects": ["read:input"],
         }
     ]
     assert "entrypoint" not in catalog[0]
+    assert "side_effects" not in catalog[0]

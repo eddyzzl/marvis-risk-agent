@@ -56,6 +56,10 @@ def worker_main() -> None:
 
 
 def _run_tool(job: dict) -> dict:
+    for path in job.get("plugin_paths") or []:
+        path_text = str(path)
+        if path_text and path_text not in sys.path:
+            sys.path.insert(0, path_text)
     module = importlib.import_module(job["module"])
     func = getattr(module, job["entrypoint"])
     ctx = ToolContext(

@@ -11,6 +11,7 @@ def _manifest(**overrides):
         "display_name": "Sample Echo Pack",
         "description": "Runtime smoke-test pack",
         "module": "marvis.packs._sample.tools",
+        "python_requires": ">=3.10,<3.14",
         "tools": [
             {
                 "name": "echo",
@@ -47,6 +48,7 @@ def test_parse_manifest_round_trips_plugin_and_tool_contract():
     assert manifest.version == "0.1.0"
     assert manifest.display_name == "Sample Echo Pack"
     assert manifest.module == "marvis.packs._sample.tools"
+    assert manifest.python_requires == ">=3.10,<3.14"
     assert manifest.builtin is True
     assert manifest.checksum == ""
     assert len(manifest.tools) == 1
@@ -81,6 +83,18 @@ def test_parse_manifest_rejects_duplicate_tool_names():
 
     with pytest.raises(ManifestError, match="duplicate tool"):
         parse_manifest(data)
+
+
+@pytest.mark.parametrize("version", ["1", "1.0", "v1.0.0", "1.0.0.0"])
+def test_parse_manifest_rejects_non_semver_versions(version):
+    with pytest.raises(ManifestError, match="semantic version"):
+        parse_manifest(_manifest(version=version))
+
+
+@pytest.mark.parametrize("python_requires", ["3.10", ">=py310", "=>3.10"])
+def test_parse_manifest_rejects_invalid_python_requires(python_requires):
+    with pytest.raises(ManifestError, match="python_requires"):
+        parse_manifest(_manifest(python_requires=python_requires))
 
 
 def test_parse_manifest_rejects_invalid_tool_contract_values():

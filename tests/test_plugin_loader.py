@@ -15,11 +15,16 @@ from marvis.plugins.loader import (
 from marvis.plugins.registry import PluginRegistry
 
 
-def _manifest(name: str = "sample_pack", *, schema: dict | None = None):
+def _manifest(
+    name: str = "sample_pack",
+    *,
+    version: str = "0.1.0",
+    schema: dict | None = None,
+):
     object_schema = schema or {"type": "object", "properties": {}, "required": []}
     return {
         "name": name,
-        "version": "0.1.0",
+        "version": version,
         "display_name": "Sample Pack",
         "description": "Loader test pack",
         "module": f"{name}.tools",
@@ -41,17 +46,21 @@ def _manifest(name: str = "sample_pack", *, schema: dict | None = None):
     }
 
 
-def _write_pack(root: Path, name: str = "sample_pack", *, schema: dict | None = None) -> Path:
+def _write_pack(
+    root: Path,
+    name: str = "sample_pack",
+    *,
+    version: str = "0.1.0",
+    schema: dict | None = None,
+    tool_body: str = "def tool_echo(inputs, ctx):\n    return {}\n",
+) -> Path:
     pack_dir = root / name
     pack_dir.mkdir(parents=True)
     (pack_dir / "manifest.json").write_text(
-        json.dumps(_manifest(name, schema=schema)),
+        json.dumps(_manifest(name, version=version, schema=schema)),
         encoding="utf-8",
     )
-    (pack_dir / "tools.py").write_text(
-        "def tool_echo(inputs, ctx):\n    return {}\n",
-        encoding="utf-8",
-    )
+    (pack_dir / "tools.py").write_text(tool_body, encoding="utf-8")
     return pack_dir
 
 
@@ -96,8 +105,9 @@ def test_install_plugin_zip_registers_with_platform_checksum(tmp_path):
 
     assert manifest.name == "sample_pack"
     assert manifest.builtin is False
-    assert manifest.checksum == compute_checksum(zip_path)
-    assert registry.get("sample_pack").checksum == compute_checksum(zip_path)
+    installed_dir = tmp_path / "installed" / "sample_pack"
+    assert manifest.checksum == compute_checksum(installed_dir)
+    assert registry.get("sample_pack").checksum == compute_checksum(installed_dir)
 
 
 def test_install_plugin_rejects_duplicate_name_and_version(tmp_path):
@@ -139,6 +149,51 @@ def test_install_plugin_rejects_zip_path_traversal(tmp_path):
 
     with pytest.raises(PluginError, match="unsafe zip path"):
         install_plugin(zip_path, tmp_path / "installed", registry)
+
+
+def test_install_plugin_rejects_invalid_zip_file(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    zip_path = tmp_path / "not-a-zip.zip"
+    zip_path.write_bytes(b"not a zip")
+
+    with pytest.raises(PluginError, match="invalid plugin zip"):
+        install_plugin(zip_path, tmp_path / "installed", registry)
+
+
+def test_install_plugin_rolls_back_existing_files_when_register_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    installed_root = tmp_path / "installed"
+    source_v1 = _write_pack(
+        tmp_path / "source-v1",
+        tool_body="def tool_echo(inputs, ctx):\n    return {'version': 1}\n",
+    )
+    zip_v1 = tmp_path / "sample_pack-v1.zip"
+    _zip_pack(source_v1, zip_v1)
+    install_plugin(zip_v1, installed_root, registry)
+    installed_tool = installed_root / "sample_pack" / "tools.py"
+    original_content = installed_tool.read_text(encoding="utf-8")
+
+    source_v2 = _write_pack(
+        tmp_path / "source-v2",
+        version="0.2.0",
+        tool_body="def tool_echo(inputs, ctx):\n    return {'version': 2}\n",
+    )
+    zip_v2 = tmp_path / "sample_pack-v2.zip"
+    _zip_pack(source_v2, zip_v2)
+
+    def fail_register(*_args, **_kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(registry, "register", fail_register)
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        install_plugin(zip_v2, installed_root, registry)
+
+    assert installed_tool.read_text(encoding="utf-8") == original_content
 
 
 def test_load_manifest_missing_file_raises_manifest_error(tmp_path):

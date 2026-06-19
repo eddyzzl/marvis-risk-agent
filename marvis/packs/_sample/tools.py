@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import time
 
 
@@ -18,3 +19,7 @@ def tool_bad_output(_inputs: dict, _ctx) -> dict:
 def tool_sleep(inputs: dict, _ctx) -> dict:
     time.sleep(float(inputs["seconds"]))
     return {"slept": True}
+
+
+def tool_random(_inputs: dict, ctx) -> dict:
+    return {"value": random.random(), "seed": ctx.seed}
