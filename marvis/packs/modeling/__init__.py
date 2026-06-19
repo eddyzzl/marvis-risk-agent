@@ -12,6 +12,7 @@ from marvis.packs.modeling.readiness import (
     modeling_readiness,
 )
 from marvis.packs.modeling.prepare import ModelingError, prepare_modeling_frame
+from marvis.packs.modeling.select import SelectionResult, select_features
 
 __all__ = [
     "Experiment",
@@ -20,9 +21,11 @@ __all__ = [
     "ModelMetrics",
     "ModelRecipe",
     "QualityIssue",
+    "SelectionResult",
     "TrainConfig",
     "TrainResult",
     "check_data_quality",
     "modeling_readiness",
     "prepare_modeling_frame",
+    "select_features",
 ]
