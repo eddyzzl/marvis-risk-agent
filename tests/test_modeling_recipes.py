@@ -9,6 +9,7 @@ from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lr import train_lr
+from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
 
 
@@ -153,3 +154,39 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
     assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
+
+
+def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "scorecard_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"C": 0.8, "scorecard_max_bins": 4},
+        seed=41,
+        early_stopping_rounds=None,
+    )
+    backend = DataBackend(tmp_path)
+
+    first = train_scorecard(backend, path, config, out_dir=tmp_path / "scorecard_a")
+    second = train_scorecard(backend, path, config, out_dir=tmp_path / "scorecard_b")
+
+    assert (tmp_path / "scorecard_a" / first.artifact.model_path).exists()
+    assert first.artifact.algorithm == "scorecard"
+    assert set(first.artifact.woe_maps or {}) == {"x1", "x2"}
+    assert first.artifact.params["base_score"] == 600
+    assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)
+    assert [item[0] for item in first.feature_importance] == [item[0] for item in second.feature_importance]
+    assert [item[1] for item in first.feature_importance] == pytest.approx(
+        [item[1] for item in second.feature_importance],
+    )
