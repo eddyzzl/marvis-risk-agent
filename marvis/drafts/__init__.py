@@ -10,7 +10,9 @@ from marvis.drafts.contracts import (
     PromotionCheck,
     assert_draft_status_transition,
 )
+from marvis.drafts.authoring import draft_script
 from marvis.drafts.errors import (
+    AuthoringError,
     DraftError,
     DraftNotFound,
     DraftStateError,
@@ -26,6 +28,7 @@ __all__ = [
     "DRAFT_STATUS_REJECTED",
     "DRAFT_STATUS_TESTED",
     "DRAFT_STATUSES",
+    "AuthoringError",
     "DraftError",
     "DraftNotFound",
     "DraftRegistry",
@@ -38,4 +41,5 @@ __all__ = [
     "PromotionCheck",
     "assert_draft_status_transition",
     "distill_learning",
+    "draft_script",
 ]

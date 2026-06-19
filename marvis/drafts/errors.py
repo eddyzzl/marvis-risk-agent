@@ -18,7 +18,12 @@ class FetchError(DraftError):
     pass
 
 
+class AuthoringError(DraftError):
+    pass
+
+
 __all__ = [
+    "AuthoringError",
     "DraftError",
     "DraftNotFound",
     "DraftStateError",
