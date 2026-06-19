@@ -10,4 +10,18 @@ class DraftNotFound(DraftError):
     pass
 
 
-__all__ = ["DraftError", "DraftNotFound", "DraftStateError"]
+class OfflineError(DraftError):
+    pass
+
+
+class FetchError(DraftError):
+    pass
+
+
+__all__ = [
+    "DraftError",
+    "DraftNotFound",
+    "DraftStateError",
+    "FetchError",
+    "OfflineError",
+]
