@@ -1,6 +1,7 @@
 import ipaddress
 from pathlib import Path
 import os
+import sys
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -14,8 +15,14 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.db import init_db
+from marvis.db import PluginRepository, init_db
+from marvis.execution_environment import load_execution_environment
+from marvis.plugins.hooks import HookDispatcher
+from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
+from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
+from marvis.routers.plugins import router as plugins_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
@@ -100,6 +107,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app = FastAPI(title="MARVIS Risk Agent")
     app.state.settings = settings
+    _configure_plugin_runtime(app, settings)
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
@@ -125,6 +133,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         return await call_next(request)
 
     app.include_router(api_router)
+    app.include_router(plugins_router)
 
     @app.exception_handler(IllegalTransition)
     def _illegal_transition(_request, exc: IllegalTransition):
@@ -162,3 +171,27 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         )
 
     return app
+
+
+def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
+    plugin_repo = PluginRepository(settings.db_path)
+    plugin_registry = PluginRegistry(plugin_repo)
+    plugin_registry.load_from_db()
+    load_builtin_packs(plugin_registry, Path(__file__).parent / "packs")
+    tool_registry = ToolRegistry(plugin_registry)
+    environment = load_execution_environment(settings.workspace)
+    python_executable = environment.python_executable or sys.executable
+    tool_runner = ToolRunner(
+        tool_registry,
+        plugin_repo,
+        python_executable=python_executable,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+    hook_dispatcher = HookDispatcher(plugin_registry, tool_runner)
+    hook_dispatcher.rebuild_index()
+    app.state.plugin_repo = plugin_repo
+    app.state.plugin_registry = plugin_registry
+    app.state.tool_registry = tool_registry
+    app.state.tool_runner = tool_runner
+    app.state.hook_dispatcher = hook_dispatcher

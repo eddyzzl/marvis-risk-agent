@@ -27,6 +27,14 @@ class Settings:
         return self.workspace / "tasks"
 
     @property
+    def plugins_dir(self) -> Path:
+        return self.workspace / "plugins"
+
+    @property
+    def datasets_dir(self) -> Path:
+        return self.workspace / "datasets"
+
+    @property
     def report_template_path(self) -> Path:
         templates_dir = self.workspace / "report_templates"
         primary = templates_dir / self.report_template_name
@@ -50,4 +58,6 @@ def build_settings(
     path = Path(workspace).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     (path / "tasks").mkdir(parents=True, exist_ok=True)
+    (path / "plugins").mkdir(parents=True, exist_ok=True)
+    (path / "datasets").mkdir(parents=True, exist_ok=True)
     return Settings(workspace=path, report_template_name=report_template_name)
