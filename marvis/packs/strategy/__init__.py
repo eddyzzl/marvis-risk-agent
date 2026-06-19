@@ -7,8 +7,10 @@ from marvis.packs.strategy.contracts import (
     TradeoffPoint,
     VintageCurve,
 )
+from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc, vintage_profit
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
+from marvis.packs.strategy.strategy import apply_strategy, build_strategy
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 
 __all__ = [
@@ -17,9 +19,12 @@ __all__ = [
     "ProfitResult",
     "RollRateMatrix",
     "Strategy",
+    "StrategyError",
     "StrategyRule",
     "TradeoffPoint",
     "VintageCurve",
+    "apply_strategy",
+    "build_strategy",
     "profit_calc",
     "roll_rate_matrix",
     "vintage_curve",
