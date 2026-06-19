@@ -162,6 +162,11 @@ def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, 
         if minimum is not None and value < minimum:
             return False, f"{field} {value} < {minimum}"
         return True, ""
+    if pc.kind == "one_of":
+        field = str(pc.spec.get("field") or "")
+        value = _dig(output, field)
+        allowed = pc.spec.get("values") or []
+        return value in allowed, f"{field}={value} not in {allowed}" if value not in allowed else ""
     return False, f"unknown post_check kind {pc.kind}"
 
 

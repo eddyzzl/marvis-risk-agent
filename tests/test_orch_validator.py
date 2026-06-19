@@ -298,6 +298,17 @@ def test_plan_validator_rejects_unknown_post_check_kind(tmp_path):
     assert any("unknown post_check kind mystery" in problem for problem in problems)
 
 
+def test_plan_validator_accepts_one_of_post_check_kind(tmp_path):
+    step = _step(
+        "step-1",
+        ToolRef("_sample", "echo"),
+        {"message": "hi"},
+        post_checks=[PostCheck("one_of", {"field": "status", "values": ["ok"]})],
+    )
+
+    assert _validator(tmp_path).validate(_plan(step)) == []
+
+
 def test_plan_validator_rejects_decision_point_on_safety_steps(tmp_path):
     metric_step = _step(
         "step-1",

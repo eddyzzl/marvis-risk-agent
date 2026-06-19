@@ -20,6 +20,7 @@ POST_CHECK_KINDS = frozenset({
     "invariant",
     "nonempty",
     "match_rate",
+    "one_of",
 })
 _SLOT_PLACEHOLDER_RE = re.compile(r"^\{slot:[A-Za-z_][A-Za-z0-9_:-]*\}$")
 

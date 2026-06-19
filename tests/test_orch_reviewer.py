@@ -48,6 +48,7 @@ def test_reviewer_deterministic_check_passes_known_post_checks():
         PostCheck("invariant", {"rule": "joined_rows<=anchor_rows"}),
         PostCheck("nonempty", {"field": "artifacts"}),
         PostCheck("match_rate", {"field": "match_rate", "min": 0.8}),
+        PostCheck("one_of", {"field": "status", "values": ["ok", "review"]}),
     ])
     output = {
         "rows": 10,
@@ -56,6 +57,7 @@ def test_reviewer_deterministic_check_passes_known_post_checks():
         "anchor_rows": 10,
         "artifacts": ["report.docx"],
         "match_rate": 0.9,
+        "status": "ok",
     }
 
     verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(step, output)
@@ -87,6 +89,15 @@ def test_reviewer_deterministic_range_allows_declared_null_metric():
     verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(step, {"psi": None})
 
     assert verdict.passed is True
+
+
+def test_reviewer_deterministic_one_of_blocks_unexpected_status():
+    step = _step([PostCheck("one_of", {"field": "status", "values": ["ok"]})])
+
+    verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(step, {"status": "failed"})
+
+    assert verdict.passed is False
+    assert "status=failed" in verdict.reasons[0]
 
 
 def test_reviewer_llm_critique_returns_soft_verdict_only():
