@@ -274,6 +274,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
         subagent_dispatcher,
         app.state.hook_dispatcher,
         harness_state,
+        planner=planner,
     )
     app.state.plan_repo = plan_repo
     app.state.plan_validator = plan_validator

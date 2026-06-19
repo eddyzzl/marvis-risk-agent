@@ -20,6 +20,7 @@ PLATFORM_HOOK_EVENTS = frozenset({
     "memory.after_save",
     "workflow.completed",
     "step.completed",
+    "plan.replanned",
 })
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 _SEMVER_RE = re.compile(

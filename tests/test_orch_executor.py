@@ -79,6 +79,23 @@ class FakeSubAgents:
         return self.result
 
 
+class FakeAdaptivePlanner:
+    def __init__(self, *, replanned_steps=None, explore_results=None):
+        self.replanned_steps = replanned_steps or []
+        self.explore_results = list(explore_results or [])
+        self.replan_calls = []
+        self.explore_calls = []
+
+    def replan(self, plan, *, completed_summaries, observation, reason, tier):
+        self.replan_calls.append((plan.id, completed_summaries, observation, reason, tier.name))
+        steps = self.replanned_steps(plan) if callable(self.replanned_steps) else self.replanned_steps
+        return _plan_like(plan, steps, replan_count=plan.replan_count + 1, tier=tier.name)
+
+    def next_explore_segment(self, plan, *, completed_summaries, tier):
+        self.explore_calls.append((plan.id, completed_summaries, tier.name))
+        return self.explore_results.pop(0)
+
+
 def _ok(output):
     return ToolResult(ok=True, output=output, error=None, error_kind=None, duration_ms=1)
 
@@ -102,8 +119,10 @@ def _step(
     depends_on=None,
     post_checks=None,
     needs_confirmation=False,
+    decision_point=False,
     sub_agent_scope=None,
     granted_tools=None,
+    status=StepStatus.PENDING,
 ):
     return PlanStep(
         id=step_id,
@@ -115,8 +134,10 @@ def _step(
         depends_on=depends_on or [],
         post_checks=post_checks or [],
         needs_confirmation=needs_confirmation,
+        decision_point=decision_point,
         sub_agent_scope=sub_agent_scope,
         granted_tools=granted_tools or [],
+        status=status,
     )
 
 
@@ -149,6 +170,34 @@ def _executor(repo, runner, reviewer=None, subagents=None, hooks=None):
         subagents,
         hooks or FakeHooks(),
         HarnessState(repo),
+    )
+
+
+def _adaptive_executor(repo, runner, planner, reviewer=None, hooks=None):
+    return PlanExecutor(
+        repo,
+        runner,
+        reviewer or Reviewer(lambda: FakeLLM()),
+        None,
+        hooks or FakeHooks(),
+        HarnessState(repo),
+        planner=planner,
+    )
+
+
+def _plan_like(plan, steps, *, replan_count=None, tier=None):
+    return Plan(
+        id=plan.id,
+        task_id=plan.task_id,
+        goal=plan.goal,
+        source=plan.source,
+        template_id=plan.template_id,
+        steps=list(steps),
+        autonomy_level=plan.autonomy_level,
+        status=plan.status,
+        novel_mode=plan.novel_mode,
+        tier=tier or plan.tier,
+        replan_count=plan.replan_count if replan_count is None else replan_count,
     )
 
 
@@ -300,3 +349,74 @@ def test_plan_executor_delegates_subagent_steps_and_stores_result_ref(tmp_path):
     assert subagents.run_calls == [("sub-1", {})]
     assert loaded_step.sub_agent_id == "sub-1"
     assert repo.load_step_output("step-1") == {"result_ref": "artifact:sub-summary"}
+
+
+def test_plan_executor_replans_after_decision_point(tmp_path):
+    plan = _plan(
+        _step("step-1", decision_point=True),
+        _step("step-2", index=1, depends_on=["step-1"]),
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "first"}), _ok({"echoed": "replanned"})])
+    hooks = FakeHooks()
+    planner = FakeAdaptivePlanner(
+        replanned_steps=lambda loaded: [
+            loaded.steps[0],
+            _step("step-3", index=1, inputs={"message": "$ref:step-1.output.echoed"}, depends_on=["step-1"]),
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner, hooks=hooks).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert [step.id for step in loaded.steps] == ["step-1", "step-3"]
+    assert loaded.replan_count == 1
+    assert planner.replan_calls[0][3] == "decision_point"
+    assert [call[0] for call in hooks.calls] == [
+        "step.completed",
+        "plan.replanned",
+        "step.completed",
+        "workflow.completed",
+    ]
+
+
+def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
+    plan = _plan(_step("step-1", tool="fail_tool"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_fail("temporary missing column"), _ok({"echoed": "fixed"})])
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-2", tool="echo", inputs={"message": "fixed"})]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert [step.id for step in loaded.steps] == ["step-2"]
+    assert loaded.replan_count == 1
+    assert planner.replan_calls[0][3] == "failure"
+    assert len(runner.calls) == 2
+
+
+def test_plan_executor_appends_explore_segment_until_done(tmp_path):
+    plan = _plan(_step("step-1"))
+    plan.novel_mode = "explore"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "first"}), _ok({"echoed": "next"})])
+    planner = FakeAdaptivePlanner(
+        explore_results=[
+            ([_step("step-2", index=1, inputs={"message": "$ref:step-1.output.echoed"}, depends_on=["step-1"])], False),
+            ([], True),
+        ]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert [step.id for step in loaded.steps] == ["step-1", "step-2"]
+    assert loaded.novel_mode == "explore"
+    assert loaded.replan_count == 1
+    assert len(planner.explore_calls) == 2
+    assert len(runner.calls) == 2

@@ -3,17 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from marvis.orchestrator.capability import CapabilityTier, resolve_tier
+from marvis.orchestrator.context.observation import summarize_failure, summarize_output
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStatus,
     PlanStep,
     StepStatus,
 )
+from marvis.orchestrator.planner import ReplanError
 from marvis.orchestrator.reviewer import FinalReview
 from marvis.plugins.runner import ToolResult
 
 
 MAX_STEP_RETRIES = 1
+NO_PROGRESS_WINDOW = 4
+NO_PROGRESS_THRESHOLD = 2
 
 
 @dataclass
@@ -33,6 +38,7 @@ class PlanExecutor:
         subagent_dispatcher,
         hook_dispatcher,
         harness_state,
+        planner=None,
     ):
         self._repo = plan_repo
         self._runner = tool_runner
@@ -40,9 +46,11 @@ class PlanExecutor:
         self._subagents = subagent_dispatcher
         self._hooks = hook_dispatcher
         self._state = harness_state
+        self._planner = planner
 
     def run(self, plan_id: str) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)
+        tier = resolve_tier(plan.tier)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             return ExecutionResult(plan.id, plan.status, None, None)
         if plan.status not in {
@@ -59,17 +67,36 @@ class PlanExecutor:
             plan = self._repo.load_plan(plan_id)
             failed = [step for step in plan.steps if step.status == StepStatus.FAILED]
             if failed:
+                if any(
+                    self._should_failure_replan(tier, plan, step)
+                    and not self._no_progress(plan, step)
+                    and self._try_replan(plan, step, reason="failure", tier=tier)
+                    for step in failed
+                ):
+                    continue
                 self._set_plan_status(plan, PlanStatus.FAILED)
                 return ExecutionResult(plan.id, PlanStatus.FAILED, None, None)
 
             step = self._next_ready_step(plan)
             if step is None:
+                if plan.novel_mode == "explore" and self._try_append_explore_segment(plan, tier):
+                    continue
                 break
             if step.needs_confirmation and not self._repo.is_step_confirmed(step.id):
                 self._set_step_status(step, StepStatus.AWAITING_CONFIRM)
                 self._set_plan_status(plan, PlanStatus.AWAITING_CONFIRM)
                 return ExecutionResult(plan.id, PlanStatus.AWAITING_CONFIRM, None, None)
             self._execute_step(plan, step)
+            plan = self._repo.load_plan(plan_id)
+            last = _find_step(plan, step.id)
+            if (
+                last is not None
+                and last.status == StepStatus.DONE
+                and last.decision_point
+                and tier.decision_point_replan
+                and not _is_safety_step(last)
+            ):
+                self._try_replan(plan, last, reason="decision_point", tier=tier)
 
         plan = self._repo.load_plan(plan_id)
         return self._finalize(plan)
@@ -238,6 +265,107 @@ class PlanExecutor:
         except Exception:
             return "fail"
 
+    def _should_failure_replan(
+        self,
+        tier: CapabilityTier,
+        plan: Plan,
+        step: PlanStep,
+    ) -> bool:
+        if self._planner is None:
+            return False
+        if not tier.failure_driven_replan:
+            return False
+        if plan.replan_count >= tier.max_replan_iterations:
+            return False
+        if _has_deterministic_failure(step):
+            return False
+        return not _is_fatal_error(step.error)
+
+    def _try_replan(
+        self,
+        plan: Plan,
+        trigger_step: PlanStep,
+        *,
+        reason: str,
+        tier: CapabilityTier,
+    ) -> bool:
+        if self._planner is None:
+            return False
+        try:
+            new_plan = self._planner.replan(
+                plan,
+                completed_summaries=self._summaries(plan),
+                observation=self._observation(trigger_step, reason),
+                reason=reason,
+                tier=tier,
+            )
+            self._repo.replace_remaining_steps(plan.id, new_plan)
+            self._dispatch(
+                "plan.replanned",
+                {"plan_id": plan.id, "reason": reason, "trigger_step_id": trigger_step.id},
+                task_id=plan.task_id,
+            )
+            return True
+        except (KeyError, ReplanError):
+            return False
+
+    def _try_append_explore_segment(self, plan: Plan, tier: CapabilityTier) -> bool:
+        if self._planner is None:
+            return False
+        try:
+            segment, done = self._planner.next_explore_segment(
+                plan,
+                completed_summaries=self._summaries(plan),
+                tier=tier,
+            )
+        except ReplanError:
+            return False
+        if done or not segment:
+            return False
+        self._repo.append_steps(plan.id, segment)
+        self._dispatch(
+            "plan.replanned",
+            {"plan_id": plan.id, "reason": "explore_segment"},
+            task_id=plan.task_id,
+        )
+        return True
+
+    def _summaries(self, plan: Plan) -> dict[str, dict]:
+        summaries = {}
+        for step in plan.steps:
+            if step.status not in {StepStatus.DONE, StepStatus.SKIPPED} or not step.output_ref:
+                continue
+            try:
+                output = self._repo.load_step_output(step.id)
+            except KeyError:
+                continue
+            summaries[step.id] = summarize_output(output, self._tool_spec(step))
+        return summaries
+
+    def _observation(self, step: PlanStep, reason: str) -> dict:
+        if reason == "failure":
+            return summarize_failure(step.error or "", "execution")
+        try:
+            return summarize_output(self._repo.load_step_output(step.id), self._tool_spec(step))
+        except KeyError:
+            return {}
+
+    def _tool_spec(self, step: PlanStep):
+        tools = getattr(self._runner, "_tools", None)
+        if tools is None:
+            return None
+        try:
+            return tools.resolve(step.tool_ref)
+        except Exception:
+            return None
+
+    def _no_progress(self, plan: Plan, failed_step: PlanStep) -> bool:
+        try:
+            recent = self._repo.recent_failed_tool_refs(plan.id, limit=NO_PROGRESS_WINDOW)
+        except Exception:
+            return False
+        return recent.count(failed_step.tool_ref.label()) >= NO_PROGRESS_THRESHOLD
+
     def _set_plan_status(self, plan: Plan, status: PlanStatus) -> None:
         if plan.status == status:
             return
@@ -283,3 +411,28 @@ def _dig(value: dict, path: str):
             return None
         current = current[part]
     return current
+
+
+def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
+    for step in plan.steps:
+        if step.id == step_id:
+            return step
+    return None
+
+
+def _has_deterministic_failure(step: PlanStep) -> bool:
+    return any(
+        verdict.reviewer == "deterministic" and not verdict.passed
+        for verdict in step.review_verdicts
+    )
+
+
+def _is_fatal_error(error: str | None) -> bool:
+    lowered = str(error or "").lower()
+    return "schema" in lowered or "contract" in lowered
+
+
+def _is_safety_step(step: PlanStep) -> bool:
+    if step.tool_ref.tool == "execute_join":
+        return True
+    return any(check.kind == "range" for check in step.post_checks)

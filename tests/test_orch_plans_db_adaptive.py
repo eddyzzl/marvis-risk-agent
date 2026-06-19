@@ -116,6 +116,8 @@ def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):
         ("step-2", 1),
         ("step-3", 2),
     ]
+    assert loaded.novel_mode == "explore"
+    assert loaded.replan_count == 1
     assert repo.recent_failed_tool_refs("plan-1", limit=4) == ["_sample.echo"]
 
 

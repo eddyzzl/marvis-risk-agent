@@ -1151,7 +1151,13 @@ class PlanRepository:
                 )["steps"][0]
                 self._insert_step(conn, payload)
             conn.execute(
-                "UPDATE plans SET updated_at = ? WHERE id = ?",
+                """
+                UPDATE plans
+                   SET replan_count = replan_count + 1,
+                       novel_mode = 'explore',
+                       updated_at = ?
+                 WHERE id = ?
+                """,
                 (_now(), plan_id),
             )
 
