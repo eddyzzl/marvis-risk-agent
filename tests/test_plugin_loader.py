@@ -1,0 +1,146 @@
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from marvis.db import PluginRepository, init_db
+from marvis.plugins.errors import DuplicatePluginError, ManifestError, PluginError
+from marvis.plugins.loader import (
+    compute_checksum,
+    install_plugin,
+    load_builtin_packs,
+    load_manifest,
+)
+from marvis.plugins.registry import PluginRegistry
+
+
+def _manifest(name: str = "sample_pack", *, schema: dict | None = None):
+    object_schema = schema or {"type": "object", "properties": {}, "required": []}
+    return {
+        "name": name,
+        "version": "0.1.0",
+        "display_name": "Sample Pack",
+        "description": "Loader test pack",
+        "module": f"{name}.tools",
+        "tools": [
+            {
+                "name": "echo",
+                "summary": "Echo a message",
+                "input_schema": object_schema,
+                "output_schema": object_schema,
+                "determinism": "deterministic",
+                "timeout_seconds": 10,
+                "failure_policy": "fail",
+                "entrypoint": "tool_echo",
+            }
+        ],
+        "hooks": [],
+        "permissions": [],
+        "checksum": "uploaded-value-is-ignored",
+    }
+
+
+def _write_pack(root: Path, name: str = "sample_pack", *, schema: dict | None = None) -> Path:
+    pack_dir = root / name
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "manifest.json").write_text(
+        json.dumps(_manifest(name, schema=schema)),
+        encoding="utf-8",
+    )
+    (pack_dir / "tools.py").write_text(
+        "def tool_echo(inputs, ctx):\n    return {}\n",
+        encoding="utf-8",
+    )
+    return pack_dir
+
+
+def _zip_pack(pack_dir: Path, zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        for path in sorted(pack_dir.rglob("*")):
+            archive.write(path, path.relative_to(pack_dir.parent).as_posix())
+
+
+def test_load_manifest_reads_and_validates_manifest_file(tmp_path):
+    pack_dir = _write_pack(tmp_path)
+
+    manifest = load_manifest(pack_dir, builtin=True)
+
+    assert manifest.name == "sample_pack"
+    assert manifest.builtin is True
+    assert manifest.checksum == ""
+
+
+def test_load_builtin_packs_registers_packs_idempotently(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    packs_root = tmp_path / "packs"
+    _write_pack(packs_root)
+
+    load_builtin_packs(registry, packs_root)
+    load_builtin_packs(registry, packs_root)
+
+    assert [plugin.name for plugin in registry.list()] == ["sample_pack"]
+
+
+def test_install_plugin_zip_registers_with_platform_checksum(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    source_pack = _write_pack(tmp_path / "source")
+    zip_path = tmp_path / "sample_pack.zip"
+    _zip_pack(source_pack, zip_path)
+
+    manifest = install_plugin(zip_path, tmp_path / "installed", registry)
+
+    assert manifest.name == "sample_pack"
+    assert manifest.builtin is False
+    assert manifest.checksum == compute_checksum(zip_path)
+    assert registry.get("sample_pack").checksum == compute_checksum(zip_path)
+
+
+def test_install_plugin_rejects_duplicate_name_and_version(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    source_pack = _write_pack(tmp_path / "source")
+    zip_path = tmp_path / "sample_pack.zip"
+    _zip_pack(source_pack, zip_path)
+
+    install_plugin(zip_path, tmp_path / "installed", registry)
+
+    with pytest.raises(DuplicatePluginError):
+        install_plugin(zip_path, tmp_path / "installed", registry)
+
+
+def test_loader_rejects_invalid_json_schema(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    source_pack = _write_pack(
+        tmp_path / "source",
+        schema={"type": "not-a-json-schema-type"},
+    )
+    zip_path = tmp_path / "bad_schema.zip"
+    _zip_pack(source_pack, zip_path)
+
+    with pytest.raises(PluginError, match="invalid json schema"):
+        install_plugin(zip_path, tmp_path / "installed", registry)
+
+
+def test_install_plugin_rejects_zip_path_traversal(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    zip_path = tmp_path / "bad.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("../manifest.json", json.dumps(_manifest()))
+
+    with pytest.raises(PluginError, match="unsafe zip path"):
+        install_plugin(zip_path, tmp_path / "installed", registry)
+
+
+def test_load_manifest_missing_file_raises_manifest_error(tmp_path):
+    with pytest.raises(ManifestError, match="manifest.json"):
+        load_manifest(tmp_path, builtin=True)
