@@ -81,6 +81,14 @@ def test_reviewer_deterministic_check_blocks_invalid_metrics_and_join_invariants
     assert any("joined_rows<=anchor_rows" in reason for reason in verdict.reasons)
 
 
+def test_reviewer_deterministic_range_allows_declared_null_metric():
+    step = _step([PostCheck("range", {"field": "psi", "min": 0.0, "allow_null": True})])
+
+    verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(step, {"psi": None})
+
+    assert verdict.passed is True
+
+
 def test_reviewer_llm_critique_returns_soft_verdict_only():
     llm = FakeLLM(json.dumps({"passed": False, "reasons": ["needs human review"]}))
 

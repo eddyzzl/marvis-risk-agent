@@ -135,6 +135,8 @@ def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, 
         field = str(pc.spec.get("field") or "")
         value = _dig(output, field)
         if value is None:
+            if pc.spec.get("allow_null") is True:
+                return True, ""
             return False, f"{field} missing"
         minimum = pc.spec.get("min")
         maximum = pc.spec.get("max")

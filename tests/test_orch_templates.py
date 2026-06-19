@@ -55,6 +55,10 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert template.steps[0].tool_ref == ToolRef("_sample", "echo")
     assert template.slots[0].name == "message"
     assert "sample_echo" in builtin_template_ids()
+    model_validation = get_template("model_validation")
+    assert model_validation.steps[0].tool_ref == ToolRef("v1_compat", "scan_materials")
+    assert model_validation.steps[-1].needs_confirmation is True
+    assert "model_validation" in builtin_template_ids()
 
 
 def test_user_template_registration_cannot_shadow_builtin_and_can_reload():
