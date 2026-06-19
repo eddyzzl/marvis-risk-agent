@@ -4,7 +4,10 @@ import json
 from typing import Any
 import uuid
 
-from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck
+from marvis.orchestrator.capability import CapabilityTier
+from marvis.orchestrator.context.budget import fit_to_budget
+from marvis.orchestrator.context.ledger import build_progress_ledger
+from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.templates import WorkflowTemplate
 from marvis.plugins.manifest import ToolRef
 
@@ -14,9 +17,19 @@ PLAN_SYS = (
     "铁律：你不计算任何指标；指标由工具产出。"
     "你只决定调用哪些工具、参数怎么接、依赖顺序。输出严格 JSON。"
 )
+REPLAN_SYS = (
+    "你在修订一个 MARVIS 执行计划的剩余步骤。已完成步骤和结果在进度里，"
+    "不要重做。只能从工具目录选工具。不要计算任何指标。不要偏离原始目标。"
+    "输出严格 JSON，格式为 {\"steps\": [...]}。"
+)
+MAX_REPLAN_PARSE_RETRY = 1
 
 
 class PlanningError(Exception):
+    pass
+
+
+class ReplanError(PlanningError):
     pass
 
 
@@ -112,6 +125,60 @@ class Planner:
             last_error = "; ".join(problems)
         raise PlanningError(f"could not generate valid plan after retries: {last_error}")
 
+    def replan(
+        self,
+        plan: Plan,
+        *,
+        completed_summaries: dict[str, dict],
+        observation: dict,
+        reason: str,
+        tier: CapabilityTier,
+    ) -> Plan:
+        if plan.replan_count >= tier.max_replan_iterations:
+            raise ReplanError(f"replan budget exhausted ({tier.max_replan_iterations})")
+
+        catalog = self._tools.catalog_for_planner()
+        ledger = build_progress_ledger(plan, completed_summaries)
+        context_items = fit_to_budget(
+            [
+                {"priority": 3, "type": "progress_ledger", "value": ledger},
+                {"priority": 2, "type": "observation", "value": observation},
+            ],
+            max_chars=4000,
+        )
+        last_error = None
+        for _attempt in range(MAX_REPLAN_PARSE_RETRY + 1):
+            prompt = build_replan_prompt(
+                plan,
+                catalog,
+                context_items,
+                observation=observation,
+                reason=reason,
+                last_error=last_error,
+            )
+            raw = self._llm_factory().complete(
+                system_prompt=REPLAN_SYS,
+                user_prompt=prompt,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            try:
+                revised_remaining = _parse_steps_json(
+                    str(raw),
+                    plan_id=plan.id,
+                    start_index=_next_remaining_index(plan),
+                    max_steps=tier.max_plan_depth,
+                )
+                new_plan = _splice_remaining(plan, revised_remaining, tier)
+            except PlanningError as exc:
+                last_error = str(exc)
+                continue
+            problems = self._validator.validate(new_plan)
+            if not problems:
+                return new_plan
+            last_error = "; ".join(problems)
+        raise ReplanError(f"replan could not produce valid plan: {last_error}")
+
     def _parse_plan_json(self, raw: str, goal: str, task_id: str) -> Plan:
         try:
             data = json.loads(raw)
@@ -160,6 +227,90 @@ def build_plan_prompt(
         },
         ensure_ascii=False,
         sort_keys=True,
+    )
+
+
+def build_replan_prompt(
+    plan: Plan,
+    catalog: list[dict],
+    context_items: list[dict],
+    *,
+    observation: dict,
+    reason: str,
+    last_error: str | None,
+) -> str:
+    return json.dumps(
+        {
+            "goal": plan.goal,
+            "reason": reason,
+            "available_tools": catalog,
+            "context_items": context_items,
+            "observation": observation,
+            "remaining_steps": [
+                {"id": step.id, "title": step.title, "status": step.status.value}
+                for step in plan.steps
+                if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
+            ],
+            "last_error": last_error,
+            "instruction": (
+                "Return only revised remaining steps. Preserve useful dependencies on "
+                "completed step ids when needed; do not include completed steps."
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _parse_steps_json(
+    raw: str,
+    *,
+    plan_id: str,
+    start_index: int,
+    max_steps: int,
+) -> list[PlanStep]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PlanningError(f"not json: {exc}") from exc
+    raw_steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise PlanningError("replan JSON must include non-empty steps")
+    return [
+        _step_from_json(item, index=start_index + offset, plan_id=plan_id)
+        for offset, item in enumerate(raw_steps[:max_steps])
+    ]
+
+
+def _next_remaining_index(plan: Plan) -> int:
+    preserved = [
+        step.index
+        for step in plan.steps
+        if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
+    ]
+    return (max(preserved) + 1) if preserved else 0
+
+
+def _splice_remaining(plan: Plan, revised_remaining: list[PlanStep], tier: CapabilityTier) -> Plan:
+    preserved = [
+        step
+        for step in plan.steps
+        if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
+    ]
+    return Plan(
+        id=plan.id,
+        task_id=plan.task_id,
+        goal=plan.goal,
+        source=plan.source,
+        template_id=plan.template_id,
+        steps=sorted(preserved, key=lambda item: (item.index, item.id)) + revised_remaining,
+        autonomy_level=plan.autonomy_level,
+        status=plan.status,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+        novel_mode=plan.novel_mode,
+        tier=tier.name,
+        replan_count=plan.replan_count + 1,
     )
 
 
