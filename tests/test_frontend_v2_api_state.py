@@ -465,3 +465,105 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         assert.equal((listeners.input || []).length, 0);
         """
     )
+
+
+def test_v2_mount_wires_plugin_and_skill_refresh_actions():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        function makeElement(tagName) {
+          return {
+            tagName: tagName.toUpperCase(),
+            id: "",
+            innerHTML: "",
+            className: "",
+            dataset: {},
+            attributes: {},
+            children: [],
+            setAttribute(name, value) {
+              this.attributes[name] = String(value);
+            },
+            appendChild(child) {
+              this.children.push(child);
+              return child;
+            },
+          };
+        }
+
+        resetV2State();
+        const calls = [];
+        const listeners = {};
+        const root = makeElement("div");
+        root.ownerDocument = { createElement: makeElement };
+        root.querySelector = (selector) => {
+          const id = selector.startsWith("#") ? selector.slice(1) : selector;
+          return root.children.find((child) => child.id === id) ?? null;
+        };
+        root.addEventListener = (type, handler) => {
+          listeners[type] = [...(listeners[type] || []), handler];
+        };
+        root.removeEventListener = (type, handler) => {
+          listeners[type] = (listeners[type] || []).filter((candidate) => candidate !== handler);
+        };
+
+        const mounted = mountV2(root, {
+          pluginActions: {
+            uploadPlugin: async (file) => calls.push(["uploadPlugin", file.name]),
+            listPlugins: async (includeDisabled) => {
+              calls.push(["listPlugins", includeDisabled]);
+              return {
+                plugins: [
+                  {
+                    name: "demo",
+                    display_name: "Demo Plugin",
+                    version: "1.0",
+                    enabled: true,
+                    builtin: false,
+                    tool_count: 1,
+                  },
+                ],
+              };
+            },
+          },
+          skillActions: {
+            reloadSkills: async () => calls.push(["reloadSkills"]),
+            listSkills: async () => {
+              calls.push(["listSkills"]);
+              return { active: ["demo_skill"], disabled: [], rejected: [] };
+            },
+          },
+        });
+
+        const uploadTarget = {
+          files: [{ name: "demo.zip" }],
+          closest(selector) {
+            return selector === "[data-upload-plugin]" ? this : null;
+          },
+        };
+        for (const handler of listeners.change || []) {
+          await handler({ target: uploadTarget });
+        }
+        assert.deepEqual(calls.splice(0), [
+          ["uploadPlugin", "demo.zip"],
+          ["listPlugins", true],
+        ]);
+        assert.ok(mounted.panels.pluginPanel.innerHTML.includes("Demo Plugin"));
+
+        const reloadTarget = {
+          closest(selector) {
+            return selector === "#reloadSkills" || selector === "[data-reload-skills]" ? this : null;
+          },
+        };
+        for (const handler of listeners.click || []) {
+          await handler({ target: reloadTarget, preventDefault() {} });
+        }
+        assert.deepEqual(calls.splice(0), [
+          ["reloadSkills"],
+          ["listSkills"],
+        ]);
+        assert.ok(mounted.panels.skillPanel.innerHTML.includes("demo_skill"));
+        """
+    )

@@ -4,8 +4,8 @@ import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
-import { attachPluginHandlers, renderPluginManagerShell } from "./plugin_manager.js";
-import { attachSkillHandlers, renderSkillManagerShell } from "./skill_manager.js";
+import { attachPluginHandlers, renderPluginManager, renderPluginManagerShell } from "./plugin_manager.js";
+import { attachSkillHandlers, renderSkillManager, renderSkillManagerShell } from "./skill_manager.js";
 import { renderSubAgentView } from "./subagent_view.js";
 import { attachGoalHandlers, renderGoalComposer } from "./workflow_create.js";
 
@@ -65,6 +65,10 @@ export function mountV2(root, options = {}) {
     panels[definition.id] = ensurePanel(root, definition);
   }
   if (!root[mountStateKey]) {
+    const pluginActions = options.pluginActions || {};
+    const skillActions = options.skillActions || {};
+    const refreshPlugins = () => renderPluginManager(panels.pluginPanel, pluginActions);
+    const refreshSkills = () => renderSkillManager(panels.skillPanel, skillActions);
     const cleanups = [
       renderGoalComposer(panels.goalPanel),
       renderPlanView(panels.planPanel),
@@ -83,8 +87,8 @@ export function mountV2(root, options = {}) {
         attachJoinHandlers(root, options.taskId || ""),
         attachGoalHandlers(root, options.taskId || ""),
         attachPlanConfirmHandlers(root),
-        attachPluginHandlers(root),
-        attachSkillHandlers(root),
+        attachPluginHandlers(root, { ...pluginActions, refreshPlugins }),
+        attachSkillHandlers(root, { ...skillActions, refreshSkills }),
       );
     }
     root[mountStateKey] = { cleanups };
