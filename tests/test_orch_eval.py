@@ -5,7 +5,10 @@ from marvis.orchestrator.eval import (
     EvalCase,
     PlanRunTrace,
     calibrate_tier_for_model,
+    cases_by_kind,
+    initial_eval_cases,
     regression_gate,
+    run_eval_suite,
     score_case,
 )
 
@@ -188,3 +191,81 @@ def test_regression_gate_has_zero_tolerance_for_guardrail_drop():
     )
     assert ok is False
     assert problems == ["GUARDRAIL REGRESSION (zero tolerance)"]
+
+
+def test_initial_eval_cases_cover_phase_2b_blueprint_categories():
+    cases = initial_eval_cases()
+    ids = {case.id for case in cases}
+    grouped = cases_by_kind(cases)
+
+    assert len(ids) == len(cases)
+    assert len(cases) >= 7
+    assert set(grouped) == {"template_hit", "plan_gen", "replan", "explore", "guardrail"}
+    assert {
+        "fixed_model_validation_template",
+        "fixed_standard_modeling_plan",
+        "adaptive_strategy_decision_replan",
+        "adaptive_feature_derivation_replan",
+        "novel_draft_research_explore",
+        "guardrail_join_requires_confirmation",
+        "guardrail_metric_must_be_platform_computed",
+    }.issubset(ids)
+
+    modeling = next(case for case in cases if case.id == "fixed_standard_modeling_plan")
+    assert modeling.kind == "plan_gen"
+    assert set(modeling.expected["required_tools"]) >= {
+        "modeling.modeling_readiness",
+        "modeling.prepare_modeling_frame",
+        "modeling.train_model",
+        "modeling.compare_experiments",
+    }
+
+    guardrail_blocks = {
+        case.expected["must_block"]
+        for case in cases
+        if case.kind == "guardrail"
+    }
+    assert guardrail_blocks == {
+        "join_requires_confirmation",
+        "metric_must_be_tool_computed",
+    }
+
+    for case in cases:
+        assert case.goal
+        assert case.task_context
+        assert case.expected
+        assert case.fixtures["offline"] is True
+        assert isinstance(case.fixtures["tool_outputs"], dict)
+
+
+def test_initial_eval_cases_are_consumable_by_deterministic_suite_runner():
+    class PassingFixtureOrchestrator:
+        def run_eval_case(self, case, *, model_id, tier):
+            if case.kind == "template_hit":
+                return _trace(template_id=case.expected["template_id"])
+            if case.kind == "plan_gen":
+                return _trace(tools=list(case.expected["required_tools"]))
+            if case.kind == "replan":
+                return _trace(replan_count=case.expected["max_replan_count"])
+            if case.kind == "explore":
+                return _trace(segments=case.expected["max_segments"])
+            if case.kind == "guardrail":
+                return _trace(guardrail_hits=[case.expected["must_block"]])
+            raise AssertionError(case.kind)
+
+    results = run_eval_suite(
+        "fixture-model",
+        "balanced",
+        list(initial_eval_cases()),
+        orchestrator=PassingFixtureOrchestrator(),
+    )
+
+    assert len(results) == len(initial_eval_cases())
+    assert all(result.passed for result in results)
+
+
+def test_initial_eval_case_helpers_do_not_leak_mutable_fixture_state():
+    grouped = cases_by_kind()
+    grouped["template_hit"][0].fixtures["offline"] = False
+
+    assert initial_eval_cases()[0].fixtures["offline"] is True
