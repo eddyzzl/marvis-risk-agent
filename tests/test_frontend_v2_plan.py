@@ -38,6 +38,7 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
               status: "done",
               tool_ref: { plugin: "score", tool: "run" },
               depends_on: ["step-1"],
+              output_ref: "metrics:step-2<script>",
               review_verdicts: [],
             },
             {
@@ -68,6 +69,9 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
         assert.ok(html.indexOf('data-step="step-1"') < html.indexOf('data-step="step-2"'));
         assert.ok(html.includes("Check &lt;sample&gt;"));
         assert.ok(html.includes("data&lt;ops&gt;.join"));
+        assert.equal(html.includes("metrics:step-2<script>"), false);
+        assert.ok(html.includes('data-artifact="metrics:step-2&lt;script&gt;"'));
+        assert.ok(html.includes("Open output"));
         assert.ok(html.includes('class="dp-mark"'));
         assert.ok(html.includes('data-confirm-step="step-1"'));
         assert.equal(html.includes('data-confirm-step="step-2"'), false);

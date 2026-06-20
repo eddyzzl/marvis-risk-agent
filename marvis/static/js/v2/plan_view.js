@@ -100,6 +100,14 @@ export function reviewVerdictHtml(verdicts = []) {
   return `<ul class="review-verdicts">${items}</ul>`;
 }
 
+function outputRefHtml(step) {
+  const outputRef = String(step?.output_ref || "");
+  if (!outputRef) {
+    return "";
+  }
+  return `<button type="button" class="step-output-button" data-artifact="${escapeHtml(outputRef)}">Open output</button>`;
+}
+
 export function stepRowHtml(step) {
   const status = step?.status || "pending";
   const index = Number.isFinite(Number(step?.index)) ? Number(step.index) + 1 : "";
@@ -111,6 +119,7 @@ export function stepRowHtml(step) {
     ? `<button type="button" data-confirm-step="${escapeHtml(step.id)}">Confirm</button>`
     : "";
   const verdicts = reviewVerdictHtml(step?.review_verdicts || []);
+  const output = outputRefHtml(step);
   return `<li data-step="${escapeHtml(step?.id || "")}" class="plan-step step-${classToken(status)}">
     <span class="idx">${escapeHtml(index)}</span>
     <span class="title">${escapeHtml(step?.title || "Untitled step")}</span>
@@ -119,6 +128,7 @@ export function stepRowHtml(step) {
     ${decisionPoint}
     ${stepStatusBadge(status)}
     ${confirm}
+    ${output}
     ${verdicts}
   </li>`;
 }
