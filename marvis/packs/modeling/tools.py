@@ -21,6 +21,7 @@ from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.handoff import handoff_to_validation
 from marvis.packs.modeling.report_compute import (
     BusinessColumns,
+    build_feature_dictionary,
     compute_amount_bin_table,
     compute_sample_analysis,
     compute_vintage_report,
@@ -234,13 +235,20 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         target_col=experiment.config.target_col,
         business=business,
     )
+    feature_dictionary_id = _optional_str(inputs.get("feature_dictionary_id"))
+    feature_dictionary = (
+        build_feature_dictionary(runtime.backend, feature_dictionary_id, runtime.registry)
+        if feature_dictionary_id
+        else {}
+    )
+    feature_importance = _feature_importance_rows(artifact, feature_dictionary=feature_dictionary)
     structured_summary = _report_structured_summary(
         project_meta=dict(inputs.get("project_meta") or {}),
         dataset_split=_dataset_split_rows(experiment.metrics),
         stability=_stability_rows(experiment.metrics),
         sample_analysis=sample,
         vintage=vintage,
-        feature_importance=_feature_importance_rows(artifact),
+        feature_importance=feature_importance,
         univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
         oot_bin_table=oot_bin,
         stress_product_removal={},
@@ -424,13 +432,22 @@ def _stability_rows(metrics) -> list[dict]:
     ]
 
 
-def _feature_importance_rows(artifact: ModelArtifact | None) -> list[dict]:
+def _feature_importance_rows(artifact: ModelArtifact | None, *, feature_dictionary: dict | None = None) -> list[dict]:
     if artifact is None:
         return []
-    return [
-        {"feature": feature, "importance": 0.0}
-        for feature in artifact.feature_list
-    ]
+    dictionary = feature_dictionary or {}
+    metadata_keys = ("含义", "产品名称", "厂商名称")
+    rows = []
+    for feature in artifact.feature_list:
+        row = {"feature": feature, "importance": 0.0}
+        if dictionary:
+            metadata = dictionary.get(str(feature))
+            row.update({
+                key: metadata.get(key) if isinstance(metadata, dict) and metadata.get(key) not in ("",) else None
+                for key in metadata_keys
+            })
+        rows.append(row)
+    return rows
 
 
 def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> list[dict]:

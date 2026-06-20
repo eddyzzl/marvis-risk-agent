@@ -16,6 +16,7 @@ from marvis.packs.modeling.report_compute import (
     resolve_report_sections,
     stress_low_pricing,
 )
+from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -247,6 +248,40 @@ def test_report_narrative_drafter_uses_llm_json_when_available():
     assert calls[0]["stream"] is False
 
 
+def test_feature_importance_rows_keep_dictionary_columns_when_first_feature_has_no_metadata():
+    artifact = ModelArtifact(
+        id="artifact_1",
+        experiment_id="experiment_1",
+        algorithm="lr",
+        model_path="model.pkl",
+        pmml_path=None,
+        feature_list=("x_missing", "x2"),
+        params={},
+        woe_maps=None,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    rows = modeling_tools._feature_importance_rows(
+        artifact,
+        feature_dictionary={
+            "x2": {
+                "含义": "负债压力",
+                "产品名称": "借贷画像",
+                "厂商名称": "数据厂商B",
+            }
+        },
+    )
+
+    assert rows[0] == {
+        "feature": "x_missing",
+        "importance": 0.0,
+        "含义": None,
+        "产品名称": None,
+        "厂商名称": None,
+    }
+    assert rows[1]["含义"] == "负债压力"
+
+
 def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
@@ -278,12 +313,20 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     frame.loc[120:, "split"] = "oot"
     path = tmp_path / "report_sample.parquet"
     frame.to_parquet(path, index=False)
+    dictionary_path = tmp_path / "feature_dictionary.parquet"
+    pd.DataFrame({
+        "feature": ["x1", "x2"],
+        "含义": ["收入稳定性", "负债压力"],
+        "产品名称": ["征信评分", "借贷画像"],
+        "厂商名称": ["数据厂商A", "数据厂商B"],
+    }).to_parquet(dictionary_path, index=False)
     registry = DatasetRegistry(
         DatasetRepository(settings.db_path),
         DataBackend(settings.datasets_dir),
         settings.datasets_dir,
     )
     dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    dictionary = registry.register_existing(dictionary_path, task_id=task.id, role="feature_dictionary")
     trained = runner.invoke(
         ToolRef("modeling", "train_model"),
         {
@@ -314,6 +357,7 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
                 "credit_limit_col": "limit",
                 "mob_observe_cols": ["mob1", "mob2", "mob3"],
             },
+            "feature_dictionary_id": dictionary.id,
             "project_meta": {"项目名称": "报告样例"},
         },
         task_id=task.id,
@@ -322,3 +366,11 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert report.ok is True, report.error
     assert Path(report.output["report_path"]).exists()
     assert len(report.output["section_status"]) == 5
+    workbook = load_workbook(report.output["report_path"])
+    feature_sheet = workbook["特征重要性"]
+    headers = [cell.value for cell in feature_sheet[1]]
+    first_row = {header: feature_sheet.cell(row=2, column=index).value for index, header in enumerate(headers, start=1)}
+    assert first_row["feature"] == "x1"
+    assert first_row["含义"] == "收入稳定性"
+    assert first_row["产品名称"] == "征信评分"
+    assert first_row["厂商名称"] == "数据厂商A"
