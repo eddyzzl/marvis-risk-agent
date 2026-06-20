@@ -110,6 +110,44 @@ def test_join_review_enables_execute_after_all_specs_are_confirmed():
     )
 
 
+def test_join_review_accepts_backend_join_plan_payload_shape():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { joinReviewHtml } from "./marvis/static/js/v2/join_review.js";
+
+        const html = joinReviewHtml({
+          join_plan_id: "join-backend-1",
+          status: "draft",
+          joins: [
+            {
+              feature_id: "feature-backend",
+              confirmed: false,
+              key_pairs: [],
+              diagnostics: {
+                anchor_rows: 10,
+                matched_rows: 9,
+                match_rate: 0.9,
+                feature_key_unique: true,
+                fan_out_detected: false,
+                shrink_detected: false,
+                joined_rows_preview: 10,
+                new_columns: 2,
+                new_columns_null_rate: 0.1,
+              },
+            },
+          ],
+        });
+
+        assert.ok(html.includes('data-join-id="join-backend-1"'));
+        assert.ok(html.includes('data-feature-dataset="feature-backend"'));
+        assert.ok(html.includes('data-confirm-join="feature-backend"'));
+        assert.ok(html.includes('data-exec-join="join-backend-1" disabled'));
+        assert.ok(html.includes("feature-backend"));
+        """
+    )
+
+
 def test_join_handlers_require_dedup_before_confirming_and_surface_execute_errors():
     run_node(
         """
@@ -157,7 +195,15 @@ def test_join_handlers_require_dedup_before_confirming_and_surface_execute_error
         dedupControl.value = "first";
         await listeners.click({ target: confirmTarget, preventDefault() {} });
         assert.deepEqual(calls.splice(0), [
-          ["confirmJoinSpec", "join-1", { feature_dataset_id: "feature-1", dedup_strategy: "first" }],
+          [
+            "confirmJoinSpec",
+            "join-1",
+            {
+              feature_id: "feature-1",
+              feature_dataset_id: "feature-1",
+              dedup_strategy: "first",
+            },
+          ],
           ["refreshJoin"],
         ]);
 

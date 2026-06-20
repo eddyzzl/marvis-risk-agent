@@ -30,6 +30,18 @@ function diagnostics(spec) {
   return spec?.diagnostics || {};
 }
 
+function joinPlanId(joinPlan) {
+  return String(joinPlan?.id || joinPlan?.join_plan_id || "");
+}
+
+function anchorDatasetId(joinPlan) {
+  return String(joinPlan?.anchor_dataset_id || joinPlan?.anchor_id || "");
+}
+
+function featureDatasetId(spec) {
+  return String(spec?.feature_dataset_id || spec?.feature_id || "");
+}
+
 function keyPairsHtml(spec) {
   const pairs = spec?.key_pairs || [];
   if (!pairs.length) {
@@ -63,7 +75,7 @@ function dedupHtml(spec) {
   if (d.feature_key_unique) {
     return '<span class="join-key-unique">Feature key unique</span>';
   }
-  const featureId = escapeHtml(spec.feature_dataset_id);
+  const featureId = escapeHtml(featureDatasetId(spec));
   return `<select data-dedup="${featureId}" aria-label="Dedup strategy">
     <option value="">dedup required</option>
     <option value="first">first</option>
@@ -78,9 +90,10 @@ export function joinSpecCardHtml(spec) {
   const d = diagnostics(spec);
   const warned = d.fan_out_detected || d.shrink_detected;
   const confirmed = Boolean(spec?.confirmed);
-  return `<section class="join-card${warned ? " has-warn" : ""}${confirmed ? " join-confirmed" : ""}" data-feature-dataset="${escapeHtml(spec?.feature_dataset_id || "")}">
+  const featureId = featureDatasetId(spec);
+  return `<section class="join-card${warned ? " has-warn" : ""}${confirmed ? " join-confirmed" : ""}" data-feature-dataset="${escapeHtml(featureId)}">
     <header class="join-card-header">
-      <strong class="join-feature">${escapeHtml(spec?.feature_dataset_id || "feature dataset")}</strong>
+      <strong class="join-feature">${escapeHtml(featureId || "feature dataset")}</strong>
       ${confirmed ? '<span class="join-confirmed">Confirmed</span>' : ""}
     </header>
     <div class="join-keys">${keyPairsHtml(spec)}</div>
@@ -90,7 +103,7 @@ export function joinSpecCardHtml(spec) {
     </div>
     ${warningHtml(spec)}
     ${dedupHtml(spec)}
-    ${confirmed ? "" : `<button type="button" data-confirm-join="${escapeHtml(spec?.feature_dataset_id || "")}">Confirm table</button>`}
+    ${confirmed ? "" : `<button type="button" data-confirm-join="${escapeHtml(featureId)}">Confirm table</button>`}
   </section>`;
 }
 
@@ -101,10 +114,11 @@ export function joinReviewHtml(joinPlan) {
   const joins = joinPlan.joins || [];
   const canExecute = joins.length > 0 && joins.every((spec) => spec.confirmed);
   const cards = joins.map(joinSpecCardHtml).join("");
-  return `<section class="join-review" data-join-id="${escapeHtml(joinPlan.id || "")}">
-    <div class="join-anchor">Anchor: ${escapeHtml(joinPlan.anchor_dataset_id || "")}</div>
+  const planId = joinPlanId(joinPlan);
+  return `<section class="join-review" data-join-id="${escapeHtml(planId)}">
+    <div class="join-anchor">Anchor: ${escapeHtml(anchorDatasetId(joinPlan))}</div>
     ${cards}
-    <button type="button" data-exec-join="${escapeHtml(joinPlan.id || "")}"${canExecute ? "" : " disabled"}>Execute join</button>
+    <button type="button" data-exec-join="${escapeHtml(planId)}"${canExecute ? "" : " disabled"}>Execute join</button>
   </section>`;
 }
 
@@ -159,7 +173,8 @@ export function attachJoinHandlers(root, deps = {}) {
     if (confirmButton?.dataset?.confirmJoin) {
       event.preventDefault?.();
       const join = actions.getCurrentJoin();
-      if (!join?.id) {
+      const joinId = joinPlanId(join);
+      if (!joinId) {
         return;
       }
       const featureDatasetId = confirmButton.dataset.confirmJoin;
@@ -169,11 +184,12 @@ export function attachJoinHandlers(root, deps = {}) {
         actions.showError("dedup strategy is required before confirming this join");
         return;
       }
-      await actions.confirmJoinSpec(join.id, {
+      await actions.confirmJoinSpec(joinId, {
+        feature_id: featureDatasetId,
         feature_dataset_id: featureDatasetId,
         dedup_strategy: dedupStrategy,
       });
-      await actions.refreshJoin(join.id);
+      await actions.refreshJoin(joinId);
       return;
     }
 
