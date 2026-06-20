@@ -1,3 +1,13 @@
+export class ApiError extends Error {
+  constructor(message, { status = 0, detail = null, payload = null } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.payload = payload;
+  }
+}
+
 export function formatErrorDetail(detail) {
   if (Array.isArray(detail)) {
     return detail.map((item) => item.msg || JSON.stringify(item)).join("; ");
@@ -8,13 +18,23 @@ export function formatErrorDetail(detail) {
   return detail || "请求失败";
 }
 
-export async function readErrorMessage(response) {
+export async function readErrorPayload(response) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     const payload = await response.json();
-    return formatErrorDetail(payload.detail || payload);
+    const detail = payload.detail || payload;
+    return {
+      detail,
+      message: formatErrorDetail(detail),
+      payload,
+    };
   }
-  return (await response.text()) || "请求失败";
+  const message = (await response.text()) || "请求失败";
+  return { detail: message, message, payload: null };
+}
+
+export async function readErrorMessage(response) {
+  return (await readErrorPayload(response)).message;
 }
 
 function isFormDataBody(body) {
@@ -56,7 +76,12 @@ export async function api(endpoint, options = {}) {
     headers,
   });
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const error = await readErrorPayload(response);
+    throw new ApiError(error.message, {
+      status: response.status,
+      detail: error.detail,
+      payload: error.payload,
+    });
   }
   if (response.status === 204) {
     return null;

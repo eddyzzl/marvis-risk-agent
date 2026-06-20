@@ -199,6 +199,34 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
     )
 
 
+def test_v2_api_preserves_structured_plan_validation_errors():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { createPlan } from "./marvis/static/js/v2/api_v2.js";
+
+        globalThis.fetch = async () => ({
+          ok: false,
+          status: 422,
+          headers: { get: () => "application/json" },
+          json: async () => ({ detail: { problems: ["missing tool <bad>"] } }),
+          text: async () => "",
+        });
+
+        await assert.rejects(
+          () => createPlan("task-1", { goal: "bad plan" }),
+          (error) => {
+            assert.equal(error.name, "ApiError");
+            assert.equal(error.status, 422);
+            assert.deepEqual(error.detail, { problems: ["missing tool <bad>"] });
+            assert.ok(error.message.includes("missing tool"));
+            return true;
+          },
+        );
+        """
+    )
+
+
 def test_v2_state_store_is_keyed_subscribable_and_resettable():
     run_node(
         """
