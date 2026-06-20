@@ -16,6 +16,7 @@ from marvis.packs.modeling.report_compute import (
     resolve_report_sections,
     stress_low_pricing,
 )
+from marvis.packs.modeling import tools as modeling_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -129,6 +130,74 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     ]
     assert workbook["样本分析"]["A1"].value.startswith("无业务数据")
     assert any(status.section == "product_list" and not status.available for status in statuses)
+
+
+def test_report_narrative_guard_removes_numbers_not_in_structured_summary():
+    narratives = {
+        "model": "训练 KS 为 0.3，AUC 可达 0.91，建议拒绝前 20% 客群。",
+        "stress": "PSI 为 0.01，预计收益提升 12.5%。",
+    }
+    structured_summary = {
+        "dataset_split": [{"split": "train", "ks": 0.3, "auc": 0.75}],
+        "stability": [{"metric": "psi", "value": 0.01}],
+    }
+
+    guarded = modeling_tools._guard_no_invented_numbers(narratives, structured_summary)
+
+    assert "0.3" in guarded["model"]
+    assert "0.01" in guarded["stress"]
+    assert "0.91" not in guarded["model"]
+    assert "20%" not in guarded["model"]
+    assert "12.5%" not in guarded["stress"]
+    assert "[平台未提供该数字]" in guarded["model"]
+
+
+def test_report_narrative_guard_rejects_user_meta_numbers_as_metrics():
+    structured_summary = {
+        "project_meta": {"目标AUC": "0.91"},
+        "dataset_split": [{"split": "train", "ks": 0.3, "auc": 0.75}],
+    }
+
+    guarded = modeling_tools._guard_no_invented_numbers(
+        {"model": "模型 AUC 为 0.91。"},
+        structured_summary,
+    )
+
+    assert "0.91" not in guarded["model"]
+    assert "[平台未提供该数字]" in guarded["model"]
+
+
+def test_report_narrative_guard_rejects_unit_changed_percent_tokens():
+    structured_summary = {"dataset_split": [{"ks": 0.3, "sample_count": 20}]}
+
+    guarded = modeling_tools._guard_no_invented_numbers(
+        {"model": "KS 为 0.3%，建议拒绝前 20% 客群。"},
+        structured_summary,
+    )
+
+    assert "0.3%" not in guarded["model"]
+    assert "20%" not in guarded["model"]
+    assert guarded["model"].count("[平台未提供该数字]") == 2
+
+
+def test_report_narrative_drafter_uses_llm_json_when_available():
+    calls = []
+
+    class FakeLLM:
+        def complete(self, **kwargs):
+            calls.append(kwargs)
+            return '{"sample":"样本覆盖 2 个放款月。","model":"模型 KS 为 0.3。"}'
+
+    narratives = modeling_tools._draft_report_narratives(
+        {"dataset_split": [{"split": "train", "ks": 0.3}]},
+        llm_factory=lambda: FakeLLM(),
+    )
+
+    assert narratives["sample"] == "样本覆盖 2 个放款月。"
+    assert narratives["model"] == "模型 KS 为 0.3。"
+    assert narratives["vintage"]
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[0]["stream"] is False
 
 
 def test_generate_model_report_tool_round_trips_via_runner(tmp_path):

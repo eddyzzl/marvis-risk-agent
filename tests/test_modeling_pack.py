@@ -71,6 +71,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     tool_names = {tool.name for tool in manifest.tools}
     train_tool = next(tool for tool in manifest.tools if tool.name == "train_model")
     handoff_tool = next(tool for tool in manifest.tools if tool.name == "handoff_to_validation")
+    report_tool = next(tool for tool in manifest.tools if tool.name == "generate_model_report")
 
     assert tool_names == {
         "check_data_quality",
@@ -87,6 +88,8 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert train_tool.determinism == "stochastic"
     assert {"write:model", "write:dataset"} <= set(train_tool.side_effects)
     assert "write:task" in handoff_tool.side_effects
+    assert "model_id" in report_tool.input_schema["properties"]
+    assert "llm" in report_tool.side_effects
 
 
 def test_modeling_pack_tools_round_trip_via_runner(tmp_path):

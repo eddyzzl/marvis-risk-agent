@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+import json
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,8 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
 from marvis.feature.metrics import feature_metrics
+from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.output.model_report import ModelReportPayload, render_model_report
 from marvis.packs.modeling.artifact import export_pmml
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
@@ -230,25 +234,40 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         target_col=experiment.config.target_col,
         business=business,
     )
+    structured_summary = _report_structured_summary(
+        project_meta=dict(inputs.get("project_meta") or {}),
+        dataset_split=_dataset_split_rows(experiment.metrics),
+        stability=_stability_rows(experiment.metrics),
+        sample_analysis=sample,
+        vintage=vintage,
+        feature_importance=_feature_importance_rows(artifact),
+        univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
+        oot_bin_table=oot_bin,
+        stress_product_removal={},
+        stress_low_pricing=low_pricing,
+        section_status=statuses,
+    )
+    narratives = _guard_no_invented_numbers(
+        _draft_report_narratives(
+            structured_summary,
+            llm_factory=_report_llm_factory(runtime.settings.workspace, _optional_str(inputs.get("model_id"))),
+        ),
+        structured_summary,
+    )
     report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
     render_model_report(
         ModelReportPayload(
-            project_meta=dict(inputs.get("project_meta") or {}),
-            dataset_split=_dataset_split_rows(experiment.metrics),
-            stability=_stability_rows(experiment.metrics),
+            project_meta=structured_summary["project_meta"],
+            dataset_split=structured_summary["dataset_split"],
+            stability=structured_summary["stability"],
             sample_analysis=sample,
             vintage=vintage,
-            feature_importance=_feature_importance_rows(artifact),
-            univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
+            feature_importance=structured_summary["feature_importance"],
+            univariate=structured_summary["univariate"],
             oot_bin_table=oot_bin,
             stress_product_removal={},
             stress_low_pricing=low_pricing,
-            narratives={
-                "sample": "样本分析基于平台聚合结果生成。",
-                "vintage": "Vintage 结论基于平台计算曲线生成。",
-                "model": "模型结论基于平台指标与特征重要性生成。",
-                "stress": "压力测试结论基于平台压测结果生成。",
-            },
+            narratives=narratives,
             section_status=statuses,
         ),
         report_path,
@@ -458,6 +477,141 @@ def _report_bin_table(
         edges=edges,
         business=business,
     )
+
+
+def _report_structured_summary(**payload) -> dict:
+    return _jsonable(payload)
+
+
+REPORT_NARRATIVE_SYS = (
+    "你为信贷风控建模报告起草章节文字。只能解释用户提供的结构化摘要，"
+    "不得编造任何数字、百分比、阈值、金额或样本量。输出 JSON object。"
+)
+REPORT_NARRATIVE_KEYS = ("sample", "vintage", "model", "stress")
+REPORT_NUMERIC_EVIDENCE_KEYS = (
+    "dataset_split",
+    "stability",
+    "sample_analysis",
+    "vintage",
+    "feature_importance",
+    "univariate",
+    "oot_bin_table",
+    "stress_product_removal",
+    "stress_low_pricing",
+)
+
+
+def _draft_report_narratives(structured_summary: dict, *, llm_factory=None) -> dict:
+    fallback = _fallback_report_narratives()
+    if llm_factory is None:
+        return fallback
+    try:
+        raw = llm_factory().complete(
+            system_prompt=REPORT_NARRATIVE_SYS,
+            user_prompt=_report_narrative_prompt(structured_summary),
+            response_format={"type": "json_object"},
+            stream=False,
+        )
+        payload = json.loads(str(raw))
+    except (LLMClientError, LLMSettingsError, json.JSONDecodeError, TypeError, ValueError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    return {
+        key: str(payload.get(key) or fallback[key])
+        for key in REPORT_NARRATIVE_KEYS
+    }
+
+
+def _fallback_report_narratives() -> dict:
+    return {
+        "sample": "样本分析基于平台聚合结果生成。",
+        "vintage": "Vintage 结论基于平台计算曲线生成。",
+        "model": "模型结论基于平台指标与特征重要性生成。",
+        "stress": "压力测试结论基于平台压测结果生成。",
+    }
+
+
+def _report_narrative_prompt(structured_summary: dict) -> str:
+    return (
+        "请基于以下结构化摘要，输出 JSON："
+        "{sample, vintage, model, stress}。\n"
+        "要求：只写文字解释；所有数字必须来自摘要原文；缺少数据时说明缺业务数据。\n\n"
+        f"结构化摘要：\n{json.dumps(structured_summary, ensure_ascii=False, sort_keys=True)}"
+    )
+
+
+def _report_llm_factory(workspace: Path, model_id: str | None):
+    def factory():
+        return OpenAICompatibleLLMClient(resolve_llm_model(workspace, model_id))
+
+    return factory
+
+
+_NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?%?")
+
+
+def _guard_no_invented_numbers(narratives: dict, structured_summary: dict) -> dict:
+    allowed = _allowed_number_tokens(_report_numeric_evidence(structured_summary))
+    guarded: dict[str, str] = {}
+    for key, value in narratives.items():
+        text = str(value)
+        guarded[str(key)] = _NUMBER_TOKEN_RE.sub(
+            lambda match: match.group(0) if _number_token_allowed(match.group(0), allowed) else "[平台未提供该数字]",
+            text,
+        )
+    return guarded
+
+
+def _report_numeric_evidence(structured_summary: dict) -> dict:
+    return {
+        key: structured_summary.get(key)
+        for key in REPORT_NUMERIC_EVIDENCE_KEYS
+        if key in structured_summary
+    }
+
+
+def _allowed_number_tokens(value) -> set[str]:
+    tokens: set[str] = set()
+
+    def visit(item) -> None:
+        if isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+            return
+        if isinstance(item, bool) or item is None:
+            return
+        if isinstance(item, (int, float, np.integer, np.floating)):
+            numeric = float(item)
+            tokens.add(_format_number_token(numeric))
+            tokens.add(str(item))
+            return
+        if isinstance(item, str):
+            for match in _NUMBER_TOKEN_RE.finditer(item):
+                tokens.add(match.group(0))
+
+    visit(value)
+    return {token for token in tokens if token}
+
+
+def _number_token_allowed(token: str, allowed: set[str]) -> bool:
+    if token in allowed:
+        return True
+    if token.endswith("%"):
+        return False
+    try:
+        numeric = float(token)
+    except ValueError:
+        return False
+    return _format_number_token(numeric) in allowed
+
+
+def _format_number_token(value: float) -> str:
+    return f"{value:.12g}"
 
 
 def _jsonable(value: Any):

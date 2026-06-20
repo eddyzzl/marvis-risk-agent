@@ -257,6 +257,7 @@
           "dataset_id": {"type": "string", "minLength": 1},
           "business_columns": {"type": "object"},
           "feature_dictionary_id": {"type": "string", "minLength": 1},
+          "model_id": {"type": "string", "minLength": 1},
           "project_meta": {"type": "object"},
           "seed": {"type": "integer"}
         },
@@ -276,10 +277,10 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_generate_model_report",
-      "side_effects": ["read:model", "read:dataset", "write:report"],
+      "side_effects": ["read:model", "read:dataset", "write:report", "llm"],
       "memory_limit_mb": 4096
     }
   ],
   "hooks": [],
-  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task", "write:report"]
+  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task", "write:report", "llm"]
 }
