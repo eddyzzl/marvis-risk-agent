@@ -169,6 +169,9 @@ def compute_amount_bin_table(
     bins = pd.Series(np.digitize(frame[score_col].to_numpy(dtype=float), edges[1:-1], right=False), index=frame.index) + 1
     base_rows = bin_table(frame, edges, score_col=score_col, target_col=target_col)
     output = []
+    cumulative_amount = 0.0
+    cumulative_bad_amount = 0.0
+    overall_amount_bad_rate = _amount_bad_rate(frame, target_col, business.loan_amount_col)
     for row in base_rows:
         group = frame[bins == row.bin_index]
         payload = asdict(row)
@@ -188,7 +191,14 @@ def compute_amount_bin_table(
         if business.loan_amount_col and business.loan_amount_col in group.columns:
             amount = pd.to_numeric(group[business.loan_amount_col], errors="coerce").fillna(0)
             target = pd.to_numeric(group[target_col], errors="coerce").fillna(0)
-            payload["金额逾期率"] = _ratio(float(amount[target == 1].sum()), float(amount.sum()))
+            amount_sum = float(amount.sum())
+            bad_amount = float(amount[target == 1].sum())
+            amount_bad_rate = _ratio(bad_amount, amount_sum)
+            cumulative_amount += amount_sum
+            cumulative_bad_amount += bad_amount
+            payload["金额逾期率"] = amount_bad_rate
+            payload["累计金额逾期率"] = _ratio(cumulative_bad_amount, cumulative_amount)
+            payload["金额lift"] = _ratio(amount_bad_rate, overall_amount_bad_rate)
         output.append(payload)
     return output
 
@@ -238,6 +248,14 @@ def build_feature_dictionary(backend, dict_dataset_id, registry) -> dict:
         }
         for _, row in frame.iterrows()
     }
+
+
+def _amount_bad_rate(frame: pd.DataFrame, target_col: str, amount_col: str | None) -> float:
+    if not amount_col or amount_col not in frame.columns:
+        return 0.0
+    amount = pd.to_numeric(frame[amount_col], errors="coerce").fillna(0)
+    target = pd.to_numeric(frame[target_col], errors="coerce").fillna(0)
+    return _ratio(float(amount[target == 1].sum()), float(amount.sum()))
 
 
 def _vintage_cohort_business_columns(points) -> tuple[dict[str, int], dict[str, dict[str, float]]]:

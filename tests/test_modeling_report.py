@@ -132,6 +132,33 @@ def test_amount_bin_table_computes_credit_utilization_by_bin(tmp_path):
     assert by_bin[2]["额度使用率"] == pytest.approx(0.8)
 
 
+def test_amount_bin_table_computes_amount_weighted_cumulative_and_lift(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.8, 0.9],
+        "y": [0, 1, 0, 1],
+        "amount": [100.0, 100.0, 300.0, 100.0],
+    })
+    path = tmp_path / "amount_weighted_bins.parquet"
+    frame.to_parquet(path, index=False)
+
+    rows = compute_amount_bin_table(
+        DataBackend(tmp_path),
+        path,
+        score_col="score",
+        target_col="y",
+        edges=[0.0, 0.5, 1.0],
+        business=BusinessColumns(loan_amount_col="amount"),
+    )
+
+    by_bin = {row["bin_index"]: row for row in rows}
+    assert by_bin[1]["金额逾期率"] == pytest.approx(0.5)
+    assert by_bin[1]["累计金额逾期率"] == pytest.approx(0.5)
+    assert by_bin[1]["金额lift"] == pytest.approx(1.5)
+    assert by_bin[2]["金额逾期率"] == pytest.approx(0.25)
+    assert by_bin[2]["累计金额逾期率"] == pytest.approx(1 / 3)
+    assert by_bin[2]["金额lift"] == pytest.approx(0.75)
+
+
 def test_resolve_sections_and_render_model_report_degrades_missing_business_data(tmp_path):
     statuses = resolve_report_sections(BusinessColumns(), dictionary_id=None)
     output = tmp_path / "model_report.xlsx"
