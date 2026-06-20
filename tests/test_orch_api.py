@@ -181,6 +181,20 @@ def test_capability_tiers_endpoint_lists_defaults(tmp_path):
     }
 
 
+def test_step_output_endpoint_returns_stored_structured_output(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    repo.create_plan(_plan(status=PlanStatus.VALIDATED))
+    repo.store_step_output("step-1", {"auc": 0.74, "notes": ["ok"]})
+
+    response = client.get("/api/step-outputs/step-1")
+    missing = client.get("/api/step-outputs/missing-step")
+
+    assert response.status_code == 200
+    assert response.json() == {"auc": 0.74, "notes": ["ok"]}
+    assert missing.status_code == 404
+
+
 def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo

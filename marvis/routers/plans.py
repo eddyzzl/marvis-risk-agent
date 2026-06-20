@@ -84,6 +84,14 @@ def list_capability_tiers() -> dict:
     }
 
 
+@router.get("/step-outputs/{step_id}")
+def get_step_output(request: Request, step_id: str) -> dict:
+    try:
+        return request.app.state.plan_repo.load_step_output(step_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="step output not found") from exc
+
+
 @router.get("/plans/{plan_id}")
 def get_plan(request: Request, plan_id: str) -> dict:
     return _load_plan_payload(request, plan_id)
