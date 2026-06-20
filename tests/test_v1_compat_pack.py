@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from docx import Document
 from fastapi.testclient import TestClient
 import nbformat
 import pytest
@@ -159,9 +160,10 @@ def test_run_notebook_tool_runner_converts_missing_material_to_structured_error(
     assert audit["outcome"] == "failed"
 
 
-def test_tool_runner_runs_metrics_after_notebook_in_separate_worker(tmp_path):
+def test_tool_runner_runs_metrics_and_reports_after_notebook_in_separate_workers(tmp_path):
     runner, _plugin_repo = _runner(tmp_path)
     repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
+    _write_report_template(tmp_path / "workspace" / "report_templates" / "default.docx")
     source_dir = _write_validation_project(tmp_path / "materials")
     task = repo.create_task(
         TaskCreate(
@@ -187,6 +189,11 @@ def test_tool_runner_runs_metrics_after_notebook_in_separate_worker(tmp_path):
         {"task_id": task.id},
         task_id=task.id,
     )
+    report = runner.invoke(
+        ToolRef("v1_compat", "render_reports"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
 
     assert notebook.ok is True, notebook.error
     assert notebook.output["status"] == "executed"
@@ -195,6 +202,15 @@ def test_tool_runner_runs_metrics_after_notebook_in_separate_worker(tmp_path):
     assert 0.0 <= metrics.output["ks"] <= 1.0
     assert 0.0 <= metrics.output["auc"] <= 1.0
     assert metrics.output["score_consistency_passed"] is True
+    assert report.ok is True, report.error
+    assert report.output["status"] == "succeeded"
+    assert {artifact["kind"] for artifact in report.output["artifacts"]} == {"excel", "word"}
+    assert {
+        artifact["path"] for artifact in report.output["artifacts"]
+    } == {
+        f"tasks/{task.id}/outputs/validation.xlsx",
+        f"tasks/{task.id}/outputs/validation_report.docx",
+    }
 
 
 def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypatch):
@@ -456,6 +472,13 @@ def _write_contract_notebook(path: Path) -> None:
         ]
     )
     nbformat.write(notebook, path)
+
+
+def _write_report_template(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = Document()
+    document.add_paragraph("MARVIS validation report")
+    document.save(path)
 
 
 def _task_context(tmp_path):
