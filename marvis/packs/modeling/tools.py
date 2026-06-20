@@ -437,9 +437,10 @@ def _feature_importance_rows(artifact: ModelArtifact | None, *, feature_dictiona
         return []
     dictionary = feature_dictionary or {}
     metadata_keys = ("含义", "产品名称", "厂商名称")
+    importance_pairs = artifact.feature_importance or tuple((feature, 0.0) for feature in artifact.feature_list)
     rows = []
-    for feature in artifact.feature_list:
-        row = {"feature": feature, "importance": 0.0}
+    for feature, importance in importance_pairs:
+        row = {"feature": feature, "importance": float(importance)}
         if dictionary:
             metadata = dictionary.get(str(feature))
             row.update({

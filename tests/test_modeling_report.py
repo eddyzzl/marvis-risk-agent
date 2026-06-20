@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from marvis.data.backend import DataBackend
@@ -370,7 +371,9 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     feature_sheet = workbook["特征重要性"]
     headers = [cell.value for cell in feature_sheet[1]]
     first_row = {header: feature_sheet.cell(row=2, column=index).value for index, header in enumerate(headers, start=1)}
+    importance_by_feature = {feature: importance for feature, importance in trained.output["feature_importance"]}
     assert first_row["feature"] == "x1"
+    assert first_row["importance"] == pytest.approx(importance_by_feature["x1"])
     assert first_row["含义"] == "收入稳定性"
     assert first_row["产品名称"] == "征信评分"
     assert first_row["厂商名称"] == "数据厂商A"

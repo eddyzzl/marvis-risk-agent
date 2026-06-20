@@ -31,7 +31,11 @@ class ExperimentStore:
 
     def attach_result(self, experiment_id: str, result: TrainResult) -> None:
         self.get(experiment_id)
-        artifact = replace(result.artifact, experiment_id=experiment_id)
+        artifact = replace(
+            result.artifact,
+            experiment_id=experiment_id,
+            feature_importance=result.feature_importance,
+        )
         self._repo.create_model_artifact(artifact)
         self._repo.attach_experiment_result(
             experiment_id,

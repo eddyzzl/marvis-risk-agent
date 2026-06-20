@@ -69,7 +69,7 @@ AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:final_validation_conclusion",
 })
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MIGRATION_TABLES = frozenset({"tasks", "plans", "plan_steps"})
+_MIGRATION_TABLES = frozenset({"tasks", "plans", "plan_steps", "model_artifacts"})
 
 
 def _now() -> str:
@@ -458,6 +458,7 @@ def init_db(db_path: Path) -> None:
                 model_path TEXT NOT NULL,
                 pmml_path TEXT,
                 feature_list_json TEXT NOT NULL,
+                feature_importance_json TEXT NOT NULL DEFAULT '[]',
                 params_json TEXT NOT NULL,
                 woe_maps_json TEXT,
                 created_at TEXT NOT NULL,
@@ -545,6 +546,7 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_backtests_strategy ON backtests(strategy_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_task ON draft_tools(task_id, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_runs_draft ON draft_runs(draft_id)")
+        _ensure_column(conn, "model_artifacts", "feature_importance_json", "TEXT NOT NULL DEFAULT '[]'")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
@@ -1738,9 +1740,9 @@ class ModelingRepository:
                 """
                 INSERT INTO model_artifacts(
                     id, experiment_id, algorithm, model_path, pmml_path,
-                    feature_list_json, params_json, woe_maps_json, created_at
+                    feature_list_json, feature_importance_json, params_json, woe_maps_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 _model_artifact_insert_values(artifact),
             )
@@ -1763,7 +1765,7 @@ class ModelingRepository:
             row = conn.execute(
                 """
                 SELECT id, experiment_id, algorithm, model_path, pmml_path,
-                       feature_list_json, params_json, woe_maps_json, created_at
+                       feature_list_json, feature_importance_json, params_json, woe_maps_json, created_at
                   FROM model_artifacts
                  WHERE id = ?
                 """,
@@ -2497,6 +2499,7 @@ def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
         artifact.model_path,
         artifact.pmml_path,
         _dump_json_any(list(artifact.feature_list)),
+        _dump_json_any([list(item) for item in artifact.feature_importance]),
         _dump_json_any(artifact.params),
         None if artifact.woe_maps is None else _dump_json_any(artifact.woe_maps),
         artifact.created_at,
@@ -2512,10 +2515,24 @@ def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
         model_path=str(row["model_path"]),
         pmml_path=_optional_str(row["pmml_path"]),
         feature_list=tuple(str(item) for item in _load_json_array(row["feature_list_json"])),
+        feature_importance=_feature_importance_from_json(row["feature_importance_json"]),
         params=_load_json_object(row["params_json"]),
         woe_maps=None if woe_maps_json is None else _load_json_object(woe_maps_json),
         created_at=str(row["created_at"]),
     )
+
+
+def _feature_importance_from_json(raw: str | None) -> tuple[tuple[str, float], ...]:
+    pairs = []
+    for item in _load_json_array(raw):
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        feature, importance = item
+        try:
+            pairs.append((str(feature), float(importance)))
+        except (TypeError, ValueError):
+            continue
+    return tuple(pairs)
 
 
 def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -> tuple:

@@ -64,6 +64,7 @@ class ModelArtifact:
     params: dict[str, Any]
     woe_maps: dict[str, Any] | None
     created_at: str
+    feature_importance: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -88,6 +88,7 @@ def test_experiment_store_attach_result_persists_artifact_and_metrics(tmp_path):
     assert experiment.metrics.test_ks == 0.37
     assert artifact is not None
     assert artifact.experiment_id == experiment_id
+    assert artifact.feature_importance == (("x1", 0.7), ("x2", 0.3))
 
 
 def test_experiment_store_compare_returns_metric_rows_in_requested_order(tmp_path):

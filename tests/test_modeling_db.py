@@ -60,6 +60,7 @@ def test_modeling_repository_round_trips_experiment_and_artifact(tmp_path):
         params={"num_leaves": 16},
         woe_maps=None,
         created_at="2026-06-19T00:01:00Z",
+        feature_importance=(("score", 0.7), ("income", 0.3)),
     )
 
     repo.create_experiment(experiment)
