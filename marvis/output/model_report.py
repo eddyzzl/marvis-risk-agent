@@ -150,9 +150,17 @@ def _vintage_rows(vintage: dict | None) -> list[dict] | None:
     if vintage is None:
         return None
     headers = vintage.get("headers") or []
+    counts = vintage.get("counts") or {}
+    amounts = vintage.get("amounts") or {}
     rows = []
     for cohort, values in (vintage.get("curves") or {}).items():
         row = {"放款月": cohort}
+        if cohort in counts:
+            row["放款笔数"] = counts[cohort]
+        amount = amounts.get(cohort)
+        if isinstance(amount, dict):
+            row["放款金额"] = amount.get("total")
+            row["件均金额"] = amount.get("average")
         for header, value in zip(headers, values, strict=False):
             row[str(header)] = value
         rows.append(row)

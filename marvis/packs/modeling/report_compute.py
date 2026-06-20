@@ -135,9 +135,12 @@ def compute_vintage_report(
         target_col="target",
         balance_col="amount" if amount_col else None,
     )
+    counts, amounts = _vintage_cohort_business_columns(points)
     return {
         "cohorts": sorted({point.cohort for point in points}),
         "headers": list(mob_observe_cols),
+        "counts": counts,
+        "amounts": amounts,
         "curves": vintage_curve_wide(points, metric="cum_bad_rate"),
         "points": [asdict(point) for point in points],
     }
@@ -225,6 +228,23 @@ def build_feature_dictionary(backend, dict_dataset_id, registry) -> dict:
         }
         for _, row in frame.iterrows()
     }
+
+
+def _vintage_cohort_business_columns(points) -> tuple[dict[str, int], dict[str, dict[str, float]]]:
+    counts: dict[str, int] = {}
+    amounts: dict[str, dict[str, float]] = {}
+    first_mobs: dict[str, int] = {}
+    for point in points:
+        current_mob = first_mobs.get(point.cohort)
+        if current_mob is not None and point.mob >= current_mob:
+            continue
+        first_mobs[point.cohort] = int(point.mob)
+        counts[point.cohort] = int(point.sample_count)
+        if point.balance_sum is not None:
+            total = float(point.balance_sum)
+            average = _ratio(total, float(point.sample_count))
+            amounts[point.cohort] = {"total": total, "average": average}
+    return counts, amounts
 
 
 def _has_business_column(business: BusinessColumns, field: str) -> bool:

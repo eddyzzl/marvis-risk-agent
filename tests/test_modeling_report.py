@@ -85,6 +85,11 @@ def test_model_report_compute_functions_are_deterministic(tmp_path):
     assert sample[0]["Mob3逾期率"] == 1.0
     assert vintage["headers"] == ["mob1", "mob2", "mob3"]
     assert vintage["curves"]["2026-01"] == sorted(vintage["curves"]["2026-01"])
+    assert vintage["counts"] == {"2026-01": 2, "2026-02": 2}
+    assert vintage["amounts"] == {
+        "2026-01": {"total": 3000.0, "average": 1500.0},
+        "2026-02": {"total": 4000.0, "average": 2000.0},
+    }
     assert low_pricing == stress_low_pricing(
         backend,
         path,
@@ -130,6 +135,48 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     ]
     assert workbook["样本分析"]["A1"].value.startswith("无业务数据")
     assert any(status.section == "product_list" and not status.available for status in statuses)
+
+
+def test_render_model_report_includes_vintage_cohort_counts_and_amounts(tmp_path):
+    output = tmp_path / "model_report.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={"项目名称": "建模报告"},
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage={
+                "headers": ["mob1"],
+                "curves": {"2026-01": [0.5]},
+                "counts": {"2026-01": 2},
+                "amounts": {"2026-01": {"total": 3000.0, "average": 1500.0}},
+            },
+            feature_importance=[],
+            univariate=[],
+            oot_bin_table=[],
+            stress_product_removal={},
+            stress_low_pricing=None,
+            narratives={},
+            section_status=[],
+        ),
+        output,
+    )
+
+    sheet = load_workbook(output)["Vintage"]
+    assert [sheet["A1"].value, sheet["B1"].value, sheet["C1"].value, sheet["D1"].value, sheet["E1"].value] == [
+        "放款月",
+        "放款笔数",
+        "放款金额",
+        "件均金额",
+        "mob1",
+    ]
+    assert [sheet["A2"].value, sheet["B2"].value, sheet["C2"].value, sheet["D2"].value, sheet["E2"].value] == [
+        "2026-01",
+        2,
+        3000.0,
+        1500.0,
+        0.5,
+    ]
 
 
 def test_report_narrative_guard_removes_numbers_not_in_structured_summary():
