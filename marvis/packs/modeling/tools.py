@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
@@ -242,9 +243,10 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         else {}
     )
     feature_importance = _feature_importance_rows(artifact, feature_dictionary=feature_dictionary)
+    split_profile = _dataset_split_profile(runtime, dataset_path, experiment.config)
     structured_summary = _report_structured_summary(
         project_meta=dict(inputs.get("project_meta") or {}),
-        dataset_split=_dataset_split_rows(experiment.metrics),
+        dataset_split=_dataset_split_rows(experiment.metrics, split_profile=split_profile),
         stability=_stability_rows(experiment.metrics),
         sample_analysis=sample,
         vintage=vintage,
@@ -385,35 +387,54 @@ def _section_available(statuses, section: str) -> bool:
     return any(status.section == section and status.available for status in statuses)
 
 
-def _dataset_split_rows(metrics) -> list[dict]:
+def _dataset_split_rows(metrics, *, split_profile: dict[str, dict] | None = None) -> list[dict]:
     if metrics is None:
         return []
+    split_profile = split_profile or {}
     if metrics.train_rmse is not None:
         return [
             {
                 "split": "train",
+                **split_profile.get("train", {}),
                 "rmse": metrics.train_rmse,
                 "mae": metrics.train_mae,
                 "r2": metrics.train_r2,
             },
             {
                 "split": "test",
+                **split_profile.get("test", {}),
                 "rmse": metrics.test_rmse,
                 "mae": metrics.test_mae,
                 "r2": metrics.test_r2,
             },
             {
                 "split": "oot",
+                **split_profile.get("oot", {}),
                 "rmse": metrics.oot_rmse,
                 "mae": metrics.oot_mae,
                 "r2": metrics.oot_r2,
             },
         ]
     return [
-        {"split": "train", "ks": metrics.train_ks, "auc": metrics.train_auc},
-        {"split": "test", "ks": metrics.test_ks, "auc": metrics.test_auc},
-        {"split": "oot", "ks": metrics.oot_ks, "auc": metrics.oot_auc},
+        {"split": "train", **split_profile.get("train", {}), "ks": metrics.train_ks, "auc": metrics.train_auc},
+        {"split": "test", **split_profile.get("test", {}), "ks": metrics.test_ks, "auc": metrics.test_auc},
+        {"split": "oot", **split_profile.get("oot", {}), "ks": metrics.oot_ks, "auc": metrics.oot_auc},
     ]
+
+
+def _dataset_split_profile(runtime: _Runtime, dataset_path: Path, config: TrainConfig) -> dict[str, dict]:
+    frame = runtime.backend.read_frame(dataset_path, columns=[config.split_col, config.target_col])
+    target = pd.to_numeric(frame[config.target_col], errors="coerce")
+    binary_target = target.dropna().isin([0, 1]).all()
+    profile = {}
+    for split in ("train", "test", "oot"):
+        split_value = config.split_values.get(split, split)
+        group_target = target[frame[config.split_col] == split_value]
+        row = {"sample_count": int(len(group_target))}
+        if binary_target:
+            row["bad_rate"] = _ratio(float((group_target == 1).sum()), float(len(group_target)))
+        profile[split] = row
+    return profile
 
 
 def _stability_rows(metrics) -> list[dict]:

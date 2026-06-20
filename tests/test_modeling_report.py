@@ -518,6 +518,20 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert Path(report.output["report_path"]).exists()
     assert len(report.output["section_status"]) == 5
     workbook = load_workbook(report.output["report_path"])
+    summary_sheet = workbook["汇总"]
+    train_row = next(
+        row
+        for row in range(1, summary_sheet.max_row + 1)
+        if summary_sheet.cell(row=row, column=1).value == "split"
+        and summary_sheet.cell(row=row, column=2).value == "train"
+    )
+    train_split_summary = {
+        summary_sheet.cell(row=row, column=1).value: summary_sheet.cell(row=row, column=2).value
+        for row in range(train_row, train_row + 5)
+    }
+    assert train_split_summary["sample_count"] == 80
+    assert train_split_summary["bad_rate"] == pytest.approx(0.5)
+
     feature_sheet = workbook["特征重要性"]
     headers = [cell.value for cell in feature_sheet[1]]
     first_row = {header: feature_sheet.cell(row=2, column=index).value for index, header in enumerate(headers, start=1)}
