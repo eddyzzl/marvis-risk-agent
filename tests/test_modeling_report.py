@@ -551,3 +551,21 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert first_row["含义"] == "收入稳定性"
     assert first_row["产品名称"] == "征信评分"
     assert first_row["厂商名称"] == "数据厂商A"
+
+    stress_sheet = workbook["压力测试"]
+    stress_headers = [
+        stress_sheet.cell(row=2, column=column).value
+        for column in range(1, stress_sheet.max_column + 1)
+    ]
+    stress_rows = [
+        {
+            header: stress_sheet.cell(row=row, column=index).value
+            for index, header in enumerate(stress_headers, start=1)
+        }
+        for row in range(3, stress_sheet.max_row + 1)
+        if stress_sheet.cell(row=row, column=1).value
+    ]
+    by_item = {row["项目"]: row for row in stress_rows}
+    assert by_item["baseline"]["sample_count"] == 40
+    assert by_item["征信评分"]["status"] == "completed"
+    assert by_item["征信评分"]["dropped_features"] == "x1"

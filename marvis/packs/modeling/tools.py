@@ -13,10 +13,11 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
 from marvis.feature.metrics import feature_metrics
+from marvis.feature.encode import woe_encode
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.output.model_report import ModelReportPayload, render_model_report
-from marvis.packs.modeling.artifact import export_pmml
+from marvis.packs.modeling.artifact import export_pmml, load_model
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.handoff import handoff_to_validation
@@ -40,6 +41,8 @@ from marvis.packs.modeling.scenarios import apply_scenario
 from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.errors import ModelingError
 from marvis.settings import build_settings
+from marvis.validation.config import ValidationConfig
+from marvis.validation.stress_test import run_stress_test
 
 
 MODELING_ARTIFACTS_DIR_NAME = "modeling_artifacts"
@@ -243,6 +246,7 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         else {}
     )
     feature_importance = _feature_importance_rows(artifact, feature_dictionary=feature_dictionary)
+    stress_product_removal = _stress_product_removal(runtime, dataset_path, artifact, experiment.config, feature_dictionary)
     split_profile = _dataset_split_profile(
         runtime,
         dataset_path,
@@ -258,7 +262,7 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         feature_importance=feature_importance,
         univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
         oot_bin_table=oot_bin,
-        stress_product_removal={},
+        stress_product_removal=stress_product_removal,
         stress_low_pricing=low_pricing,
         section_status=statuses,
     )
@@ -280,7 +284,7 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
             feature_importance=structured_summary["feature_importance"],
             univariate=structured_summary["univariate"],
             oot_bin_table=oot_bin,
-            stress_product_removal={},
+            stress_product_removal=stress_product_removal,
             stress_low_pricing=low_pricing,
             narratives=narratives,
             section_status=statuses,
@@ -519,6 +523,108 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
         )
         rows.append({"feature": feature, "iv": metrics.iv, "ks": metrics.ks})
     return rows
+
+
+def _stress_product_removal(
+    runtime: _Runtime,
+    dataset_path: Path,
+    artifact: ModelArtifact | None,
+    config: TrainConfig,
+    feature_dictionary: dict,
+) -> dict:
+    if artifact is None or not feature_dictionary:
+        return {}
+    categories = _stress_feature_categories(feature_dictionary, artifact.feature_list)
+    if not categories:
+        return {}
+    columns = _unique_columns([*artifact.feature_list, config.target_col, config.split_col])
+    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    oot_value = config.split_values.get("oot", "oot")
+    oot_sample = frame[frame[config.split_col] == oot_value]
+    if oot_sample.empty:
+        return {"baseline": {"status": "skipped", "reason": "OOT sample is required for stress test"}}
+    base_dir = _artifact_base_dir(runtime.settings, runtime.experiments.get(artifact.experiment_id).task_id)
+    result = run_stress_test(
+        oot_sample=oot_sample,
+        config=ValidationConfig(
+            target_col=config.target_col,
+            score_col="__model_score__",
+            split_col=config.split_col,
+            time_col=str(config.params.get("time_col") or "apply_month"),
+            feature_columns=list(artifact.feature_list),
+            bin_count=10,
+            random_seed=config.seed,
+            split_values={key: str(value) for key, value in config.split_values.items()},
+        ),
+        feature_categories=categories,
+        input_scorer=_ModelArtifactScorer(artifact, base_dir=base_dir),
+    )
+    return _stress_product_rows(result)
+
+
+def _stress_feature_categories(feature_dictionary: dict, feature_list: tuple[str, ...]) -> dict[str, list[str]]:
+    allowed = set(feature_list)
+    categories: dict[str, list[str]] = {}
+    for feature, metadata in feature_dictionary.items():
+        if feature not in allowed or not isinstance(metadata, dict):
+            continue
+        product = _optional_str(metadata.get("产品名称"))
+        if not product:
+            continue
+        categories.setdefault(product, []).append(str(feature))
+    return categories
+
+
+def _stress_product_rows(result) -> dict:
+    rows = {
+        "baseline": {
+            "status": result.status,
+            "sample_count": result.baseline.sample_count,
+            "ks": result.baseline.ks,
+            "dropped_features": "",
+            "dropped_feature_count": "",
+            "ks_after": "",
+            "ks_delta": "",
+            "psi_vs_baseline": "",
+            "error": "",
+        }
+    }
+    for row in result.per_category:
+        rows[row.category] = {
+            "status": row.status,
+            "sample_count": result.baseline.sample_count,
+            "ks": result.baseline.ks,
+            "dropped_features": ", ".join(row.dropped_features),
+            "dropped_feature_count": len(row.dropped_features),
+            "ks_after": row.ks_after,
+            "ks_delta": row.ks_delta,
+            "psi_vs_baseline": row.psi_vs_baseline,
+            "error": row.error or "",
+        }
+    return rows
+
+
+class _ModelArtifactScorer:
+    def __init__(self, artifact: ModelArtifact, *, base_dir: Path):
+        self.artifact = artifact
+        self.model = load_model(artifact, base_dir=base_dir)
+
+    def score(self, dataframe: pd.DataFrame) -> list[float]:
+        features = list(self.artifact.feature_list)
+        if self.artifact.algorithm == "xgb":
+            import xgboost as xgb
+
+            matrix = xgb.DMatrix(dataframe[features], feature_names=features)
+            return [float(value) for value in self.model.predict(matrix)]
+        if self.artifact.algorithm == "scorecard" and isinstance(self.model, dict):
+            encoded = pd.DataFrame(index=dataframe.index)
+            woe_maps = self.model["woe_maps"]
+            for feature in features:
+                encoded[feature] = woe_encode(dataframe, feature, woe_maps[feature]).to_numpy(dtype=float)
+            return [float(value) for value in self.model["model"].predict_proba(encoded)[:, 1]]
+        if hasattr(self.model, "predict_proba"):
+            return [float(value) for value in self.model.predict_proba(dataframe[features])[:, 1]]
+        return [float(value) for value in self.model.predict(dataframe[features])]
 
 
 def _report_score_col(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> str:
