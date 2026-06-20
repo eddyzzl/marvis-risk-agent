@@ -130,6 +130,24 @@ export function progressBarHtml(plan) {
   </div>`;
 }
 
+export function planActionsHtml(plan) {
+  const planId = String(plan?.id || "");
+  if (!planId) {
+    return "";
+  }
+  const status = plan?.status || "draft";
+  const confirm = status === "validated"
+    ? `<button type="button" data-confirm-plan="${escapeHtml(planId)}">Confirm and run</button>`
+    : "";
+  const cancel = terminalPlanStatuses.has(status)
+    ? ""
+    : `<button type="button" data-cancel-plan="${escapeHtml(planId)}">Cancel</button>`;
+  if (!confirm && !cancel) {
+    return "";
+  }
+  return `<div class="plan-actions">${confirm}${cancel}</div>`;
+}
+
 export function planHtml(plan) {
   if (!plan) {
     return emptyPlanHtml();
@@ -145,6 +163,7 @@ export function planHtml(plan) {
         <span class="plan-tier">${escapeHtml(plan.tier || "balanced")}</span>
         <span class="plan-mode">${escapeHtml(novelMode)}</span>
       </div>
+      ${planActionsHtml(plan)}
     </header>
     <ol class="plan-steps">${steps}</ol>
     ${progressBarHtml(plan)}

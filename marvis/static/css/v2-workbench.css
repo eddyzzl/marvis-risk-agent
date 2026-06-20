@@ -70,6 +70,23 @@
   justify-self: start;
 }
 
+.plan-header {
+  display: grid;
+  gap: 8px;
+}
+
+.plan-meta,
+.plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.plan-actions button {
+  width: auto;
+}
+
 .plan-step,
 .subagent-row,
 .plugin-row,

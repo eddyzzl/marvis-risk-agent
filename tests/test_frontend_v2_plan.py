@@ -109,6 +109,36 @@ def test_render_plan_view_updates_from_state_and_can_unsubscribe():
     )
 
 
+def test_plan_html_renders_validated_plan_actions_and_hides_terminal_actions():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { planHtml } from "./marvis/static/js/v2/plan_view.js";
+
+        const ready = planHtml({
+          id: "plan-1",
+          goal: "Ready plan",
+          status: "validated",
+          steps: [],
+        });
+        assert.ok(ready.includes('class="plan-actions"'));
+        assert.ok(ready.includes('data-confirm-plan="plan-1"'));
+        assert.ok(ready.includes('data-cancel-plan="plan-1"'));
+        assert.ok(ready.includes("Confirm and run"));
+        assert.ok(ready.includes("Cancel"));
+
+        const done = planHtml({
+          id: "plan-2",
+          goal: "Done plan",
+          status: "done",
+          steps: [],
+        });
+        assert.equal(done.includes("data-confirm-plan"), false);
+        assert.equal(done.includes("data-cancel-plan"), false);
+        """
+    )
+
+
 def test_start_plan_polling_dedupes_and_stops_at_terminal_status():
     run_node(
         """
