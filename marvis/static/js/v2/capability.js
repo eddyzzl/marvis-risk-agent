@@ -57,6 +57,17 @@ export function tierSettingsHtml(data = {}) {
   </section>`;
 }
 
+export function renderTierSettingsShell(container, data = {}) {
+  if (!container) {
+    throw new Error("renderTierSettingsShell requires a container");
+  }
+  if (container.dataset) {
+    container.dataset.v2TierSettings = "true";
+  }
+  container.innerHTML = tierSettingsHtml(data);
+  return () => {};
+}
+
 export async function renderTierSettings(container, deps = {}) {
   if (!container) {
     throw new Error("renderTierSettings requires a container");

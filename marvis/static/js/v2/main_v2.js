@@ -1,10 +1,10 @@
-import { attachCapabilityHandlers } from "./capability.js";
+import { attachCapabilityHandlers, renderTierSettingsShell } from "./capability.js";
 import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
-import { attachPluginHandlers } from "./plugin_manager.js";
-import { attachSkillHandlers } from "./skill_manager.js";
+import { attachPluginHandlers, renderPluginManagerShell } from "./plugin_manager.js";
+import { attachSkillHandlers, renderSkillManagerShell } from "./skill_manager.js";
 import { renderSubAgentView } from "./subagent_view.js";
 import { attachGoalHandlers, renderGoalComposer } from "./workflow_create.js";
 
@@ -69,9 +69,9 @@ export function mountV2(root, options = {}) {
       renderPlanView(panels.planPanel),
       renderJoinReview(panels.joinPanel),
       renderSubAgentView(panels.subAgentPanel),
-      renderEmptyPanel(panels.pluginPanel, "plugins", "暂无插件数据"),
-      renderEmptyPanel(panels.skillPanel, "skills", "暂无 Workflow 模板数据"),
-      renderEmptyPanel(panels.capabilityPanel, "capability", "暂无能力档位数据"),
+      renderPluginManagerShell(panels.pluginPanel),
+      renderSkillManagerShell(panels.skillPanel),
+      renderTierSettingsShell(panels.capabilityPanel),
       renderLoopEvents(panels.loopPanel),
       renderEmptyPanel(panels.artifactPanel, "artifact", "暂无工件预览"),
     ];

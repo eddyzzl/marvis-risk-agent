@@ -60,6 +60,17 @@ export function skillManagerHtml(report = {}) {
   </section>`;
 }
 
+export function renderSkillManagerShell(container, report = {}) {
+  if (!container) {
+    throw new Error("renderSkillManagerShell requires a container");
+  }
+  if (container.dataset) {
+    container.dataset.v2SkillManager = "true";
+  }
+  container.innerHTML = skillManagerHtml(report);
+  return () => {};
+}
+
 export async function renderSkillManager(container, deps = {}) {
   if (!container) {
     throw new Error("renderSkillManager requires a container");

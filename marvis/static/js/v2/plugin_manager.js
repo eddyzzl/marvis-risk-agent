@@ -81,6 +81,17 @@ export function pluginManagerHtml(data = {}) {
   </section>`;
 }
 
+export function renderPluginManagerShell(container, data = {}) {
+  if (!container) {
+    throw new Error("renderPluginManagerShell requires a container");
+  }
+  if (container.dataset) {
+    container.dataset.v2PluginManager = "true";
+  }
+  container.innerHTML = pluginManagerHtml(data);
+  return () => {};
+}
+
 export async function renderPluginManager(container, deps = {}) {
   if (!container) {
     throw new Error("renderPluginManager requires a container");

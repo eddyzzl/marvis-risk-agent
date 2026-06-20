@@ -371,12 +371,16 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(root.dataset.v2Mounted, "true");
         assert.equal(first.panels.goalPanel.dataset.v2GoalComposer, "true");
         assert.equal(first.panels.joinPanel.dataset.v2JoinReview, "true");
+        assert.equal(first.panels.pluginPanel.dataset.v2PluginManager, "true");
+        assert.equal(first.panels.skillPanel.dataset.v2SkillManager, "true");
+        assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
         assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
         assert.ok(first.panels.joinPanel.innerHTML.includes('data-v2-empty="join"'));
-        assert.ok(first.panels.pluginPanel.innerHTML.includes('data-v2-empty="plugins"'));
-        assert.ok(first.panels.skillPanel.innerHTML.includes('data-v2-empty="skills"'));
-        assert.ok(first.panels.capabilityPanel.innerHTML.includes('data-v2-empty="capability"'));
+        assert.ok(first.panels.pluginPanel.innerHTML.includes('data-upload-plugin'));
+        assert.ok(first.panels.skillPanel.innerHTML.includes('id="reloadSkills"'));
+        assert.ok(first.panels.skillPanel.innerHTML.includes('data-validate-skill'));
+        assert.ok(first.panels.capabilityPanel.innerHTML.includes('Guardrails remain constant'));
         assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
         assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
 
