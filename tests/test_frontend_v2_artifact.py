@@ -133,5 +133,13 @@ def test_artifact_ref_html_handles_value_metrics_and_file_refs_safely():
         assert.equal(artifact.includes("<script>"), false);
         assert.ok(artifact.includes("report&lt;script&gt;.docx"));
         assert.ok(artifact.includes("data-artifact-download"));
+        assert.ok(artifact.includes("data-artifact-preview"));
+
+        const image = artifactFileHtml("chart<script>.png");
+        assert.equal(image.includes("<script>"), false);
+        assert.ok(image.includes("chart&lt;script&gt;.png"));
+        assert.ok(image.includes("data-artifact-image"));
+        assert.ok(image.includes("<img"));
+        assert.ok(image.includes("/api/artifacts/chart%3Cscript%3E.png"));
         """
     )

@@ -35,6 +35,23 @@ function parseArtifactRef(artifactRef) {
   };
 }
 
+function extensionOf(value) {
+  const match = String(value || "").toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
+  return match ? match[1] : "";
+}
+
+function artifactUrl(encodedId) {
+  return `/api/artifacts/${encodedId}`;
+}
+
+function isImageArtifact(id) {
+  return new Set(["png", "jpg", "jpeg", "gif", "webp"]).has(extensionOf(id));
+}
+
+function isPreviewableReportArtifact(id) {
+  return new Set(["docx", "pdf", "html", "htm"]).has(extensionOf(id));
+}
+
 export function datasetTableHtml(preview = {}) {
   const columns = preview.columns?.length
     ? preview.columns
@@ -76,9 +93,21 @@ export function metricsHtml(metrics = {}) {
 export function artifactFileHtml(artifactId) {
   const id = String(artifactId || "");
   const encoded = encodeURIComponent(id);
+  const url = artifactUrl(encoded);
+  if (isImageArtifact(id)) {
+    return `<section class="artifact-file artifact-image">
+      <span>${escapeHtml(id)}</span>
+      <img data-artifact-image src="${url}" alt="${escapeHtml(id)}">
+      <a data-artifact-download href="${url}">Download</a>
+    </section>`;
+  }
+  const preview = isPreviewableReportArtifact(id)
+    ? `<a data-artifact-preview href="${url}/preview">Preview</a>`
+    : "";
   return `<section class="artifact-file">
     <span>${escapeHtml(id)}</span>
-    <a data-artifact-download href="/api/artifacts/${encoded}">Download</a>
+    ${preview}
+    <a data-artifact-download href="${url}">Download</a>
   </section>`;
 }
 
