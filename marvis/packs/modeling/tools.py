@@ -46,6 +46,7 @@ from marvis.validation.stress_test import run_stress_test
 
 
 MODELING_ARTIFACTS_DIR_NAME = "modeling_artifacts"
+MODEL_REPORT_SCORE_COL = "__model_score__"
 
 
 def tool_check_data_quality(inputs: dict, ctx) -> dict:
@@ -221,12 +222,18 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
             amount_col=business.loan_amount_col,
         )
 
-    score_col = _report_score_col(runtime, dataset_path, artifact, experiment.config)
+    report_dataset_path, score_col = _report_scored_dataset(
+        runtime,
+        dataset_path,
+        artifact,
+        experiment.config,
+        task_id=ctx.task_id,
+    )
     low_pricing = None
     if _section_available(statuses, "low_pricing") and business.interest_rate_col:
         low_pricing = stress_low_pricing(
             runtime.backend,
-            dataset_path,
+            report_dataset_path,
             score_col=score_col,
             target_col=experiment.config.target_col,
             interest_rate_col=business.interest_rate_col,
@@ -234,7 +241,7 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         )
     oot_bin = _report_bin_table(
         runtime,
-        dataset_path,
+        report_dataset_path,
         score_col=score_col,
         target_col=experiment.config.target_col,
         business=business,
@@ -543,12 +550,11 @@ def _stress_product_removal(
     oot_sample = frame[frame[config.split_col] == oot_value]
     if oot_sample.empty:
         return {"baseline": {"status": "skipped", "reason": "OOT sample is required for stress test"}}
-    base_dir = _artifact_base_dir(runtime.settings, runtime.experiments.get(artifact.experiment_id).task_id)
     result = run_stress_test(
         oot_sample=oot_sample,
         config=ValidationConfig(
             target_col=config.target_col,
-            score_col="__model_score__",
+            score_col=MODEL_REPORT_SCORE_COL,
             split_col=config.split_col,
             time_col=str(config.params.get("time_col") or "apply_month"),
             feature_columns=list(artifact.feature_list),
@@ -557,9 +563,37 @@ def _stress_product_removal(
             split_values={key: str(value) for key, value in config.split_values.items()},
         ),
         feature_categories=categories,
-        input_scorer=_ModelArtifactScorer(artifact, base_dir=base_dir),
+        input_scorer=_ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact)),
     )
     return _stress_product_rows(result)
+
+
+def _report_scored_dataset(
+    runtime: _Runtime,
+    dataset_path: Path,
+    artifact: ModelArtifact | None,
+    config: TrainConfig,
+    *,
+    task_id: str,
+) -> tuple[Path, str]:
+    columns = runtime.backend.column_names(dataset_path)
+    if "score" in columns:
+        return dataset_path, "score"
+    if artifact is None:
+        return dataset_path, _report_score_col(runtime, dataset_path, artifact, config)
+
+    frame = runtime.backend.read_frame(dataset_path)
+    scorer = _ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact))
+    frame[MODEL_REPORT_SCORE_COL] = scorer.score(frame)
+    out_path = Path(runtime.settings.tasks_dir) / task_id / "outputs" / "model_report_scored.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(out_path, index=False)
+    return out_path, MODEL_REPORT_SCORE_COL
+
+
+def _artifact_model_base_dir(runtime: _Runtime, artifact: ModelArtifact) -> Path:
+    experiment = runtime.experiments.get(artifact.experiment_id)
+    return _artifact_base_dir(runtime.settings, experiment.task_id)
 
 
 def _stress_feature_categories(feature_dictionary: dict, feature_list: tuple[str, ...]) -> dict[str, list[str]]:

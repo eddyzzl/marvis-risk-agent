@@ -484,6 +484,7 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
         )
     )
     frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.2, 0.3, 0.4], x2=[0.4, 0.3, 0.2, 0.1])] * 40, ignore_index=True)
+    frame = frame.drop(columns=["score"])
     frame.loc[80:119, "split"] = "test"
     frame.loc[120:, "split"] = "oot"
     path = tmp_path / "report_sample.parquet"
@@ -540,6 +541,12 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
 
     assert report.ok is True, report.error
     assert Path(report.output["report_path"]).exists()
+    scored_path = settings.tasks_dir / task.id / "outputs" / "model_report_scored.parquet"
+    assert scored_path.exists()
+    scored_frame = pd.read_parquet(scored_path)
+    assert "__model_score__" in scored_frame.columns
+    assert scored_frame["__model_score__"].between(0, 1).all()
+    assert not scored_frame["__model_score__"].equals(scored_frame["x1"])
     assert len(report.output["section_status"]) == 5
     workbook = load_workbook(report.output["report_path"])
     summary_sheet = workbook["汇总"]
