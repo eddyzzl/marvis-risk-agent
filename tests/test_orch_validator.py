@@ -235,6 +235,25 @@ def test_plan_validator_requires_join_confirmation(tmp_path):
     assert _validator(tmp_path).validate(_plan(confirmed)) == []
 
 
+def test_plan_validator_requires_draft_run_confirmation(tmp_path):
+    draft_run = _step(
+        "step-1",
+        ToolRef("drafts", "run_draft"),
+        {"draft_id": "draft-1", "inputs": {}},
+    )
+    confirmed = _step(
+        "step-1",
+        ToolRef("drafts", "run_draft"),
+        {"draft_id": "draft-1", "inputs": {}},
+        needs_confirmation=True,
+    )
+
+    problems = _validator(tmp_path).validate(_plan(draft_run))
+
+    assert any("draft" in problem and "confirmation" in problem for problem in problems)
+    assert _validator(tmp_path).validate(_plan(confirmed)) == []
+
+
 def test_plan_validator_requires_range_checks_for_metric_fields(tmp_path):
     missing_checks = _step(
         "step-1",

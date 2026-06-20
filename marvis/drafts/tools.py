@@ -6,6 +6,7 @@ import sys
 from marvis.db import DraftRepository, PluginRepository
 from marvis.drafts.authoring import draft_script
 from marvis.drafts.errors import DraftNotFound, OfflineError
+from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.drafts.web_search import web_search
@@ -25,6 +26,22 @@ def tool_web_search(inputs: dict, ctx) -> dict:
     except OfflineError as exc:
         return {"results": [], "offline": True, "guidance": str(exc)}
     return {"results": results, "offline": False, "guidance": ""}
+
+
+def tool_distill_learning(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    note = distill_learning(
+        str(inputs["query"]),
+        _string_list(inputs.get("contents") or []),
+        _string_list(inputs.get("sources") or []),
+        llm_factory=_llm_factory(runtime.workspace, _optional_str(inputs.get("model_id"))),
+    )
+    runtime.draft_repo.save_learning_note(note)
+    return {
+        "learning_note_id": note.id,
+        "query": note.query,
+        "source_count": len(note.sources),
+    }
 
 
 def tool_draft_script(inputs: dict, ctx) -> dict:
@@ -55,7 +72,7 @@ def tool_run_draft(inputs: dict, ctx) -> dict:
     run = runtime.sandbox.run_draft(
         draft.id,
         dict(inputs.get("inputs") or {}),
-        task_id=draft.task_id,
+        task_id=str(ctx.task_id),
     )
     return {
         "run_id": run.id,
@@ -102,4 +119,15 @@ def _optional_str(value) -> str | None:
     return str(value)
 
 
-__all__ = ["tool_draft_script", "tool_run_draft", "tool_web_search"]
+def _string_list(value) -> list[str]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        return [str(value)]
+    return [str(item) for item in value]
+
+
+__all__ = [
+    "tool_distill_learning",
+    "tool_draft_script",
+    "tool_run_draft",
+    "tool_web_search",
+]

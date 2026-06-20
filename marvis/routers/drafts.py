@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from marvis.drafts.errors import DraftNotFound, DraftStateError, PromotionError
 from marvis.drafts.promotion import promote_draft, reject_draft, validate_for_promotion
-from marvis.drafts.tools import tool_web_search
+from marvis.drafts.tools import tool_distill_learning, tool_draft_script, tool_web_search
 from marvis.plugins.errors import DuplicatePluginError
 from marvis.routers.plugins import _require_plugin_admin
 
@@ -59,6 +59,64 @@ def web_search(payload: dict) -> dict:
         {"query": query, "max_results": max_results},
         SimpleNamespace(),
     )
+
+
+@router.post("/learning-notes")
+def create_learning_note(request: Request, payload: dict) -> dict:
+    query = str(payload.get("query") or "").strip()
+    contents = _required_text_list(payload.get("contents"), "contents")
+    sources = _required_text_list(payload.get("sources"), "sources")
+    if not query:
+        raise HTTPException(status_code=422, detail="query is required")
+    tool_payload = {
+        "query": query,
+        "contents": contents,
+        "sources": sources,
+    }
+    model_id = str(payload.get("model_id") or "").strip()
+    if model_id:
+        tool_payload["model_id"] = model_id
+    result = tool_distill_learning(
+        tool_payload,
+        SimpleNamespace(
+            workspace=request.app.state.settings.workspace,
+            datasets_root=request.app.state.settings.datasets_dir,
+        ),
+    )
+    note = request.app.state.draft_repo.get_learning_note(str(result["learning_note_id"]))
+    if note is None:
+        raise HTTPException(status_code=500, detail="learning note was not saved")
+    return {"learning_note": _public_learning_note(note)}
+
+
+@router.post("/author")
+def author_draft(request: Request, payload: dict) -> dict:
+    task_id = str(payload.get("task_id") or "").strip()
+    goal = str(payload.get("goal") or "").strip()
+    if not task_id:
+        raise HTTPException(status_code=422, detail="task_id is required")
+    if not goal:
+        raise HTTPException(status_code=422, detail="goal is required")
+    tool_payload = {"goal": goal}
+    learning_note_id = str(payload.get("learning_note_id") or "").strip()
+    if learning_note_id:
+        tool_payload["learning_note_id"] = learning_note_id
+    model_id = str(payload.get("model_id") or "").strip()
+    if model_id:
+        tool_payload["model_id"] = model_id
+    result = tool_draft_script(
+        tool_payload,
+        SimpleNamespace(
+            task_id=task_id,
+            workspace=request.app.state.settings.workspace,
+            datasets_root=request.app.state.settings.datasets_dir,
+        ),
+    )
+    try:
+        draft = request.app.state.draft_registry.get(str(result["draft_id"]))
+    except DraftNotFound as exc:
+        raise HTTPException(status_code=500, detail="draft was not saved") from exc
+    return {"draft": _public_draft(draft, include_code=False)}
 
 
 @router.post("/{draft_id}/promote")
@@ -167,3 +225,12 @@ def _public_check(check) -> dict:
         "problems": list(check.problems),
         "test_result": check.test_result,
     }
+
+
+def _required_text_list(value, field: str) -> list[str]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, list):
+        raise HTTPException(status_code=422, detail=f"{field} must be a non-empty list")
+    items = [str(item).strip() for item in value if str(item).strip()]
+    if not items:
+        raise HTTPException(status_code=422, detail=f"{field} must be a non-empty list")
+    return items

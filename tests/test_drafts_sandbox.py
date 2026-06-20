@@ -1,7 +1,9 @@
 import sys
 
+import pytest
+
 from marvis.db import DraftRepository, PluginRepository, init_db
-from marvis.drafts import DraftTool
+from marvis.drafts import DraftStateError, DraftTool
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -86,6 +88,21 @@ def test_draft_sandbox_records_failure_without_raising(tmp_path):
     assert run.output is None
     assert "boom" in run.error
     assert repo.list_runs(draft.id) == [run]
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_sandbox_rejects_task_id_mismatch_without_recording_run(tmp_path):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "def calc_margin(inputs, ctx):\n"
+        "    return {'margin': inputs['revenue'] - inputs['cost']}\n"
+    )
+    drafts.add(draft)
+
+    with pytest.raises(DraftStateError, match="task mismatch"):
+        sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-2")
+
+    assert repo.list_runs(draft.id) == []
     assert drafts.get(draft.id).status == "draft"
 
 

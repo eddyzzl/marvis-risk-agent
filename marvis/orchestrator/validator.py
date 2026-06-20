@@ -37,6 +37,7 @@ class PlanValidator:
         problems.extend(self._check_ref_compatibility(plan))
         problems.extend(self._check_post_check_kinds(plan))
         problems.extend(self._check_join_gates(plan))
+        problems.extend(self._check_draft_run_gates(plan))
         problems.extend(self._check_determinism_checks(plan))
         problems.extend(self._check_subagent_grants(plan))
         problems.extend(self._check_decision_points(plan))
@@ -118,6 +119,13 @@ class PlanValidator:
             f"join step {step.title} must require confirmation (INV-3)"
             for step in plan.steps
             if step.tool_ref.tool == "execute_join" and not step.needs_confirmation
+        ]
+
+    def _check_draft_run_gates(self, plan: Plan) -> list[str]:
+        return [
+            f"draft run step {step.title} must require confirmation"
+            for step in plan.steps
+            if _is_draft_run_step(step) and not step.needs_confirmation
         ]
 
     def _check_post_check_kinds(self, plan: Plan) -> list[str]:
@@ -230,9 +238,13 @@ def _metric_fields_in(schema: dict) -> set[str]:
 
 
 def _is_safety_step(step: PlanStep) -> bool:
-    if step.tool_ref.tool == "execute_join":
+    if step.tool_ref.tool == "execute_join" or _is_draft_run_step(step):
         return True
     return any(check.kind == "range" for check in step.post_checks)
+
+
+def _is_draft_run_step(step: PlanStep) -> bool:
+    return step.tool_ref.plugin == "drafts" and step.tool_ref.tool == "run_draft"
 
 
 def _has_cycle(steps: list[PlanStep]) -> bool:

@@ -80,6 +80,46 @@
       "memory_limit_mb": 2048
     },
     {
+      "name": "distill_learning",
+      "summary": "Distill bounded reference contents into a saved learning note for draft authoring.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "minLength": 1},
+          "contents": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1
+          },
+          "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1
+          },
+          "model_id": {"type": "string", "minLength": 1},
+          "seed": {"type": "integer"}
+        },
+        "required": ["query", "contents", "sources"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "learning_note_id": {"type": "string"},
+          "query": {"type": "string"},
+          "source_count": {"type": "integer", "minimum": 0}
+        },
+        "required": ["learning_note_id", "query", "source_count"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_distill_learning",
+      "side_effects": ["write:learning_note", "llm"],
+      "memory_limit_mb": 2048
+    },
+    {
       "name": "run_draft",
       "summary": "Run a saved draft tool in the same subprocess isolation path as formal tools.",
       "input_schema": {
@@ -111,5 +151,5 @@
     }
   ],
   "hooks": [],
-  "permissions": ["network:optional", "write:draft", "read:draft", "write:draft_run", "llm"]
+  "permissions": ["network:optional", "write:draft", "read:draft", "write:draft_run", "write:learning_note", "llm"]
 }

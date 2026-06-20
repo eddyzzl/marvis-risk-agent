@@ -2,8 +2,10 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from marvis.db import DraftRepository, PluginRepository, init_db
-from marvis.drafts import DraftTool
+from marvis.drafts import DraftStateError, DraftTool
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -94,6 +96,39 @@ def test_draft_web_search_tool_returns_offline_payload(monkeypatch, tmp_path):
     assert result == {"results": [], "offline": True, "guidance": "offline guidance"}
 
 
+def test_draft_distill_learning_tool_persists_note(monkeypatch, tmp_path):
+    from marvis.drafts import tools
+
+    class FakeClient:
+        def __init__(self, _profile):
+            pass
+
+        def complete(self, **_kwargs):
+            return "1. Use WOE bins.\n2. Validate PSI drift before promotion."
+
+    monkeypatch.setattr(tools, "resolve_llm_model", lambda _workspace, _model_id=None: {"model_id": "m1"})
+    monkeypatch.setattr(tools, "OpenAICompatibleLLMClient", FakeClient)
+    ctx = _ctx(tmp_path)
+
+    result = tools.tool_distill_learning(
+        {
+            "query": "scorecard monitoring",
+            "contents": ["WOE and PSI implementation notes"],
+            "sources": ["https://example.test/woe"],
+        },
+        ctx,
+    )
+
+    repo = DraftRepository(build_settings(tmp_path).db_path)
+    note = repo.get_learning_note(result["learning_note_id"])
+    assert result["query"] == "scorecard monitoring"
+    assert result["source_count"] == 1
+    assert note is not None
+    assert note.query == "scorecard monitoring"
+    assert note.sources == ("https://example.test/woe",)
+    assert "Use WOE bins" in note.distilled
+
+
 def test_draft_script_tool_persists_generated_draft(monkeypatch, tmp_path):
     from marvis.drafts import tools
 
@@ -135,6 +170,22 @@ def test_draft_run_tool_runs_saved_draft_in_subprocess(tmp_path):
     assert result["error"] is None
 
 
+def test_draft_run_tool_rejects_cross_task_draft(tmp_path):
+    from marvis.drafts import tools
+
+    ctx = _ctx(tmp_path, task_id="task-2")
+    repo = DraftRepository(build_settings(tmp_path).db_path)
+    repo.save_draft(_draft())
+
+    with pytest.raises(DraftStateError, match="task mismatch"):
+        tools.tool_run_draft(
+            {"draft_id": "draft-1", "inputs": {"revenue": 10, "cost": 3}},
+            ctx,
+        )
+
+    assert repo.list_runs("draft-1") == []
+
+
 def test_builtin_drafts_pack_exposes_offline_search_through_runner(monkeypatch, tmp_path):
     monkeypatch.setenv("MARVIS_PROBE_URL", "http://127.0.0.1:9")
     runner = _runner(tmp_path)
@@ -148,6 +199,21 @@ def test_builtin_drafts_pack_exposes_offline_search_through_runner(monkeypatch, 
     assert result.ok is True, result.error
     assert result.output["offline"] is True
     assert result.output["results"] == []
+
+
+def test_builtin_drafts_pack_registers_distill_learning_tool(tmp_path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    repo = PluginRepository(settings.db_path)
+    registry = PluginRegistry(repo)
+    load_builtin_packs(registry, _packs_root())
+
+    tool = ToolRegistry(registry).resolve(ToolRef("drafts", "distill_learning"))
+
+    assert tool.entrypoint == "tool_distill_learning"
+    assert tool.input_schema["required"] == ["query", "contents", "sources"]
+    assert "llm" in tool.side_effects
+    assert "write:learning_note" in tool.side_effects
 
 
 def test_builtin_drafts_pack_runs_draft_through_runner(tmp_path):

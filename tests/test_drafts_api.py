@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
-from marvis.drafts import DraftTool
+from marvis.drafts import DraftTool, LearningNote
 
 
 ADMIN_HEADERS = {"X-MARVIS-Plugin-Admin": "local-dev"}
@@ -118,6 +118,97 @@ def test_draft_web_search_endpoint_returns_offline_guidance(tmp_path, monkeypatc
         "offline": True,
         "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
     }
+
+
+def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_distill(payload, ctx):
+        assert payload == {
+            "query": "scorecard monitoring",
+            "contents": ["Use WOE bins and validate PSI."],
+            "sources": ["https://example.test/woe"],
+            "model_id": "m1",
+        }
+        assert ctx.workspace == client.app.state.settings.workspace
+        assert ctx.datasets_root == client.app.state.settings.datasets_dir
+        note = LearningNote(
+            id="note-1",
+            query="scorecard monitoring",
+            sources=("https://example.test/woe",),
+            distilled="Use WOE bins. Validate PSI drift.",
+            created_at="2026-06-20T00:00:00Z",
+        )
+        client.app.state.draft_repo.save_learning_note(note)
+        return {"learning_note_id": note.id, "query": note.query, "source_count": 1}
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_distill_learning", fake_distill)
+
+    response = client.post(
+        "/api/drafts/learning-notes",
+        json={
+            "query": "scorecard monitoring",
+            "contents": ["Use WOE bins and validate PSI."],
+            "sources": ["https://example.test/woe"],
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "learning_note": {
+            "id": "note-1",
+            "query": "scorecard monitoring",
+            "sources": ["https://example.test/woe"],
+            "distilled": "Use WOE bins. Validate PSI drift.",
+            "created_at": "2026-06-20T00:00:00Z",
+        }
+    }
+
+
+def test_draft_author_endpoint_creates_draft_from_saved_learning_note(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+    client.app.state.draft_repo.save_learning_note(
+        LearningNote(
+            id="note-1",
+            query="scorecard monitoring",
+            sources=("https://example.test/woe",),
+            distilled="Use WOE bins. Validate PSI drift.",
+            created_at="2026-06-20T00:00:00Z",
+        )
+    )
+
+    def fake_author(payload, ctx):
+        assert payload == {
+            "goal": "build monitoring helper",
+            "learning_note_id": "note-1",
+            "model_id": "m1",
+        }
+        assert ctx.task_id == "task-1"
+        draft = _draft(
+            source="web_learning",
+            learning_note_id="note-1",
+        )
+        client.app.state.draft_registry.add(draft)
+        return {"draft_id": draft.id, "name": draft.name, "has_schema": True}
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_draft_script", fake_author)
+
+    response = client.post(
+        "/api/drafts/author",
+        json={
+            "task_id": "task-1",
+            "goal": "build monitoring helper",
+            "learning_note_id": "note-1",
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["draft"]["id"] == "draft-1"
+    assert response.json()["draft"]["source"] == "web_learning"
+    assert response.json()["draft"]["learning_note_id"] == "note-1"
+    assert response.json()["draft"]["code"] is None
 
 
 def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):

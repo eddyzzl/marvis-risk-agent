@@ -95,10 +95,12 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         import assert from "node:assert/strict";
         import {
           cancelPlan,
+          authorDraftTool,
           confirmJoinSpec,
           confirmPlan,
           confirmStep,
           createPlan,
+          distillDraftLearning,
           executeJoin,
           getJoinPlan,
           getMemoryDistillation,
@@ -215,6 +217,32 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
           query: "learn joins",
           max_results: 3,
+        });
+        await distillDraftLearning({
+          query: "learn joins",
+          contents: ["bounded page contents"],
+          sources: ["https://example.test/a"],
+          model_id: "m1",
+        });
+        assert.equal(calls.at(-1).url, "/api/drafts/learning-notes");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          query: "learn joins",
+          contents: ["bounded page contents"],
+          sources: ["https://example.test/a"],
+          model_id: "m1",
+        });
+        await authorDraftTool({
+          task_id: "task-1",
+          goal: "build helper",
+          learning_note_id: "note-1",
+          model_id: "m1",
+        });
+        assert.equal(calls.at(-1).url, "/api/drafts/author");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          task_id: "task-1",
+          goal: "build helper",
+          learning_note_id: "note-1",
+          model_id: "m1",
         });
         """
     )

@@ -8,6 +8,7 @@ import tempfile
 import uuid
 
 from marvis.drafts.contracts import DRAFT_STATUS_DRAFT, DRAFT_STATUS_TESTED, DraftRun
+from marvis.drafts.errors import DraftStateError
 
 
 DRAFT_TIMEOUT_SECONDS = 30
@@ -21,6 +22,8 @@ class DraftSandbox:
 
     def run_draft(self, draft_id: str, inputs: dict, *, task_id: str) -> DraftRun:
         draft = self._drafts.get(draft_id)
+        if str(draft.task_id) != str(task_id):
+            raise DraftStateError(f"task mismatch for draft {draft_id}: {draft.task_id} != {task_id}")
         with tempfile.TemporaryDirectory(prefix="marvis-draft-") as temp_name:
             module_path = Path(temp_name) / f"{draft.name}.py"
             module_path.write_text(draft.code, encoding="utf-8")
