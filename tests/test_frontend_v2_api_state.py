@@ -567,3 +567,68 @@ def test_v2_mount_wires_plugin_and_skill_refresh_actions():
         assert.ok(mounted.panels.skillPanel.innerHTML.includes("demo_skill"));
         """
     )
+
+
+def test_v2_mount_fetches_capability_tiers_into_panel_and_state():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import {
+          getCapabilityTiers,
+          getSelectedTier,
+          resetV2State,
+        } from "./marvis/static/js/v2/state_v2.js";
+
+        function makeElement(tagName) {
+          return {
+            tagName: tagName.toUpperCase(),
+            id: "",
+            innerHTML: "",
+            className: "",
+            dataset: {},
+            attributes: {},
+            children: [],
+            setAttribute(name, value) {
+              this.attributes[name] = String(value);
+            },
+            appendChild(child) {
+              this.children.push(child);
+              return child;
+            },
+          };
+        }
+
+        resetV2State();
+        const calls = [];
+        const root = makeElement("div");
+        root.ownerDocument = { createElement: makeElement };
+        root.querySelector = (selector) => {
+          const id = selector.startsWith("#") ? selector.slice(1) : selector;
+          return root.children.find((child) => child.id === id) ?? null;
+        };
+
+        const mounted = mountV2(root, {
+          capabilityActions: {
+            listCapabilityTiers: async () => {
+              calls.push(["listCapabilityTiers"]);
+              return {
+                default: "autonomous",
+                tiers: [
+                  { name: "autonomous", summary: "Auto <mode>", max_replans: 8 },
+                ],
+              };
+            },
+          },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        assert.deepEqual(calls, [["listCapabilityTiers"]]);
+        assert.equal(getSelectedTier(), "autonomous");
+        assert.equal(getCapabilityTiers()[0].name, "autonomous");
+        assert.equal(mounted.panels.capabilityPanel.innerHTML.includes("Auto <mode>"), false);
+        assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("Auto &lt;mode&gt;"));
+        assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("max_replans"));
+        """
+    )

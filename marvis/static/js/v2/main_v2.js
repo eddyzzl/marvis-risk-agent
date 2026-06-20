@@ -1,5 +1,5 @@
 import { attachArtifactHandlers } from "./artifact_view.js";
-import { attachCapabilityHandlers, renderTierSettingsShell } from "./capability.js";
+import { attachCapabilityHandlers, renderTierSettings, renderTierSettingsShell } from "./capability.js";
 import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
@@ -67,8 +67,16 @@ export function mountV2(root, options = {}) {
   if (!root[mountStateKey]) {
     const pluginActions = options.pluginActions || {};
     const skillActions = options.skillActions || {};
+    const capabilityActions = options.capabilityActions || {};
     const refreshPlugins = () => renderPluginManager(panels.pluginPanel, pluginActions);
     const refreshSkills = () => renderSkillManager(panels.skillPanel, skillActions);
+    const refreshCapabilities = async () => {
+      try {
+        await renderTierSettings(panels.capabilityPanel, capabilityActions);
+      } catch (_error) {
+        renderTierSettingsShell(panels.capabilityPanel);
+      }
+    };
     const cleanups = [
       renderGoalComposer(panels.goalPanel),
       renderPlanView(panels.planPanel),
@@ -80,6 +88,7 @@ export function mountV2(root, options = {}) {
       renderLoopEvents(panels.loopPanel),
       renderEmptyPanel(panels.artifactPanel, "artifact", "暂无工件预览"),
     ];
+    void refreshCapabilities();
     if (typeof root.addEventListener === "function") {
       cleanups.push(
         attachCapabilityHandlers(root),
