@@ -4,9 +4,14 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
 
-from marvis.drafts.errors import DraftNotFound, DraftStateError, PromotionError
+from marvis.drafts.errors import DraftNotFound, DraftStateError, FetchError, PromotionError
 from marvis.drafts.promotion import promote_draft, reject_draft, validate_for_promotion
-from marvis.drafts.tools import tool_distill_learning, tool_draft_script, tool_web_search
+from marvis.drafts.tools import (
+    tool_distill_learning,
+    tool_draft_script,
+    tool_fetch_url,
+    tool_web_search,
+)
 from marvis.plugins.errors import DuplicatePluginError
 from marvis.routers.plugins import _require_plugin_admin
 
@@ -54,11 +59,28 @@ def web_search(payload: dict) -> dict:
     query = str(payload.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=422, detail="query is required")
-    max_results = int(payload.get("max_results") or 5)
-    return tool_web_search(
-        {"query": query, "max_results": max_results},
-        SimpleNamespace(),
-    )
+    max_results = _bounded_int(payload.get("max_results"), "max_results", default=5, minimum=1, maximum=10)
+    try:
+        return tool_web_search(
+            {"query": query, "max_results": max_results},
+            SimpleNamespace(),
+        )
+    except FetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/fetch-url")
+def fetch_url(payload: dict) -> dict:
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=422, detail="url is required")
+    tool_payload = {"url": url}
+    max_bytes = _bounded_int(payload.get("max_bytes"), "max_bytes", default=500_000, minimum=1, maximum=500_000)
+    tool_payload["max_bytes"] = max_bytes
+    try:
+        return tool_fetch_url(tool_payload, SimpleNamespace())
+    except FetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/learning-notes")
@@ -234,3 +256,15 @@ def _required_text_list(value, field: str) -> list[str]:
     if not items:
         raise HTTPException(status_code=422, detail=f"{field} must be a non-empty list")
     return items
+
+
+def _bounded_int(value, field: str, *, default: int, minimum: int, maximum: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{field} must be an integer") from exc
+    if parsed < minimum or parsed > maximum:
+        raise HTTPException(status_code=422, detail=f"{field} must be between {minimum} and {maximum}")
+    return parsed

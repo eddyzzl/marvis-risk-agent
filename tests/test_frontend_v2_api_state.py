@@ -102,6 +102,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           createPlan,
           distillDraftLearning,
           executeJoin,
+          fetchDraftUrl,
           getJoinPlan,
           getMemoryDistillation,
           getPlan,
@@ -217,6 +218,12 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
           query: "learn joins",
           max_results: 3,
+        });
+        await fetchDraftUrl("https://example.test/a", 1200);
+        assert.equal(calls.at(-1).url, "/api/drafts/fetch-url");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          url: "https://example.test/a",
+          max_bytes: 1200,
         });
         await distillDraftLearning({
           query: "learn joins",

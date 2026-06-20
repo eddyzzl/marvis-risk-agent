@@ -99,6 +99,9 @@ export const rejectDraft = (draftId, reason) => (
 export const searchDraftWeb = (query, maxResults = 5) => (
   apiPost("/api/drafts/web-search", { query, max_results: maxResults })
 );
+export const fetchDraftUrl = (url, maxBytes = 500000) => (
+  apiPost("/api/drafts/fetch-url", { url, max_bytes: maxBytes })
+);
 export const distillDraftLearning = (payload) => (
   apiPost("/api/drafts/learning-notes", payload)
 );

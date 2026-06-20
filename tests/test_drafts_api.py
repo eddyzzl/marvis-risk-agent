@@ -1,7 +1,9 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from marvis.app import create_app
 from marvis.drafts import DraftTool, LearningNote
+from marvis.drafts.errors import FetchError
 
 
 ADMIN_HEADERS = {"X-MARVIS-Plugin-Admin": "local-dev"}
@@ -118,6 +120,87 @@ def test_draft_web_search_endpoint_returns_offline_guidance(tmp_path, monkeypatc
         "offline": True,
         "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
     }
+
+
+@pytest.mark.parametrize("max_results", [0, 11, "abc"])
+def test_draft_web_search_endpoint_rejects_out_of_bounds_max_results(tmp_path, monkeypatch, max_results):
+    client = TestClient(create_app(tmp_path))
+
+    def fail_if_called(_payload, _ctx):
+        raise AssertionError("tool_web_search should not be called")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_web_search", fail_if_called)
+
+    response = client.post(
+        "/api/drafts/web-search",
+        json={"query": "learn joins", "max_results": max_results},
+    )
+
+    assert response.status_code == 422
+    assert "max_results" in response.json()["detail"]
+
+
+def test_draft_fetch_url_endpoint_returns_bounded_content(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_fetch(payload, _ctx):
+        assert payload == {"url": "https://example.test/a", "max_bytes": 1200}
+        return {
+            "url": "https://example.test/a",
+            "content": "bounded page contents",
+            "offline": False,
+            "guidance": "",
+        }
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fake_fetch)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": 1200},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "url": "https://example.test/a",
+        "content": "bounded page contents",
+        "offline": False,
+        "guidance": "",
+    }
+
+
+@pytest.mark.parametrize("max_bytes", [0, 500001, "abc"])
+def test_draft_fetch_url_endpoint_rejects_out_of_bounds_max_bytes(tmp_path, monkeypatch, max_bytes):
+    client = TestClient(create_app(tmp_path))
+
+    def fail_if_called(_payload, _ctx):
+        raise AssertionError("tool_fetch_url should not be called")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fail_if_called)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": max_bytes},
+    )
+
+    assert response.status_code == 422
+    assert "max_bytes" in response.json()["detail"]
+
+
+def test_draft_fetch_url_endpoint_maps_fetch_errors_to_controlled_response(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_fetch(_payload, _ctx):
+        raise FetchError("HTTP 404")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fake_fetch)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": 1200},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "HTTP 404"
 
 
 def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, monkeypatch):

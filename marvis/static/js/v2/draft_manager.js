@@ -1,5 +1,8 @@
 import { escapeHtml } from "../ui-utils.js";
 import {
+  authorDraftTool as authorDraftToolApi,
+  distillDraftLearning as distillDraftLearningApi,
+  fetchDraftUrl as fetchDraftUrlApi,
   getDraft as getDraftApi,
   listDrafts as listDraftsApi,
   promoteDraft as promoteDraftApi,
@@ -43,6 +46,17 @@ function safeWebResultUrl(value) {
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
+function fieldValue(root, selector) {
+  return String(root?.querySelector?.(selector)?.value || "").trim();
+}
+
+function setFieldValue(root, selector, value) {
+  const field = root?.querySelector?.(selector);
+  if (field) {
+    field.value = String(value || "");
+  }
+}
+
 function statusQuery(root) {
   const status = String(root?.querySelector?.("[data-draft-status]")?.value || "").trim();
   return status ? { status } : {};
@@ -72,6 +86,25 @@ function showWebLearningResult(root, payload) {
   if (slot) {
     slot.innerHTML = webLearningResultHtml(payload);
   }
+}
+
+function showLearningNote(root, note) {
+  const slot = root?.querySelector?.("[data-draft-learning-note]");
+  if (slot) {
+    slot.innerHTML = learningNoteHtml(note);
+  }
+}
+
+function showFetchedContent(root, payload) {
+  setFieldValue(root, "[data-draft-learning-source]", payload?.url || "");
+  setFieldValue(root, "[data-draft-learning-content]", payload?.content || "");
+  const slot = root?.querySelector?.("[data-draft-learning-note]");
+  if (!slot) return;
+  if (payload?.offline) {
+    slot.innerHTML = `<div class="draft-web-guidance offline">${escapeHtml(payload.guidance || "")}</div>`;
+    return;
+  }
+  slot.innerHTML = `<div class="draft-web-guidance">${escapeHtml(payload?.content || "")}</div>`;
 }
 
 function defaultShowError(message) {
@@ -122,7 +155,31 @@ export function draftManagerHtml(data = {}, options = {}) {
         <input type="search" data-draft-web-query>
       </label>
       <button type="button" data-draft-web-search>Search</button>
+      <label>
+        Task
+        <input type="text" data-draft-task-id>
+      </label>
+      <label>
+        Goal
+        <textarea data-draft-goal rows="2"></textarea>
+      </label>
+      <label>
+        Model
+        <input type="text" data-draft-model-id>
+      </label>
       <div data-draft-web-result></div>
+      <label>
+        Source
+        <input type="text" data-draft-learning-source>
+      </label>
+      <label>
+        Content
+        <textarea data-draft-learning-content rows="4"></textarea>
+      </label>
+      <input type="hidden" data-draft-learning-note-id>
+      <button type="button" data-draft-distill-learning>Distill</button>
+      <button type="button" data-draft-author>Author draft</button>
+      <div data-draft-learning-note></div>
     </section>
     <div class="draft-manager-layout">
       <div class="draft-list" data-draft-list>${rows}</div>
@@ -158,10 +215,14 @@ export function webLearningResultHtml(payload = {}) {
     const urlHtml = safeUrl
       ? `<a href="${escapeHtml(safeUrl)}" rel="noreferrer">${escapeHtml(safeUrl)}</a>`
       : escapeHtml(result.url || "");
+    const fetchHtml = safeUrl
+      ? `<button type="button" data-draft-fetch-url="${escapeHtml(safeUrl)}">Fetch</button>`
+      : "";
     return `<li>
       <strong>${escapeHtml(result.title || result.url || "Result")}</strong>
       ${urlHtml}
       ${result.snippet ? `<p>${escapeHtml(result.snippet)}</p>` : ""}
+      ${fetchHtml}
     </li>`;
   }).join("");
   return `<ol class="draft-web-results">${items}</ol>`;
@@ -265,8 +326,11 @@ export function attachDraftHandlers(root, deps = {}) {
     throw new Error("attachDraftHandlers requires a stable event root");
   }
   const actions = {
+    authorDraft: authorDraftToolApi,
     confirmPromote: defaultConfirmPromote,
     confirmReject: defaultConfirmReject,
+    distillLearning: distillDraftLearningApi,
+    fetchUrl: fetchDraftUrlApi,
     getDraft: getDraftApi,
     promoteDraft: promoteDraftApi,
     refreshDrafts: async () => {},
@@ -300,6 +364,74 @@ export function attachDraftHandlers(root, deps = {}) {
         showWebLearningResult(root, await actions.webSearch(query));
       } catch (error) {
         actions.showError(error?.message || "draft web learning failed");
+      }
+      return;
+    }
+
+    const fetchButton = closest(target, "[data-draft-fetch-url]");
+    if (fetchButton?.dataset?.draftFetchUrl) {
+      event.preventDefault?.();
+      try {
+        showFetchedContent(root, await actions.fetchUrl(fetchButton.dataset.draftFetchUrl));
+      } catch (error) {
+        actions.showError(error?.message || "draft web fetch failed");
+      }
+      return;
+    }
+
+    const distillButton = closest(target, "[data-draft-distill-learning]");
+    if (distillButton) {
+      event.preventDefault?.();
+      const query = fieldValue(root, "[data-draft-web-query]");
+      const content = fieldValue(root, "[data-draft-learning-content]");
+      const source = fieldValue(root, "[data-draft-learning-source]");
+      const modelId = fieldValue(root, "[data-draft-model-id]");
+      if (!query || !content || !source) {
+        actions.showError("query, source, and content are required");
+        return;
+      }
+      const payload = {
+        query,
+        contents: [content],
+        sources: [source],
+      };
+      if (modelId) payload.model_id = modelId;
+      try {
+        const result = await actions.distillLearning(payload);
+        const note = result?.learning_note || null;
+        setFieldValue(root, "[data-draft-learning-note-id]", note?.id || "");
+        showLearningNote(root, note);
+      } catch (error) {
+        actions.showError(error?.message || "draft learning distillation failed");
+      }
+      return;
+    }
+
+    const authorButton = closest(target, "[data-draft-author]");
+    if (authorButton) {
+      event.preventDefault?.();
+      const taskId = fieldValue(root, "[data-draft-task-id]");
+      const goal = fieldValue(root, "[data-draft-goal]");
+      const learningNoteId = fieldValue(root, "[data-draft-learning-note-id]");
+      const modelId = fieldValue(root, "[data-draft-model-id]");
+      if (!taskId || !goal || !learningNoteId) {
+        actions.showError("task, goal, and learning note are required");
+        return;
+      }
+      const payload = {
+        task_id: taskId,
+        goal,
+        learning_note_id: learningNoteId,
+      };
+      if (modelId) payload.model_id = modelId;
+      try {
+        const result = await actions.authorDraft(payload);
+        await refresh();
+        if (result?.draft?.id) {
+          showDetail(root, await actions.getDraft(result.draft.id));
+        }
+      } catch (error) {
+        actions.showError(error?.message || "draft authoring failed");
       }
       return;
     }

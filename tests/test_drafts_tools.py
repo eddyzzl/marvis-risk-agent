@@ -96,6 +96,39 @@ def test_draft_web_search_tool_returns_offline_payload(monkeypatch, tmp_path):
     assert result == {"results": [], "offline": True, "guidance": "offline guidance"}
 
 
+def test_draft_fetch_url_tool_returns_offline_payload(monkeypatch, tmp_path):
+    from marvis.drafts import tools
+    from marvis.drafts.errors import OfflineError
+
+    monkeypatch.setattr(tools, "fetch_url", lambda *_args, **_kwargs: (_ for _ in ()).throw(OfflineError("offline guidance")))
+
+    result = tools.tool_fetch_url({"url": "https://example.test/a", "max_bytes": 1200}, _ctx(tmp_path))
+
+    assert result == {"url": "https://example.test/a", "content": "", "offline": True, "guidance": "offline guidance"}
+
+
+def test_draft_fetch_url_tool_returns_bounded_content(monkeypatch, tmp_path):
+    from marvis.drafts import tools
+
+    calls = []
+
+    def fake_fetch(url, *, max_bytes):
+        calls.append((url, max_bytes))
+        return "bounded contents"
+
+    monkeypatch.setattr(tools, "fetch_url", fake_fetch)
+
+    result = tools.tool_fetch_url({"url": "https://example.test/a", "max_bytes": 1200}, _ctx(tmp_path))
+
+    assert result == {
+        "url": "https://example.test/a",
+        "content": "bounded contents",
+        "offline": False,
+        "guidance": "",
+    }
+    assert calls == [("https://example.test/a", 1200)]
+
+
 def test_draft_distill_learning_tool_persists_note(monkeypatch, tmp_path):
     from marvis.drafts import tools
 
@@ -214,6 +247,20 @@ def test_builtin_drafts_pack_registers_distill_learning_tool(tmp_path):
     assert tool.input_schema["required"] == ["query", "contents", "sources"]
     assert "llm" in tool.side_effects
     assert "write:learning_note" in tool.side_effects
+
+
+def test_builtin_drafts_pack_registers_fetch_url_tool(tmp_path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    repo = PluginRepository(settings.db_path)
+    registry = PluginRegistry(repo)
+    load_builtin_packs(registry, _packs_root())
+
+    tool = ToolRegistry(registry).resolve(ToolRef("drafts", "fetch_url"))
+
+    assert tool.entrypoint == "tool_fetch_url"
+    assert tool.input_schema["required"] == ["url"]
+    assert "network:optional" in tool.side_effects
 
 
 def test_builtin_drafts_pack_runs_draft_through_runner(tmp_path):

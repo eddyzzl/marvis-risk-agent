@@ -44,6 +44,12 @@ def test_draft_manager_html_escapes_list_and_detail_payloads():
         assert.ok(listHtml.includes("Run &lt;margin&gt;"));
         assert.ok(listHtml.includes("data-draft-status"));
         assert.ok(listHtml.includes("data-draft-web-query"));
+        assert.ok(listHtml.includes("data-draft-task-id"));
+        assert.ok(listHtml.includes("data-draft-goal"));
+        assert.ok(listHtml.includes("data-draft-learning-content"));
+        assert.ok(listHtml.includes("data-draft-learning-note-id"));
+        assert.ok(listHtml.includes("data-draft-distill-learning"));
+        assert.ok(listHtml.includes("data-draft-author"));
         assert.ok(listHtml.includes("data-draft-web-search"));
         assert.ok(listHtml.includes("data-draft-web-result"));
 
@@ -141,8 +147,134 @@ def test_draft_web_learning_results_do_not_link_unsafe_urls():
         assert.equal(html.includes('href="javascript:alert(1)"'), false);
         assert.ok(html.includes("javascript:alert(1)"));
         assert.ok(html.includes('href="https://example.test/a"'));
+        assert.ok(html.includes('data-draft-fetch-url="https://example.test/a"'));
+        assert.equal(html.includes('data-draft-fetch-url="javascript:alert(1)"'), false);
         assert.equal(html.includes("<img>"), false);
         assert.ok(html.includes("bad &lt;img&gt;"));
+        """
+    )
+
+
+def test_draft_handlers_fetch_distill_and_author_web_learning_flow():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachDraftHandlers } from "./marvis/static/js/v2/draft_manager.js";
+
+        const calls = [];
+        const resultSlot = { innerHTML: "" };
+        const noteSlot = { innerHTML: "" };
+        const detailSlot = { innerHTML: "" };
+        const sourceField = { value: "" };
+        const contentField = { value: "" };
+        const noteIdField = { value: "" };
+        const queryField = { value: "learn joins" };
+        const taskField = { value: "task-1" };
+        const goalField = { value: "build helper" };
+        const modelField = { value: "m1" };
+        const statusFilter = { value: "draft" };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) {
+            if (selector === "[data-draft-web-result]") return resultSlot;
+            if (selector === "[data-draft-learning-note]") return noteSlot;
+            if (selector === "[data-draft-detail]") return detailSlot;
+            if (selector === "[data-draft-learning-source]") return sourceField;
+            if (selector === "[data-draft-learning-content]") return contentField;
+            if (selector === "[data-draft-learning-note-id]") return noteIdField;
+            if (selector === "[data-draft-web-query]") return queryField;
+            if (selector === "[data-draft-task-id]") return taskField;
+            if (selector === "[data-draft-goal]") return goalField;
+            if (selector === "[data-draft-model-id]") return modelField;
+            if (selector === "[data-draft-status]") return statusFilter;
+            return null;
+          },
+        };
+
+        attachDraftHandlers(root, {
+          fetchUrl: async (url) => {
+            calls.push(["fetchUrl", url]);
+            return { url, content: "bounded <content>", offline: false, guidance: "" };
+          },
+          distillLearning: async (payload) => {
+            calls.push(["distillLearning", payload]);
+            return {
+              learning_note: {
+                id: "note-1",
+                query: payload.query,
+                sources: payload.sources,
+                distilled: "Use bounded content <safely>.",
+              },
+            };
+          },
+          authorDraft: async (payload) => {
+            calls.push(["authorDraft", payload]);
+            return { draft: { id: "draft-1", name: "calc_margin", status: "draft" } };
+          },
+          getDraft: async (id) => {
+            calls.push(["getDraft", id]);
+            return { draft: { id, name: "calc_margin", status: "draft" }, runs: [] };
+          },
+          refreshDrafts: async (query) => calls.push(["refreshDrafts", query]),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-draft-fetch-url]"
+                ? { dataset: { draftFetchUrl: "https://example.test/a" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.equal(sourceField.value, "https://example.test/a");
+        assert.equal(contentField.value, "bounded <content>");
+        assert.ok(noteSlot.innerHTML.includes("bounded &lt;content&gt;"));
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-draft-distill-learning]" ? this : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.equal(noteIdField.value, "note-1");
+        assert.equal(noteSlot.innerHTML.includes("<safely>"), false);
+        assert.ok(noteSlot.innerHTML.includes("&lt;safely&gt;"));
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-draft-author]" ? this : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(calls, [
+          ["fetchUrl", "https://example.test/a"],
+          ["distillLearning", {
+            query: "learn joins",
+            contents: ["bounded <content>"],
+            sources: ["https://example.test/a"],
+            model_id: "m1",
+          }],
+          ["authorDraft", {
+            task_id: "task-1",
+            goal: "build helper",
+            learning_note_id: "note-1",
+            model_id: "m1",
+          }],
+          ["refreshDrafts", { status: "draft" }],
+          ["getDraft", "draft-1"],
+        ]);
+        assert.ok(detailSlot.innerHTML.includes("calc_margin"));
         """
     )
 

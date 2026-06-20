@@ -80,6 +80,37 @@
       "memory_limit_mb": 2048
     },
     {
+      "name": "fetch_url",
+      "summary": "Fetch a bounded page text payload for draft-zone web learning.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "minLength": 1},
+          "max_bytes": {"type": "integer", "minimum": 1, "maximum": 500000},
+          "seed": {"type": "integer"}
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string"},
+          "content": {"type": "string"},
+          "offline": {"type": "boolean"},
+          "guidance": {"type": "string"}
+        },
+        "required": ["url", "content", "offline", "guidance"],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_fetch_url",
+      "side_effects": ["network:optional"],
+      "memory_limit_mb": 1024
+    },
+    {
       "name": "distill_learning",
       "summary": "Distill bounded reference contents into a saved learning note for draft authoring.",
       "input_schema": {

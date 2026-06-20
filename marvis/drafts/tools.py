@@ -9,7 +9,7 @@ from marvis.drafts.errors import DraftNotFound, OfflineError
 from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
-from marvis.drafts.web_search import web_search
+from marvis.drafts.web_search import fetch_url, web_search
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -26,6 +26,18 @@ def tool_web_search(inputs: dict, ctx) -> dict:
     except OfflineError as exc:
         return {"results": [], "offline": True, "guidance": str(exc)}
     return {"results": results, "offline": False, "guidance": ""}
+
+
+def tool_fetch_url(inputs: dict, ctx) -> dict:
+    url = str(inputs["url"])
+    try:
+        content = fetch_url(
+            url,
+            max_bytes=int(inputs.get("max_bytes", 500_000)),
+        )
+    except OfflineError as exc:
+        return {"url": url, "content": "", "offline": True, "guidance": str(exc)}
+    return {"url": url, "content": content, "offline": False, "guidance": ""}
 
 
 def tool_distill_learning(inputs: dict, ctx) -> dict:
@@ -128,6 +140,7 @@ def _string_list(value) -> list[str]:
 __all__ = [
     "tool_distill_learning",
     "tool_draft_script",
+    "tool_fetch_url",
     "tool_run_draft",
     "tool_web_search",
 ]
