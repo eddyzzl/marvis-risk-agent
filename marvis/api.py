@@ -305,6 +305,63 @@ def _nan_safe_records(frame: pd.DataFrame) -> list[dict]:
     return clean.to_dict("records")
 
 
+def _dataset_preview_profiles(dataset) -> list[dict]:
+    return [
+        {
+            "name": column.name,
+            "dtype": column.dtype,
+            "semantic_role": column.semantic_role,
+            "null_rate": column.null_rate,
+            "cardinality": column.cardinality,
+            "sample_values": list(column.sample_values),
+        }
+        for column in dataset.columns
+    ]
+
+
+def _masked_preview_records(frame: pd.DataFrame, dataset) -> list[dict]:
+    role_by_column = {column.name: column.semantic_role for column in dataset.columns}
+    rows = []
+    for record in _nan_safe_records(frame):
+        rows.append({
+            str(column): _mask_preview_value(value, role_by_column.get(str(column)))
+            for column, value in record.items()
+        })
+    return rows
+
+
+def _mask_preview_value(value, semantic_role: str | None):
+    if value is None:
+        return None
+    if semantic_role == "phone":
+        return _mask_preview_text(value, keep_start=3, keep_end=2)
+    if semantic_role == "idcard":
+        return _mask_preview_text(value, keep_start=4, keep_end=2)
+    if semantic_role == "id":
+        return _mask_preview_text(value, keep_start=4, keep_end=4)
+    return value
+
+
+def _mask_preview_text(value, *, keep_start: int, keep_end: int) -> str:
+    text = _mask_preview_source_text(value)
+    if len(text) <= keep_start + keep_end:
+        return "*" * len(text)
+    hidden = "*" * (len(text) - keep_start - keep_end)
+    return f"{text[:keep_start]}{hidden}{text[-keep_end:]}"
+
+
+def _mask_preview_source_text(value) -> str:
+    if not isinstance(value, str):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if number.is_integer():
+                return str(int(number))
+    return str(value).strip()
+
+
 def _reject_if_task_has_active_job(repo: TaskRepository, task_id: str) -> None:
     if repo.task_has_active_job(task_id):
         raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL)
@@ -787,6 +844,17 @@ async def upload_task_dataset(
         raise
     except (DataBackendError, DataIngestError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for dataset in datasets:
+        _dispatch_platform_hook(
+            getattr(request.app.state, "hook_dispatcher", None),
+            "dataset.registered",
+            {
+                "task_id": task_id,
+                "dataset_id": dataset.id,
+                "role": dataset.role,
+            },
+            task_id=task_id,
+        )
     return {
         "datasets": [_dataset_payload(dataset) for dataset in datasets],
         "reports": reports,
@@ -808,7 +876,8 @@ def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
     frame = frame.head(rows)
     return {
         "columns": [str(column) for column in frame.columns],
-        "rows": _nan_safe_records(frame),
+        "column_profiles": _dataset_preview_profiles(dataset),
+        "rows": _masked_preview_records(frame, dataset),
         "truncated": truncated,
     }
 
@@ -856,7 +925,7 @@ def get_join_plan(join_plan_id: str, request: Request) -> dict:
 @router.post("/joins/{join_plan_id}/confirm")
 async def confirm_join_plan(join_plan_id: str, request: Request) -> dict:
     payload = await request.json()
-    feature_id = str(payload.get("feature_id") or "")
+    feature_id = str(payload.get("feature_id") or payload.get("feature_dataset_id") or "")
     if not feature_id:
         raise HTTPException(status_code=422, detail="feature_id is required")
     dedup_strategy = payload.get("dedup_strategy")
@@ -895,6 +964,18 @@ async def confirm_join_plan(join_plan_id: str, request: Request) -> dict:
             repo_data.update_join_spec(plan.id, spec)
     except DedupRequiredError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if confirmed:
+        _dispatch_platform_hook(
+            getattr(request.app.state, "hook_dispatcher", None),
+            "join.confirmed",
+            {
+                "task_id": plan.task_id,
+                "join_plan_id": join_plan_id,
+                "feature_id": feature_id,
+                "confirmed": True,
+            },
+            task_id=plan.task_id,
+        )
     return _join_plan_payload(repo_data.load_join_plan(join_plan_id))
 
 

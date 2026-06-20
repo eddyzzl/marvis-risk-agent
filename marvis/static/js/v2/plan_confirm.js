@@ -29,6 +29,14 @@ function syncPlanFromPayload(payload) {
   }
 }
 
+function defaultShowError(message) {
+  if (typeof alert === "function") {
+    alert(message);
+    return;
+  }
+  console.error(message);
+}
+
 export function attachPlanConfirmHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachPlanConfirmHandlers requires a stable event root");
@@ -39,6 +47,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     confirmStep: confirmStepApi,
     getCurrentPlan,
     runPlan: runPlanApi,
+    showError: defaultShowError,
     startPlanPolling,
     stopPlanPolling,
     ...deps,
@@ -50,9 +59,13 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (planButton?.dataset?.confirmPlan) {
       event.preventDefault?.();
       const planId = planButton.dataset.confirmPlan;
-      syncPlanFromPayload(await actions.confirmPlan(planId));
-      await actions.runPlan(planId);
-      actions.startPlanPolling(planId);
+      try {
+        syncPlanFromPayload(await actions.confirmPlan(planId));
+        await actions.runPlan(planId);
+        actions.startPlanPolling(planId);
+      } catch (error) {
+        actions.showError(error?.message || "confirm plan failed");
+      }
       return;
     }
 
@@ -63,8 +76,12 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
       if (!plan?.id) {
         return;
       }
-      await actions.confirmStep(plan.id, stepButton.dataset.confirmStep);
-      actions.startPlanPolling(plan.id);
+      try {
+        await actions.confirmStep(plan.id, stepButton.dataset.confirmStep);
+        actions.startPlanPolling(plan.id);
+      } catch (error) {
+        actions.showError(error?.message || "confirm step failed");
+      }
       return;
     }
 
@@ -72,8 +89,12 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (cancelButton?.dataset?.cancelPlan) {
       event.preventDefault?.();
       const planId = cancelButton.dataset.cancelPlan;
-      syncPlanFromPayload(await actions.cancelPlan(planId));
-      actions.stopPlanPolling(planId);
+      try {
+        syncPlanFromPayload(await actions.cancelPlan(planId));
+        actions.stopPlanPolling(planId);
+      } catch (error) {
+        actions.showError(error?.message || "cancel plan failed");
+      }
     }
   };
 

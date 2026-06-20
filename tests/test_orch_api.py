@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from marvis.app import create_app
 from marvis.db import PlanRepository, TaskRepository, connect, init_db
 from marvis.domain import TaskCreate
-from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStatus, PlanStep, SubAgent
 from marvis.routers.plans import router
 from marvis.plugins.manifest import ToolRef
 
@@ -61,6 +61,15 @@ class FakeExecutor:
     def run(self, plan_id):
         self.calls.append(plan_id)
         return SimpleNamespace(status=PlanStatus.DONE)
+
+
+class FakeHookDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, event, payload, *, task_id):
+        self.calls.append((event, payload, task_id))
+        return []
 
 
 def _client(tmp_path, *, validator=None, intent=None):
@@ -195,6 +204,40 @@ def test_step_output_endpoint_returns_stored_structured_output(tmp_path):
     assert missing.status_code == 404
 
 
+def test_get_plan_payload_includes_sub_agents_for_v2_panel(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    repo.create_plan(_plan(status=PlanStatus.RUNNING))
+    repo.upsert_sub_agent(
+        SubAgent(
+            id="sub-1",
+            parent_task_id="task-1",
+            parent_step_id="step-1",
+            scope="Review join",
+            granted_tools=[ToolRef("_sample", "echo")],
+            context_budget=8192,
+            status=AgentStatus.RETURNED,
+            result_ref="artifact:summary",
+        )
+    )
+
+    response = client.get("/api/plans/plan-1")
+
+    assert response.status_code == 200
+    assert response.json()["plan"]["sub_agents"] == [
+        {
+            "id": "sub-1",
+            "parent_task_id": "task-1",
+            "parent_step_id": "step-1",
+            "scope": "Review join",
+            "granted_tools": [{"plugin": "_sample", "tool": "echo", "version": ""}],
+            "context_budget": 8192,
+            "status": "returned",
+            "result_ref": "artifact:summary",
+        }
+    ]
+
+
 def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo
@@ -225,6 +268,26 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     cancelled = cancel_client.post("/api/plans/plan-1/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["plan"]["status"] == "cancelled"
+
+
+def test_plan_confirm_dispatches_plan_confirmed_hook(tmp_path):
+    client = _client(tmp_path)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.VALIDATED, task_id=task_id))
+
+    response = client.post("/api/plans/plan-1/confirm")
+
+    assert response.status_code == 200
+    assert dispatcher.calls == [
+        (
+            "plan.confirmed",
+            {"task_id": task_id, "plan_id": "plan-1"},
+            task_id,
+        )
+    ]
 
 
 def test_plan_run_rejects_active_task_job(tmp_path):

@@ -191,3 +191,114 @@ def test_draft_handlers_load_run_promote_reject_and_validate_json_inputs():
         assert.equal(listeners.change, undefined);
         """
     )
+
+
+def test_draft_handlers_surface_refresh_errors_without_bubbling():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachDraftHandlers } from "./marvis/static/js/v2/draft_manager.js";
+
+        const listeners = {};
+        const messages = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector() {
+            return { value: "draft" };
+          },
+        };
+        attachDraftHandlers(root, {
+          refreshDrafts: async (query) => {
+            assert.deepEqual(query, { status: "draft" });
+            throw new Error("draft list failed");
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-refresh-drafts]" ? this : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(messages, ["draft list failed"]);
+        """
+    )
+
+
+def test_draft_handlers_require_secondary_confirmation_before_promotion():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachDraftHandlers } from "./marvis/static/js/v2/draft_manager.js";
+
+        const calls = [];
+        const promotionTests = { value: '[{"inputs":{},"expect":{}}]' };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) {
+            if (selector === "[data-draft-promotion-tests]") return promotionTests;
+            if (selector === "[data-draft-status]") return { value: "tested" };
+            return null;
+          },
+        };
+
+        attachDraftHandlers(root, {
+          confirmPromote: (id, testCases) => {
+            calls.push(["confirmPromote", id, testCases]);
+            return false;
+          },
+          promoteDraft: async (id, testCases) => calls.push(["promoteDraft", id, testCases]),
+          refreshDrafts: async (query) => calls.push(["refreshDrafts", query]),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-promote-draft]" ? { dataset: { promoteDraft: "draft-1" } } : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(calls, [
+          ["confirmPromote", "draft-1", [{ inputs: {}, expect: {} }]],
+        ]);
+        """
+    )
+
+
+def test_render_draft_manager_preserves_status_filter_on_refresh():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderDraftManager } from "./marvis/static/js/v2/draft_manager.js";
+
+        const calls = [];
+        const statusControl = { value: "tested" };
+        const container = {
+          innerHTML: "",
+          dataset: {},
+          querySelector(selector) {
+            return selector === "[data-draft-status]" ? statusControl : null;
+          },
+        };
+
+        await renderDraftManager(container, {
+          listDrafts: async (query) => {
+            calls.push(query);
+            return { drafts: [{ id: "draft-1", name: "Tested Draft", status: "tested" }] };
+          },
+        });
+
+        assert.deepEqual(calls, [{ status: "tested" }]);
+        assert.ok(container.innerHTML.includes('value="tested" selected'));
+        assert.ok(container.innerHTML.includes("Tested Draft"));
+        """
+    )

@@ -113,6 +113,7 @@ def _fail(message="boom"):
 def _step(
     step_id,
     *,
+    plugin="_sample",
     index=0,
     tool="echo",
     inputs=None,
@@ -129,7 +130,7 @@ def _step(
         plan_id="plan-1",
         index=index,
         title=step_id,
-        tool_ref=ToolRef("_sample", tool),
+        tool_ref=ToolRef(plugin, tool),
         inputs=inputs or {},
         depends_on=depends_on or [],
         post_checks=post_checks or [],
@@ -258,6 +259,40 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     assert result.summary_ref is not None
     assert repo.load_plan_summary(result.summary_ref)["goal_doubt"] is True
     assert [call[0] for call in hooks.calls] == ["step.completed"]
+
+
+def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_path):
+    repo = _repo(
+        tmp_path,
+        _plan(_step("step-1", plugin="feature", tool="compute_feature_metrics")),
+    )
+    runner = FakeRunner([
+        _ok({"dataset_id": "dataset-1", "features": ["income"], "metrics": []})
+    ])
+    hooks = FakeHooks()
+
+    result = _executor(repo, runner, hooks=hooks).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    assert hooks.calls[:2] == [
+        (
+            "feature.computed",
+            {
+                "plan_id": "plan-1",
+                "step_id": "step-1",
+                "tool": "compute_feature_metrics",
+                "output_ref": "metrics:step-1",
+                "dataset_id": "dataset-1",
+                "features": ["income"],
+            },
+            "task-1",
+        ),
+        (
+            "step.completed",
+            {"plan_id": "plan-1", "step_id": "step-1"},
+            "task-1",
+        ),
+    ]
 
 
 def test_plan_executor_pauses_for_confirmation_and_resumes_from_db(tmp_path):

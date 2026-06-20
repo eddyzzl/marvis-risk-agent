@@ -489,6 +489,95 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
     )
 
 
+def test_v2_mount_initially_loads_governance_panels():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        function makeElement(tagName) {
+          return {
+            tagName: tagName.toUpperCase(),
+            id: "",
+            innerHTML: "",
+            className: "",
+            dataset: {},
+            attributes: {},
+            children: [],
+            setAttribute(name, value) {
+              this.attributes[name] = String(value);
+            },
+            appendChild(child) {
+              this.children.push(child);
+              return child;
+            },
+          };
+        }
+
+        resetV2State();
+        const calls = [];
+        const root = makeElement("div");
+        root.ownerDocument = { createElement: makeElement };
+        root.querySelector = (selector) => {
+          const id = selector.startsWith("#") ? selector.slice(1) : selector;
+          return root.children.find((child) => child.id === id) ?? null;
+        };
+
+        const mounted = mountV2(root, {
+          pluginActions: {
+            listPlugins: async (includeDisabled) => {
+              calls.push(["listPlugins", includeDisabled]);
+              return {
+                plugins: [
+                  {
+                    name: "demo",
+                    display_name: "Demo Plugin",
+                    version: "1.0",
+                    enabled: true,
+                    builtin: false,
+                    tool_count: 1,
+                  },
+                ],
+              };
+            },
+          },
+          skillActions: {
+            listSkills: async () => {
+              calls.push(["listSkills"]);
+              return { active: ["demo_skill"], disabled: [], rejected: [] };
+            },
+          },
+          draftActions: {
+            listDrafts: async (query) => {
+              calls.push(["listDrafts", query]);
+              return { drafts: [{ id: "draft-1", name: "Draft Tool", status: "draft" }] };
+            },
+          },
+          memoryActions: {
+            listMemoryDistillations: async (query) => {
+              calls.push(["listMemoryDistillations", query]);
+              return { distillations: [{ id: "mem-1", summary: "Memory summary" }] };
+            },
+          },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+
+        assert.deepEqual(calls, [
+          ["listPlugins", true],
+          ["listSkills"],
+          ["listDrafts", {}],
+          ["listMemoryDistillations", { category: "" }],
+        ]);
+        assert.ok(mounted.panels.pluginPanel.innerHTML.includes("Demo Plugin"));
+        assert.ok(mounted.panels.skillPanel.innerHTML.includes("demo_skill"));
+        assert.ok(mounted.panels.draftPanel.innerHTML.includes("Draft Tool"));
+        assert.ok(mounted.panels.memoryPanel.innerHTML.includes("Memory summary"));
+        """
+    )
+
+
 def test_v2_mount_wires_plugin_and_skill_refresh_actions():
     run_node(
         """
@@ -558,6 +647,12 @@ def test_v2_mount_wires_plugin_and_skill_refresh_actions():
             },
           },
         });
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.deepEqual(calls.splice(0), [
+          ["listPlugins", true],
+          ["listSkills"],
+        ]);
 
         const uploadTarget = {
           files: [{ name: "demo.zip" }],

@@ -34,8 +34,9 @@ def reload_skills(request: Request) -> dict:
 
 @router.post("/validate")
 def validate_skill(request: Request, body: dict) -> dict:
+    skill_payload = body.get("skill") if isinstance(body.get("skill"), dict) else body
     try:
-        template = parse_skill_template(body)
+        template = parse_skill_template(skill_payload)
     except SkillTemplateError as exc:
         return {"valid": False, "problems": [str(exc)]}
     problems = validate_skill_template(

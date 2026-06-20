@@ -144,6 +144,32 @@ def test_parse_manifest_rejects_unknown_hook_event_and_missing_tool():
         parse_manifest(_manifest(hooks=[{"event": "task.created", "tool": "missing"}]))
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        "task.created",
+        "task.scanned",
+        "dataset.registered",
+        "join.confirmed",
+        "notebook.completed",
+        "validation.completed",
+        "feature.computed",
+        "plan.confirmed",
+        "step.completed",
+        "report.before_generate",
+        "report.after_generate",
+        "memory.before_save",
+        "memory.after_save",
+        "workflow.completed",
+        "plan.replanned",
+    ],
+)
+def test_parse_manifest_accepts_platform_hook_events(event):
+    manifest = parse_manifest(_manifest(hooks=[{"event": event, "tool": "echo"}]))
+
+    assert manifest.hooks[0].event == event
+
+
 def test_plugin_error_types_carry_context():
     schema_error = SchemaValidationError("inputs", "$.message is required")
     assert schema_error.label == "inputs"

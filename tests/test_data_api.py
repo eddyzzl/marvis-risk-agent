@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import pandas as pd
 from fastapi import FastAPI
@@ -10,6 +11,15 @@ from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.settings import build_settings
+
+
+class FakeHookDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, event, payload, *, task_id):
+        self.calls.append((event, payload, task_id))
+        return []
 
 
 def _client(tmp_path):
@@ -83,6 +93,58 @@ def test_dataset_upload_list_and_preview_api(tmp_path):
     assert preview.json()["columns"] == ["mobile", "bad_flag"]
     assert preview.json()["truncated"] is True
     assert invalid_preview.status_code == 422
+
+
+def test_dataset_preview_returns_column_profiles_and_masked_samples(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    csv_bytes = b"mobile,bad_flag\n13800138000,0\n,1\n"
+
+    upload = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", csv_bytes, "text/csv")},
+    )
+    dataset = upload.json()["datasets"][0]
+
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
+    assert profiles["mobile"]["semantic_role"] == "phone"
+    assert profiles["mobile"]["null_rate"] == 0.5
+    assert profiles["mobile"]["sample_values"] == ["138******00"]
+    assert payload["rows"][0]["mobile"] == "138******00"
+    assert payload["rows"][1]["mobile"] is None
+    assert "13800138000" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_dataset_upload_dispatches_dataset_registered_hook(tmp_path):
+    client, settings = _client(tmp_path)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", b"mobile,bad_flag\n13800138000,0\n", "text/csv")},
+    )
+
+    assert response.status_code == 201
+    dataset = response.json()["datasets"][0]
+    assert dispatcher.calls == [
+        (
+            "dataset.registered",
+            {
+                "task_id": task.id,
+                "dataset_id": dataset["id"],
+                "role": "sample",
+            },
+            task.id,
+        )
+    ]
 
 
 def test_dataset_upload_rejects_invalid_excel_sheet(tmp_path):
@@ -166,6 +228,103 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert execute.json()["anchor_rows"] == 2
     assert execute.json()["joined_rows"] == 2
     assert repeat.status_code == 409
+
+
+def test_join_confirm_dispatches_join_confirmed_hook(tmp_path):
+    client, settings = _client(tmp_path)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "anchor",
+        pd.DataFrame({"mobile": ["13800138000", "13900139000"]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [
+                hashlib.md5(value.encode()).hexdigest()
+                for value in ["13800138000", "13900139000"]
+            ],
+            "balance": [10, 20],
+        }),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_id": feature.id, "confirmed": True, "dedup_strategy": None},
+    )
+
+    assert response.status_code == 200
+    assert dispatcher.calls == [
+        (
+            "join.confirmed",
+            {
+                "task_id": task.id,
+                "join_plan_id": plan["join_plan_id"],
+                "feature_id": feature.id,
+                "confirmed": True,
+            },
+            task.id,
+        )
+    ]
+
+
+def test_join_confirm_accepts_feature_dataset_id_alias(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "anchor",
+        pd.DataFrame({"mobile": ["13800138000", "13900139000"]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [
+                hashlib.md5(value.encode()).hexdigest()
+                for value in ["13800138000", "13900139000"]
+            ],
+            "balance": [10, 20],
+        }),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    response = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_dataset_id": feature.id, "confirmed": True, "dedup_strategy": None},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["joins"][0]["confirmed"] is True
 
 
 def test_join_api_keeps_task_dataset_boundaries(tmp_path):

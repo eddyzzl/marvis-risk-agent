@@ -198,6 +198,14 @@ export function renderPlanView(container) {
   return onPlanChange((plan) => render(plan));
 }
 
+function defaultShowError(message) {
+  if (typeof alert === "function") {
+    alert(message);
+    return;
+  }
+  console.error(message);
+}
+
 function deactivatePlanPoll(planId, pollState) {
   if (!pollState || pollState.stopped) {
     return;
@@ -226,6 +234,7 @@ export function startPlanPolling(planId, options = {}) {
     timer: null,
     setTimeoutFn: options.setTimeoutFn || ((fn, ms) => setTimeout(fn, ms)),
     clearTimeoutFn: options.clearTimeoutFn || ((timerId) => clearTimeout(timerId)),
+    showError: options.showError || defaultShowError,
     stop() {
       stopPlanPolling(key);
     },
@@ -253,7 +262,9 @@ export function startPlanPolling(planId, options = {}) {
   };
   planPolls.set(key, pollState);
   if (options.autoStart !== false) {
-    void pollState.tick();
+    void pollState.tick().catch((error) => {
+      pollState.showError(error?.message || "plan polling failed");
+    });
   }
   return pollState;
 }

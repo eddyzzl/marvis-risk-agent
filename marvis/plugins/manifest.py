@@ -12,8 +12,12 @@ FAILURE_POLICY_CHOICES = frozenset({"fail", "retry", "skip"})
 PLATFORM_HOOK_EVENTS = frozenset({
     "task.created",
     "task.scanned",
+    "dataset.registered",
+    "join.confirmed",
     "notebook.completed",
     "validation.completed",
+    "feature.computed",
+    "plan.confirmed",
     "report.before_generate",
     "report.after_generate",
     "memory.before_save",

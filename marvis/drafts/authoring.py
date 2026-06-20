@@ -41,7 +41,14 @@ _BANNED_SNIPPETS = (
     "shutil.rmtree",
     "requests.",
     "httpx.",
+    "urllib.",
+    "urlopen(",
     "open(",
+    ".write_text(",
+    ".write_bytes(",
+    "os.remove",
+    "os.unlink",
+    "os.rmdir",
 )
 
 

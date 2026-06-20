@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 import sqlite3
 import traceback
 from pathlib import Path
@@ -19,6 +20,7 @@ from marvis.state_machine import ConflictError
 
 
 router = APIRouter(prefix="/api", tags=["plans"])
+logger = logging.getLogger(__name__)
 PLAN_JOB_KIND = "plan"
 ACTIVE_JOB_DETAIL = "task already has an active job"
 
@@ -73,7 +75,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
         repo.create_plan(plan)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="plan already exists") from exc
-    return _plan_payload(plan)
+    return _plan_payload(request, plan)
 
 
 @router.get("/capability-tiers")
@@ -105,7 +107,14 @@ def confirm_plan(request: Request, plan_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IllegalPlanTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _load_plan_payload(request, plan_id)
+    plan = _load_plan(request, plan_id)
+    _dispatch_platform_hook(
+        getattr(request.app.state, "hook_dispatcher", None),
+        "plan.confirmed",
+        {"task_id": plan.task_id, "plan_id": plan.id},
+        task_id=plan.task_id,
+    )
+    return _plan_payload(request, plan)
 
 
 @router.post("/plans/{plan_id}/run", status_code=202)
@@ -163,7 +172,7 @@ def cancel_plan(request: Request, plan_id: str) -> dict:
 
 
 def _load_plan_payload(request: Request, plan_id: str) -> dict:
-    return _plan_payload(_load_plan(request, plan_id))
+    return _plan_payload(request, _load_plan(request, plan_id))
 
 
 def _load_plan(request: Request, plan_id: str):
@@ -173,8 +182,29 @@ def _load_plan(request: Request, plan_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-def _plan_payload(plan) -> dict:
-    return {"plan": plan_to_dict(plan)}
+def _plan_payload(request: Request, plan) -> dict:
+    payload = plan_to_dict(plan)
+    payload["sub_agents"] = [
+        _sub_agent_payload(sub)
+        for sub in request.app.state.plan_repo.list_sub_agents_for_plan(plan.id)
+    ]
+    return {"plan": payload}
+
+
+def _sub_agent_payload(sub) -> dict:
+    return {
+        "id": sub.id,
+        "parent_task_id": sub.parent_task_id,
+        "parent_step_id": sub.parent_step_id,
+        "scope": sub.scope,
+        "granted_tools": [
+            {"plugin": ref.plugin, "tool": ref.tool, "version": ref.version}
+            for ref in sub.granted_tools
+        ],
+        "context_budget": sub.context_budget,
+        "status": sub.status.value,
+        "result_ref": sub.result_ref,
+    }
 
 
 def _task_context(task_id: str, body: CreatePlanRequest) -> dict:
@@ -216,6 +246,21 @@ def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:
         raise
     status = "failed" if result.status == PlanStatus.FAILED else "succeeded"
     repo.finish_job(job_id, status=status)
+
+
+def _dispatch_platform_hook(
+    hook_dispatcher,
+    event: str,
+    payload: dict,
+    *,
+    task_id: str,
+) -> None:
+    if hook_dispatcher is None:
+        return
+    try:
+        hook_dispatcher.dispatch(event, payload, task_id=task_id)
+    except Exception as exc:
+        logger.warning("platform hook dispatch failed for %s/%s: %s", event, task_id, exc)
 
 
 def _fail_plan_job(db_path: Path, job_id: str, exc: Exception) -> None:

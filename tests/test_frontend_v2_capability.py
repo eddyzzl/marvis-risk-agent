@@ -99,3 +99,57 @@ def test_capability_handlers_update_state_and_storage():
         assert.equal(listeners.change, undefined);
         """
     )
+
+
+def test_render_tier_settings_restores_persisted_selected_tier():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderTierSettings } from "./marvis/static/js/v2/capability.js";
+        import { getSelectedTier, resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const container = { innerHTML: "", dataset: {} };
+        await renderTierSettings(container, {
+          storage: {
+            getItem(key) {
+              assert.equal(key, "marvis_v2_selected_tier");
+              return "autonomous";
+            },
+          },
+          listCapabilityTiers: async () => ({
+            default: "balanced",
+            tiers: [
+              { name: "balanced", summary: "Default" },
+              { name: "autonomous", summary: "Higher autonomy" },
+            ],
+          }),
+        });
+
+        assert.equal(getSelectedTier(), "autonomous");
+        """
+    )
+
+
+def test_render_tier_settings_ignores_unknown_persisted_tier():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderTierSettings } from "./marvis/static/js/v2/capability.js";
+        import { getSelectedTier, resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        await renderTierSettings({ innerHTML: "", dataset: {} }, {
+          storage: { getItem: () => "removed-tier" },
+          listCapabilityTiers: async () => ({
+            default: "balanced",
+            tiers: [
+              { name: "balanced", summary: "Default" },
+              { name: "autonomous", summary: "Higher autonomy" },
+            ],
+          }),
+        });
+
+        assert.equal(getSelectedTier(), "balanced");
+        """
+    )

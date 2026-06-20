@@ -79,9 +79,14 @@ export async function renderTierSettings(container, deps = {}) {
     listCapabilityTiers: listCapabilityTiersApi,
     ...deps,
   };
+  const storage = deps.storage
+    || (typeof localStorage !== "undefined" ? localStorage : null);
   const data = await actions.listCapabilityTiers();
+  const persistedTier = String(storage?.getItem?.(selectedTierStorageKey) || "");
+  const tierNames = new Set((data.tiers || []).map((tier) => String(tier.name || "")));
+  const selectedTier = tierNames.has(persistedTier) ? persistedTier : data.default || "";
   setCapabilityTiers(data.tiers || []);
-  setSelectedTier(data.default || "");
+  setSelectedTier(selectedTier);
   container.innerHTML = tierSettingsHtml(data);
   return data;
 }

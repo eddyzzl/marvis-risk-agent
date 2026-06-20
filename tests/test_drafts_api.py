@@ -110,6 +110,22 @@ def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):
     assert client.get("/api/drafts/draft-1").json()["draft"]["status"] == "promoted"
 
 
+def test_promote_draft_endpoint_rejects_malformed_test_cases(tmp_path):
+    client = _client_with_draft(tmp_path)
+
+    response = client.post(
+        "/api/drafts/draft-1/promote",
+        json={"test_cases": [{"expect": {"margin": 7}}]},
+        headers=ADMIN_HEADERS,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["check"]["passed"] is False
+    assert response.json()["detail"]["check"]["problems"] == [
+        "test case 1 inputs must be an object"
+    ]
+
+
 def test_reject_draft_endpoint_requires_admin_and_writes_audit(tmp_path):
     client = _client_with_draft(tmp_path)
 

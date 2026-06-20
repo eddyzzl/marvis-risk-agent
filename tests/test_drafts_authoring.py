@@ -111,3 +111,27 @@ def test_draft_script_rejects_dangerous_code_and_invalid_json():
         )
     with pytest.raises(AuthoringError, match="JSON"):
         draft_script("task-1", "bad", learning_note=None, llm_factory=lambda: _FakeLLM("not json"))
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    urllib.request.urlopen('https://example.test')\n"
+        "    return {'margin': 0}\n",
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    Path('/tmp/marvis-draft').write_text('bad')\n"
+        "    return {'margin': 0}\n",
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    os.remove('/tmp/marvis-draft')\n"
+        "    return {'margin': 0}\n",
+    ],
+)
+def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):
+    with pytest.raises(AuthoringError, match="banned"):
+        draft_script(
+            "task-1",
+            "bad",
+            learning_note=None,
+            llm_factory=lambda: _FakeLLM(_valid_spec(code=code)),
+        )

@@ -220,8 +220,17 @@ def test_skills_api_lists_reloads_and_validates_user_skills(tmp_path):
     assert any(skill["id"] == "sample_echo" and skill["status"] == "rejected" for skill in skills)
 
     valid = client.post("/api/skills/validate", json=_skill_data(id="preview_echo"))
+    frontend_valid = client.post(
+        "/api/skills/validate",
+        json={"skill": _skill_data(id="frontend_preview_echo")},
+    )
     invalid = client.post("/api/skills/validate", json=_skill_data(id="sample_echo"))
 
     assert valid.json() == {"valid": True, "id": "preview_echo", "problems": []}
+    assert frontend_valid.json() == {
+        "valid": True,
+        "id": "frontend_preview_echo",
+        "problems": [],
+    }
     assert invalid.json()["valid"] is False
     assert any("shadows a builtin" in problem for problem in invalid.json()["problems"])

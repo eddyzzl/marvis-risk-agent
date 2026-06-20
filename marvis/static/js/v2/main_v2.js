@@ -1,6 +1,7 @@
 import { attachArtifactHandlers } from "./artifact_view.js";
 import { attachCapabilityHandlers, renderTierSettings, renderTierSettingsShell } from "./capability.js";
-import { attachDraftHandlers, renderDraftManagerShell } from "./draft_manager.js";
+import { listDrafts as listDraftsApi } from "./api_v2.js";
+import { attachDraftHandlers, renderDraftManager, renderDraftManagerShell } from "./draft_manager.js";
 import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
 import { attachMemoryHandlers, renderMemoryManager, renderMemoryManagerShell } from "./memory_manager.js";
@@ -76,6 +77,10 @@ export function mountV2(root, options = {}) {
     const memoryActions = options.memoryActions || {};
     const refreshPlugins = () => renderPluginManager(panels.pluginPanel, pluginActions);
     const refreshSkills = () => renderSkillManager(panels.skillPanel, skillActions);
+    const refreshDrafts = (query = {}) => renderDraftManager(panels.draftPanel, {
+      ...draftActions,
+      listDrafts: () => (draftActions.listDrafts || listDraftsApi)(query),
+    });
     const refreshMemories = () => renderMemoryManager(panels.memoryPanel, memoryActions);
     const refreshCapabilities = async () => {
       try {
@@ -83,6 +88,9 @@ export function mountV2(root, options = {}) {
       } catch (_error) {
         renderTierSettingsShell(panels.capabilityPanel);
       }
+    };
+    const quietlyRefresh = (refresh) => {
+      void refresh().catch(() => {});
     };
     const cleanups = [
       renderGoalComposer(panels.goalPanel),
@@ -97,6 +105,10 @@ export function mountV2(root, options = {}) {
       renderLoopEvents(panels.loopPanel),
       renderEmptyPanel(panels.artifactPanel, "artifact", "暂无工件预览"),
     ];
+    quietlyRefresh(refreshPlugins);
+    quietlyRefresh(refreshSkills);
+    quietlyRefresh(refreshDrafts);
+    quietlyRefresh(refreshMemories);
     void refreshCapabilities();
     if (typeof root.addEventListener === "function") {
       cleanups.push(
@@ -107,7 +119,7 @@ export function mountV2(root, options = {}) {
         attachPlanConfirmHandlers(root),
         attachPluginHandlers(root, { ...pluginActions, refreshPlugins }),
         attachSkillHandlers(root, { ...skillActions, refreshSkills }),
-        attachDraftHandlers(root, draftActions),
+        attachDraftHandlers(root, { ...draftActions, refreshDrafts }),
         attachMemoryHandlers(root, { ...memoryActions, refreshMemories }),
       );
     }

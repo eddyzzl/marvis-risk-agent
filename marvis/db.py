@@ -1480,19 +1480,23 @@ class PlanRepository:
             ).fetchone()
         if row is None:
             raise KeyError(sub_id)
-        return SubAgent(
-            id=row["id"],
-            parent_task_id=row["parent_task_id"],
-            parent_step_id=row["parent_step_id"],
-            scope=row["scope"],
-            granted_tools=[
-                _tool_ref_from_dict(item)
-                for item in _load_json_array(row["granted_tools_json"])
-            ],
-            context_budget=int(row["context_budget"]),
-            status=AgentStatus(row["status"]),
-            result_ref=row["result_ref"],
-        )
+        return _sub_agent_from_row(row)
+
+    def list_sub_agents_for_plan(self, plan_id: str) -> list[SubAgent]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT sub_agents.id, sub_agents.parent_task_id, sub_agents.parent_step_id,
+                       sub_agents.scope, sub_agents.granted_tools_json,
+                       sub_agents.context_budget, sub_agents.status, sub_agents.result_ref
+                  FROM sub_agents
+                  JOIN plan_steps ON plan_steps.id = sub_agents.parent_step_id
+                 WHERE plan_steps.plan_id = ?
+                 ORDER BY sub_agents.created_at, sub_agents.id
+                """,
+                (plan_id,),
+            ).fetchall()
+        return [_sub_agent_from_row(row) for row in rows]
 
     def write_audit(self, **kwargs) -> None:
         with connect(self.db_path) as conn:
@@ -2335,6 +2339,22 @@ def _tool_ref_from_dict(payload: dict) -> ToolRef:
         plugin=str(payload["plugin"]),
         tool=str(payload["tool"]),
         version=str(payload.get("version") or ""),
+    )
+
+
+def _sub_agent_from_row(row: sqlite3.Row) -> SubAgent:
+    return SubAgent(
+        id=row["id"],
+        parent_task_id=row["parent_task_id"],
+        parent_step_id=row["parent_step_id"],
+        scope=row["scope"],
+        granted_tools=[
+            _tool_ref_from_dict(item)
+            for item in _load_json_array(row["granted_tools_json"])
+        ],
+        context_budget=int(row["context_budget"]),
+        status=AgentStatus(row["status"]),
+        result_ref=row["result_ref"],
     )
 
 

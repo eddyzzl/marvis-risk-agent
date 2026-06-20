@@ -22,6 +22,9 @@ def validate_for_promotion(
         problems.append("determinism not declared")
     if not test_cases:
         problems.append("at least one test case required")
+    for index, test_case in enumerate(test_cases, start=1):
+        if not isinstance(test_case, dict) or not isinstance(test_case.get("inputs"), dict):
+            problems.append(f"test case {index} inputs must be an object")
 
     test_result = None
     if not problems:

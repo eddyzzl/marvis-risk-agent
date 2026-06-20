@@ -274,6 +274,42 @@ def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypa
     assert validation_metric_summary(context.v1)["psi"] is None
 
 
+def test_validation_metric_summary_marks_pmml_consistency_failure_for_review(tmp_path):
+    context = _task_context(tmp_path)
+    outputs_dir = context.task_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / "validation_results.json").write_text(
+        json.dumps({
+            "reproducibility": {"summary": {"status": "fail"}},
+            "effectiveness": {
+                "overall": [
+                    {
+                        "split": "oot",
+                        "ks": 0.321,
+                        "auc": 0.745,
+                        "psi_vs_train": 0.04,
+                    }
+                ]
+            },
+        }),
+        encoding="utf-8",
+    )
+    _advance_status(context.repo, context.task_id, TaskStatus.EXECUTED)
+    context.repo.update_status(
+        context.task_id,
+        TaskStatus.REVIEW_REQUIRED,
+        message="score consistency failed",
+        expected=TaskStatus.EXECUTED,
+    )
+
+    output = validation_metric_summary(context.v1)
+
+    assert output["status"] == "review_required"
+    assert output["score_consistency_passed"] is False
+    assert output["ks"] == 0.321
+    assert output["auc"] == 0.745
+
+
 def test_validation_metric_summary_rejects_missing_required_metrics(tmp_path):
     context = _task_context(tmp_path)
     outputs_dir = context.task_dir / "outputs"
@@ -381,6 +417,51 @@ def test_model_validation_plan_api_uses_v1_compat_template(tmp_path):
         "compute_validation_metrics",
         "render_reports",
     ]
+
+
+def test_model_validation_workflow_executes_v1_compat_until_report_confirmation(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    _write_report_template(tmp_path / "report_templates" / "default.docx")
+    source_dir = _write_validation_project(tmp_path / "materials")
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+    created = client.post(f"/api/tasks/{task.id}/plans", json={"goal": "模型验证"})
+    assert created.status_code == 201, created.text
+    plan = created.json()["plan"]
+    plan_id = plan["id"]
+    report_step_id = plan["steps"][-1]["id"]
+
+    confirmed = client.post(f"/api/plans/{plan_id}/confirm")
+    first_run = client.post(f"/api/plans/{plan_id}/run")
+    waiting = client.get(f"/api/plans/{plan_id}").json()["plan"]
+
+    assert confirmed.status_code == 200, confirmed.text
+    assert first_run.status_code == 202, first_run.text
+    assert waiting["status"] == "awaiting_confirm"
+    assert [step["status"] for step in waiting["steps"][:3]] == ["done", "done", "done"]
+    assert waiting["steps"][-1]["status"] == "awaiting_confirm"
+
+    resumed = client.post(f"/api/plans/{plan_id}/steps/{report_step_id}/confirm")
+    completed = client.get(f"/api/plans/{plan_id}").json()["plan"]
+
+    assert resumed.status_code == 202, resumed.text
+    assert completed["status"] == "done"
+    assert [step["status"] for step in completed["steps"]] == ["done", "done", "done", "done"]
+    assert (tmp_path / "tasks" / task.id / "outputs" / "validation.xlsx").exists()
+    assert (tmp_path / "tasks" / task.id / "outputs" / "validation_report.docx").exists()
 
 
 class _NoLLM:

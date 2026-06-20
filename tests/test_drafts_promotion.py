@@ -98,6 +98,22 @@ def test_validate_and_promote_draft_registers_formal_plugin(tmp_path):
     assert (plugins_dir / manifest.name / "manifest.json").exists()
 
 
+def test_validate_for_promotion_rejects_malformed_test_case_without_running(tmp_path):
+    sandbox, drafts, _plugin_registry, _plugins_dir = _runtime(tmp_path)
+    draft = _draft()
+    drafts.add(draft)
+
+    check = validate_for_promotion(
+        draft,
+        sandbox=sandbox,
+        test_cases=[{"expect": {"margin": 7}}],
+    )
+
+    assert check.passed is False
+    assert check.problems == ("test case 1 inputs must be an object",)
+    assert check.test_result is None
+
+
 def test_promote_draft_rejects_failed_check_and_reject_marks_status(tmp_path):
     sandbox, drafts, plugin_registry, plugins_dir = _runtime(tmp_path)
     draft = _draft()

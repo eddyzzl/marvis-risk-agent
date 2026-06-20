@@ -162,6 +162,7 @@ class PlanExecutor:
             step.output_ref = self._repo.store_step_output(step.id, output)
             step.status = StepStatus.DONE
             self._repo.update_step(step)
+            self._dispatch_feature_computed(plan, step, output)
             self._dispatch(
                 "step.completed",
                 {"plan_id": plan.id, "step_id": step.id},
@@ -279,6 +280,27 @@ class PlanExecutor:
             return str(tools.resolve(step.tool_ref).failure_policy)
         except Exception:
             return "fail"
+
+    def _dispatch_feature_computed(self, plan: Plan, step: PlanStep, output: dict) -> None:
+        if step.tool_ref.plugin != "feature":
+            return
+        payload = {
+            "plan_id": plan.id,
+            "step_id": step.id,
+            "tool": step.tool_ref.tool,
+            "output_ref": step.output_ref,
+        }
+        for field in (
+            "dataset_id",
+            "derived_dataset_id",
+            "features",
+            "new_columns",
+            "feature",
+            "target_col",
+        ):
+            if field in output:
+                payload[field] = output[field]
+        self._dispatch("feature.computed", payload, task_id=plan.task_id)
 
     def _should_failure_replan(
         self,

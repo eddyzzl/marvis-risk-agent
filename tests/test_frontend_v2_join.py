@@ -399,3 +399,78 @@ def test_join_handlers_require_dedup_before_confirming_and_surface_execute_error
         assert.equal(listeners.click, undefined);
         """
     )
+
+
+def test_join_handlers_surface_execute_api_errors_without_bubbling():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const listeners = {};
+        const messages = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachJoinHandlers(root, {
+          executeJoin: async (joinId) => {
+            assert.equal(joinId, "join-1");
+            throw new Error("join produced 12 > anchor 10 rows");
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-exec-join]"
+                ? { dataset: { execJoin: "join-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(messages, ["join produced 12 > anchor 10 rows"]);
+        """
+    )
+
+
+def test_join_handlers_surface_confirm_api_errors_without_bubbling():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+        import { resetV2State, setCurrentJoin } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setCurrentJoin({ id: "join-1" });
+        const listeners = {};
+        const messages = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector() { return null; },
+        };
+        attachJoinHandlers(root, {
+          confirmJoinSpec: async () => {
+            throw new Error("join plan or feature not found");
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-confirm-join]"
+                ? { dataset: { confirmJoin: "feature-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(messages, ["join plan or feature not found"]);
+        """
+    )

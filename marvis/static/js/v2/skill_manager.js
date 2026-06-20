@@ -102,19 +102,58 @@ function skillActionErrorMessage(error, fallback) {
   return error?.message || fallback;
 }
 
+function defaultScheduleValidation(fn, delay) {
+  return setTimeout(fn, delay);
+}
+
+function defaultCancelValidation(handle) {
+  clearTimeout(handle);
+}
+
 export function attachSkillHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachSkillHandlers requires a stable event root");
   }
   const actions = {
+    cancelValidation: defaultCancelValidation,
     refreshSkills: async () => {},
     reloadSkills: reloadSkillsApi,
+    scheduleValidation: defaultScheduleValidation,
     showError: defaultShowError,
     validateSkill: validateSkillApi,
+    validationDelayMs: 250,
     ...deps,
   };
 
   const validationSlot = () => root.querySelector?.("[data-skill-validation-result]");
+  let pendingValidation = null;
+  let validationVersion = 0;
+
+  const cancelPendingValidation = () => {
+    if (pendingValidation !== null) {
+      actions.cancelValidation(pendingValidation);
+      pendingValidation = null;
+    }
+  };
+
+  const runValidation = async (skill, version) => {
+    if (version !== validationVersion) {
+      return;
+    }
+    const slot = validationSlot();
+    try {
+      const result = await actions.validateSkill(skill);
+      if (version === validationVersion && slot) {
+        slot.innerHTML = skillValidationResultHtml(result);
+      }
+    } catch (error) {
+      if (version === validationVersion && slot) {
+        slot.innerHTML = skillValidationResultHtml({
+          problems: [skillActionErrorMessage(error, "skill validation failed")],
+        });
+      }
+    }
+  };
 
   const clickHandler = async (event) => {
     const reloadButton = closest(event.target, "#reloadSkills")
@@ -137,6 +176,9 @@ export function attachSkillHandlers(root, deps = {}) {
       return;
     }
     const slot = validationSlot();
+    cancelPendingValidation();
+    const version = validationVersion + 1;
+    validationVersion = version;
     let skill;
     try {
       skill = JSON.parse(input.value || "{}");
@@ -146,23 +188,17 @@ export function attachSkillHandlers(root, deps = {}) {
       }
       return;
     }
-    try {
-      const result = await actions.validateSkill(skill);
-      if (slot) {
-        slot.innerHTML = skillValidationResultHtml(result);
-      }
-    } catch (error) {
-      if (slot) {
-        slot.innerHTML = skillValidationResultHtml({
-          problems: [skillActionErrorMessage(error, "skill validation failed")],
-        });
-      }
-    }
+    pendingValidation = actions.scheduleValidation(() => {
+      pendingValidation = null;
+      return runValidation(skill, version);
+    }, actions.validationDelayMs);
   };
 
   root.addEventListener("click", clickHandler);
   root.addEventListener("input", inputHandler);
   return () => {
+    cancelPendingValidation();
+    validationVersion += 1;
     root.removeEventListener?.("click", clickHandler);
     root.removeEventListener?.("input", inputHandler);
   };

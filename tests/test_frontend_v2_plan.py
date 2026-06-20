@@ -201,3 +201,37 @@ def test_start_plan_polling_dedupes_and_stops_at_terminal_status():
         stopPlanPolling("plan-1");
         """
     )
+
+
+def test_start_plan_polling_surfaces_autostart_errors_without_unhandled_rejection():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          startPlanPolling,
+          stopPlanPolling,
+        } from "./marvis/static/js/v2/plan_view.js";
+
+        const messages = [];
+        const unhandled = [];
+        const onUnhandled = (error) => unhandled.push(error?.message || String(error));
+        process.on("unhandledRejection", onUnhandled);
+        globalThis.fetch = async () => ({
+          ok: false,
+          status: 503,
+          headers: { get: () => "application/json" },
+          json: async () => ({ detail: "poll failed" }),
+          text: async () => "",
+        });
+
+        startPlanPolling("plan-error", {
+          showError: (message) => messages.push(message),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        process.off("unhandledRejection", onUnhandled);
+        stopPlanPolling("plan-error");
+        assert.deepEqual(messages, ["poll failed"]);
+        assert.deepEqual(unhandled, []);
+        """
+    )

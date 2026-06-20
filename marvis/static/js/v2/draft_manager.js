@@ -32,6 +32,11 @@ function sourceLabel(source) {
   }[source] || String(source || "unknown");
 }
 
+function statusOptionHtml(value, label, selectedStatus) {
+  const selected = String(value || "") === selectedStatus ? " selected" : "";
+  return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(label)}</option>`;
+}
+
 function statusQuery(root) {
   const status = String(root?.querySelector?.("[data-draft-status]")?.value || "").trim();
   return status ? { status } : {};
@@ -71,8 +76,16 @@ function defaultConfirmReject() {
   return "";
 }
 
-export function draftManagerHtml(data = {}) {
+function defaultConfirmPromote(id) {
+  if (typeof confirm === "function") {
+    return confirm(`Promote draft ${id} into the trusted tool registry?`);
+  }
+  return true;
+}
+
+export function draftManagerHtml(data = {}, options = {}) {
   const drafts = data.drafts || [];
+  const selectedStatus = String(options.status || "");
   const rows = drafts.length
     ? drafts.map(draftRowHtml).join("")
     : '<div class="v2-empty" data-v2-empty="drafts">No draft tools</div>';
@@ -81,11 +94,11 @@ export function draftManagerHtml(data = {}) {
       <label>
         Status
         <select data-draft-status>
-          <option value="">All</option>
-          <option value="draft">Draft</option>
-          <option value="tested">Tested</option>
-          <option value="promoted">Promoted</option>
-          <option value="rejected">Rejected</option>
+          ${statusOptionHtml("", "All", selectedStatus)}
+          ${statusOptionHtml("draft", "Draft", selectedStatus)}
+          ${statusOptionHtml("tested", "Tested", selectedStatus)}
+          ${statusOptionHtml("promoted", "Promoted", selectedStatus)}
+          ${statusOptionHtml("rejected", "Rejected", selectedStatus)}
         </select>
       </label>
       <button type="button" data-refresh-drafts>Refresh</button>
@@ -198,8 +211,9 @@ export async function renderDraftManager(container, deps = {}) {
     container.dataset.v2DraftManager = "true";
   }
   const actions = { listDrafts: listDraftsApi, ...deps };
-  const data = await actions.listDrafts();
-  container.innerHTML = draftManagerHtml(data);
+  const query = statusQuery(container);
+  const data = await actions.listDrafts(query);
+  container.innerHTML = draftManagerHtml(data, query);
   return data;
 }
 
@@ -208,6 +222,7 @@ export function attachDraftHandlers(root, deps = {}) {
     throw new Error("attachDraftHandlers requires a stable event root");
   }
   const actions = {
+    confirmPromote: defaultConfirmPromote,
     confirmReject: defaultConfirmReject,
     getDraft: getDraftApi,
     promoteDraft: promoteDraftApi,
@@ -219,6 +234,13 @@ export function attachDraftHandlers(root, deps = {}) {
   };
 
   const refresh = () => actions.refreshDrafts(statusQuery(root));
+  const refreshWithFeedback = async () => {
+    try {
+      await refresh();
+    } catch (error) {
+      actions.showError(error?.message || "draft refresh failed");
+    }
+  };
 
   const clickHandler = async (event) => {
     const target = event.target;
@@ -250,11 +272,15 @@ export function attachDraftHandlers(root, deps = {}) {
     if (promoteButton?.dataset?.promoteDraft) {
       event.preventDefault?.();
       try {
+        const draftId = promoteButton.dataset.promoteDraft;
         const testCases = parseJsonField(root, "[data-draft-promotion-tests]", []);
         if (!Array.isArray(testCases) || !testCases.length) {
           throw new Error("Promotion test cases are required");
         }
-        await actions.promoteDraft(promoteButton.dataset.promoteDraft, testCases);
+        if (!actions.confirmPromote(draftId, testCases)) {
+          return;
+        }
+        await actions.promoteDraft(draftId, testCases);
         await refresh();
       } catch (error) {
         actions.showError(error?.message || "draft promotion failed");
@@ -281,13 +307,13 @@ export function attachDraftHandlers(root, deps = {}) {
     const refreshButton = closest(target, "[data-refresh-drafts]");
     if (refreshButton) {
       event.preventDefault?.();
-      await refresh();
+      await refreshWithFeedback();
     }
   };
 
   const changeHandler = async (event) => {
     if (closest(event.target, "[data-draft-status]")) {
-      await refresh();
+      await refreshWithFeedback();
     }
   };
 

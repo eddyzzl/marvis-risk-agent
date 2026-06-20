@@ -359,24 +359,32 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
         actions.showError("dedup strategy is required before confirming this join");
         return;
       }
-      await actions.confirmJoinSpec(joinId, {
-        feature_id: featureDatasetId,
-        feature_dataset_id: featureDatasetId,
-        dedup_strategy: dedupStrategy,
-      });
-      await actions.refreshJoin(joinId);
+      try {
+        await actions.confirmJoinSpec(joinId, {
+          feature_id: featureDatasetId,
+          feature_dataset_id: featureDatasetId,
+          dedup_strategy: dedupStrategy,
+        });
+        await actions.refreshJoin(joinId);
+      } catch (error) {
+        actions.showError(error?.message || "confirm join failed");
+      }
       return;
     }
 
     const executeButton = closest(target, "[data-exec-join]");
     if (executeButton?.dataset?.execJoin) {
       event.preventDefault?.();
-      const result = await actions.executeJoin(executeButton.dataset.execJoin);
-      if (result?.fan_out) {
-        actions.showError("fan-out detected; join execution was stopped");
-        return;
+      try {
+        const result = await actions.executeJoin(executeButton.dataset.execJoin);
+        if (result?.fan_out) {
+          actions.showError("fan-out detected; join execution was stopped");
+          return;
+        }
+        actions.showResult(result);
+      } catch (error) {
+        actions.showError(error?.message || "execute join failed");
       }
-      actions.showResult(result);
     }
   };
 

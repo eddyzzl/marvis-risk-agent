@@ -64,6 +64,7 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
           },
         };
 
+        const scheduled = [];
         const detach = attachSkillHandlers(root, {
           reloadSkills: async () => calls.push(["reloadSkills"]),
           refreshSkills: async () => calls.push(["refreshSkills"]),
@@ -71,6 +72,12 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
             calls.push(["validateSkill", skill]);
             return { problems: [] };
           },
+          validationDelayMs: 200,
+          scheduleValidation: (fn) => {
+            scheduled.push(fn);
+            return fn;
+          },
+          cancelValidation: () => {},
         });
 
         const reloadTarget = {
@@ -88,6 +95,9 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
           },
         };
         await listeners.input({ target: validTarget });
+        assert.deepEqual(calls, []);
+        assert.equal(scheduled.length, 1);
+        await scheduled.shift()();
         assert.deepEqual(calls.splice(0), [["validateSkill", { id: "preview_echo" }]]);
         assert.ok(resultSlot.innerHTML.includes("Valid skill"));
 
@@ -104,6 +114,71 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
         detach();
         assert.equal(listeners.click, undefined);
         assert.equal(listeners.input, undefined);
+        """
+    )
+
+
+def test_skill_handlers_debounce_validation_input_and_keep_latest_payload():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachSkillHandlers } from "./marvis/static/js/v2/skill_manager.js";
+
+        const calls = [];
+        const scheduled = [];
+        const canceled = [];
+        const resultSlot = { innerHTML: "" };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) {
+            return selector === "[data-skill-validation-result]" ? resultSlot : null;
+          },
+        };
+
+        attachSkillHandlers(root, {
+          validateSkill: async (skill) => {
+            calls.push(["validateSkill", skill]);
+            return { problems: [] };
+          },
+          validationDelayMs: 250,
+          scheduleValidation: (fn, delay) => {
+            const handle = { fn, delay };
+            scheduled.push(handle);
+            return handle;
+          },
+          cancelValidation: (handle) => canceled.push(handle),
+        });
+
+        const firstTarget = {
+          value: '{"id":"first"}',
+          closest(selector) {
+            return selector === "[data-validate-skill]" ? this : null;
+          },
+        };
+        const secondTarget = {
+          value: '{"id":"second"}',
+          closest(selector) {
+            return selector === "[data-validate-skill]" ? this : null;
+          },
+        };
+
+        await listeners.input({ target: firstTarget });
+        await listeners.input({ target: secondTarget });
+
+        assert.equal(scheduled.length, 2);
+        assert.deepEqual(canceled, [scheduled[0]]);
+        assert.deepEqual(calls, []);
+        assert.equal(scheduled[0].delay, 250);
+        assert.equal(scheduled[1].delay, 250);
+
+        await scheduled[0].fn();
+        assert.deepEqual(calls, []);
+
+        await scheduled[1].fn();
+        assert.deepEqual(calls, [["validateSkill", { id: "second" }]]);
+        assert.ok(resultSlot.innerHTML.includes("Valid skill"));
         """
     )
 
@@ -165,12 +240,19 @@ def test_skill_handlers_show_local_only_message_for_validate_403():
           },
         };
 
+        const scheduled = [];
         attachSkillHandlers(root, {
           validateSkill: async () => {
             const error = new Error("forbidden <script>");
             error.status = 403;
             throw error;
           },
+          validationDelayMs: 200,
+          scheduleValidation: (fn) => {
+            scheduled.push(fn);
+            return fn;
+          },
+          cancelValidation: () => {},
         });
 
         const validTarget = {
@@ -180,6 +262,8 @@ def test_skill_handlers_show_local_only_message_for_validate_403():
           },
         };
         await listeners.input({ target: validTarget });
+        assert.equal(scheduled.length, 1);
+        await scheduled.shift()();
 
         assert.ok(resultSlot.innerHTML.includes("local workspace"));
         assert.equal(resultSlot.innerHTML.includes("forbidden"), false);

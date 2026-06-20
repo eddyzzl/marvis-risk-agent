@@ -150,11 +150,23 @@ def _desensitize(value: Any, role: str) -> object:
 
 
 def _mask_text(value: Any, *, keep_start: int, keep_end: int) -> str:
-    text = str(value).strip()
+    text = _mask_source_text(value)
     if len(text) <= keep_start + keep_end:
         return "*" * len(text)
     hidden = "*" * (len(text) - keep_start - keep_end)
     return f"{text[:keep_start]}{hidden}{text[-keep_end:]}"
+
+
+def _mask_source_text(value: Any) -> str:
+    if not isinstance(value, str):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if number.is_integer():
+                return str(int(number))
+    return str(value).strip()
 
 
 def _binary_value(value: Any) -> int | None:

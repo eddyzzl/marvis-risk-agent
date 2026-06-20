@@ -1,5 +1,7 @@
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from marvis.db import PluginRepository, init_db
 from marvis.plugins.loader import load_builtin_packs
@@ -39,6 +41,27 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.output == {"echoed": "hi"}
     assert result.error is None
     assert result.duration_ms >= 0
+
+
+def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeypatch):
+    runner = _runner(tmp_path)
+    calls = []
+
+    def fake_run(_args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            stdout=json.dumps({"ok": True, "output": {"echoed": "你好"}}, ensure_ascii=False),
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.run", fake_run)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "你好"}, task_id="task-1")
+
+    assert result.ok is True
+    assert result.output == {"echoed": "你好"}
+    assert calls[0]["encoding"] == "utf-8"
 
 
 def test_tool_runner_records_invocation_audit(tmp_path):
