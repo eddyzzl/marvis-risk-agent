@@ -78,7 +78,7 @@ export function mountV2(root, options = {}) {
     if (typeof root.addEventListener === "function") {
       cleanups.push(
         attachCapabilityHandlers(root),
-        attachJoinHandlers(root),
+        attachJoinHandlers(root, options.taskId || ""),
         attachGoalHandlers(root, options.taskId || ""),
         attachPlanConfirmHandlers(root),
         attachPluginHandlers(root),

@@ -148,6 +148,181 @@ def test_join_review_accepts_backend_join_plan_payload_shape():
     )
 
 
+def test_render_join_review_with_explicit_plan_renders_immediately():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderJoinReview } from "./marvis/static/js/v2/join_review.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const container = { dataset: {}, innerHTML: "" };
+        const cleanup = renderJoinReview(container, {
+          id: "join-explicit",
+          anchor_dataset_id: "sample",
+          joins: [],
+        });
+
+        assert.equal(container.dataset.v2JoinReview, "true");
+        assert.ok(container.innerHTML.includes('data-join-id="join-explicit"'));
+        cleanup();
+        """
+    )
+
+
+def test_join_proposal_renders_dataset_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { joinProposalHtml } from "./marvis/static/js/v2/join_review.js";
+
+        const html = joinProposalHtml([
+          {
+            id: "anchor-1",
+            source_name: "sample<img>.csv",
+            role: "sample",
+            row_count: 100,
+          },
+          {
+            id: "feature-1",
+            source_name: "feature.csv",
+            role: "feature",
+            row_count: 50,
+          },
+        ]);
+
+        assert.equal(html.includes("<img>"), false);
+        assert.ok(html.includes("sample&lt;img&gt;.csv"));
+        assert.ok(html.includes('data-refresh-datasets'));
+        assert.ok(html.includes('data-join-anchor'));
+        assert.ok(html.includes('data-join-features'));
+        assert.ok(html.includes("multiple"));
+        assert.ok(html.includes('value="anchor-1"'));
+        assert.ok(html.includes('value="feature-1"'));
+        assert.ok(html.includes("sample | 100 rows"));
+        assert.ok(html.includes("feature | 50 rows"));
+        assert.ok(html.includes('data-propose-join'));
+        """
+    )
+
+
+def test_join_handlers_refresh_datasets_and_propose_join_from_controls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const calls = [];
+        const problemSlot = { innerHTML: "stale" };
+        const anchorControl = { value: "anchor-1" };
+        const featureControl = {
+          selectedOptions: [{ value: "feature-1" }, { value: "anchor-1" }],
+        };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector(selector) {
+            if (selector === "[data-join-problems]") return problemSlot;
+            if (selector === "[data-join-anchor]") return anchorControl;
+            if (selector === "[data-join-features]") return featureControl;
+            return null;
+          },
+        };
+
+        const detach = attachJoinHandlers(root, () => "task-1", {
+          listDatasets: async (taskId) => {
+            calls.push(["listDatasets", taskId]);
+            return {
+              datasets: [
+                { id: "anchor-1", source_name: "sample.csv", role: "sample" },
+                { id: "feature-1", source_name: "feature.csv", role: "feature" },
+              ],
+            };
+          },
+          proposeJoin: async (taskId, body) => {
+            calls.push(["proposeJoin", taskId, body]);
+            return { join_plan_id: "join-new", joins: [] };
+          },
+          setDatasets: (datasets) => calls.push(["setDatasets", datasets.map((item) => item.id)]),
+          setCurrentJoin: (joinPlan) => calls.push(["setCurrentJoin", joinPlan.join_plan_id]),
+          showError: (message) => calls.push(["showError", message]),
+        });
+
+        const refreshTarget = {
+          closest(selector) {
+            return selector === "[data-refresh-datasets]" ? { dataset: { refreshDatasets: "" } } : null;
+          },
+        };
+        await listeners.click({ target: refreshTarget, preventDefault() {} });
+        assert.deepEqual(calls.splice(0), [
+          ["listDatasets", "task-1"],
+          ["setDatasets", ["anchor-1", "feature-1"]],
+        ]);
+        assert.equal(problemSlot.innerHTML, "");
+
+        const proposeTarget = {
+          closest(selector) {
+            return selector === "[data-propose-join]" ? { dataset: { proposeJoin: "" } } : null;
+          },
+        };
+        await listeners.click({ target: proposeTarget, preventDefault() {} });
+        assert.deepEqual(calls.splice(0), [
+          [
+            "proposeJoin",
+            "task-1",
+            { anchor_dataset_id: "anchor-1", feature_dataset_ids: ["feature-1"] },
+          ],
+          ["setCurrentJoin", "join-new"],
+        ]);
+        assert.equal(problemSlot.innerHTML, "");
+
+        detach();
+        assert.equal(listeners.click, undefined);
+        """
+    )
+
+
+def test_join_handlers_require_task_before_dataset_actions():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const calls = [];
+        const problemSlot = { innerHTML: "" };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector(selector) {
+            return selector === "[data-join-problems]" ? problemSlot : null;
+          },
+        };
+
+        attachJoinHandlers(root, () => "", {
+          listDatasets: async () => calls.push(["listDatasets"]),
+          proposeJoin: async () => calls.push(["proposeJoin"]),
+          showError: (message) => calls.push(["showError", message]),
+        });
+
+        const refreshTarget = {
+          closest(selector) {
+            return selector === "[data-refresh-datasets]" ? { dataset: { refreshDatasets: "" } } : null;
+          },
+        };
+        await listeners.click({ target: refreshTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, []);
+        assert.ok(problemSlot.innerHTML.includes("select or create a task"));
+        """
+    )
+
+
 def test_join_handlers_require_dedup_before_confirming_and_surface_execute_errors():
     run_node(
         """

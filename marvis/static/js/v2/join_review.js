@@ -3,10 +3,15 @@ import {
   confirmJoinSpec as confirmJoinSpecApi,
   executeJoin as executeJoinApi,
   getJoinPlan,
+  listDatasets as listDatasetsApi,
+  proposeJoin as proposeJoinApi,
 } from "./api_v2.js";
 import {
+  getDatasets,
   getCurrentJoin,
+  onDatasetsChange,
   onCurrentJoinChange,
+  setDatasets,
   setCurrentJoin,
 } from "./state_v2.js";
 
@@ -40,6 +45,88 @@ function anchorDatasetId(joinPlan) {
 
 function featureDatasetId(spec) {
   return String(spec?.feature_dataset_id || spec?.feature_id || "");
+}
+
+function datasetId(dataset) {
+  return String(dataset?.id || dataset?.dataset_id || "");
+}
+
+function datasetLabel(dataset) {
+  const source = String(dataset?.source_name || dataset?.name || datasetId(dataset) || "dataset");
+  const role = String(dataset?.role || "dataset");
+  const rowCount = Number(dataset?.row_count);
+  const rows = Number.isFinite(rowCount) ? `${rowCount} rows` : "rows unknown";
+  return `${source} - ${role} | ${rows}`;
+}
+
+function datasetOptionsHtml(datasets) {
+  return datasets.map((dataset) => {
+    const id = datasetId(dataset);
+    return `<option value="${escapeHtml(id)}">${escapeHtml(datasetLabel(dataset))}</option>`;
+  }).join("");
+}
+
+function joinProblemHtml(problems) {
+  if (!problems.length) {
+    return "";
+  }
+  return `<div class="join-problems" data-join-problem>${problems
+    .map((problem) => `<div>${escapeHtml(problem)}</div>`)
+    .join("")}</div>`;
+}
+
+function renderJoinProblems(root, problems = []) {
+  const slot = root.querySelector?.("[data-join-problems]");
+  if (!slot) {
+    return false;
+  }
+  slot.innerHTML = joinProblemHtml(problems);
+  return true;
+}
+
+function showJoinProblem(root, actions, message) {
+  if (!renderJoinProblems(root, [message])) {
+    actions.showError(message);
+  }
+}
+
+function clearJoinProblems(root) {
+  renderJoinProblems(root, []);
+}
+
+function resolveTaskId(taskId) {
+  const value = typeof taskId === "function" ? taskId() : taskId;
+  return String(value || "").trim();
+}
+
+function controlValue(root, selector) {
+  return String(root.querySelector?.(selector)?.value || "").trim();
+}
+
+function selectedValues(root, selector) {
+  const control = root.querySelector?.(selector);
+  if (!control) {
+    return [];
+  }
+  const selectedOptions = control.selectedOptions
+    ? Array.from(control.selectedOptions)
+    : Array.from(control.options || []).filter((option) => option.selected);
+  if (selectedOptions.length) {
+    return selectedOptions.map((option) => String(option.value || "").trim()).filter(Boolean);
+  }
+  const value = String(control.value || "").trim();
+  return value ? [value] : [];
+}
+
+function uniqueValues(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function normalizeAttachArgs(taskId, deps) {
+  if (taskId && typeof taskId === "object" && !Array.isArray(taskId)) {
+    return { taskId: "", deps: taskId };
+  }
+  return { taskId, deps };
 }
 
 function keyPairsHtml(spec) {
@@ -122,6 +209,32 @@ export function joinReviewHtml(joinPlan) {
   </section>`;
 }
 
+export function joinProposalHtml(datasets = getDatasets()) {
+  const items = Array.isArray(datasets) ? datasets : [];
+  const options = datasetOptionsHtml(items);
+  return `<section class="join-proposal" data-join-proposal>
+    <div class="join-proposal-toolbar">
+      <button type="button" data-refresh-datasets>Refresh datasets</button>
+    </div>
+    ${items.length
+    ? `<label>
+        Anchor dataset
+        <select data-join-anchor>${options}</select>
+      </label>
+      <label>
+        Feature datasets
+        <select data-join-features multiple>${options}</select>
+      </label>
+      <button type="button" data-propose-join>Propose join</button>`
+    : '<div class="v2-empty" data-v2-empty="datasets">No datasets loaded</div>'}
+    <div data-join-problems></div>
+  </section>`;
+}
+
+export function joinPanelHtml(joinPlan = getCurrentJoin(), datasets = getDatasets()) {
+  return `${joinProposalHtml(datasets)}${joinReviewHtml(joinPlan)}`;
+}
+
 export function renderJoinReview(container, joinPlan = getCurrentJoin()) {
   if (!container) {
     throw new Error("renderJoinReview requires a container");
@@ -129,11 +242,18 @@ export function renderJoinReview(container, joinPlan = getCurrentJoin()) {
   if (container.dataset) {
     container.dataset.v2JoinReview = "true";
   }
-  const render = (nextJoin) => {
-    container.innerHTML = joinReviewHtml(nextJoin);
+  const render = () => {
+    container.innerHTML = joinPanelHtml(getCurrentJoin(), getDatasets());
   };
-  render(joinPlan);
-  return onCurrentJoinChange((nextJoin) => render(nextJoin));
+  if (joinPlan !== getCurrentJoin()) {
+    setCurrentJoin(joinPlan);
+  }
+  render();
+  const cleanups = [
+    onCurrentJoinChange(() => render()),
+    onDatasetsChange(() => render()),
+  ];
+  return () => cleanups.forEach((cleanup) => cleanup());
 }
 
 function defaultShowError(message) {
@@ -153,22 +273,77 @@ async function defaultRefreshJoin(joinId) {
   return joinPlan;
 }
 
-export function attachJoinHandlers(root, deps = {}) {
+export function attachJoinHandlers(root, taskId = "", deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachJoinHandlers requires a stable event root");
   }
+  const normalized = normalizeAttachArgs(taskId, deps);
   const actions = {
     confirmJoinSpec: confirmJoinSpecApi,
     executeJoin: executeJoinApi,
+    listDatasets: listDatasetsApi,
+    proposeJoin: proposeJoinApi,
     getCurrentJoin,
     refreshJoin: defaultRefreshJoin,
+    setCurrentJoin,
+    setDatasets,
     showError: defaultShowError,
     showResult: () => {},
-    ...deps,
+    ...normalized.deps,
   };
 
   const handler = async (event) => {
     const target = event.target;
+    const refreshButton = closest(target, "[data-refresh-datasets]");
+    if (refreshButton) {
+      event.preventDefault?.();
+      const resolvedTaskId = resolveTaskId(normalized.taskId);
+      if (!resolvedTaskId) {
+        showJoinProblem(root, actions, "select or create a task before loading V2 datasets");
+        return;
+      }
+      try {
+        const payload = await actions.listDatasets(resolvedTaskId);
+        const datasets = Array.isArray(payload?.datasets) ? payload.datasets : [];
+        actions.setDatasets(datasets);
+        clearJoinProblems(root);
+      } catch (error) {
+        showJoinProblem(root, actions, error?.message || "load datasets failed");
+      }
+      return;
+    }
+
+    const proposeButton = closest(target, "[data-propose-join]");
+    if (proposeButton) {
+      event.preventDefault?.();
+      const resolvedTaskId = resolveTaskId(normalized.taskId);
+      if (!resolvedTaskId) {
+        showJoinProblem(root, actions, "select or create a task before proposing a join");
+        return;
+      }
+      const anchorId = controlValue(root, "[data-join-anchor]");
+      const featureIds = uniqueValues(selectedValues(root, "[data-join-features]"))
+        .filter((featureId) => featureId !== anchorId);
+      if (!anchorId || !featureIds.length) {
+        showJoinProblem(root, actions, "select one anchor dataset and at least one feature dataset");
+        return;
+      }
+      try {
+        const payload = await actions.proposeJoin(resolvedTaskId, {
+          anchor_dataset_id: anchorId,
+          feature_dataset_ids: featureIds,
+        });
+        const joinPlan = payload?.join_plan || payload?.join || payload;
+        if (joinPlan) {
+          actions.setCurrentJoin(joinPlan);
+        }
+        clearJoinProblems(root);
+      } catch (error) {
+        showJoinProblem(root, actions, error?.message || "propose join failed");
+      }
+      return;
+    }
+
     const confirmButton = closest(target, "[data-confirm-join]");
     if (confirmButton?.dataset?.confirmJoin) {
       event.preventDefault?.();
