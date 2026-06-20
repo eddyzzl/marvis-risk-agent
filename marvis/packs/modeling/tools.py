@@ -243,7 +243,12 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         else {}
     )
     feature_importance = _feature_importance_rows(artifact, feature_dictionary=feature_dictionary)
-    split_profile = _dataset_split_profile(runtime, dataset_path, experiment.config)
+    split_profile = _dataset_split_profile(
+        runtime,
+        dataset_path,
+        experiment.config,
+        window_col=business.loan_month_col,
+    )
     structured_summary = _report_structured_summary(
         project_meta=dict(inputs.get("project_meta") or {}),
         dataset_split=_dataset_split_rows(experiment.metrics, split_profile=split_profile),
@@ -422,19 +427,39 @@ def _dataset_split_rows(metrics, *, split_profile: dict[str, dict] | None = None
     ]
 
 
-def _dataset_split_profile(runtime: _Runtime, dataset_path: Path, config: TrainConfig) -> dict[str, dict]:
-    frame = runtime.backend.read_frame(dataset_path, columns=[config.split_col, config.target_col])
+def _dataset_split_profile(
+    runtime: _Runtime,
+    dataset_path: Path,
+    config: TrainConfig,
+    *,
+    window_col: str | None = None,
+) -> dict[str, dict]:
+    frame = runtime.backend.read_frame(dataset_path, columns=_unique_columns([config.split_col, config.target_col, window_col]))
     target = pd.to_numeric(frame[config.target_col], errors="coerce")
     binary_target = target.dropna().isin([0, 1]).all()
     profile = {}
     for split in ("train", "test", "oot"):
         split_value = config.split_values.get(split, split)
-        group_target = target[frame[config.split_col] == split_value]
+        split_mask = frame[config.split_col] == split_value
+        group_target = target[split_mask]
         row = {"sample_count": int(len(group_target))}
         if binary_target:
             row["bad_rate"] = _ratio(float((group_target == 1).sum()), float(len(group_target)))
+        if window_col and window_col in frame.columns:
+            window_values = sorted(str(value) for value in frame.loc[split_mask, window_col].dropna().unique())
+            if window_values:
+                row["window_start"] = window_values[0]
+                row["window_end"] = window_values[-1]
         profile[split] = row
     return profile
+
+
+def _unique_columns(values) -> list[str]:
+    columns = []
+    for value in values:
+        if value and str(value) not in columns:
+            columns.append(str(value))
+    return columns
 
 
 def _stability_rows(metrics) -> list[dict]:
