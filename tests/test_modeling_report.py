@@ -12,6 +12,7 @@ from marvis.domain import TaskCreate
 from marvis.output.model_report import ModelReportPayload, render_model_report
 from marvis.packs.modeling.report_compute import (
     BusinessColumns,
+    compute_amount_bin_table,
     compute_sample_analysis,
     compute_vintage_report,
     resolve_report_sections,
@@ -102,6 +103,33 @@ def test_model_report_compute_functions_are_deterministic(tmp_path):
         ratios=(0.25, 0.5),
     )
     assert set(low_pricing["by_ratio"]) == {"0.25", "0.5"}
+
+
+def test_amount_bin_table_computes_credit_utilization_by_bin(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.8, 0.9],
+        "y": [0, 1, 0, 1],
+        "drawdown": [50.0, 100.0, 300.0, 100.0],
+        "limit": [100.0, 100.0, 400.0, 100.0],
+    })
+    path = tmp_path / "amount_bins.parquet"
+    frame.to_parquet(path, index=False)
+
+    rows = compute_amount_bin_table(
+        DataBackend(tmp_path),
+        path,
+        score_col="score",
+        target_col="y",
+        edges=[0.0, 0.5, 1.0],
+        business=BusinessColumns(
+            drawdown_amount_col="drawdown",
+            credit_limit_col="limit",
+        ),
+    )
+
+    by_bin = {row["bin_index"]: row for row in rows}
+    assert by_bin[1]["额度使用率"] == pytest.approx(0.75)
+    assert by_bin[2]["额度使用率"] == pytest.approx(0.8)
 
 
 def test_resolve_sections_and_render_model_report_degrades_missing_business_data(tmp_path):

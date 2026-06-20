@@ -162,6 +162,7 @@ def compute_amount_bin_table(
         business.term_col,
         business.credit_limit_col,
         business.loan_amount_col,
+        business.drawdown_amount_col,
     ])
     frame = backend.read_frame(dataset_path, columns=columns)
     edges = np.asarray(edges, dtype=float)
@@ -175,6 +176,15 @@ def compute_amount_bin_table(
         _add_mean(payload, "平均期数", group, business.term_col)
         _add_mean(payload, "平均授信金额", group, business.credit_limit_col)
         _add_mean(payload, "平均放款金额", group, business.loan_amount_col)
+        if (
+            business.drawdown_amount_col
+            and business.drawdown_amount_col in group.columns
+            and business.credit_limit_col
+            and business.credit_limit_col in group.columns
+        ):
+            drawdown = pd.to_numeric(group[business.drawdown_amount_col], errors="coerce").fillna(0)
+            limit = pd.to_numeric(group[business.credit_limit_col], errors="coerce").fillna(0)
+            payload["额度使用率"] = _ratio(float(drawdown.sum()), float(limit.sum()))
         if business.loan_amount_col and business.loan_amount_col in group.columns:
             amount = pd.to_numeric(group[business.loan_amount_col], errors="coerce").fillna(0)
             target = pd.to_numeric(group[target_col], errors="coerce").fillna(0)
