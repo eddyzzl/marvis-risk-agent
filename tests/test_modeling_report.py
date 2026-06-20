@@ -139,6 +139,35 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
+def test_render_model_report_summary_lists_unique_products_from_feature_dictionary(tmp_path):
+    output = tmp_path / "model_report.xlsx"
+    render_model_report(
+        ModelReportPayload(
+            project_meta={"项目名称": "建模报告"},
+            dataset_split=[],
+            stability=[],
+            sample_analysis=[],
+            vintage=None,
+            feature_importance=[
+                {"feature": "x1", "importance": 0.7, "产品名称": "征信评分", "厂商名称": "数据厂商A"},
+                {"feature": "x2", "importance": 0.3, "产品名称": "征信评分", "厂商名称": "数据厂商A"},
+                {"feature": "x3", "importance": 0.1, "产品名称": "借贷画像", "厂商名称": "数据厂商B"},
+            ],
+            univariate=[],
+            oot_bin_table=[],
+            stress_product_removal={},
+            stress_low_pricing=None,
+            narratives={},
+            section_status=[],
+        ),
+        output,
+    )
+
+    summary = load_workbook(output)["汇总"]
+    rows = {summary.cell(row=row, column=1).value: summary.cell(row=row, column=2).value for row in range(1, summary.max_row + 1)}
+    assert rows["五、使用产品清单"] == "征信评分（数据厂商A）；借贷画像（数据厂商B）"
+
+
 def test_render_model_report_includes_vintage_cohort_counts_and_amounts(tmp_path):
     output = tmp_path / "model_report.xlsx"
     render_model_report(

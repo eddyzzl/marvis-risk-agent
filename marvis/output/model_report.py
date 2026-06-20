@@ -81,7 +81,7 @@ def _write_summary(workbook: Workbook, payload: ModelReportPayload) -> None:
         ("二、样本分析结论", str(payload.narratives.get("sample", ""))),
         ("三、Vintage分析结论", str(payload.narratives.get("vintage", ""))),
         ("四、模型结论", str(payload.narratives.get("model", ""))),
-        ("五、使用产品清单", _unavailable_reason(payload, "product_list") or ""),
+        ("五、使用产品清单", _product_list_summary(payload)),
         ("六、压力测试", str(payload.narratives.get("stress", ""))),
     ]
     _write_rows(sheet, rows)
@@ -182,6 +182,25 @@ def _unavailable_reason(payload: ModelReportPayload, section: str) -> str | None
         if status.section == section and not status.available:
             return status.reason or "缺少业务数据"
     return None
+
+
+def _product_list_summary(payload: ModelReportPayload) -> str:
+    unavailable = _unavailable_reason(payload, "product_list")
+    if unavailable:
+        return unavailable
+    products = []
+    seen = set()
+    for row in payload.feature_importance:
+        product = row.get("产品名称")
+        if not product:
+            continue
+        vendor = row.get("厂商名称")
+        label = f"{product}（{vendor}）" if vendor else str(product)
+        if label in seen:
+            continue
+        seen.add(label)
+        products.append(label)
+    return "；".join(products)
 
 
 def _cell(value: Any):
