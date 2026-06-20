@@ -5,6 +5,7 @@ import {
   promoteDraft as promoteDraftApi,
   rejectDraft as rejectDraftApi,
   runDraft as runDraftApi,
+  searchDraftWeb as searchDraftWebApi,
 } from "./api_v2.js";
 
 function closest(target, selector) {
@@ -37,6 +38,11 @@ function statusOptionHtml(value, label, selectedStatus) {
   return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(label)}</option>`;
 }
 
+function safeWebResultUrl(value) {
+  const url = String(value || "").trim();
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
 function statusQuery(root) {
   const status = String(root?.querySelector?.("[data-draft-status]")?.value || "").trim();
   return status ? { status } : {};
@@ -58,6 +64,13 @@ function showDetail(root, payload) {
   const slot = root?.querySelector?.("[data-draft-detail]");
   if (slot) {
     slot.innerHTML = draftDetailHtml(payload);
+  }
+}
+
+function showWebLearningResult(root, payload) {
+  const slot = root?.querySelector?.("[data-draft-web-result]");
+  if (slot) {
+    slot.innerHTML = webLearningResultHtml(payload);
   }
 }
 
@@ -103,6 +116,14 @@ export function draftManagerHtml(data = {}, options = {}) {
       </label>
       <button type="button" data-refresh-drafts>Refresh</button>
     </header>
+    <section class="draft-web-learning">
+      <label>
+        Web learning
+        <input type="search" data-draft-web-query>
+      </label>
+      <button type="button" data-draft-web-search>Search</button>
+      <div data-draft-web-result></div>
+    </section>
     <div class="draft-manager-layout">
       <div class="draft-list" data-draft-list>${rows}</div>
       <section class="draft-detail" data-draft-detail>
@@ -122,6 +143,28 @@ export function draftRowHtml(draft) {
     ${draft?.summary ? `<p>${escapeHtml(draft.summary)}</p>` : ""}
     <small>${escapeHtml(sourceLabel(draft?.source))}${draft?.task_id ? ` · ${escapeHtml(draft.task_id)}` : ""}</small>
   </article>`;
+}
+
+export function webLearningResultHtml(payload = {}) {
+  if (payload.offline) {
+    return `<div class="draft-web-guidance offline">${escapeHtml(payload.guidance || "No network. Produce the tool externally, then upload it as a plugin.")}</div>`;
+  }
+  const results = payload.results || [];
+  if (!results.length) {
+    return '<div class="v2-empty" data-v2-empty="draft-web-results">No web results</div>';
+  }
+  const items = results.map((result) => {
+    const safeUrl = safeWebResultUrl(result.url);
+    const urlHtml = safeUrl
+      ? `<a href="${escapeHtml(safeUrl)}" rel="noreferrer">${escapeHtml(safeUrl)}</a>`
+      : escapeHtml(result.url || "");
+    return `<li>
+      <strong>${escapeHtml(result.title || result.url || "Result")}</strong>
+      ${urlHtml}
+      ${result.snippet ? `<p>${escapeHtml(result.snippet)}</p>` : ""}
+    </li>`;
+  }).join("");
+  return `<ol class="draft-web-results">${items}</ol>`;
 }
 
 export function draftDetailHtml(payload = {}) {
@@ -229,6 +272,7 @@ export function attachDraftHandlers(root, deps = {}) {
     refreshDrafts: async () => {},
     rejectDraft: rejectDraftApi,
     runDraft: runDraftApi,
+    webSearch: searchDraftWebApi,
     showError: defaultShowError,
     ...deps,
   };
@@ -244,6 +288,22 @@ export function attachDraftHandlers(root, deps = {}) {
 
   const clickHandler = async (event) => {
     const target = event.target;
+    const webSearchButton = closest(target, "[data-draft-web-search]");
+    if (webSearchButton) {
+      event.preventDefault?.();
+      const query = String(root.querySelector?.("[data-draft-web-query]")?.value || "").trim();
+      if (!query) {
+        actions.showError("web learning query is required");
+        return;
+      }
+      try {
+        showWebLearningResult(root, await actions.webSearch(query));
+      } catch (error) {
+        actions.showError(error?.message || "draft web learning failed");
+      }
+      return;
+    }
+
     const draftItem = closest(target, "[data-draft-id]");
     if (draftItem?.dataset?.draftId) {
       event.preventDefault?.();

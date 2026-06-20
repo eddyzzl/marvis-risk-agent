@@ -94,6 +94,32 @@ def test_run_draft_endpoint_records_run(tmp_path):
     assert detail["draft"]["status"] == "tested"
 
 
+def test_draft_web_search_endpoint_returns_offline_guidance(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_web_search(payload, _ctx):
+        assert payload == {"query": "learn joins", "max_results": 3}
+        return {
+            "results": [],
+            "offline": True,
+            "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
+        }
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_web_search", fake_web_search)
+
+    response = client.post(
+        "/api/drafts/web-search",
+        json={"query": "learn joins", "max_results": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": [],
+        "offline": True,
+        "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
+    }
+
+
 def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):
     client = _client_with_draft(tmp_path)
     body = {"test_cases": [{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}]}

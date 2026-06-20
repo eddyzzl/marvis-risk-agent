@@ -96,3 +96,6 @@ export const promoteDraft = (draftId, testCases) => (
 export const rejectDraft = (draftId, reason) => (
   apiPost(`/api/drafts/${pathPart(draftId)}/reject`, { reason })
 );
+export const searchDraftWeb = (query, maxResults = 5) => (
+  apiPost("/api/drafts/web-search", { query, max_results: maxResults })
+);

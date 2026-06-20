@@ -115,6 +115,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           removePlugin,
           rollbackMemoryDistillation,
           runPlan,
+          searchDraftWeb,
           setPluginEnabled,
           consolidateMemory,
           uploadDataset,
@@ -209,6 +210,12 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.equal(calls.at(-1).url, "/api/agent-memory/distillations/distill%2F1/rollback");
         await consolidateMemory("model_experience");
         assert.equal(calls.at(-1).url, "/api/agent-memory/consolidate?category=model_experience");
+        await searchDraftWeb("learn joins", 3);
+        assert.equal(calls.at(-1).url, "/api/drafts/web-search");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), {
+          query: "learn joins",
+          max_results: 3,
+        });
         """
     )
 

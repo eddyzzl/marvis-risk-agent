@@ -43,6 +43,9 @@ def test_draft_manager_html_escapes_list_and_detail_payloads():
         assert.equal(listHtml.includes("Run <margin>"), false);
         assert.ok(listHtml.includes("Run &lt;margin&gt;"));
         assert.ok(listHtml.includes("data-draft-status"));
+        assert.ok(listHtml.includes("data-draft-web-query"));
+        assert.ok(listHtml.includes("data-draft-web-search"));
+        assert.ok(listHtml.includes("data-draft-web-result"));
 
         const detailHtml = draftDetailHtml({
           draft: {
@@ -69,6 +72,77 @@ def test_draft_manager_html_escapes_list_and_detail_payloads():
         assert.ok(detailHtml.includes("data-run-draft"));
         assert.ok(detailHtml.includes("data-promote-draft"));
         assert.ok(detailHtml.includes("data-reject-draft"));
+        """
+    )
+
+
+def test_draft_handlers_render_offline_web_learning_guidance():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachDraftHandlers } from "./marvis/static/js/v2/draft_manager.js";
+
+        const calls = [];
+        const resultSlot = { innerHTML: "" };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) {
+            if (selector === "[data-draft-web-query]") return { value: "learn joins" };
+            if (selector === "[data-draft-web-result]") return resultSlot;
+            return null;
+          },
+        };
+
+        attachDraftHandlers(root, {
+          webSearch: async (query) => {
+            calls.push(["webSearch", query]);
+            return {
+              results: [],
+              offline: true,
+              guidance: "No network <script>. Produce externally, then upload as a plugin.",
+            };
+          },
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-draft-web-search]" ? this : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(calls, [["webSearch", "learn joins"]]);
+        assert.ok(resultSlot.innerHTML.includes("draft-web-guidance"));
+        assert.ok(resultSlot.innerHTML.includes("Produce externally"));
+        assert.equal(resultSlot.innerHTML.includes("<script>"), false);
+        assert.ok(resultSlot.innerHTML.includes("&lt;script&gt;"));
+        """
+    )
+
+
+def test_draft_web_learning_results_do_not_link_unsafe_urls():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { webLearningResultHtml } from "./marvis/static/js/v2/draft_manager.js";
+
+        const html = webLearningResultHtml({
+          offline: false,
+          results: [
+            { title: "Unsafe", url: "javascript:alert(1)", snippet: "bad <img>" },
+            { title: "Safe", url: "https://example.test/a", snippet: "ok" },
+          ],
+        });
+
+        assert.equal(html.includes('href="javascript:alert(1)"'), false);
+        assert.ok(html.includes("javascript:alert(1)"));
+        assert.ok(html.includes('href="https://example.test/a"'));
+        assert.equal(html.includes("<img>"), false);
+        assert.ok(html.includes("bad &lt;img&gt;"));
         """
     )
 

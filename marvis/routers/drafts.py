@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import APIRouter, HTTPException, Request
 
 from marvis.drafts.errors import DraftNotFound, DraftStateError, PromotionError
 from marvis.drafts.promotion import promote_draft, reject_draft, validate_for_promotion
+from marvis.drafts.tools import tool_web_search
 from marvis.plugins.errors import DuplicatePluginError
 from marvis.routers.plugins import _require_plugin_admin
 
@@ -44,6 +47,18 @@ def run_draft(request: Request, draft_id: str, payload: dict) -> dict:
         task_id=draft.task_id,
     )
     return _public_run(run)
+
+
+@router.post("/web-search")
+def web_search(payload: dict) -> dict:
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="query is required")
+    max_results = int(payload.get("max_results") or 5)
+    return tool_web_search(
+        {"query": query, "max_results": max_results},
+        SimpleNamespace(),
+    )
 
 
 @router.post("/{draft_id}/promote")
