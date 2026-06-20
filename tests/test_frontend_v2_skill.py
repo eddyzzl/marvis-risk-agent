@@ -108,6 +108,86 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
     )
 
 
+def test_skill_handlers_show_local_only_message_for_reload_403():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachSkillHandlers } from "./marvis/static/js/v2/skill_manager.js";
+
+        const messages = [];
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector() { return null; },
+        };
+
+        attachSkillHandlers(root, {
+          reloadSkills: async () => {
+            const error = new Error("forbidden");
+            error.status = 403;
+            throw error;
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        const reloadTarget = {
+          closest(selector) {
+            return selector === "[data-reload-skills]" ? this : null;
+          },
+        };
+        await listeners.click({ target: reloadTarget, preventDefault() {} });
+
+        assert.equal(messages.length, 1);
+        assert.ok(messages[0].includes("local workspace"));
+        assert.equal(messages[0].includes("forbidden"), false);
+        """
+    )
+
+
+def test_skill_handlers_show_local_only_message_for_validate_403():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachSkillHandlers } from "./marvis/static/js/v2/skill_manager.js";
+
+        const resultSlot = { innerHTML: "" };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector(selector) {
+            return selector === "[data-skill-validation-result]" ? resultSlot : null;
+          },
+        };
+
+        attachSkillHandlers(root, {
+          validateSkill: async () => {
+            const error = new Error("forbidden <script>");
+            error.status = 403;
+            throw error;
+          },
+        });
+
+        const validTarget = {
+          value: '{"id":"preview_echo"}',
+          closest(selector) {
+            return selector === "[data-validate-skill]" ? this : null;
+          },
+        };
+        await listeners.input({ target: validTarget });
+
+        assert.ok(resultSlot.innerHTML.includes("local workspace"));
+        assert.equal(resultSlot.innerHTML.includes("forbidden"), false);
+        assert.equal(resultSlot.innerHTML.includes("<script>"), false);
+        """
+    )
+
+
 def test_skill_validation_result_escapes_backend_problem_text():
     run_node(
         """

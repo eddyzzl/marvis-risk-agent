@@ -95,6 +95,13 @@ function defaultShowError(message) {
   console.error(message);
 }
 
+function skillActionErrorMessage(error, fallback) {
+  if (error?.status === 403) {
+    return "Skill template management is available from the local workspace only.";
+  }
+  return error?.message || fallback;
+}
+
 export function attachSkillHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachSkillHandlers requires a stable event root");
@@ -120,7 +127,7 @@ export function attachSkillHandlers(root, deps = {}) {
       await actions.reloadSkills();
       await actions.refreshSkills();
     } catch (error) {
-      actions.showError(error?.message || "skill reload failed");
+      actions.showError(skillActionErrorMessage(error, "skill reload failed"));
     }
   };
 
@@ -146,7 +153,9 @@ export function attachSkillHandlers(root, deps = {}) {
       }
     } catch (error) {
       if (slot) {
-        slot.innerHTML = skillValidationResultHtml({ problems: [error?.message || "skill validation failed"] });
+        slot.innerHTML = skillValidationResultHtml({
+          problems: [skillActionErrorMessage(error, "skill validation failed")],
+        });
       }
     }
   };
