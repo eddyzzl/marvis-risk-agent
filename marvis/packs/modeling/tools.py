@@ -520,15 +520,29 @@ def _feature_importance_rows(artifact: ModelArtifact | None, *, feature_dictiona
 def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> list[dict]:
     if artifact is None:
         return []
-    frame = runtime.backend.read_frame(dataset_path, columns=[*artifact.feature_list, config.target_col])
+    frame = runtime.backend.read_frame(dataset_path, columns=[*artifact.feature_list, config.target_col, config.split_col])
     rows = []
     for feature in artifact.feature_list:
-        metrics = feature_metrics(
-            frame[feature].to_numpy(dtype=float),
-            frame[config.target_col].to_numpy(dtype=int),
-            feature=feature,
-        )
-        rows.append({"feature": feature, "iv": metrics.iv, "ks": metrics.ks})
+        for split_name, split_value in config.split_values.items():
+            split_frame = frame[frame[config.split_col] == split_value]
+            if split_frame.empty:
+                continue
+            metrics = feature_metrics(
+                split_frame[feature].to_numpy(dtype=float),
+                split_frame[config.target_col].to_numpy(dtype=int),
+                feature=feature,
+            )
+            rows.append({
+                "feature": feature,
+                "split": split_name,
+                "iv": metrics.iv,
+                "ks": metrics.ks,
+                "auc": metrics.auc,
+                "sample_count": int(len(split_frame)),
+                "coverage": 1.0 - metrics.missing_rate,
+                "missing_rate": metrics.missing_rate,
+                "unique_count": metrics.unique_count,
+            })
     return rows
 
 

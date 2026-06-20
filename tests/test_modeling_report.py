@@ -583,6 +583,28 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert first_row["产品名称"] == "征信评分"
     assert first_row["厂商名称"] == "数据厂商A"
 
+    univariate_sheet = workbook["单变量分析"]
+    univariate_headers = [cell.value for cell in univariate_sheet[1]]
+    assert univariate_headers[:4] == ["feature", "split", "iv", "ks"]
+    univariate_rows = [
+        {
+            header: univariate_sheet.cell(row=row, column=index).value
+            for index, header in enumerate(univariate_headers, start=1)
+        }
+        for row in range(2, univariate_sheet.max_row + 1)
+    ]
+    assert {
+        (row["feature"], row["split"])
+        for row in univariate_rows
+    } == {
+        ("x1", "train"),
+        ("x1", "test"),
+        ("x1", "oot"),
+        ("x2", "train"),
+        ("x2", "test"),
+        ("x2", "oot"),
+    }
+
     stress_sheet = workbook["压力测试"]
     stress_headers = [
         stress_sheet.cell(row=2, column=column).value
