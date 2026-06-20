@@ -1,9 +1,12 @@
 import json
+import math
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import nbformat
 import pytest
 
 from marvis.app import create_app
@@ -25,6 +28,8 @@ from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def test_v1_compat_manifest_registers_builtin_tools(tmp_path):
@@ -119,6 +124,79 @@ def test_v1_compat_tool_runner_converts_missing_task_to_execution_error(tmp_path
     assert "Task not found" in result.error
 
 
+def test_run_notebook_tool_runner_converts_missing_material_to_structured_error(tmp_path):
+    runner, plugin_repo = _runner(tmp_path)
+    repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
+    source_dir = tmp_path / "materials"
+    source_dir.mkdir(parents=True)
+    (source_dir / "model.ipynb").write_text("secret notebook source", encoding="utf-8")
+    (source_dir / "model.pmml").write_text("<PMML>secret</PMML>", encoding="utf-8")
+    (source_dir / "dictionary.csv").write_text("特征名,类别\nx,base\n", encoding="utf-8")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+        )
+    )
+
+    result = runner.invoke(
+        ToolRef("v1_compat", "run_notebook"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "missing required input: sample" in result.error
+    combined_output = f"{result.error}\n{result.stdout_tail}\n{result.stderr_tail}"
+    assert "secret notebook source" not in combined_output
+    assert "<PMML>secret</PMML>" not in combined_output
+    assert repo.get_task(task.id).status == TaskStatus.FAILED
+    audit = plugin_repo.list_audit(kind="tool.invoke")[-1]
+    assert audit["target_ref"] == "v1_compat.run_notebook"
+    assert audit["outcome"] == "failed"
+
+
+def test_tool_runner_runs_metrics_after_notebook_in_separate_worker(tmp_path):
+    runner, _plugin_repo = _runner(tmp_path)
+    repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
+    source_dir = _write_validation_project(tmp_path / "materials")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+
+    notebook = runner.invoke(
+        ToolRef("v1_compat", "run_notebook"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
+    metrics = runner.invoke(
+        ToolRef("v1_compat", "compute_validation_metrics"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
+
+    assert notebook.ok is True, notebook.error
+    assert notebook.output["status"] == "executed"
+    assert metrics.ok is True, metrics.error
+    assert metrics.output["status"] == "writing_artifacts"
+    assert 0.0 <= metrics.output["ks"] <= 1.0
+    assert 0.0 <= metrics.output["auc"] <= 1.0
+    assert metrics.output["score_consistency_passed"] is True
+
+
 def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypatch):
     context = _task_context(tmp_path)
     outputs_dir = context.task_dir / "outputs"
@@ -159,6 +237,10 @@ def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypa
     monkeypatch.setattr(
         "marvis.packs.v1_compat.tools.run_metrics_stage",
         fake_run_metrics_stage,
+    )
+    monkeypatch.setattr(
+        "marvis.packs.v1_compat.tools.get_live_notebook_session",
+        lambda _task_id: object(),
     )
 
     output = tool_compute_validation_metrics({"task_id": context.task_id}, context.ctx)
@@ -321,6 +403,59 @@ def _write_materials(source_dir: Path) -> None:
     (source_dir / "sample.csv").write_text("y,pred\n1,0.9\n", encoding="utf-8")
     (source_dir / "model.pmml").write_text("<PMML>secret</PMML>", encoding="utf-8")
     (source_dir / "dictionary.csv").write_text("特征名,类别\nx,base\n", encoding="utf-8")
+
+
+def _write_validation_project(source_dir: Path) -> Path:
+    source_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for split in ("train", "test", "oot"):
+        for index in range(40):
+            x1 = (index + 1) / 41
+            rows.append(
+                {
+                    "x1": x1,
+                    "x2": 0.0,
+                    "pred": 1 / (1 + math.exp(-x1)),
+                    "y": int(index >= 20),
+                    "split": split,
+                    "apply_month": "202503" if split == "train" else "202505",
+                }
+            )
+    csv_lines = ["x1,x2,pred,y,split,apply_month"]
+    csv_lines.extend(
+        f"{row['x1']},{row['x2']},{row['pred']},{row['y']},{row['split']},{row['apply_month']}"
+        for row in rows
+    )
+    (source_dir / "sample.csv").write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+    shutil.copy(FIXTURES / "min_lr.pmml", source_dir / "fr_final.pmml")
+    (source_dir / "data_dictionary.csv").write_text(
+        "特征名,类别\nx1,征信\nx2,基础信息\n",
+        encoding="utf-8",
+    )
+    _write_contract_notebook(source_dir / "dev.ipynb")
+    return source_dir
+
+
+def _write_contract_notebook(path: Path) -> None:
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "\n".join(
+                    [
+                        "import pandas as pd",
+                        "RMC_SAMPLE_DF = pd.read_csv('sample.csv')",
+                        "RMC_TARGET_COL = 'y'",
+                        "RMC_ALGORITHM = 'lgb'",
+                        "RMC_SPLIT_COL = 'split'",
+                        "RMC_TIME_COL = 'apply_month'",
+                        "def RMC_SCORE_FN(df):",
+                        "    return df['pred']",
+                    ]
+                )
+            )
+        ]
+    )
+    nbformat.write(notebook, path)
 
 
 def _task_context(tmp_path):

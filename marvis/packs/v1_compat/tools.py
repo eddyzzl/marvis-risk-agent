@@ -12,6 +12,7 @@ from marvis.packs.v1_compat.adapters import (
     update_scan_status,
     validation_metric_summary,
 )
+from marvis.notebooks import get_live_notebook_session
 from marvis.pipeline import run_metrics_stage, run_notebook_stage, run_report_stage
 
 
@@ -47,6 +48,7 @@ def tool_run_notebook(inputs: dict, ctx) -> dict:
 def tool_compute_validation_metrics(inputs: dict, ctx) -> dict:
     task_id = str(inputs["task_id"])
     context = load_v1_task_context(ctx, task_id)
+    _ensure_metrics_session(task_id, context)
     run_metrics_stage(task_id=task_id, settings=context.pipeline_settings)
     return validation_metric_summary(context)
 
@@ -69,3 +71,23 @@ def _report_status(status: TaskStatus) -> str:
     if status is TaskStatus.REVIEW_REQUIRED:
         return "review_required"
     return "failed"
+
+
+def _ensure_metrics_session(task_id: str, context) -> None:
+    if get_live_notebook_session(task_id) is not None:
+        return
+    if context.repo.get_task(task_id).status is not TaskStatus.EXECUTED:
+        return
+    # ToolRunner workers are one-shot processes, so the live notebook kernel
+    # from run_notebook cannot cross into the metrics tool invocation.
+    context.repo.update_status(
+        task_id,
+        TaskStatus.RUNNING,
+        message="notebook rerun for isolated metrics worker",
+        expected=TaskStatus.EXECUTED,
+    )
+    run_notebook_stage(
+        task_id=task_id,
+        settings=context.pipeline_settings,
+        stage_claimed=True,
+    )
