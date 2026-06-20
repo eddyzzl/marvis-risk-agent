@@ -1,6 +1,10 @@
+from pathlib import Path
+
 import pytest
 
+from marvis.db import PluginRepository, init_db
 from marvis.orchestrator.contracts import PostCheck
+from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.templates import (
     SlotSpec,
     StepTemplate,
@@ -13,7 +17,10 @@ from marvis.orchestrator.templates import (
     register_template,
     register_user_template,
 )
+from marvis.orchestrator.validator import PlanValidator
+from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
+from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
 def _template(template_id: str, *, source: str = "builtin") -> WorkflowTemplate:
@@ -59,6 +66,50 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert model_validation.steps[0].tool_ref == ToolRef("v1_compat", "scan_materials")
     assert model_validation.steps[-1].needs_confirmation is True
     assert "model_validation" in builtin_template_ids()
+    standard_modeling = get_template("standard_modeling")
+    assert standard_modeling.steps[-1].tool_ref == ToolRef("modeling", "generate_model_report")
+    assert standard_modeling.steps[-1].needs_confirmation is True
+    assert not any(step.decision_point for step in standard_modeling.steps)
+    assert "standard_modeling" in builtin_template_ids()
+
+
+def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("standard_modeling"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "feature_cols": ["income", "age"],
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "recipe": "lr",
+            "seed": 7,
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("modeling", "check_data_quality"),
+        ToolRef("modeling", "modeling_readiness"),
+        ToolRef("modeling", "prepare_modeling_frame"),
+        ToolRef("modeling", "select_features"),
+        ToolRef("modeling", "train_model"),
+        ToolRef("modeling", "compare_experiments"),
+        ToolRef("modeling", "generate_model_report"),
+    ]
+    train_step = plan.steps[4]
+    compare_step = plan.steps[5]
+    report_step = plan.steps[6]
+    assert compare_step.inputs == {"experiment_ids": [f"$ref:{train_step.id}.output.experiment_id"]}
+    assert report_step.inputs["experiment_id"] == f"$ref:{train_step.id}.output.experiment_id"
+    assert report_step.inputs["dataset_id"] == "dataset-1"
+    assert report_step.inputs["project_meta"] == {}
+    assert report_step.needs_confirmation is True
 
 
 def test_user_template_registration_cannot_shadow_builtin_and_can_reload():
@@ -78,3 +129,12 @@ def test_user_template_registration_cannot_shadow_builtin_and_can_reload():
     with pytest.raises(KeyError):
         get_template("user_echo")
     assert get_template("sample_echo").source == "builtin"
+
+
+def _tool_registry(tmp_path: Path) -> ToolRegistry:
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    registry = PluginRegistry(repo)
+    load_builtin_packs(registry, Path(__file__).parents[1] / "marvis" / "packs")
+    return ToolRegistry(registry)

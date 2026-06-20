@@ -86,5 +86,122 @@ MODEL_VALIDATION = WorkflowTemplate(
     source="builtin",
 )
 
+STANDARD_MODELING = WorkflowTemplate(
+    id="standard_modeling",
+    title="标准建模",
+    goal_patterns=("标准建模", "模型开发", "train model", "standard modeling"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered modeling dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("feature_cols", True, "task_context", "Candidate feature columns"),
+        SlotSpec("split_col", True, "task_context", "Train/test/oot split column"),
+        SlotSpec("split_values", True, "task_context", "Split value mapping"),
+        SlotSpec("recipe", True, "user", "Modeling recipe id"),
+        SlotSpec("seed", True, "task_context", "Reproducibility seed"),
+    ),
+    steps=(
+        StepTemplate(
+            title="检查数据质量",
+            tool_ref=ToolRef("modeling", "check_data_quality"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=(),
+            post_checks=(
+                PostCheck(
+                    "schema",
+                    {
+                        "type": "object",
+                        "properties": {"issues": {"type": "array"}},
+                        "required": ["issues"],
+                    },
+                ),
+            ),
+        ),
+        StepTemplate(
+            title="评估建模就绪度",
+            tool_ref=ToolRef("modeling", "modeling_readiness"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+                "split_col": "{slot:split_col}",
+            },
+            depends_on_titles=("检查数据质量",),
+            post_checks=(PostCheck("one_of", {"field": "ready", "values": [True]}),),
+        ),
+        StepTemplate(
+            title="准备建模样本",
+            tool_ref=ToolRef("modeling", "prepare_modeling_frame"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+                "feature_cols": "{slot:feature_cols}",
+                "split_col": "{slot:split_col}",
+                "split_config": {},
+                "seed": "{slot:seed}",
+            },
+            depends_on_titles=("评估建模就绪度",),
+            post_checks=(PostCheck("nonempty", {"field": "result_dataset_id"}),),
+        ),
+        StepTemplate(
+            title="筛选特征",
+            tool_ref=ToolRef("modeling", "select_features"),
+            inputs_template={
+                "dataset_id": "$ref:准备建模样本.output.result_dataset_id",
+                "features": "{slot:feature_cols}",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=("准备建模样本",),
+            post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+        ),
+        StepTemplate(
+            title="训练模型",
+            tool_ref=ToolRef("modeling", "train_model"),
+            inputs_template={
+                "dataset_id": "$ref:准备建模样本.output.result_dataset_id",
+                "recipe": "{slot:recipe}",
+                "features": "$ref:筛选特征.output.selected",
+                "target_col": "{slot:target_col}",
+                "split_col": "{slot:split_col}",
+                "split_values": "{slot:split_values}",
+                "params": {},
+                "seed": "{slot:seed}",
+            },
+            depends_on_titles=("准备建模样本", "筛选特征"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "experiment_id"}),
+                PostCheck("nonempty", {"field": "artifact_id"}),
+            ),
+        ),
+        StepTemplate(
+            title="对比实验",
+            tool_ref=ToolRef("modeling", "compare_experiments"),
+            inputs_template={"experiment_ids": ["$ref:训练模型.output.experiment_id"]},
+            depends_on_titles=("训练模型",),
+            post_checks=(PostCheck("nonempty", {"field": "experiments"}),),
+        ),
+        StepTemplate(
+            title="生成模型开发报告",
+            tool_ref=ToolRef("modeling", "generate_model_report"),
+            inputs_template={
+                "experiment_id": "$ref:训练模型.output.experiment_id",
+                "dataset_id": "{slot:dataset_id}",
+                "business_columns": {},
+                "project_meta": {},
+            },
+            depends_on_titles=("训练模型", "对比实验"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "report_path"}),
+                PostCheck("nonempty", {"field": "section_status"}),
+            ),
+            needs_confirmation=True,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
 _register_builtin_template(SAMPLE_ECHO)
 _register_builtin_template(MODEL_VALIDATION)
+_register_builtin_template(STANDARD_MODELING)
