@@ -159,6 +159,26 @@ def test_amount_bin_table_computes_amount_weighted_cumulative_and_lift(tmp_path)
     assert by_bin[2]["金额lift"] == pytest.approx(0.75)
 
 
+def test_stress_low_pricing_exposes_cumulative_bin_curves_by_ratio(tmp_path):
+    path = tmp_path / "low_pricing.parquet"
+    _business_frame().to_parquet(path, index=False)
+
+    result = stress_low_pricing(
+        DataBackend(tmp_path),
+        path,
+        score_col="score",
+        target_col="y",
+        interest_rate_col="rate",
+        low_pricing_threshold=None,
+        ratios=(0.25, 0.5),
+    )
+
+    assert set(result["bins_by_ratio"]) == {"0.25", "0.5"}
+    for curve in result["bins_by_ratio"].values():
+        assert curve == sorted(curve)
+        assert curve[-1] == pytest.approx(1.0)
+
+
 def test_resolve_sections_and_render_model_report_degrades_missing_business_data(tmp_path):
     statuses = resolve_report_sections(BusinessColumns(), dictionary_id=None)
     output = tmp_path / "model_report.xlsx"
