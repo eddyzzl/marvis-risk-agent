@@ -63,3 +63,39 @@ def test_render_loop_events_updates_from_state_and_empty_state():
         assert.equal(container.innerHTML, rendered);
         """
     )
+
+
+def test_render_loop_events_updates_from_plan_loop_events():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderLoopEvents } from "./marvis/static/js/v2/loop_progress.js";
+        import { resetV2State, setLoopEvents, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const container = { innerHTML: "", dataset: {} };
+        const unsubscribe = renderLoopEvents(container);
+
+        setLoopEvents([{ type: "replan", reason: "stale state", at: "2026-06-20T00:02:00Z" }]);
+        assert.ok(container.innerHTML.includes("stale state"));
+
+        setPlan({
+          id: "plan-1",
+          loop_events: [
+            { type: "explore_segment", reason: "explore", at: "2026-06-20T00:01:00Z" },
+            { type: "no_progress", reason: "failure", at: "2026-06-20T00:03:00Z" },
+          ],
+        });
+        assert.ok(container.innerHTML.includes("Explore segment: explore"));
+        assert.ok(container.innerHTML.includes("No progress: failure"));
+        assert.equal(container.innerHTML.includes("stale state"), false);
+
+        setPlan({ id: "plan-2", loop_events: [] });
+        assert.ok(container.innerHTML.includes('data-v2-empty="loop-events"'));
+        assert.equal(container.innerHTML.includes("stale state"), false);
+
+        unsubscribe();
+        setPlan({ id: "plan-3", loop_events: [{ type: "replan", reason: "ignored", at: "later" }] });
+        assert.equal(container.innerHTML.includes("ignored"), false);
+        """
+    )

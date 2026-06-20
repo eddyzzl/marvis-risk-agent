@@ -67,13 +67,28 @@ class PlanExecutor:
             plan = self._repo.load_plan(plan_id)
             failed = [step for step in plan.steps if step.status == StepStatus.FAILED]
             if failed:
-                if any(
-                    self._should_failure_replan(tier, plan, step)
-                    and not self._no_progress(plan, step)
-                    and self._try_replan(plan, step, reason="failure", tier=tier)
-                    for step in failed
-                ):
+                no_progress_step = None
+                replanned = False
+                for step in failed:
+                    if not self._should_failure_replan(tier, plan, step):
+                        continue
+                    if self._no_progress(plan, step):
+                        no_progress_step = no_progress_step or step
+                        continue
+                    if self._try_replan(plan, step, reason="failure", tier=tier):
+                        replanned = True
+                        break
+                if replanned:
                     continue
+                if no_progress_step is not None:
+                    self._repo.append_loop_event(
+                        plan.id,
+                        {
+                            "type": "no_progress",
+                            "reason": "failure",
+                            "trigger_step_id": no_progress_step.id,
+                        },
+                    )
                 self._set_plan_status(plan, PlanStatus.FAILED)
                 return ExecutionResult(plan.id, PlanStatus.FAILED, None, None)
 
@@ -299,7 +314,15 @@ class PlanExecutor:
                 reason=reason,
                 tier=tier,
             )
-            self._repo.replace_remaining_steps(plan.id, new_plan)
+            self._repo.replace_remaining_steps(
+                plan.id,
+                new_plan,
+                loop_event={
+                    "type": "replan",
+                    "reason": reason,
+                    "trigger_step_id": trigger_step.id,
+                },
+            )
             self._dispatch(
                 "plan.replanned",
                 {"plan_id": plan.id, "reason": reason, "trigger_step_id": trigger_step.id},
@@ -322,7 +345,14 @@ class PlanExecutor:
             return False
         if done or not segment:
             return False
-        self._repo.append_steps(plan.id, segment)
+        self._repo.append_steps(
+            plan.id,
+            segment,
+            loop_event={
+                "type": "explore_segment",
+                "reason": "explore_segment",
+            },
+        )
         self._dispatch(
             "plan.replanned",
             {"plan_id": plan.id, "reason": "explore_segment"},

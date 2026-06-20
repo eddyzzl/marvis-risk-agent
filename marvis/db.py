@@ -306,6 +306,7 @@ def init_db(db_path: Path) -> None:
                 novel_mode TEXT NOT NULL DEFAULT 'plan_ahead',
                 tier TEXT NOT NULL DEFAULT 'balanced',
                 replan_count INTEGER NOT NULL DEFAULT 0,
+                loop_events_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -328,6 +329,12 @@ def init_db(db_path: Path) -> None:
             table="plans",
             column="replan_count",
             definition="INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            conn,
+            table="plans",
+            column="loop_events_json",
+            definition="TEXT NOT NULL DEFAULT '[]'",
         )
         conn.execute(
             """
@@ -1074,9 +1081,9 @@ class PlanRepository:
                 """
                 INSERT INTO plans(
                     id, task_id, goal, source, template_id, autonomy_level,
-                    status, novel_mode, tier, replan_count, created_at, updated_at
+                    status, novel_mode, tier, replan_count, loop_events_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["id"],
@@ -1089,6 +1096,7 @@ class PlanRepository:
                     payload["novel_mode"],
                     payload["tier"],
                     payload["replan_count"],
+                    _dump_json_any(payload["loop_events"]),
                     created_at,
                     updated_at,
                 ),
@@ -1108,7 +1116,7 @@ class PlanRepository:
             plan_row = conn.execute(
                 """
                 SELECT id, task_id, goal, source, template_id, autonomy_level,
-                       status, novel_mode, tier, replan_count, created_at, updated_at
+                       status, novel_mode, tier, replan_count, loop_events_json, created_at, updated_at
                   FROM plans
                  WHERE id = ?
                 """,
@@ -1239,11 +1247,17 @@ class PlanRepository:
         value = json.loads(row["output_json"])
         return value if isinstance(value, dict) else {}
 
-    def replace_remaining_steps(self, plan_id: str, new_plan: Plan) -> None:
+    def replace_remaining_steps(
+        self,
+        plan_id: str,
+        new_plan: Plan,
+        *,
+        loop_event: dict | None = None,
+    ) -> None:
         payload = plan_to_dict(new_plan)
         with connect(self.db_path) as conn:
-            if conn.execute("SELECT 1 FROM plans WHERE id = ?", (plan_id,)).fetchone() is None:
-                raise PlanNotFoundError(plan_id)
+            loop_events = _load_plan_loop_events(conn, plan_id)
+            _append_normalized_loop_event(loop_events, loop_event)
             completed_rows = conn.execute(
                 """
                 SELECT id
@@ -1273,10 +1287,17 @@ class PlanRepository:
                    SET replan_count = replan_count + 1,
                        tier = ?,
                        novel_mode = ?,
+                       loop_events_json = ?,
                        updated_at = ?
                  WHERE id = ?
                 """,
-                (payload["tier"], payload["novel_mode"], _now(), plan_id),
+                (
+                    payload["tier"],
+                    payload["novel_mode"],
+                    _dump_json_any(loop_events),
+                    _now(),
+                    plan_id,
+                ),
             )
             _write_audit_row(
                 conn,
@@ -1286,10 +1307,16 @@ class PlanRepository:
                 detail={"step_count": len(payload["steps"])},
             )
 
-    def append_steps(self, plan_id: str, steps: list) -> None:
+    def append_steps(
+        self,
+        plan_id: str,
+        steps: list,
+        *,
+        loop_event: dict | None = None,
+    ) -> None:
         with connect(self.db_path) as conn:
-            if conn.execute("SELECT 1 FROM plans WHERE id = ?", (plan_id,)).fetchone() is None:
-                raise PlanNotFoundError(plan_id)
+            loop_events = _load_plan_loop_events(conn, plan_id)
+            _append_normalized_loop_event(loop_events, loop_event)
             row = conn.execute(
                 "SELECT COALESCE(MAX(idx), -1) AS max_idx FROM plan_steps WHERE plan_id = ?",
                 (plan_id,),
@@ -1318,10 +1345,35 @@ class PlanRepository:
                 UPDATE plans
                    SET replan_count = replan_count + 1,
                        novel_mode = 'explore',
+                       loop_events_json = ?,
                        updated_at = ?
                  WHERE id = ?
                 """,
-                (_now(), plan_id),
+                (_dump_json_any(loop_events), _now(), plan_id),
+            )
+
+    def append_loop_event(self, plan_id: str, loop_event: dict) -> None:
+        with connect(self.db_path) as conn:
+            loop_events = _load_plan_loop_events(conn, plan_id)
+            normalized_event = _normalize_loop_event(loop_event)
+            if normalized_event is None:
+                return
+            loop_events.append(normalized_event)
+            conn.execute(
+                """
+                UPDATE plans
+                   SET loop_events_json = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                """,
+                (_dump_json_any(loop_events), _now(), plan_id),
+            )
+            _write_audit_row(
+                conn,
+                kind="plan.loop_event",
+                target_ref=plan_id,
+                outcome="succeeded",
+                detail={"type": normalized_event["type"], "reason": normalized_event["reason"]},
             )
 
     def recent_failed_tool_refs(self, plan_id: str, *, limit: int) -> list[str]:
@@ -2215,6 +2267,7 @@ def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row])
         "novel_mode": plan_row["novel_mode"],
         "tier": plan_row["tier"],
         "replan_count": int(plan_row["replan_count"]),
+        "loop_events": _load_json_array(plan_row["loop_events_json"]),
     }
 
 
@@ -2681,6 +2734,37 @@ def _load_json_array(raw: str | None) -> list:
         return []
     value = json.loads(raw)
     return value if isinstance(value, list) else []
+
+
+def _normalize_loop_event(event: dict | None) -> dict | None:
+    if event is None:
+        return None
+    payload = asdict(event) if is_dataclass(event) else dict(event)
+    normalized = {
+        "type": str(payload["type"]),
+        "reason": str(payload.get("reason") or ""),
+        "at": str(payload.get("at") or _now()),
+    }
+    trigger_step_id = _optional_str(payload.get("trigger_step_id"))
+    if trigger_step_id is not None:
+        normalized["trigger_step_id"] = trigger_step_id
+    return normalized
+
+
+def _load_plan_loop_events(conn: sqlite3.Connection, plan_id: str) -> list:
+    plan_row = conn.execute(
+        "SELECT loop_events_json FROM plans WHERE id = ?",
+        (plan_id,),
+    ).fetchone()
+    if plan_row is None:
+        raise PlanNotFoundError(plan_id)
+    return _load_json_array(plan_row["loop_events_json"])
+
+
+def _append_normalized_loop_event(loop_events: list, event: dict | None) -> None:
+    normalized_event = _normalize_loop_event(event)
+    if normalized_event is not None:
+        loop_events.append(normalized_event)
 
 
 def _write_audit_row(

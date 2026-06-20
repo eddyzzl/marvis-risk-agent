@@ -88,6 +88,15 @@ class Plan:
     novel_mode: str = "plan_ahead"
     tier: str = "balanced"
     replan_count: int = 0
+    loop_events: list["LoopEvent"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LoopEvent:
+    type: str
+    reason: str
+    at: str
+    trigger_step_id: str | None = None
 
 
 @dataclass
@@ -147,6 +156,7 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "novel_mode": plan.novel_mode,
         "tier": plan.tier,
         "replan_count": plan.replan_count,
+        "loop_events": [_loop_event_to_dict(event) for event in plan.loop_events],
     }
 
 
@@ -165,6 +175,10 @@ def plan_from_dict(payload: dict[str, Any]) -> Plan:
         novel_mode=str(payload.get("novel_mode") or "plan_ahead"),
         tier=str(payload.get("tier") or "balanced"),
         replan_count=int(payload.get("replan_count") or 0),
+        loop_events=[
+            _loop_event_from_dict(item)
+            for item in payload.get("loop_events") or []
+        ],
     )
 
 
@@ -256,6 +270,26 @@ def _review_verdict_from_dict(payload: dict[str, Any]) -> ReviewVerdict:
         passed=bool(payload["passed"]),
         reasons=[str(item) for item in payload.get("reasons") or []],
         at=str(payload["at"]),
+    )
+
+
+def _loop_event_to_dict(event: LoopEvent) -> dict[str, Any]:
+    payload = {
+        "type": event.type,
+        "reason": event.reason,
+        "at": event.at,
+    }
+    if event.trigger_step_id is not None:
+        payload["trigger_step_id"] = event.trigger_step_id
+    return payload
+
+
+def _loop_event_from_dict(payload: dict[str, Any]) -> LoopEvent:
+    return LoopEvent(
+        type=str(payload["type"]),
+        reason=str(payload.get("reason") or ""),
+        at=str(payload.get("at") or ""),
+        trigger_step_id=_optional_str(payload.get("trigger_step_id")),
     )
 
 

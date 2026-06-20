@@ -1,7 +1,9 @@
 import { escapeHtml } from "../ui-utils.js";
 import {
+  getPlan,
   getLoopEvents,
   onLoopEventsChange,
+  onPlanChange,
 } from "./state_v2.js";
 
 function classToken(value, fallback = "event") {
@@ -45,6 +47,14 @@ export function loopEventsHtml(events = []) {
   return `<section class="loop-events">${sortedEvents(events).map(loopEventHtml).join("")}</section>`;
 }
 
+function currentLoopEvents() {
+  const planEvents = getPlan()?.loop_events;
+  if (Array.isArray(planEvents)) {
+    return planEvents;
+  }
+  return getLoopEvents();
+}
+
 export function renderLoopEvents(container) {
   if (!container) {
     throw new Error("renderLoopEvents requires a container");
@@ -55,6 +65,11 @@ export function renderLoopEvents(container) {
   const render = (events) => {
     container.innerHTML = loopEventsHtml(events);
   };
-  render(getLoopEvents());
-  return onLoopEventsChange((events) => render(events));
+  render(currentLoopEvents());
+  const unsubLoopEvents = onLoopEventsChange(() => render(currentLoopEvents()));
+  const unsubPlan = onPlanChange(() => render(currentLoopEvents()));
+  return () => {
+    unsubLoopEvents();
+    unsubPlan();
+  };
 }

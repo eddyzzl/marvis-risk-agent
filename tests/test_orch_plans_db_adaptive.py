@@ -1,5 +1,5 @@
 from marvis.db import PlanRepository, connect, init_db
-from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
+from marvis.orchestrator.contracts import LoopEvent, Plan, PlanStatus, PlanStep, StepStatus
 from marvis.plugins.manifest import ToolRef
 
 
@@ -52,7 +52,7 @@ def test_plan_repository_migrates_adaptive_columns_on_existing_tables(tmp_path):
     with connect(db_path) as conn:
         plan_columns = {row[1] for row in conn.execute("PRAGMA table_info(plans)")}
         step_columns = {row[1] for row in conn.execute("PRAGMA table_info(plan_steps)")}
-    assert {"novel_mode", "tier", "replan_count"} <= plan_columns
+    assert {"novel_mode", "tier", "replan_count", "loop_events_json"} <= plan_columns
     assert "decision_point" in step_columns
 
 
@@ -64,6 +64,14 @@ def test_plan_repository_adaptive_fields_round_trip(tmp_path):
     plan.novel_mode = "explore"
     plan.tier = "autonomous"
     plan.replan_count = 2
+    plan.loop_events = [
+        LoopEvent(
+            type="replan",
+            reason="failure",
+            at="2026-06-19T00:00:30+00:00",
+            trigger_step_id="step-1",
+        )
+    ]
     plan.steps[0].decision_point = True
 
     repo.create_plan(plan)
@@ -72,6 +80,7 @@ def test_plan_repository_adaptive_fields_round_trip(tmp_path):
     assert loaded.novel_mode == "explore"
     assert loaded.tier == "autonomous"
     assert loaded.replan_count == 2
+    assert loaded.loop_events == plan.loop_events
     assert loaded.steps[0].decision_point is True
 
 
@@ -90,13 +99,26 @@ def test_plan_repository_replaces_remaining_steps_and_increments_replan_count(tm
     new_plan.tier = "autonomous"
     new_plan.novel_mode = "explore"
 
-    repo.replace_remaining_steps("plan-1", new_plan)
+    repo.replace_remaining_steps(
+        "plan-1",
+        new_plan,
+        loop_event={
+            "type": "replan",
+            "reason": "failure",
+            "trigger_step_id": "step-2",
+        },
+    )
 
     loaded = repo.load_plan("plan-1")
     assert [step.id for step in loaded.steps] == ["step-1", "step-3"]
     assert loaded.steps[0].status == StepStatus.DONE
     assert loaded.replan_count == 1
     assert loaded.tier == "autonomous"
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "replan"
+    assert loaded.loop_events[0].reason == "failure"
+    assert loaded.loop_events[0].trigger_step_id == "step-2"
+    assert loaded.loop_events[0].at
     assert repo.load_step_output("step-1") == {"echoed": "done"}
 
 
@@ -108,7 +130,11 @@ def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):
     plan.steps[1].status = StepStatus.FAILED
     repo.create_plan(plan)
 
-    repo.append_steps("plan-1", [_step("step-3", 99, title="Next")])
+    repo.append_steps(
+        "plan-1",
+        [_step("step-3", 99, title="Next")],
+        loop_event={"type": "explore_segment", "reason": "explore_segment"},
+    )
     loaded = repo.load_plan("plan-1")
 
     assert [(step.id, step.index) for step in loaded.steps] == [
@@ -118,6 +144,10 @@ def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):
     ]
     assert loaded.novel_mode == "explore"
     assert loaded.replan_count == 1
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "explore_segment"
+    assert loaded.loop_events[0].reason == "explore_segment"
+    assert loaded.loop_events[0].at
     assert repo.recent_failed_tool_refs("plan-1", limit=4) == ["_sample.echo"]
 
 

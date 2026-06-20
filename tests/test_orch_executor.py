@@ -372,6 +372,11 @@ def test_plan_executor_replans_after_decision_point(tmp_path):
     assert result.status == PlanStatus.DONE
     assert [step.id for step in loaded.steps] == ["step-1", "step-3"]
     assert loaded.replan_count == 1
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "replan"
+    assert loaded.loop_events[0].reason == "decision_point"
+    assert loaded.loop_events[0].trigger_step_id == "step-1"
+    assert loaded.loop_events[0].at
     assert planner.replan_calls[0][3] == "decision_point"
     assert [call[0] for call in hooks.calls] == [
         "step.completed",
@@ -395,8 +400,35 @@ def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
     assert result.status == PlanStatus.DONE
     assert [step.id for step in loaded.steps] == ["step-2"]
     assert loaded.replan_count == 1
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "replan"
+    assert loaded.loop_events[0].reason == "failure"
+    assert loaded.loop_events[0].trigger_step_id == "step-1"
     assert planner.replan_calls[0][3] == "failure"
     assert len(runner.calls) == 2
+
+
+def test_plan_executor_records_no_progress_when_repeated_failures_block_replan(tmp_path):
+    plan = _plan(
+        _step("step-1", tool="fail_tool", status=StepStatus.FAILED),
+        _step("step-2", index=1, tool="fail_tool", status=StepStatus.FAILED),
+    )
+    repo = _repo(tmp_path, plan)
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-3", tool="echo", inputs={"message": "fixed"})]
+    )
+
+    result = _adaptive_executor(repo, FakeRunner([]), planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert planner.replan_calls == []
+    assert loaded.replan_count == 0
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "no_progress"
+    assert loaded.loop_events[0].reason == "failure"
+    assert loaded.loop_events[0].trigger_step_id == "step-1"
+    assert loaded.loop_events[0].at
 
 
 def test_plan_executor_appends_explore_segment_until_done(tmp_path):
@@ -418,5 +450,9 @@ def test_plan_executor_appends_explore_segment_until_done(tmp_path):
     assert [step.id for step in loaded.steps] == ["step-1", "step-2"]
     assert loaded.novel_mode == "explore"
     assert loaded.replan_count == 1
+    assert len(loaded.loop_events) == 1
+    assert loaded.loop_events[0].type == "explore_segment"
+    assert loaded.loop_events[0].reason == "explore_segment"
+    assert loaded.loop_events[0].at
     assert len(planner.explore_calls) == 2
     assert len(runner.calls) == 2

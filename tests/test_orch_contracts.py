@@ -2,6 +2,7 @@ import pytest
 
 from marvis.orchestrator.contracts import (
     AgentStatus,
+    LoopEvent,
     OutputRef,
     Plan,
     PlanStatus,
@@ -64,6 +65,14 @@ def _plan() -> Plan:
         novel_mode="explore",
         tier="autonomous",
         replan_count=2,
+        loop_events=[
+            LoopEvent(
+                type="replan",
+                reason="decision_point",
+                at="2026-06-19T00:00:30+00:00",
+                trigger_step_id="step-1",
+            )
+        ],
     )
 
 
@@ -77,6 +86,14 @@ def test_plan_contract_round_trips_to_json_safe_dict():
     assert payload["novel_mode"] == "explore"
     assert payload["tier"] == "autonomous"
     assert payload["replan_count"] == 2
+    assert payload["loop_events"] == [
+        {
+            "type": "replan",
+            "reason": "decision_point",
+            "at": "2026-06-19T00:00:30+00:00",
+            "trigger_step_id": "step-1",
+        }
+    ]
     assert payload["steps"][0]["status"] == "awaiting_confirm"
     assert payload["steps"][0]["decision_point"] is True
     assert payload["steps"][0]["tool_ref"] == {
@@ -112,6 +129,7 @@ def test_adaptive_contract_defaults_do_not_change_plain_dag_behavior():
     assert plan.novel_mode == "plan_ahead"
     assert plan.tier == "balanced"
     assert plan.replan_count == 0
+    assert plan.loop_events == []
 
 
 def test_subagent_contract_defaults_and_tool_refs():
