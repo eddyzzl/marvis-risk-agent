@@ -253,6 +253,35 @@ def test_create_app_wires_plan_runtime_and_router(tmp_path):
     assert hasattr(app.state, "intent_router")
 
 
+def test_create_app_can_create_standard_modeling_template_plan_from_goal(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    task_id = _create_task(app.state.plan_repo.db_path)
+
+    response = client.post(
+        f"/api/tasks/{task_id}/plans",
+        json={
+            "goal": "请帮我建模，训练一个A卡模型",
+            "slots": {
+                "dataset_id": "dataset-1",
+                "target_col": "bad_flag",
+                "feature_cols": ["income", "age"],
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "recipe": "lr",
+                "seed": 7,
+            },
+        },
+    )
+
+    assert response.status_code == 201, response.json()
+    plan = response.json()["plan"]
+    assert plan["template_id"] == "standard_modeling"
+    assert plan["status"] == "validated"
+    assert plan["steps"][-1]["tool_ref"] == {"plugin": "modeling", "tool": "generate_model_report", "version": ""}
+    assert plan["steps"][-1]["needs_confirmation"] is True
+
+
 def _job_statuses(db_path):
     with connect(db_path) as conn:
         rows = conn.execute("SELECT status FROM jobs ORDER BY created_at, id").fetchall()

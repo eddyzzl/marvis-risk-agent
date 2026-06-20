@@ -89,7 +89,7 @@ MODEL_VALIDATION = WorkflowTemplate(
 STANDARD_MODELING = WorkflowTemplate(
     id="standard_modeling",
     title="标准建模",
-    goal_patterns=("标准建模", "模型开发", "train model", "standard modeling"),
+    goal_patterns=("标准建模", "建模", "训练模型", "模型开发", "build model", "train model", "standard modeling"),
     slots=(
         SlotSpec("dataset_id", True, "task_context", "Registered modeling dataset id"),
         SlotSpec("target_col", True, "task_context", "Binary target column"),

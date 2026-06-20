@@ -103,3 +103,24 @@ def test_intent_router_extracts_task_context_slots():
 
     assert result.template_id == "context_slot_template"
     assert result.slots == {"task_id": "task-7"}
+
+
+def test_intent_router_matches_standard_modeling_without_llm_for_common_chinese_goal():
+    load_builtin_templates()
+    llm = FakeLLM("novel")
+    task_context = {
+        "dataset_id": "dataset-1",
+        "target_col": "bad_flag",
+        "feature_cols": ["income", "age"],
+        "split_col": "split",
+        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "recipe": "lr",
+        "seed": 7,
+    }
+
+    result = _router(llm).route("请帮我建模，训练一个A卡模型", task_context)
+
+    assert result.kind == "template"
+    assert result.template_id == "standard_modeling"
+    assert result.slots == task_context
+    assert llm.calls == []
