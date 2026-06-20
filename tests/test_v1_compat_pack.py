@@ -77,6 +77,33 @@ def test_scan_materials_tool_runner_scans_without_file_contents(tmp_path):
     assert repo.get_task(task.id).status == TaskStatus.SCANNED
 
 
+def test_scan_materials_marks_task_failed_when_required_material_is_missing(tmp_path):
+    runner, _plugin_repo = _runner(tmp_path)
+    repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
+    source_dir = tmp_path / "materials"
+    source_dir.mkdir(parents=True)
+    (source_dir / "model.ipynb").write_text("secret notebook source", encoding="utf-8")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+        )
+    )
+
+    result = runner.invoke(
+        ToolRef("v1_compat", "scan_materials"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
+
+    assert result.ok is True
+    assert result.output["status"] == "failed"
+    assert any(check["status"] == "missing" for check in result.output["checks"])
+    assert repo.get_task(task.id).status == TaskStatus.FAILED
+
+
 def test_v1_compat_tool_runner_converts_missing_task_to_execution_error(tmp_path):
     runner, _plugin_repo = _runner(tmp_path)
 

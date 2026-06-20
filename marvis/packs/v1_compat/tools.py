@@ -19,8 +19,8 @@ def tool_scan_materials(inputs: dict, ctx) -> dict:
     task_id = str(inputs["task_id"])
     context = load_v1_task_context(ctx, task_id)
     artifacts = scan_materials(context)
-    update_scan_status(context)
     checks = material_checks(artifacts)
+    update_scan_status(context, checks)
     return {
         "task_id": task_id,
         "status": "failed" if any(check["status"] != "ok" for check in checks) else "scanned",

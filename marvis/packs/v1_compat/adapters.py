@@ -94,12 +94,13 @@ def material_checks(artifacts: list[FileArtifact]) -> list[dict]:
     return checks
 
 
-def update_scan_status(context: V1TaskContext) -> None:
+def update_scan_status(context: V1TaskContext, checks: list[dict]) -> None:
     if context.task.status in {TaskStatus.CREATED, TaskStatus.SCANNED, TaskStatus.FAILED}:
+        failed = any(check.get("status") != "ok" for check in checks)
         context.repo.update_status(
             context.task_id,
-            TaskStatus.SCANNED,
-            message="source scanned",
+            TaskStatus.FAILED if failed else TaskStatus.SCANNED,
+            message="source scan failed" if failed else "source scanned",
             expected={TaskStatus.CREATED, TaskStatus.SCANNED, TaskStatus.FAILED},
         )
 
