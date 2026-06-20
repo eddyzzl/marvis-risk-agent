@@ -69,6 +69,48 @@ def test_render_artifact_fetches_dataset_preview_and_writes_container():
     )
 
 
+def test_artifact_handlers_open_result_refs_into_preview_panel():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachArtifactHandlers } from "./marvis/static/js/v2/artifact_view.js";
+
+        const calls = [];
+        const container = { innerHTML: "", dataset: {} };
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+        };
+
+        const detach = attachArtifactHandlers(root, () => container, {
+          renderArtifact: async (targetContainer, artifactRef) => {
+            calls.push(["renderArtifact", targetContainer === container, artifactRef]);
+            targetContainer.innerHTML = "opened";
+          },
+          showError: (message) => calls.push(["showError", message]),
+        });
+
+        const artifactTarget = {
+          closest(selector) {
+            return selector === "[data-artifact]"
+              ? { dataset: { artifact: "dataset:dataset-1" } }
+              : null;
+          },
+        };
+        await listeners.click({ target: artifactTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, [["renderArtifact", true, "dataset:dataset-1"]]);
+        assert.equal(container.innerHTML, "opened");
+
+        detach();
+        assert.equal(listeners.click, undefined);
+        """
+    )
+
+
 def test_artifact_ref_html_handles_value_metrics_and_file_refs_safely():
     run_node(
         """

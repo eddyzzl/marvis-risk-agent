@@ -2,6 +2,10 @@ import { apiGet } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { previewDataset as previewDatasetApi } from "./api_v2.js";
 
+function closest(target, selector) {
+  return typeof target?.closest === "function" ? target.closest(selector) : null;
+}
+
 function pct(value) {
   const number = Number(value);
   return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "-";
@@ -111,4 +115,49 @@ export async function renderArtifact(container, artifactRef, deps = {}) {
   }
   container.innerHTML = valueHtml(ref.value);
   return ref;
+}
+
+function defaultShowError(message) {
+  if (typeof alert === "function") {
+    alert(message);
+    return;
+  }
+  console.error(message);
+}
+
+function resolvePreviewContainer(container) {
+  return typeof container === "function" ? container() : container;
+}
+
+export function attachArtifactHandlers(root, container = null, deps = {}) {
+  if (!root || typeof root.addEventListener !== "function") {
+    throw new Error("attachArtifactHandlers requires a stable event root");
+  }
+  const actions = {
+    renderArtifact,
+    showError: defaultShowError,
+    ...deps,
+  };
+
+  const handler = async (event) => {
+    const artifactButton = closest(event.target, "[data-artifact]");
+    if (!artifactButton?.dataset?.artifact) {
+      return;
+    }
+    event.preventDefault?.();
+    const previewContainer = resolvePreviewContainer(container)
+      || root.querySelector?.("#artifactPanel");
+    if (!previewContainer) {
+      actions.showError("artifact preview panel unavailable");
+      return;
+    }
+    try {
+      await actions.renderArtifact(previewContainer, artifactButton.dataset.artifact);
+    } catch (error) {
+      actions.showError(error?.message || "artifact preview failed");
+    }
+  };
+
+  root.addEventListener("click", handler);
+  return () => root.removeEventListener?.("click", handler);
 }

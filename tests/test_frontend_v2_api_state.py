@@ -454,7 +454,7 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         const mounted = mountV2(root);
         mountV2(root);
 
-        assert.equal((listeners.click || []).length, 5);
+        assert.equal((listeners.click || []).length, 6);
         assert.equal((listeners.change || []).length, 2);
         assert.equal((listeners.input || []).length, 1);
 

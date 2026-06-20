@@ -1,3 +1,4 @@
+import { attachArtifactHandlers } from "./artifact_view.js";
 import { attachCapabilityHandlers, renderTierSettingsShell } from "./capability.js";
 import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
@@ -78,6 +79,7 @@ export function mountV2(root, options = {}) {
     if (typeof root.addEventListener === "function") {
       cleanups.push(
         attachCapabilityHandlers(root),
+        attachArtifactHandlers(root, () => panels.artifactPanel),
         attachJoinHandlers(root, options.taskId || ""),
         attachGoalHandlers(root, options.taskId || ""),
         attachPlanConfirmHandlers(root),
