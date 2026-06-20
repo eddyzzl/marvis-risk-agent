@@ -58,3 +58,22 @@ export const confirmJoinSpec = (joinId, body) => apiPost(`/api/joins/${pathPart(
 export const executeJoin = (joinId) => apiPost(`/api/joins/${pathPart(joinId)}/execute`, {});
 
 export const listCapabilityTiers = () => apiGet("/api/capability-tiers");
+
+export function listDrafts({ taskId = "", status = "" } = {}) {
+  const params = new URLSearchParams();
+  if (taskId) params.set("task_id", String(taskId));
+  if (status) params.set("status", String(status));
+  const query = params.toString();
+  return apiGet(`/api/drafts${query ? `?${query}` : ""}`);
+}
+
+export const getDraft = (draftId) => apiGet(`/api/drafts/${pathPart(draftId)}`);
+export const runDraft = (draftId, inputs) => (
+  apiPost(`/api/drafts/${pathPart(draftId)}/run`, { inputs })
+);
+export const promoteDraft = (draftId, testCases) => (
+  apiPost(`/api/drafts/${pathPart(draftId)}/promote`, { test_cases: testCases })
+);
+export const rejectDraft = (draftId, reason) => (
+  apiPost(`/api/drafts/${pathPart(draftId)}/reject`, { reason })
+);

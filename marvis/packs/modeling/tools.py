@@ -26,6 +26,7 @@ from marvis.packs.modeling.report_compute import (
 from marvis.packs.modeling.readiness import check_data_quality, modeling_readiness
 from marvis.packs.modeling.prepare import prepare_modeling_frame
 from marvis.packs.modeling.recipes.lgb import train_lgb
+from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
@@ -283,6 +284,8 @@ def _train_recipe(
 ) -> TrainResult:
     if recipe == "lgb":
         return train_lgb(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "lgb_regressor":
+        return train_lgb_regressor(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "xgb":
         return train_xgb(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "lr":
@@ -358,6 +361,27 @@ def _section_available(statuses, section: str) -> bool:
 def _dataset_split_rows(metrics) -> list[dict]:
     if metrics is None:
         return []
+    if metrics.train_rmse is not None:
+        return [
+            {
+                "split": "train",
+                "rmse": metrics.train_rmse,
+                "mae": metrics.train_mae,
+                "r2": metrics.train_r2,
+            },
+            {
+                "split": "test",
+                "rmse": metrics.test_rmse,
+                "mae": metrics.test_mae,
+                "r2": metrics.test_r2,
+            },
+            {
+                "split": "oot",
+                "rmse": metrics.oot_rmse,
+                "mae": metrics.oot_mae,
+                "r2": metrics.oot_r2,
+            },
+        ]
     return [
         {"split": "train", "ks": metrics.train_ks, "auc": metrics.train_auc},
         {"split": "test", "ks": metrics.test_ks, "auc": metrics.test_auc},
@@ -368,6 +392,12 @@ def _dataset_split_rows(metrics) -> list[dict]:
 def _stability_rows(metrics) -> list[dict]:
     if metrics is None:
         return []
+    if metrics.train_rmse is not None:
+        return [
+            {"metric": "rmse_test_minus_train", "value": metrics.overfit_train_test_gap},
+            {"metric": "rmse_oot_minus_train", "value": metrics.overfit_train_oot_gap},
+            {"metric": "overfit_flag", "value": metrics.overfit_flag},
+        ]
     return [
         {"metric": "psi_test_vs_train", "value": metrics.psi_test_vs_train},
         {"metric": "psi_oot_vs_train", "value": metrics.psi_oot_vs_train},

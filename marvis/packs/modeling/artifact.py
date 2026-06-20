@@ -13,6 +13,7 @@ from marvis.packs.modeling.errors import ModelingError
 
 _MODEL_SUFFIX = {
     "lgb": ".txt",
+    "lgb_regressor": ".txt",
     "xgb": ".json",
     "lr": ".joblib",
     "scorecard": ".joblib",
@@ -36,7 +37,7 @@ def save_model(
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}{_MODEL_SUFFIX[algorithm]}"
     target = out_dir / model_path
-    if algorithm == "lgb":
+    if algorithm in {"lgb", "lgb_regressor"}:
         model.save_model(target)
     elif algorithm == "xgb":
         model.save_model(target)
@@ -59,7 +60,7 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
     path = Path(base_dir) / artifact.model_path
     if not path.exists():
         raise ModelingError(f"model file does not exist: {artifact.model_path}")
-    if artifact.algorithm == "lgb":
+    if artifact.algorithm in {"lgb", "lgb_regressor"}:
         import lightgbm as lgb
 
         return lgb.Booster(model_file=path.as_posix())

@@ -8,6 +8,7 @@ from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
 from marvis.packs.modeling.recipes.lgb import train_lgb
+from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
@@ -26,11 +27,12 @@ def _config() -> TrainConfig:
     )
 
 
-def test_recipe_registry_exposes_four_builtin_recipes():
+def test_recipe_registry_exposes_builtin_classification_and_regression_recipes():
     recipes = list_recipes()
 
-    assert [recipe.id for recipe in recipes] == ["lgb", "xgb", "lr", "scorecard"]
+    assert [recipe.id for recipe in recipes] == ["lgb", "xgb", "lr", "scorecard", "lgb_regressor"]
     assert get_recipe("scorecard").requires_woe is True
+    assert get_recipe("lgb_regressor").algorithm == "lgb_regressor"
     assert get_recipe("lr").algorithm == "lr"
     with pytest.raises(KeyError):
         get_recipe("unknown")
@@ -190,3 +192,44 @@ def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
     assert [item[1] for item in first.feature_importance] == pytest.approx(
         [item[1] for item in second.feature_importance],
     )
+
+
+def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp_path):
+    rows = 180
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "income": [3500 + (((i * 37) % 101) * 38) + (((i * 17) % 89) * 9) for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "income_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="income",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 8, "learning_rate": 0.1, "num_leaves": 4},
+        seed=47,
+        early_stopping_rounds=None,
+        recipe_id="lgb_regressor",
+        scenario_id="income",
+        target_type="continuous",
+        eval_metric="rmse_mae",
+    )
+    backend = DataBackend(tmp_path)
+
+    first = train_lgb_regressor(backend, path, config, out_dir=tmp_path / "income_a")
+    second = train_lgb_regressor(backend, path, config, out_dir=tmp_path / "income_b")
+
+    assert (tmp_path / "income_a" / first.artifact.model_path).exists()
+    assert first.artifact.algorithm == "lgb_regressor"
+    assert first.metrics.train_ks is None
+    assert first.metrics.test_auc is None
+    assert first.metrics.test_rmse is not None
+    assert first.metrics.test_rmse > 0
+    assert first.metrics.test_mae is not None
+    assert -1.0 <= first.metrics.test_r2 <= 1.0
+    assert first.metrics.test_rmse == pytest.approx(second.metrics.test_rmse)
+    assert [item[0] for item in first.feature_importance] == ["x1", "x2"]

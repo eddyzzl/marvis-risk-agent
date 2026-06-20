@@ -137,7 +137,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
-          "recipe": {"type": "string", "enum": ["lgb", "xgb", "lr", "scorecard"]},
+          "recipe": {"type": "string", "enum": ["lgb", "xgb", "lr", "scorecard", "lgb_regressor"]},
           "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "target_col": {"type": "string", "minLength": 1},
           "split_col": {"type": "string", "minLength": 1},

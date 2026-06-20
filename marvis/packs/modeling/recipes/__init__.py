@@ -61,6 +61,17 @@ def _register_builtin_recipes() -> None:
             param_space={},
             requires_woe=True,
         ),
+        ModelRecipe(
+            id="lgb_regressor",
+            algorithm="lgb_regressor",
+            default_params={
+                "objective": "regression",
+                "metric": "rmse",
+                "verbosity": -1,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
     ):
         register_recipe(recipe)
 

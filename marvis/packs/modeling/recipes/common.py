@@ -72,6 +72,55 @@ def compute_model_metrics(
     )
 
 
+def compute_regression_metrics(
+    score_fn: Callable[[pd.DataFrame], np.ndarray],
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    config: TrainConfig,
+) -> ModelMetrics:
+    train_pred = _scores(score_fn, train)
+    test_pred = _scores(score_fn, test)
+    oot_pred = None if oot is None else _scores(score_fn, oot)
+    train_target = train[config.target_col].to_numpy(dtype=float)
+    test_target = test[config.target_col].to_numpy(dtype=float)
+    oot_target = None if oot is None else oot[config.target_col].to_numpy(dtype=float)
+
+    train_rmse, train_mae, train_r2 = _regression_values(train_target, train_pred)
+    test_rmse, test_mae, test_r2 = _regression_values(test_target, test_pred)
+    oot_values = (
+        None
+        if oot_pred is None or oot_target is None
+        else _regression_values(oot_target, oot_pred)
+    )
+    oot_rmse = None if oot_values is None else oot_values[0]
+    oot_mae = None if oot_values is None else oot_values[1]
+    oot_r2 = None if oot_values is None else oot_values[2]
+
+    return ModelMetrics(
+        train_ks=None,
+        test_ks=None,
+        oot_ks=None,
+        train_auc=None,
+        test_auc=None,
+        oot_auc=None,
+        psi_test_vs_train=None,
+        psi_oot_vs_train=None,
+        overfit_train_test_gap=test_rmse - train_rmse,
+        overfit_train_oot_gap=None if oot_rmse is None else oot_rmse - train_rmse,
+        overfit_flag=False,
+        train_rmse=train_rmse,
+        test_rmse=test_rmse,
+        oot_rmse=oot_rmse,
+        train_mae=train_mae,
+        test_mae=test_mae,
+        oot_mae=oot_mae,
+        train_r2=train_r2,
+        test_r2=test_r2,
+        oot_r2=oot_r2,
+    )
+
+
 def _scores(score_fn: Callable[[pd.DataFrame], np.ndarray], frame: pd.DataFrame) -> np.ndarray:
     scores = np.asarray(score_fn(frame), dtype=float)
     if scores.shape[0] != len(frame):
@@ -79,4 +128,16 @@ def _scores(score_fn: Callable[[pd.DataFrame], np.ndarray], frame: pd.DataFrame)
     return scores
 
 
-__all__ = ["compute_model_metrics", "split_modeling_frame"]
+def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, float, float]:
+    residual = pred - target
+    rmse = float(np.sqrt(np.mean(np.square(residual))))
+    mae = float(np.mean(np.abs(residual)))
+    total = float(np.sum(np.square(target - np.mean(target))))
+    if total <= np.finfo(float).eps:
+        r2 = 0.0
+    else:
+        r2 = float(1 - (np.sum(np.square(residual)) / total))
+    return rmse, mae, r2
+
+
+__all__ = ["compute_model_metrics", "compute_regression_metrics", "split_modeling_frame"]

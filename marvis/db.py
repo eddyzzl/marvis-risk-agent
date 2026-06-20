@@ -2689,17 +2689,26 @@ def _model_metrics_to_dict(metrics: ModelMetrics) -> dict:
 
 def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
     return ModelMetrics(
-        train_ks=float(payload["train_ks"]),
-        test_ks=float(payload["test_ks"]),
+        train_ks=_optional_float(payload.get("train_ks")),
+        test_ks=_optional_float(payload.get("test_ks")),
         oot_ks=_optional_float(payload.get("oot_ks")),
-        train_auc=float(payload["train_auc"]),
-        test_auc=float(payload["test_auc"]),
+        train_auc=_optional_float(payload.get("train_auc")),
+        test_auc=_optional_float(payload.get("test_auc")),
         oot_auc=_optional_float(payload.get("oot_auc")),
         psi_test_vs_train=_optional_float(payload.get("psi_test_vs_train")),
         psi_oot_vs_train=_optional_float(payload.get("psi_oot_vs_train")),
-        overfit_train_test_gap=float(payload["overfit_train_test_gap"]),
+        overfit_train_test_gap=float(payload.get("overfit_train_test_gap") or 0.0),
         overfit_train_oot_gap=_optional_float(payload.get("overfit_train_oot_gap")),
-        overfit_flag=bool(payload["overfit_flag"]),
+        overfit_flag=bool(payload.get("overfit_flag")),
+        train_rmse=_optional_float(payload.get("train_rmse")),
+        test_rmse=_optional_float(payload.get("test_rmse")),
+        oot_rmse=_optional_float(payload.get("oot_rmse")),
+        train_mae=_optional_float(payload.get("train_mae")),
+        test_mae=_optional_float(payload.get("test_mae")),
+        oot_mae=_optional_float(payload.get("oot_mae")),
+        train_r2=_optional_float(payload.get("train_r2")),
+        test_r2=_optional_float(payload.get("test_r2")),
+        oot_r2=_optional_float(payload.get("oot_r2")),
     )
 
 

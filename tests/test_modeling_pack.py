@@ -54,6 +54,7 @@ def _register_modeling_sample(registry, tmp_path, task_id: str):
         "x1": [((i * 37) % 101) / 100 for i in range(rows)],
         "x2": [((i * 17) % 89) / 100 for i in range(rows)],
         "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "income": [3500 + (((i * 37) % 101) * 38) + (((i * 17) % 89) * 9) for i in range(rows)],
         "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
         "apply_month": [f"2026-{(i % 6) + 1:02d}" for i in range(rows)],
         "approved": [1] * rows,
@@ -214,3 +215,43 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
     )
     assert validation_task.task_type == "validation"
     assert validation_task.pmml_path == "model.pmml"
+
+
+def test_modeling_pack_trains_income_regression_scenario_via_runner(tmp_path):
+    runner, _plugin_registry, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    result = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lgb_regressor",
+            "features": ["x1", "x2"],
+            "target_col": "income",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 4, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 29,
+            "scenario": "income",
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["artifact_id"]
+    assert result.output["metrics"]["test_ks"] is None
+    assert result.output["metrics"]["test_auc"] is None
+    assert result.output["metrics"]["test_rmse"] > 0
+    assert result.output["metrics"]["test_mae"] > 0
+
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": [result.output["experiment_id"]]},
+        task_id=task.id,
+    )
+
+    assert compared.ok is True, compared.error
+    row = compared.output["experiments"][0]
+    assert row["recipe"] == "lgb_regressor"
+    assert row["test_ks"] is None
+    assert row["test_rmse"] == result.output["metrics"]["test_rmse"]

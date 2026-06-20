@@ -31,17 +31,26 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class ModelMetrics:
-    train_ks: float
-    test_ks: float
+    train_ks: float | None
+    test_ks: float | None
     oot_ks: float | None
-    train_auc: float
-    test_auc: float
+    train_auc: float | None
+    test_auc: float | None
     oot_auc: float | None
     psi_test_vs_train: float | None
     psi_oot_vs_train: float | None
     overfit_train_test_gap: float
     overfit_train_oot_gap: float | None
     overfit_flag: bool
+    train_rmse: float | None = None
+    test_rmse: float | None = None
+    oot_rmse: float | None = None
+    train_mae: float | None = None
+    test_mae: float | None = None
+    oot_mae: float | None = None
+    train_r2: float | None = None
+    test_r2: float | None = None
+    oot_r2: float | None = None
 
 
 @dataclass(frozen=True)

@@ -349,6 +349,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "subAgentPanel",
           "pluginPanel",
           "skillPanel",
+          "draftPanel",
           "capabilityPanel",
           "loopPanel",
           "artifactPanel",
@@ -356,7 +357,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(first.panels.goalPanel, second.panels.goalPanel);
         assert.equal(first.panels.joinPanel, second.panels.joinPanel);
         assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 9);
+        assert.equal(root.children.length, 10);
         assert.deepEqual(root.children.map((child) => child.id), [
           "goalPanel",
           "planPanel",
@@ -364,6 +365,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "subAgentPanel",
           "pluginPanel",
           "skillPanel",
+          "draftPanel",
           "capabilityPanel",
           "loopPanel",
           "artifactPanel",
@@ -373,6 +375,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(first.panels.joinPanel.dataset.v2JoinReview, "true");
         assert.equal(first.panels.pluginPanel.dataset.v2PluginManager, "true");
         assert.equal(first.panels.skillPanel.dataset.v2SkillManager, "true");
+        assert.equal(first.panels.draftPanel.dataset.v2DraftManager, "true");
         assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
         assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
@@ -380,6 +383,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.ok(first.panels.pluginPanel.innerHTML.includes('data-upload-plugin'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('id="reloadSkills"'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-validate-skill'));
+        assert.ok(first.panels.draftPanel.innerHTML.includes("data-draft-status"));
         assert.ok(first.panels.capabilityPanel.innerHTML.includes('Guardrails remain constant'));
         assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
         assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
@@ -454,8 +458,8 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         const mounted = mountV2(root);
         mountV2(root);
 
-        assert.equal((listeners.click || []).length, 6);
-        assert.equal((listeners.change || []).length, 2);
+        assert.equal((listeners.click || []).length, 7);
+        assert.equal((listeners.change || []).length, 3);
         assert.equal((listeners.input || []).length, 1);
 
         mounted.unmount();
