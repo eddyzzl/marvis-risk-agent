@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`
 - 债务来源：`CODE_REVIEW_2026-06-13.md`。本 spec 已内联必须修复的接口/测试契约；提交实现时，审计附件可随同提交或移入 `docs/superpowers/reviews/`。

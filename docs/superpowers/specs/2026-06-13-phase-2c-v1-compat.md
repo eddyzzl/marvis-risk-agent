@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 9、13 节）
 - 前置依赖：Phase 1（Plugin/Tool Runtime）；现有 V1 `pipeline.py` / `notebooks.py` / `validation/` / `output/`

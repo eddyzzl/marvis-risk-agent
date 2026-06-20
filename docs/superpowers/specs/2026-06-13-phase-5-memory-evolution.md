@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 8 节）
 - 前置依赖：现有 V1.1 `agent_memory`（store/retrieval/extractors/policy/prompting）、Phase 1（Hook 系统可触发后台蒸馏）

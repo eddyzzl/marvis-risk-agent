@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 7 节，数据层与 join 引擎）
 - 前置依赖：Phase 1（Tool 契约/子进程 runner，data_ops 包以内置 Plugin 形式落地）

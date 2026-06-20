@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施规划（governing blueprint，统辖后续所有 Phase 函数级 spec）
+- 状态：已实现并验证（governing blueprint，统辖后续所有 Phase 函数级 spec）
 - 日期：2026-06-13
 - 适用版本线：V2 → V4（V1.1.x 为当前稳定基线）
 - 关联文档：`docs/roadmap.md`（产品阶段与术语唯一来源）、`AGENTS.md`（工程约定）、`DESIGN.md`（体验约束）、`CODE_REVIEW_2026-06-13.md`（地基阶段债务审计附件；Phase 0 已内联必须修复项）

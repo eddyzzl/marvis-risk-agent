@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 11 节）
 - 依赖后端 API：Phase 1（plugins）、Phase 2（plans）、Phase 2B（capability_tier/replan/explore）、Phase 3（datasets/joins）

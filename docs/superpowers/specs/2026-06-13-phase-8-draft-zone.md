@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 10、15.3 节）
 - 前置依赖：Phase 1（Tool Runtime / 子进程 runner / PluginRegistry）、Phase 2（编排，理解为什么草稿不能被 Planner 自动选）

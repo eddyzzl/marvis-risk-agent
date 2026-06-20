@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 15.1 节）
 - 前置依赖：Phase 1（Tool 契约）、Phase 3（数据层/Dataset）、Phase 4（特征工程/确定性指标核心）、Phase 4V（共享 vintage/roll-rate 核心 `validation/vintage.py`）

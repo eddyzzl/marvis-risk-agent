@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：待实施
+- 状态：已实现并验证
 - 日期：2026-06-13
 - 上级蓝图：`2026-06-13-marvis-platform-blueprint.md`（第 5 节，方案 C）
 - 前置依赖：Phase 1（Tool Runtime / ToolRegistry / ToolRunner / HookDispatcher）完成
