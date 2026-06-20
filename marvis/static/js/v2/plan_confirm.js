@@ -6,7 +6,7 @@ import {
   runPlan as runPlanApi,
 } from "./api_v2.js";
 import { startPlanPolling, stopPlanPolling } from "./plan_view.js";
-import { getPlan as getCurrentPlan } from "./state_v2.js";
+import { getPlan as getCurrentPlan, setPlan } from "./state_v2.js";
 
 function problemText(problem) {
   if (typeof problem === "string") {
@@ -20,6 +20,13 @@ function problemText(problem) {
 
 function closest(target, selector) {
   return typeof target?.closest === "function" ? target.closest(selector) : null;
+}
+
+function syncPlanFromPayload(payload) {
+  const plan = payload?.plan || payload;
+  if (plan?.id) {
+    setPlan(plan);
+  }
 }
 
 export function attachPlanConfirmHandlers(root, deps = {}) {
@@ -43,7 +50,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (planButton?.dataset?.confirmPlan) {
       event.preventDefault?.();
       const planId = planButton.dataset.confirmPlan;
-      await actions.confirmPlan(planId);
+      syncPlanFromPayload(await actions.confirmPlan(planId));
       await actions.runPlan(planId);
       actions.startPlanPolling(planId);
       return;
@@ -65,7 +72,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (cancelButton?.dataset?.cancelPlan) {
       event.preventDefault?.();
       const planId = cancelButton.dataset.cancelPlan;
-      await actions.cancelPlan(planId);
+      syncPlanFromPayload(await actions.cancelPlan(planId));
       actions.stopPlanPolling(planId);
     }
   };

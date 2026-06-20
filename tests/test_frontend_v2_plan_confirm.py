@@ -23,7 +23,7 @@ def test_plan_confirm_handlers_sequence_plan_step_and_cancel_actions():
         """
         import assert from "node:assert/strict";
         import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
-        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+        import { getPlan, resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
 
         resetV2State();
         setPlan({ id: "plan-1", status: "awaiting_confirm", steps: [] });
@@ -40,7 +40,10 @@ def test_plan_confirm_handlers_sequence_plan_step_and_cancel_actions():
           confirmPlan: async (planId) => calls.push(["confirmPlan", planId]),
           runPlan: async (planId) => calls.push(["runPlan", planId]),
           confirmStep: async (planId, stepId) => calls.push(["confirmStep", planId, stepId]),
-          cancelPlan: async (planId) => calls.push(["cancelPlan", planId]),
+          cancelPlan: async (planId) => {
+            calls.push(["cancelPlan", planId]);
+            return { plan: { id: planId, status: "cancelled", steps: [] } };
+          },
           startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
           stopPlanPolling: (planId) => calls.push(["stopPlanPolling", planId]),
         });
@@ -84,6 +87,7 @@ def test_plan_confirm_handlers_sequence_plan_step_and_cancel_actions():
           ["cancelPlan", "plan-1"],
           ["stopPlanPolling", "plan-1"],
         ]);
+        assert.equal(getPlan().status, "cancelled");
 
         detach();
         assert.equal(listeners.click, undefined);
