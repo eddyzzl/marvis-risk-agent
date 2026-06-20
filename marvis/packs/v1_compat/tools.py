@@ -38,9 +38,9 @@ def tool_run_notebook(inputs: dict, ctx) -> dict:
         "task_id": task_id,
         "status": "executed" if task.status is TaskStatus.EXECUTED else "failed",
         "notebook_cells": notebook_cell_count(context),
-        "sample_ref": artifact_ref(context.execution_dir / "code_model_scores.csv"),
-        "runtime_model_ref": artifact_ref(context.execution_dir / "runtime_contract.json"),
-        "evidence_ref": artifact_ref(context.outputs_dir / "reproducibility_result.json"),
+        "sample_ref": artifact_ref(context, context.execution_dir / "code_model_scores.csv"),
+        "runtime_model_ref": artifact_ref(context, context.execution_dir / "runtime_contract.json"),
+        "evidence_ref": artifact_ref(context, context.outputs_dir / "reproducibility_result.json"),
     }
 
 

@@ -133,7 +133,7 @@ def validation_metric_summary(context: V1TaskContext) -> dict:
         "auc": _float_or_zero(selected.get("auc")),
         "psi": _optional_float(selected.get("psi_vs_train")),
         "score_consistency_passed": reproducibility.get("status") == "pass",
-        "validation_results_ref": artifact_ref(context.outputs_dir / "validation_results.json"),
+        "validation_results_ref": artifact_ref(context, context.outputs_dir / "validation_results.json"),
     }
 
 
@@ -148,8 +148,8 @@ def report_artifacts(context: V1TaskContext) -> list[dict]:
     return artifacts
 
 
-def artifact_ref(path: Path) -> str:
-    return f"artifact:{path.name}"
+def artifact_ref(context: V1TaskContext, path: Path) -> str:
+    return f"artifact:{safe_relative_path(path, context.workspace)}"
 
 
 def safe_relative_path(path: Path, root: Path) -> str:

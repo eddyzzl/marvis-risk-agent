@@ -11,7 +11,11 @@ from marvis.domain import TaskCreate, TaskStatus
 from marvis.orchestrator.planner import Planner
 from marvis.orchestrator.templates import get_template, load_builtin_templates
 from marvis.orchestrator.validator import PlanValidator
-from marvis.packs.v1_compat.adapters import report_artifacts, validation_metric_summary
+from marvis.packs.v1_compat.adapters import (
+    artifact_ref,
+    report_artifacts,
+    validation_metric_summary,
+)
 from marvis.packs.v1_compat.tools import (
     tool_compute_validation_metrics,
     tool_render_reports,
@@ -138,10 +142,19 @@ def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypa
         "auc": 0.745,
         "psi": None,
         "score_consistency_passed": True,
-        "validation_results_ref": "artifact:validation_results.json",
+        "validation_results_ref": f"artifact:tasks/{context.task_id}/outputs/validation_results.json",
     }
     assert "customer_id" not in json.dumps(output)
     assert validation_metric_summary(context.v1)["psi"] is None
+
+
+def test_v1_compat_artifact_refs_are_workspace_relative_and_safe(tmp_path):
+    context = _task_context(tmp_path)
+
+    ref = artifact_ref(context.v1, context.task_dir / "outputs" / "validation_results.json")
+
+    assert ref == f"artifact:tasks/{context.task_id}/outputs/validation_results.json"
+    assert str(context.task_dir) not in ref
 
 
 def test_render_reports_wraps_existing_download_routes(tmp_path, monkeypatch):
