@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -130,9 +131,9 @@ def validation_metric_summary(context: V1TaskContext) -> dict:
     return {
         "task_id": context.task_id,
         "status": _metrics_status(status),
-        "ks": _float_or_zero(selected.get("ks")),
-        "auc": _float_or_zero(selected.get("auc")),
-        "psi": _optional_float(selected.get("psi_vs_train")),
+        "ks": _required_float(selected, "ks"),
+        "auc": _required_float(selected, "auc"),
+        "psi": _optional_float(selected.get("psi_vs_train"), "psi_vs_train"),
         "score_consistency_passed": reproducibility.get("status") == "pass",
         "validation_results_ref": artifact_ref(context, context.outputs_dir / "validation_results.json"),
     }
@@ -193,17 +194,26 @@ def _metrics_status(status: TaskStatus) -> str:
     return "writing_artifacts"
 
 
-def _float_or_zero(value) -> float:
+def _required_float(row: dict, field: str) -> float:
+    if field not in row or row[field] is None:
+        raise RuntimeError(f"metrics output missing {field}")
+    return _coerce_float(row[field], field)
+
+
+def _coerce_float(value, field: str) -> float:
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
-        return 0.0
+        raise RuntimeError(f"metrics output invalid {field}") from None
+    if not math.isfinite(number):
+        raise RuntimeError(f"metrics output invalid {field}")
+    return number
 
 
-def _optional_float(value) -> float | None:
+def _optional_float(value, field: str) -> float | None:
     if value is None:
         return None
-    return _float_or_zero(value)
+    return _coerce_float(value, field)
 
 
 def _artifact_payload(kind: str, context: V1TaskContext, path: Path) -> dict:

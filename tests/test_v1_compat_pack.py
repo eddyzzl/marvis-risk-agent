@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from marvis.app import create_app
 from marvis.db import PluginRepository, TaskRepository, init_db
@@ -173,6 +174,29 @@ def test_compute_metrics_summary_keeps_only_top_level_metrics(tmp_path, monkeypa
     }
     assert "customer_id" not in json.dumps(output)
     assert validation_metric_summary(context.v1)["psi"] is None
+
+
+def test_validation_metric_summary_rejects_missing_required_metrics(tmp_path):
+    context = _task_context(tmp_path)
+    outputs_dir = context.task_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / "validation_results.json").write_text(
+        json.dumps({
+            "reproducibility": {"summary": {"status": "pass"}},
+            "effectiveness": {
+                "overall": [
+                    {
+                        "split": "oot",
+                        "auc": 0.745,
+                    }
+                ]
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="metrics output missing ks"):
+        validation_metric_summary(context.v1)
 
 
 def test_v1_compat_artifact_refs_are_workspace_relative_and_safe(tmp_path):
