@@ -43,6 +43,53 @@ def test_goal_composer_html_renders_goal_tier_and_novel_controls():
     )
 
 
+def test_goal_composer_tracks_capability_tier_state_without_losing_inputs():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderGoalComposer } from "./marvis/static/js/v2/workflow_create.js";
+        import {
+          resetV2State,
+          setCapabilityTiers,
+          setSelectedTier,
+        } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const controls = {
+          "#goalInput": { value: "Keep <goal>" },
+          "#tierSelect": { value: "balanced" },
+          "#novelMode": { value: "explore" },
+        };
+        const container = {
+          dataset: {},
+          innerHTML: "",
+          querySelector(selector) {
+            return controls[selector] || null;
+          },
+        };
+
+        const cleanup = renderGoalComposer(container);
+        setCapabilityTiers([
+          { name: "conservative", summary: "Guarded <mode>" },
+          { name: "autonomous", summary: "Higher autonomy" },
+        ]);
+        controls["#tierSelect"].value = "autonomous";
+        setSelectedTier("autonomous");
+
+        assert.equal(container.dataset.v2GoalComposer, "true");
+        assert.equal(container.innerHTML.includes("Guarded <mode>"), false);
+        assert.ok(container.innerHTML.includes("Guarded &lt;mode&gt;"));
+        assert.ok(container.innerHTML.includes('value="autonomous" selected'));
+        assert.ok(container.innerHTML.includes("Keep &lt;goal&gt;"));
+        assert.ok(container.innerHTML.includes('<option value="explore" selected'));
+
+        cleanup();
+        setSelectedTier("conservative");
+        assert.ok(container.innerHTML.includes('value="autonomous" selected'));
+        """
+    )
+
+
 def test_goal_handlers_create_plan_and_update_state():
     run_node(
         """

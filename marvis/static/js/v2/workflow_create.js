@@ -1,7 +1,13 @@
 import { escapeHtml } from "../ui-utils.js";
 import { createPlan as createPlanApi } from "./api_v2.js";
 import { renderPlanValidationProblems } from "./plan_confirm.js";
-import { setPlan } from "./state_v2.js";
+import {
+  getCapabilityTiers,
+  getSelectedTier,
+  onCapabilityTiersChange,
+  onSelectedTierChange,
+  setPlan,
+} from "./state_v2.js";
 
 const defaultTiers = [
   { name: "conservative", summary: "Guarded execution" },
@@ -29,11 +35,18 @@ function tierOptionsHtml(tiers, defaultTier) {
   }).join("");
 }
 
+function novelOptionHtml(value, label, selectedValue) {
+  const selected = value === selectedValue ? " selected" : "";
+  return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(label)}</option>`;
+}
+
 export function goalComposerHtml(options = {}) {
   const tiers = options.tiers?.length ? options.tiers : defaultTiers;
   const defaultTier = options.defaultTier || "balanced";
+  const goal = String(options.goal || "");
+  const novelMode = String(options.novelMode || "");
   return `<section class="goal-composer">
-    <textarea id="goalInput" placeholder="Describe the workflow goal"></textarea>
+    <textarea id="goalInput" placeholder="Describe the workflow goal">${escapeHtml(goal)}</textarea>
     <label>
       Capability tier
       <select id="tierSelect">${tierOptionsHtml(tiers, defaultTier)}</select>
@@ -41,14 +54,22 @@ export function goalComposerHtml(options = {}) {
     <label>
       Novel mode
       <select id="novelMode">
-        <option value="">auto</option>
-        <option value="plan_ahead">plan_ahead</option>
-        <option value="explore">explore</option>
+        ${novelOptionHtml("", "auto", novelMode)}
+        ${novelOptionHtml("plan_ahead", "plan_ahead", novelMode)}
+        ${novelOptionHtml("explore", "explore", novelMode)}
       </select>
     </label>
     <button id="createPlanBtn" type="button" data-create-plan>Create plan</button>
     <div data-plan-problems></div>
   </section>`;
+}
+
+function currentComposerValues(container) {
+  return {
+    goal: controlValue(container, "#goalInput"),
+    tier: controlValue(container, "#tierSelect"),
+    novelMode: controlValue(container, "#novelMode"),
+  };
 }
 
 export function renderGoalComposer(container, options = {}) {
@@ -58,8 +79,23 @@ export function renderGoalComposer(container, options = {}) {
   if (container.dataset) {
     container.dataset.v2GoalComposer = "true";
   }
-  container.innerHTML = goalComposerHtml(options);
-  return () => {};
+  const render = () => {
+    const current = currentComposerValues(container);
+    const tiers = getCapabilityTiers();
+    container.innerHTML = goalComposerHtml({
+      ...options,
+      goal: current.goal,
+      tiers: tiers.length ? tiers : options.tiers,
+      defaultTier: getSelectedTier() || current.tier || options.defaultTier,
+      novelMode: current.novelMode,
+    });
+  };
+  render();
+  const cleanups = [
+    onCapabilityTiersChange(() => render()),
+    onSelectedTierChange(() => render()),
+  ];
+  return () => cleanups.forEach((cleanup) => cleanup());
 }
 
 function validationProblems(error) {
