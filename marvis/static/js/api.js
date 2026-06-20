@@ -21,10 +21,15 @@ export async function api(endpoint, options = {}) {
   const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
     ? endpoint
     : `/${endpoint}`;
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {}),
-  };
+  const body = options.body;
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers = { ...(options.headers || {}) };
+  const hasContentType = Object.keys(headers).some(
+    (name) => name.toLowerCase() === "content-type",
+  );
+  if (body !== undefined && !isFormData && !hasContentType) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(normalizedEndpoint, {
     ...options,
     headers,

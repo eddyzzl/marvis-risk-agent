@@ -153,14 +153,26 @@
               aria-labelledby="materialSourceUploadTab"
             >
               <input id="materialUploadInput" class="visually-hidden" type="file" multiple />
-              <div class="material-upload-dropzone" role="button" tabindex="0">
+              <input
+                id="materialFolderUploadInput"
+                class="visually-hidden"
+                type="file"
+                webkitdirectory
+                directory
+                multiple
+              />
+              <div class="material-upload-dropzone">
                 <svg class="material-upload-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M12 15V4"></path>
                   <path d="M7.5 8.5 12 4l4.5 4.5"></path>
                   <path d="M5 15.5v2.2A2.3 2.3 0 0 0 7.3 20h9.4a2.3 2.3 0 0 0 2.3-2.3v-2.2"></path>
                 </svg>
                 <strong>点击或拖拽上传</strong>
-                <span id="materialUploadStatus">文件上传提交暂未开放，请先使用文件路径。</span>
+                <span id="materialUploadStatus">请选择文件或文件夹。</span>
+                <div class="material-upload-actions">
+                  <button id="materialUploadFileButton" class="button ghost" type="button">选择文件</button>
+                  <button id="materialUploadFolderButton" class="button ghost" type="button">选择文件夹</button>
+                </div>
               </div>
             </div>
           </section>

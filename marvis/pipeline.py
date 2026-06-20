@@ -1268,6 +1268,8 @@ def _load_sample(
     suffix = sample_path.suffix.lower()
     if suffix == ".csv":
         return pd.read_csv(sample_path)
+    if suffix in {".xlsx", ".xls"}:
+        return pd.read_excel(sample_path)
     if suffix == ".feather":
         return _load_arrow_sample(
             sample_path,

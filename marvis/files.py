@@ -3,6 +3,18 @@ from pathlib import Path
 
 from marvis.domain import FileArtifact, FileRole
 
+EXCEL_SUFFIXES = {".xlsx", ".xls"}
+SAMPLE_SUFFIXES = {".feather", ".csv", ".parquet"}
+DICTIONARY_KEYWORDS = ("字典", "dictionary")
+EXCEL_SAMPLE_KEYWORDS = (
+    "样本",
+    "数据",
+    "建模",
+    "sample",
+    "data",
+    "modeling",
+)
+
 
 def classify_file(path: Path) -> FileRole:
     name = path.name
@@ -14,9 +26,15 @@ def classify_file(path: Path) -> FileRole:
 
     if suffix == ".ipynb":
         return FileRole.NOTEBOOK
-    if suffix in {".xlsx", ".csv"} and ("字典" in name or "dictionary" in lower_name):
+    if suffix in EXCEL_SUFFIXES | {".csv"} and any(
+        keyword in name or keyword in lower_name for keyword in DICTIONARY_KEYWORDS
+    ):
         return FileRole.DATA_DICTIONARY
-    if suffix in {".feather", ".csv", ".parquet"}:
+    if suffix in SAMPLE_SUFFIXES:
+        return FileRole.SAMPLE
+    if suffix in EXCEL_SUFFIXES and any(
+        keyword in name or keyword in lower_name for keyword in EXCEL_SAMPLE_KEYWORDS
+    ):
         return FileRole.SAMPLE
     if suffix == ".pmml":
         return FileRole.MODEL_PMML

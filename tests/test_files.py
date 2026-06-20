@@ -10,6 +10,7 @@ from marvis.files import classify_file, scan_source_dir
 def test_classify_file_roles():
     assert classify_file(Path("model.ipynb")) == FileRole.NOTEBOOK
     assert classify_file(Path("sample.feather")) == FileRole.SAMPLE
+    assert classify_file(Path("model_sample.xlsx")) == FileRole.SAMPLE
     assert classify_file(Path("data_dictionary.csv")) == FileRole.DATA_DICTIONARY
     assert classify_file(Path("fr_mob6_final.pmml")) == FileRole.MODEL_PMML
     assert classify_file(Path("数据字典.xlsx")) == FileRole.DATA_DICTIONARY

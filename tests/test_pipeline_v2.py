@@ -1452,3 +1452,12 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
     sample = _load_sample(sample_path, fallback_python=fallback_python)
 
     assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}
+
+
+def test_load_sample_supports_excel_files(tmp_path: Path):
+    sample_path = tmp_path / "model_sample.xlsx"
+    pd.DataFrame({"x1": [1, 2], "y": [0, 1]}).to_excel(sample_path, index=False)
+
+    sample = _load_sample(sample_path)
+
+    assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}

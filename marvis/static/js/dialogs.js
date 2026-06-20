@@ -19,6 +19,9 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
     }
     if (pathPanel) pathPanel.hidden = !isPath;
     if (uploadPanel) uploadPanel.hidden = isPath;
+    if (!isPath && uploadPanel) {
+      uploadPanel.scrollIntoView({ block: "nearest" });
+    }
   }
 
   function reset() {
@@ -28,10 +31,16 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
   }
 
   function captureFiles(fileList) {
-    files = Array.from(fileList || []).map((file) => ({
-      name: file.name || "未命名文件",
-      size: Number(file.size || 0),
-    }));
+    files = Array.from(fileList || []).map((file) => {
+      const relativePath = (file.webkitRelativePath || file.name || "未命名文件")
+        .replace(/^\/+/, "");
+      return {
+        file,
+        name: file.name || "未命名文件",
+        relativePath,
+        size: Number(file.size || 0),
+      };
+    });
     notifyFilesChanged();
   }
 
@@ -55,15 +64,31 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
 
   function bindDropzone() {
     const input = $("materialUploadInput");
+    const folderInput = $("materialFolderUploadInput");
+    const fileButton = $("materialUploadFileButton");
+    const folderButton = $("materialUploadFolderButton");
     const dropzone = document.querySelector(".material-upload-dropzone");
     if (!input || !dropzone) return;
-    dropzone.onclick = () => input.click();
-    dropzone.onkeydown = (event) => {
-      if (!["Enter", " "].includes(event.key)) return;
-      event.preventDefault();
+    dropzone.onclick = (event) => {
+      if (event.target.closest("button")) return;
       input.click();
     };
+    if (fileButton) {
+      fileButton.onclick = (event) => {
+        event.stopPropagation();
+        input.click();
+      };
+    }
+    if (folderButton && folderInput) {
+      folderButton.onclick = (event) => {
+        event.stopPropagation();
+        folderInput.click();
+      };
+    }
     input.onchange = () => captureFiles(input.files);
+    if (folderInput) {
+      folderInput.onchange = () => captureFiles(folderInput.files);
+    }
     ["dragenter", "dragover"].forEach((eventName) => {
       dropzone.addEventListener(eventName, (event) => {
         event.preventDefault();
