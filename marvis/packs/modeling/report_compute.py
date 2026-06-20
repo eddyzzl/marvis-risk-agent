@@ -221,6 +221,11 @@ def stress_low_pricing(
     )
     edges = equal_frequency_bin_edges(frame[score_col].to_numpy(dtype=float), 10)
     base_dist = bin_distribution(frame[score_col].to_numpy(dtype=float), edges)
+    baseline_ks = feature_ks(
+        frame[score_col].to_numpy(dtype=float),
+        frame[target_col].to_numpy(dtype=int),
+    )
+    baseline_low_pricing_ratio = float((frame[interest_rate_col] <= threshold).mean())
     by_ratio = {}
     bins_by_ratio = {}
     ks_by_ratio = {}
@@ -247,6 +252,13 @@ def stress_low_pricing(
         "ks_by_ratio": ks_by_ratio,
         "psi_by_ratio": psi_by_ratio,
         "by_ratio": by_ratio,
+        "conclusion_data": _low_pricing_conclusion_data(
+            threshold=threshold,
+            baseline_low_pricing_ratio=baseline_low_pricing_ratio,
+            baseline_ks=baseline_ks,
+            ks_by_ratio=ks_by_ratio,
+            psi_by_ratio=psi_by_ratio,
+        ),
     }
 
 
@@ -353,6 +365,29 @@ def _cycle_take(frame: pd.DataFrame, count: int) -> pd.DataFrame:
         return frame.copy()
     repeats = int(np.ceil(count / len(frame)))
     return pd.concat([frame] * repeats, ignore_index=True).iloc[:count].copy()
+
+
+def _low_pricing_conclusion_data(
+    *,
+    threshold: float,
+    baseline_low_pricing_ratio: float,
+    baseline_ks: float,
+    ks_by_ratio: dict[str, float],
+    psi_by_ratio: dict[str, float],
+) -> dict:
+    max_psi_ratio = max(psi_by_ratio, key=lambda ratio: psi_by_ratio[ratio]) if psi_by_ratio else ""
+    min_ks_ratio = min(ks_by_ratio, key=lambda ratio: ks_by_ratio[ratio]) if ks_by_ratio else ""
+    min_ks = ks_by_ratio[min_ks_ratio] if min_ks_ratio else None
+    return {
+        "threshold": threshold,
+        "baseline_low_pricing_ratio": baseline_low_pricing_ratio,
+        "baseline_ks": baseline_ks,
+        "max_psi_ratio": max_psi_ratio,
+        "max_psi": psi_by_ratio[max_psi_ratio] if max_psi_ratio else None,
+        "min_ks_ratio": min_ks_ratio,
+        "min_ks": min_ks,
+        "max_ks_drop": None if min_ks is None else baseline_ks - min_ks,
+    }
 
 
 def _first_existing(frame: pd.DataFrame, columns: tuple[str, ...]) -> str | None:

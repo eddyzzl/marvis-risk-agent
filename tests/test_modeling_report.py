@@ -203,6 +203,30 @@ def test_stress_low_pricing_exposes_flat_metric_indexes_by_ratio(tmp_path):
     }
 
 
+def test_stress_low_pricing_exposes_conclusion_data_for_report_narratives(tmp_path):
+    path = tmp_path / "low_pricing.parquet"
+    _business_frame().to_parquet(path, index=False)
+
+    result = stress_low_pricing(
+        DataBackend(tmp_path),
+        path,
+        score_col="score",
+        target_col="y",
+        interest_rate_col="rate",
+        low_pricing_threshold=None,
+        ratios=(0.25, 0.5),
+    )
+
+    conclusion = result["conclusion_data"]
+    assert conclusion["threshold"] == result["threshold"]
+    assert conclusion["baseline_low_pricing_ratio"] == pytest.approx(0.5)
+    assert conclusion["max_psi_ratio"] in result["psi_by_ratio"]
+    assert conclusion["max_psi"] == result["psi_by_ratio"][conclusion["max_psi_ratio"]]
+    assert conclusion["min_ks_ratio"] in result["ks_by_ratio"]
+    assert conclusion["min_ks"] == result["ks_by_ratio"][conclusion["min_ks_ratio"]]
+    assert conclusion["max_ks_drop"] == pytest.approx(conclusion["baseline_ks"] - conclusion["min_ks"])
+
+
 def test_resolve_sections_and_render_model_report_degrades_missing_business_data(tmp_path):
     statuses = resolve_report_sections(BusinessColumns(), dictionary_id=None)
     output = tmp_path / "model_report.xlsx"
