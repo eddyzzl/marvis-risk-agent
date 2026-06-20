@@ -59,6 +59,25 @@ export const executeJoin = (joinId) => apiPost(`/api/joins/${pathPart(joinId)}/e
 
 export const listCapabilityTiers = () => apiGet("/api/capability-tiers");
 
+export function listMemoryDistillations({ category = "", includeSuperseded = false } = {}) {
+  const params = new URLSearchParams();
+  if (category) params.set("category", String(category));
+  if (includeSuperseded) params.set("include_superseded", "true");
+  const query = params.toString();
+  return apiGet(`/api/agent-memory/distillations${query ? `?${query}` : ""}`);
+}
+
+export const getMemoryDistillation = (distillationId) => (
+  apiGet(`/api/agent-memory/distillations/${pathPart(distillationId)}`)
+);
+export const rollbackMemoryDistillation = (distillationId) => (
+  apiPost(`/api/agent-memory/distillations/${pathPart(distillationId)}/rollback`, {})
+);
+export function consolidateMemory(category = "") {
+  const query = category ? `?category=${queryPart(category)}` : "";
+  return apiPost(`/api/agent-memory/consolidate${query}`, {});
+}
+
 export function listDrafts({ taskId = "", status = "" } = {}) {
   const params = new URLSearchParams();
   if (taskId) params.set("task_id", String(taskId));

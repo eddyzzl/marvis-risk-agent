@@ -43,6 +43,7 @@
 .subagent-list,
 .loop-events,
 .plugin-list,
+.memory-distillation-list,
 .skill-list {
   display: grid;
   gap: 10px;
@@ -90,6 +91,8 @@
 .plan-step,
 .subagent-row,
 .plugin-row,
+.memory-distillation-row,
+.memory-distillation-detail-inner,
 .skill,
 .tier-row,
 .join-card,
@@ -113,6 +116,7 @@
 }
 
 .plugin-manager,
+.memory-manager,
 .skill-manager,
 .tier-settings {
   display: grid;
@@ -120,6 +124,7 @@
 }
 
 .plugin-upload,
+.memory-manager-toolbar,
 .skill-validator {
   display: grid;
   gap: 6px;
@@ -137,11 +142,30 @@
 }
 
 .plugin-row header,
+.memory-distillation-row,
+.memory-distillation-row button:first-child,
+.memory-manager-toolbar,
 .plugin-row label {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.memory-distillation-row {
+  justify-content: space-between;
+}
+
+.memory-distillation-row button:first-child {
+  min-width: 0;
+  flex: 1 1 240px;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.memory-distillation-detail-inner {
+  display: grid;
+  gap: 10px;
 }
 
 .plugin-row input[type="checkbox"] {
@@ -163,6 +187,7 @@
 .plugin-version,
 .plugin-tool-count,
 .plugin-builtin-badge,
+.memory-distillation-row span,
 .skill-badge,
 .subagent-grants,
 .tier-limit {

@@ -38,6 +38,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "workflow_create.js",
         "artifact_view.js",
         "capability.js",
+        "memory_manager.js",
         "subagent_view.js",
         "loop_progress.js",
     ):
@@ -100,9 +101,11 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           createPlan,
           executeJoin,
           getJoinPlan,
+          getMemoryDistillation,
           getPlan,
           listCapabilityTiers,
           listDatasets,
+          listMemoryDistillations,
           listPluginTools,
           listPlugins,
           listSkills,
@@ -110,8 +113,10 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           proposeJoin,
           reloadSkills,
           removePlugin,
+          rollbackMemoryDistillation,
           runPlan,
           setPluginEnabled,
+          consolidateMemory,
           uploadDataset,
           uploadPlugin,
           validateSkill,
@@ -195,6 +200,15 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
 
         await listCapabilityTiers();
         assert.equal(calls.at(-1).url, "/api/capability-tiers");
+
+        await listMemoryDistillations({ category: "field_convention", includeSuperseded: true });
+        assert.equal(calls.at(-1).url, "/api/agent-memory/distillations?category=field_convention&include_superseded=true");
+        await getMemoryDistillation("distill/1");
+        assert.equal(calls.at(-1).url, "/api/agent-memory/distillations/distill%2F1");
+        await rollbackMemoryDistillation("distill/1");
+        assert.equal(calls.at(-1).url, "/api/agent-memory/distillations/distill%2F1/rollback");
+        await consolidateMemory("model_experience");
+        assert.equal(calls.at(-1).url, "/api/agent-memory/consolidate?category=model_experience");
         """
     )
 
@@ -351,13 +365,14 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "skillPanel",
           "draftPanel",
           "capabilityPanel",
+          "memoryPanel",
           "loopPanel",
           "artifactPanel",
         ]);
         assert.equal(first.panels.goalPanel, second.panels.goalPanel);
         assert.equal(first.panels.joinPanel, second.panels.joinPanel);
         assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 10);
+        assert.equal(root.children.length, 11);
         assert.deepEqual(root.children.map((child) => child.id), [
           "goalPanel",
           "planPanel",
@@ -367,6 +382,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "skillPanel",
           "draftPanel",
           "capabilityPanel",
+          "memoryPanel",
           "loopPanel",
           "artifactPanel",
         ]);
@@ -377,6 +393,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(first.panels.skillPanel.dataset.v2SkillManager, "true");
         assert.equal(first.panels.draftPanel.dataset.v2DraftManager, "true");
         assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
+        assert.equal(first.panels.memoryPanel.dataset.v2MemoryManager, "true");
         assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
         assert.ok(first.panels.joinPanel.innerHTML.includes('data-v2-empty="join"'));
@@ -385,6 +402,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-validate-skill'));
         assert.ok(first.panels.draftPanel.innerHTML.includes("data-draft-status"));
         assert.ok(first.panels.capabilityPanel.innerHTML.includes('Guardrails remain constant'));
+        assert.ok(first.panels.memoryPanel.innerHTML.includes('data-consolidate-memory'));
         assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
         assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
 
@@ -458,8 +476,8 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         const mounted = mountV2(root);
         mountV2(root);
 
-        assert.equal((listeners.click || []).length, 7);
-        assert.equal((listeners.change || []).length, 3);
+        assert.equal((listeners.click || []).length, 8);
+        assert.equal((listeners.change || []).length, 4);
         assert.equal((listeners.input || []).length, 1);
 
         mounted.unmount();

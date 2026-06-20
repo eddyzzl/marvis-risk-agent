@@ -3,6 +3,7 @@ import { attachCapabilityHandlers, renderTierSettings, renderTierSettingsShell }
 import { attachDraftHandlers, renderDraftManagerShell } from "./draft_manager.js";
 import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
+import { attachMemoryHandlers, renderMemoryManager, renderMemoryManagerShell } from "./memory_manager.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
 import { attachPluginHandlers, renderPluginManager, renderPluginManagerShell } from "./plugin_manager.js";
@@ -19,6 +20,7 @@ const panelDefinitions = [
   { id: "skillPanel", className: "v2-skill-panel", label: "V2 workflow templates" },
   { id: "draftPanel", className: "v2-draft-panel", label: "V2 draft tools" },
   { id: "capabilityPanel", className: "v2-capability-panel", label: "V2 capability tiers" },
+  { id: "memoryPanel", className: "v2-memory-panel", label: "V2 memory audit" },
   { id: "loopPanel", className: "v2-loop-panel", label: "V2 loop progress" },
   { id: "artifactPanel", className: "v2-artifact-panel", label: "V2 artifacts" },
 ];
@@ -71,8 +73,10 @@ export function mountV2(root, options = {}) {
     const skillActions = options.skillActions || {};
     const draftActions = options.draftActions || {};
     const capabilityActions = options.capabilityActions || {};
+    const memoryActions = options.memoryActions || {};
     const refreshPlugins = () => renderPluginManager(panels.pluginPanel, pluginActions);
     const refreshSkills = () => renderSkillManager(panels.skillPanel, skillActions);
+    const refreshMemories = () => renderMemoryManager(panels.memoryPanel, memoryActions);
     const refreshCapabilities = async () => {
       try {
         await renderTierSettings(panels.capabilityPanel, capabilityActions);
@@ -89,6 +93,7 @@ export function mountV2(root, options = {}) {
       renderSkillManagerShell(panels.skillPanel),
       renderDraftManagerShell(panels.draftPanel),
       renderTierSettingsShell(panels.capabilityPanel),
+      renderMemoryManagerShell(panels.memoryPanel),
       renderLoopEvents(panels.loopPanel),
       renderEmptyPanel(panels.artifactPanel, "artifact", "暂无工件预览"),
     ];
@@ -103,6 +108,7 @@ export function mountV2(root, options = {}) {
         attachPluginHandlers(root, { ...pluginActions, refreshPlugins }),
         attachSkillHandlers(root, { ...skillActions, refreshSkills }),
         attachDraftHandlers(root, draftActions),
+        attachMemoryHandlers(root, { ...memoryActions, refreshMemories }),
       );
     }
     root[mountStateKey] = { cleanups };
