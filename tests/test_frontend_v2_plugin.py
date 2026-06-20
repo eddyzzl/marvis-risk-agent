@@ -171,3 +171,86 @@ def test_plugin_handlers_upload_toggle_remove_and_show_tools():
         assert.equal(listeners.change, undefined);
         """
     )
+
+
+def test_plugin_handlers_show_status_specific_upload_conflict_error():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPluginHandlers } from "./marvis/static/js/v2/plugin_manager.js";
+
+        const messages = [];
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector() { return null; },
+        };
+
+        attachPluginHandlers(root, {
+          uploadPlugin: async () => {
+            const error = new Error("duplicate plugin uploaded_pack");
+            error.status = 409;
+            throw error;
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        const uploadTarget = {
+          files: [{ name: "plugin.zip" }],
+          closest(selector) {
+            return selector === "[data-upload-plugin]" ? this : null;
+          },
+        };
+        await listeners.change({ target: uploadTarget });
+
+        assert.equal(messages.length, 1);
+        assert.ok(messages[0].includes("already installed"));
+        assert.ok(messages[0].includes("version"));
+        assert.equal(messages[0].includes("duplicate plugin"), false);
+        """
+    )
+
+
+def test_plugin_handlers_show_status_specific_upload_manifest_error():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPluginHandlers } from "./marvis/static/js/v2/plugin_manager.js";
+
+        const messages = [];
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener(type, fn) {
+            if (listeners[type] === fn) delete listeners[type];
+          },
+          querySelector() { return null; },
+        };
+
+        attachPluginHandlers(root, {
+          uploadPlugin: async () => {
+            const error = new Error("unknown hook <script>");
+            error.status = 422;
+            throw error;
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        const uploadTarget = {
+          files: [{ name: "plugin.zip" }],
+          closest(selector) {
+            return selector === "[data-upload-plugin]" ? this : null;
+          },
+        };
+        await listeners.change({ target: uploadTarget });
+
+        assert.equal(messages.length, 1);
+        assert.ok(messages[0].includes("manifest"));
+        assert.ok(messages[0].includes("upload"));
+        assert.equal(messages[0].includes("unknown hook"), false);
+        assert.equal(messages[0].includes("<script>"), false);
+        """
+    )

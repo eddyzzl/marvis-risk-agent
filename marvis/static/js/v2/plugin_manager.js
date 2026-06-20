@@ -124,6 +124,19 @@ function defaultShowError(message) {
   console.error(message);
 }
 
+function pluginUploadErrorMessage(error) {
+  if (error?.status === 409) {
+    return "Plugin is already installed. Remove it or upload a package with a new version.";
+  }
+  if (error?.status === 422) {
+    return "Plugin manifest is invalid. Fix manifest.json and upload the package again.";
+  }
+  if (error?.status === 403) {
+    return "Plugin changes require local plugin admin confirmation.";
+  }
+  return error?.message || "plugin upload failed";
+}
+
 export function attachPluginHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachPluginHandlers requires a stable event root");
@@ -151,7 +164,7 @@ export function attachPluginHandlers(root, deps = {}) {
         await actions.uploadPlugin(file);
         await actions.refreshPlugins();
       } catch (error) {
-        actions.showError(error?.message || "plugin upload failed");
+        actions.showError(pluginUploadErrorMessage(error));
       }
       return;
     }
