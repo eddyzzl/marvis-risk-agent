@@ -827,16 +827,20 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert 'id="sourceDir"' in material_section
     assert "材料目录" in material_section
     assert 'id="materialUploadInput" class="visually-hidden" type="file" multiple />' in material_section
+    assert 'id="materialFolderUploadInput"' in material_section
+    assert "webkitdirectory" in material_section
     assert 'class="material-upload-dropzone"' in material_section
-    assert 'role="button" tabindex="0"' in material_section
+    assert 'class="material-upload-dropzone" role="button"' not in material_section
     assert 'class="material-upload-icon"' in material_section
     assert 'id="materialUploadStatus"' in material_section
     assert "点击或拖拽上传" in material_section
-    assert "暂未开放" in material_section
+    assert "选择文件夹" in material_section
+    assert "暂未开放" not in material_section
 
     assert "export function createMaterialSourceController" in dialogs_js
     assert "function bindDropzone()" in dialogs_js
     assert "captureFiles(input.files)" in dialogs_js
+    assert "file.webkitRelativePath" in dialogs_js
     assert "captureFiles(event.dataTransfer?.files)" in dialogs_js
     assert 'dropzone.classList.add("is-dragover")' in dialogs_js
     assert "materialSourceController.bindDropzone();" in app_js
@@ -846,6 +850,34 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert ".material-source-tab" in styles_css
     assert ".material-upload-dropzone" in styles_css
     assert ".material-upload-dropzone.is-dragover" in styles_css
+    segment_rule = _css_rule(styles_css, ".material-source-segment")
+    assert "width: 100%;" in segment_rule
+
+
+def test_create_task_upload_mode_posts_materials_before_creating_task():
+    app_js = _read_static("app.js")
+    api_js = _read_static("js/api.js")
+
+    api_start = api_js.index("export async function api")
+    api_end = api_js.index("export function sleep", api_start)
+    api_body = api_js[api_start:api_end]
+    assert "body instanceof FormData" in api_body
+    assert '"Content-Type": "application/json"' not in api_body
+
+    upload_start = app_js.index("async function uploadMaterialFiles")
+    upload_end = app_js.index("async function createTask", upload_start)
+    upload_body = app_js[upload_start:upload_end]
+    assert "new FormData()" in upload_body
+    assert 'formData.append("files"' in upload_body
+    assert 'formData.append("relative_paths"' in upload_body
+    assert 'api("api/material-uploads"' in upload_body
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_body = app_js[create_start:create_end]
+    assert "await uploadMaterialFiles" in create_body
+    assert "payload.source_dir = upload.source_dir" in create_body
+    assert "文件上传暂未开放" not in create_body
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():

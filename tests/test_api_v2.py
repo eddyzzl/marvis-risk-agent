@@ -274,6 +274,51 @@ def test_create_then_get_task(tmp_path: Path, monkeypatch):
     assert got.json()["report_available"] is False
 
 
+def test_material_upload_preserves_folder_paths_under_workspace(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/material-uploads",
+        data={
+            "relative_paths": [
+                "submitted/model.ipynb",
+                "submitted/data/sample.csv",
+            ],
+        },
+        files=[
+            ("files", ("model.ipynb", b"{}", "application/x-ipynb+json")),
+            ("files", ("sample.csv", b"x,y\n1,0\n", "text/csv")),
+        ],
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    source_dir = Path(payload["source_dir"])
+    assert source_dir.parent == tmp_path / "material_uploads"
+    assert (source_dir / "submitted" / "model.ipynb").read_bytes() == b"{}"
+    assert (source_dir / "submitted" / "data" / "sample.csv").read_bytes() == b"x,y\n1,0\n"
+    assert payload["files"] == [
+        {"relative_path": "submitted/model.ipynb", "size_bytes": 2},
+        {"relative_path": "submitted/data/sample.csv", "size_bytes": 8},
+    ]
+
+
+def test_material_upload_rejects_paths_outside_upload_directory(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/material-uploads",
+        data={"relative_paths": "../escape.csv"},
+        files={"files": ("escape.csv", b"x,y\n1,0\n", "text/csv")},
+    )
+
+    assert response.status_code == 422
+    assert "invalid upload path" in response.json()["detail"]
+
+
 def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     dispatcher = FakeHookDispatcher()

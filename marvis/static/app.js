@@ -332,7 +332,7 @@ function renderMaterialUploadSelection(files = materialSourceController.selected
   const status = $("materialUploadStatus");
   if (!status) return;
   if (files.length === 0) {
-    status.textContent = "文件上传提交暂未开放，请先使用文件路径。";
+    status.textContent = "请选择文件或文件夹。";
     return;
   }
   const names = files
@@ -340,7 +340,13 @@ function renderMaterialUploadSelection(files = materialSourceController.selected
     .map((file) => file.name)
     .join("、");
   const suffix = files.length > 3 ? ` 等 ${files.length} 个文件` : "";
-  status.textContent = `已选择 ${names}${suffix}；上传提交暂未开放。`;
+  const folderCount = new Set(
+    files
+      .map((file) => (file.relativePath || "").split("/").slice(0, -1).join("/"))
+      .filter(Boolean),
+  ).size;
+  const folderText = folderCount > 0 ? `，包含 ${folderCount} 个目录` : "";
+  status.textContent = `已选择 ${names}${suffix}${folderText}。`;
 }
 
 function handleRunModeCardPointerDown(event) {
@@ -5544,6 +5550,21 @@ function agentValidationPaused(task) {
   return ["scanned", "executed", "writing_artifacts", "review_required"].includes(status);
 }
 
+async function uploadMaterialFiles(files) {
+  if (!files.length) {
+    throw new Error("请先选择要上传的材料文件。");
+  }
+  const formData = new FormData();
+  files.forEach((item) => {
+    formData.append("files", item.file, item.name);
+    formData.append("relative_paths", item.relativePath || item.name);
+  });
+  return await api("api/material-uploads", {
+    method: "POST",
+    body: formData,
+  });
+}
+
 async function createTask() {
   setCreateStatus("");
   const selectedRunMode = document.querySelector('input[name="runMode"]:checked')?.value;
@@ -5560,8 +5581,18 @@ async function createTask() {
     report_values: collectCreateTaskReportValues(),
   };
   if (materialSourceController.mode() === "upload") {
-    setCreateStatus("文件上传暂未开放，请先使用文件路径。", "error");
-    return null;
+    const files = materialSourceController.selectedFiles();
+    if (files.length === 0) {
+      setCreateStatus("请先选择要上传的材料文件。", "error");
+      return null;
+    }
+    if (!payload.model_name || !payload.validator) {
+      setCreateStatus("请先填写模型名称和验证人员。", "error");
+      return null;
+    }
+    setCreateStatus("正在上传材料...");
+    const upload = await uploadMaterialFiles(files);
+    payload.source_dir = upload.source_dir;
   }
   if (!payload.model_name || !payload.validator || !payload.source_dir) {
     setCreateStatus("请先填写模型名称、验证人员和材料目录。", "error");

@@ -3,11 +3,12 @@ from dataclasses import asdict, replace
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import traceback
 from urllib.parse import unquote
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -134,6 +135,8 @@ logger = logging.getLogger(__name__)
 MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ]{1,64}$", re.UNICODE)
 AGENT_STOP_ACK_CONTENT = "已停止当前动作，请问有什么指示？"
 AGENT_STOP_STATUS_MESSAGE = "已停止当前动作"
+MATERIAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
+MAX_MATERIAL_UPLOAD_FILES = 2000
 
 
 REQUIRED_SCAN_MATERIALS = (
@@ -528,6 +531,48 @@ def _path_is_within(root: Path, candidate: Path) -> bool:
     return True
 
 
+def _new_material_upload_dir(settings) -> Path:
+    uploads_root = Path(settings.workspace).resolve() / "material_uploads"
+    uploads_root.mkdir(parents=True, exist_ok=True)
+    for _ in range(10):
+        candidate = uploads_root / uuid4().hex
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        return candidate
+    raise HTTPException(status_code=500, detail="failed to allocate material upload directory")
+
+
+def _validate_upload_relative_path(raw_path: str | None) -> PurePosixPath:
+    value = str(raw_path or "").replace("\\", "/").strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="invalid upload path: empty filename")
+    path = PurePosixPath(value)
+    invalid = (
+        path.is_absolute()
+        or path.name in {"", ".", ".."}
+        or any(part in {"", ".", ".."} for part in path.parts)
+    )
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"invalid upload path: {value}")
+    return path
+
+
+async def _save_upload_file(upload: UploadFile, destination: Path) -> int:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    size_bytes = 0
+    with destination.open("wb") as output:
+        while True:
+            chunk = await upload.read(MATERIAL_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            size_bytes += len(chunk)
+            output.write(chunk)
+    await upload.close()
+    return size_bytes
+
+
 @router.get("/branding")
 def get_branding(request: Request) -> dict[str, object]:
     return load_branding(request.app.state.settings.workspace)
@@ -585,6 +630,66 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         task_id=task.id,
     )
     return _task_payload(repo, task, request.app.state.settings.tasks_dir)
+
+
+@router.post("/material-uploads", status_code=201)
+async def upload_materials(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] | None = Form(default=None),
+) -> dict:
+    if not files:
+        raise HTTPException(status_code=422, detail="at least one material file is required")
+    if len(files) > MAX_MATERIAL_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"too many material files: max_files={MAX_MATERIAL_UPLOAD_FILES}",
+        )
+    if relative_paths and len(relative_paths) != len(files):
+        raise HTTPException(
+            status_code=422,
+            detail="relative_paths count must match uploaded files count",
+        )
+
+    upload_dir = _new_material_upload_dir(request.app.state.settings)
+    saved_files: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    try:
+        for index, upload in enumerate(files):
+            raw_relative_path = (
+                relative_paths[index]
+                if relative_paths and index < len(relative_paths)
+                else upload.filename
+            )
+            relative_path = _validate_upload_relative_path(raw_relative_path)
+            relative_path_text = relative_path.as_posix()
+            if relative_path_text in seen_paths:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"duplicate upload path: {relative_path_text}",
+                )
+            seen_paths.add(relative_path_text)
+
+            destination = (upload_dir / Path(*relative_path.parts)).resolve()
+            try:
+                destination = assert_within(upload_dir, destination)
+            except PermissionError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid upload path: {relative_path_text}",
+                ) from exc
+            size_bytes = await _save_upload_file(upload, destination)
+            saved_files.append(
+                {
+                    "relative_path": relative_path_text,
+                    "size_bytes": size_bytes,
+                }
+            )
+    except Exception:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
+
+    return {"source_dir": str(upload_dir), "files": saved_files}
 
 
 @router.get("/tasks/{task_id}")

@@ -65,12 +65,12 @@ export async function api(endpoint, options = {}) {
   const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
     ? endpoint
     : `/${endpoint}`;
-  const headers = isFormDataBody(options.body)
-    ? { ...(options.headers || {}) }
-    : {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      };
+  const body = options.body;
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers = { ...(options.headers || {}) };
+  if (body !== undefined && !isFormData && !hasContentType(headers)) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(normalizedEndpoint, {
     ...options,
     headers,

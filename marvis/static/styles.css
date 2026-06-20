@@ -1587,9 +1587,9 @@ body.is-resizing {
 }
 
 .material-source-segment {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(104px, 1fr));
-  width: min(280px, 100%);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
   padding: 3px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1629,11 +1629,11 @@ body.is-resizing {
 
 .material-upload-dropzone {
   display: grid;
-  min-height: 128px;
+  min-height: 108px;
   align-content: center;
   justify-items: center;
-  gap: 7px;
-  padding: 20px;
+  gap: 6px;
+  padding: 14px;
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   color: var(--text-muted);
@@ -1662,9 +1662,23 @@ body.is-resizing {
   font-size: 12px;
 }
 
+.material-upload-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.material-upload-actions .button {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
 .material-upload-icon {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   color: var(--text-muted);
   fill: none;
   stroke: currentColor;
