@@ -129,6 +129,17 @@ def test_artifact_ref_html_handles_value_metrics_and_file_refs_safely():
         assert.equal(metrics.includes("<bad>"), false);
         assert.ok(metrics.includes("&lt;bad&gt;"));
 
+        const refs = metricsHtml({
+          validation_results_ref: "artifact:validation_results.json",
+          joined_dataset: "dataset:joined<script>",
+          note: "not:a-ref <img>",
+        });
+        assert.equal(refs.includes("joined<script>"), false);
+        assert.equal(refs.includes("<img>"), false);
+        assert.ok(refs.includes('data-artifact="artifact:validation_results.json"'));
+        assert.ok(refs.includes('data-artifact="dataset:joined&lt;script&gt;"'));
+        assert.ok(refs.includes("not:a-ref &lt;img&gt;"));
+
         const artifact = artifactFileHtml("report<script>.docx");
         assert.equal(artifact.includes("<script>"), false);
         assert.ok(artifact.includes("report&lt;script&gt;.docx"));

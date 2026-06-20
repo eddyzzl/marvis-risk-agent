@@ -18,6 +18,25 @@ function cellText(value) {
   return String(value ?? "");
 }
 
+function outputRefKind(value) {
+  const text = String(value || "");
+  const index = text.indexOf(":");
+  if (index < 1) {
+    return "";
+  }
+  const kind = text.slice(0, index);
+  return new Set(["dataset", "metrics", "artifact", "value"]).has(kind) ? kind : "";
+}
+
+function metricsCellHtml(value) {
+  const text = cellText(value);
+  const kind = outputRefKind(text);
+  if (kind) {
+    return `<button type="button" data-artifact="${escapeHtml(text)}">Open ${escapeHtml(kind)}</button>`;
+  }
+  return escapeHtml(text);
+}
+
 function profileByName(preview) {
   const profiles = preview.column_profiles || preview.profiles || [];
   return new Map(profiles.map((profile) => [String(profile.name), profile]));
@@ -85,7 +104,7 @@ export function datasetTableHtml(preview = {}) {
 
 export function metricsHtml(metrics = {}) {
   const rows = Object.entries(metrics)
-    .map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(cellText(value))}</td></tr>`)
+    .map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${metricsCellHtml(value)}</td></tr>`)
     .join("");
   return `<table class="metrics-preview"><tbody>${rows}</tbody></table>`;
 }
