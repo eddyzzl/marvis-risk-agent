@@ -308,6 +308,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
         import {
           resetV2State,
+          setCurrentJoin,
           setPlan,
         } from "./marvis/static/js/v2/state_v2.js";
 
@@ -344,6 +345,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.deepEqual(Object.keys(first.panels), [
           "goalPanel",
           "planPanel",
+          "joinPanel",
           "subAgentPanel",
           "pluginPanel",
           "skillPanel",
@@ -352,11 +354,13 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "artifactPanel",
         ]);
         assert.equal(first.panels.goalPanel, second.panels.goalPanel);
+        assert.equal(first.panels.joinPanel, second.panels.joinPanel);
         assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 8);
+        assert.equal(root.children.length, 9);
         assert.deepEqual(root.children.map((child) => child.id), [
           "goalPanel",
           "planPanel",
+          "joinPanel",
           "subAgentPanel",
           "pluginPanel",
           "skillPanel",
@@ -366,8 +370,10 @@ def test_v2_mount_creates_stable_panels_idempotently():
         ]);
         assert.equal(root.dataset.v2Mounted, "true");
         assert.equal(first.panels.goalPanel.dataset.v2GoalComposer, "true");
+        assert.equal(first.panels.joinPanel.dataset.v2JoinReview, "true");
         assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
+        assert.ok(first.panels.joinPanel.innerHTML.includes('data-v2-empty="join"'));
         assert.ok(first.panels.pluginPanel.innerHTML.includes('data-v2-empty="plugins"'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-v2-empty="skills"'));
         assert.ok(first.panels.capabilityPanel.innerHTML.includes('data-v2-empty="capability"'));
@@ -389,6 +395,13 @@ def test_v2_mount_creates_stable_panels_idempotently():
         });
         assert.ok(first.panels.planPanel.innerHTML.includes("Mounted plan"));
         assert.ok(first.panels.subAgentPanel.innerHTML.includes("Mounted subagent"));
+
+        setCurrentJoin({
+          id: "join-mounted",
+          anchor_dataset_id: "sample",
+          joins: [],
+        });
+        assert.ok(first.panels.joinPanel.innerHTML.includes("join-mounted"));
         """
     )
 

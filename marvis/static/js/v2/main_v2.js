@@ -1,5 +1,5 @@
 import { attachCapabilityHandlers } from "./capability.js";
-import { attachJoinHandlers } from "./join_review.js";
+import { attachJoinHandlers, renderJoinReview } from "./join_review.js";
 import { renderLoopEvents } from "./loop_progress.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
@@ -11,6 +11,7 @@ import { attachGoalHandlers, renderGoalComposer } from "./workflow_create.js";
 const panelDefinitions = [
   { id: "goalPanel", className: "v2-goal-panel", label: "V2 goal composer" },
   { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
+  { id: "joinPanel", className: "v2-join-panel", label: "V2 join review" },
   { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 sub agents" },
   { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 plugins" },
   { id: "skillPanel", className: "v2-skill-panel", label: "V2 workflow templates" },
@@ -66,6 +67,7 @@ export function mountV2(root, options = {}) {
     const cleanups = [
       renderGoalComposer(panels.goalPanel),
       renderPlanView(panels.planPanel),
+      renderJoinReview(panels.joinPanel),
       renderSubAgentView(panels.subAgentPanel),
       renderEmptyPanel(panels.pluginPanel, "plugins", "暂无插件数据"),
       renderEmptyPanel(panels.skillPanel, "skills", "暂无 Workflow 模板数据"),
