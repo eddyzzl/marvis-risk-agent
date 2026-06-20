@@ -22,9 +22,12 @@ class _ModuleScriptParser(HTMLParser):
         self.module_srcs: list[str] = []
         self.stylesheet_hrefs: list[str] = []
         self.v2_runtime_mount_attrs: dict[str, str | None] = {}
+        self.v2_workspace_dialog_attrs: dict[str, str | None] = {}
 
     def handle_starttag(self, tag: str, attrs) -> None:
         attr_map = {name: value for name, value in attrs}
+        if tag == "dialog" and attr_map.get("id") == "v2WorkspaceDialog":
+            self.v2_workspace_dialog_attrs = attr_map
         if tag == "div" and attr_map.get("id") == "v2RuntimeMount":
             self.v2_runtime_mount_attrs = attr_map
         if tag != "script":
@@ -46,11 +49,27 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     parser = _ModuleScriptParser()
     parser.feed(index_response.text)
     assert parser.module_srcs == [f"static/app.js?v={__version__}"]
-    assert "hidden" in parser.v2_runtime_mount_attrs
-    assert parser.v2_runtime_mount_attrs["aria-hidden"] == "true"
+    assert parser.v2_workspace_dialog_attrs["aria-labelledby"] == "v2WorkspaceTitle"
+    assert "hidden" not in parser.v2_runtime_mount_attrs
+    assert parser.v2_runtime_mount_attrs["aria-label"] == "V2 工作台"
+    assert 'id="openV2WorkspaceButton"' in index_response.text
+    assert 'id="closeV2WorkspaceButton"' in index_response.text
+    assert 'id="refreshV2PluginsButton"' in index_response.text
+    assert 'id="refreshV2SkillsButton"' in index_response.text
+    assert 'id="refreshV2CapabilityButton"' in index_response.text
+    app_response = client.get(f"/static/app.js?v={__version__}")
+    assert app_response.status_code == 200
+    assert "function openV2WorkspaceDialog" in app_response.text
+    assert "function closeV2WorkspaceDialog" in app_response.text
+    assert "async function refreshV2Plugins" in app_response.text
+    assert "async function refreshV2Skills" in app_response.text
+    assert "async function refreshV2Capability" in app_response.text
+    assert '$("openV2WorkspaceButton").onclick = openV2WorkspaceDialog;' in app_response.text
+    assert '$("closeV2WorkspaceButton").onclick = closeV2WorkspaceDialog;' in app_response.text
     assert parser.stylesheet_hrefs == [
         f"static/styles.css?v={__version__}",
         f"static/css/welcome.css?v={__version__}",
+        f"static/css/v2-workbench.css?v={__version__}",
     ]
     for href in parser.stylesheet_hrefs:
         response = client.get("/" + href)

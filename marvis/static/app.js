@@ -3,7 +3,10 @@ import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import { renderTierSettings } from "./js/v2/capability.js";
 import { mountV2 } from "./js/v2/main_v2.js";
+import { renderPluginManager } from "./js/v2/plugin_manager.js";
+import { renderSkillManager } from "./js/v2/skill_manager.js";
 import {
   columnFractions,
   columnHeatColors,
@@ -1429,6 +1432,58 @@ function setAgentMemoryStatus(message = "", kind = "") {
   if (!status) return;
   status.textContent = message;
   status.className = ["status", kind].filter(Boolean).join(" ");
+}
+
+function setV2WorkspaceStatus(message = "", kind = "") {
+  const status = $("v2WorkspaceStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.className = ["status", kind].filter(Boolean).join(" ");
+}
+
+function mountV2Runtime() {
+  const root = $("v2RuntimeMount");
+  return root ? mountV2(root) : null;
+}
+
+function openV2WorkspaceDialog() {
+  mountV2Runtime();
+  setV2WorkspaceStatus("");
+  $("v2WorkspaceDialog").showModal();
+}
+
+function closeV2WorkspaceDialog() {
+  $("v2WorkspaceDialog").close();
+}
+
+async function refreshV2Plugins() {
+  const mounted = mountV2Runtime();
+  if (!mounted) return;
+  setV2WorkspaceStatus("正在读取插件...");
+  await renderPluginManager(mounted.panels.pluginPanel);
+  setV2WorkspaceStatus("插件已更新。", "success");
+}
+
+async function refreshV2Skills() {
+  const mounted = mountV2Runtime();
+  if (!mounted) return;
+  setV2WorkspaceStatus("正在读取 Workflow 模板...");
+  await renderSkillManager(mounted.panels.skillPanel);
+  setV2WorkspaceStatus("Workflow 模板已更新。", "success");
+}
+
+async function refreshV2Capability() {
+  const mounted = mountV2Runtime();
+  if (!mounted) return;
+  setV2WorkspaceStatus("正在读取能力档位...");
+  await renderTierSettings(mounted.panels.capabilityPanel);
+  setV2WorkspaceStatus("能力档位已更新。", "success");
+}
+
+function runV2WorkspaceAction(action) {
+  action().catch((error) => {
+    setV2WorkspaceStatus(error?.message || "V2 工作台操作失败", "error");
+  });
 }
 
 function agentMemoryFilterParams() {
@@ -5968,11 +6023,6 @@ function handleWorkflowStepperKeydown(event) {
   scrollStepTarget(step.dataset.stepTarget);
 }
 
-function mountV2Runtime() {
-  const root = $("v2RuntimeMount");
-  if (root) mountV2(root);
-}
-
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
 $("welcomeModelValidationCard").onclick = openTaskDialog;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
@@ -5984,6 +6034,11 @@ $("openAgentMemoryButton").onclick = openAgentMemoryDialog;
 $("closeAgentMemoryButton").onclick = closeAgentMemoryDialog;
 $("openDraftToolsButton").onclick = openDraftToolsDialog;
 $("closeDraftToolsButton").onclick = closeDraftToolsDialog;
+$("openV2WorkspaceButton").onclick = openV2WorkspaceDialog;
+$("closeV2WorkspaceButton").onclick = closeV2WorkspaceDialog;
+$("refreshV2PluginsButton").onclick = () => runV2WorkspaceAction(refreshV2Plugins);
+$("refreshV2SkillsButton").onclick = () => runV2WorkspaceAction(refreshV2Skills);
+$("refreshV2CapabilityButton").onclick = () => runV2WorkspaceAction(refreshV2Capability);
 $("agentMemoryRawTab").onclick = () => setAgentMemoryViewMode("raw");
 $("agentMemoryDistillationTab").onclick = () => setAgentMemoryViewMode("distillation");
 $("closeWordPreviewButton").onclick = closeWordPreviewDialog;

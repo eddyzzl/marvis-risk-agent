@@ -7,6 +7,7 @@
     <link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png" />
     <link rel="stylesheet" href="static/styles.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" />
+    <link rel="stylesheet" href="static/css/v2-workbench.css?v=__MARVIS_STATIC_VERSION__" />
   </head>
   <body data-theme="light">
     <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
@@ -345,6 +346,32 @@
       </form>
     </dialog>
 
+    <dialog id="v2WorkspaceDialog" class="task-dialog environment-dialog v2-workspace-dialog" aria-labelledby="v2WorkspaceTitle">
+      <form class="task-dialog-panel v2-workspace-panel" method="dialog">
+        <header class="dialog-head">
+          <h2 id="v2WorkspaceTitle">V2 工作台</h2>
+          <button id="closeV2WorkspaceButton" class="button compact secondary" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="task-form v2-workspace-body">
+          <section class="task-form-section v2-workspace-toolbar" aria-label="V2 工作台操作">
+            <button id="refreshV2PluginsButton" class="button secondary" type="button">
+              刷新插件
+            </button>
+            <button id="refreshV2SkillsButton" class="button secondary" type="button">
+              刷新 Workflow 模板
+            </button>
+            <button id="refreshV2CapabilityButton" class="button secondary" type="button">
+              刷新能力档位
+            </button>
+          </section>
+          <div id="v2WorkspaceStatus" class="status" role="status" aria-live="polite"></div>
+          <div id="v2RuntimeMount" class="v2-runtime-shell" aria-label="V2 工作台"></div>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="wordPreviewDialog" class="task-dialog word-preview-dialog" aria-labelledby="wordPreviewTitle">
       <div class="task-dialog-panel word-preview-panel">
         <header class="dialog-head">
@@ -542,6 +569,12 @@
                 <span class="settings-row-title">草稿工具</span>
                 <button id="openDraftToolsButton" class="settings-environment-button" type="button">
                   <span>试运行与转正</span>
+                </button>
+              </div>
+              <div class="settings-row" data-settings-row="v2-workspace">
+                <span class="settings-row-title">V2 工作台</span>
+                <button id="openV2WorkspaceButton" class="settings-environment-button" type="button">
+                  <span>编排与插件</span>
                 </button>
               </div>
             </div>
@@ -800,7 +833,6 @@
     </div>
     <div id="searchScrim" class="search-scrim" aria-hidden="true"></div>
     <div id="metricTooltip" class="metric-tooltip" hidden></div>
-    <div id="v2RuntimeMount" hidden aria-hidden="true"></div>
     <script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>
   </body>
 </html>

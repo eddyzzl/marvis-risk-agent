@@ -1,0 +1,165 @@
+.v2-workspace-dialog {
+  width: min(1180px, calc(100vw - 32px));
+}
+
+.v2-workspace-panel {
+  max-height: min(860px, calc(100vh - 32px));
+}
+
+.v2-workspace-body {
+  gap: 12px;
+}
+
+.v2-workspace-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.v2-runtime-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 12px;
+  min-height: 360px;
+}
+
+.v2-panel {
+  min-width: 0;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 14px;
+}
+
+.v2-empty {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.plan-steps,
+.subagent-list,
+.loop-events,
+.plugin-list,
+.skill-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plan-step,
+.subagent-row,
+.plugin-row,
+.skill,
+.tier-row,
+.join-card,
+.loop-evt {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: var(--surface-soft);
+}
+
+.subagent-row,
+.loop-evt {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.loop-evt.attention,
+.join-card.has-warn {
+  border-color: var(--danger);
+}
+
+.plugin-manager,
+.skill-manager,
+.tier-settings {
+  display: grid;
+  gap: 12px;
+}
+
+.plugin-upload,
+.skill-validator {
+  display: grid;
+  gap: 6px;
+}
+
+.plugin-upload input,
+.skill-validator textarea,
+.plugin-tools pre {
+  max-width: 100%;
+}
+
+.plugin-row {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-row header,
+.plugin-row label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plugin-row input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
+  margin: 0;
+  accent-color: var(--brand-primary);
+}
+
+.plugin-row button {
+  justify-self: start;
+}
+
+.plugin-version,
+.plugin-tool-count,
+.plugin-builtin-badge,
+.skill-badge,
+.subagent-grants,
+.tier-limit {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.plugin-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-tool-schema {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.skill-manager textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+}
+
+.tier-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+@media (max-width: 860px) {
+  .v2-runtime-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-tool-schema {
+    grid-template-columns: 1fr;
+  }
+}

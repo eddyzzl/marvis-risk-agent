@@ -317,18 +317,29 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "planPanel",
           "subAgentPanel",
           "pluginPanel",
+          "skillPanel",
+          "capabilityPanel",
+          "loopPanel",
           "artifactPanel",
         ]);
         assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 4);
+        assert.equal(root.children.length, 7);
         assert.deepEqual(root.children.map((child) => child.id), [
           "planPanel",
           "subAgentPanel",
           "pluginPanel",
+          "skillPanel",
+          "capabilityPanel",
+          "loopPanel",
           "artifactPanel",
         ]);
         assert.equal(root.dataset.v2Mounted, "true");
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
+        assert.ok(first.panels.pluginPanel.innerHTML.includes('data-v2-empty="plugins"'));
+        assert.ok(first.panels.skillPanel.innerHTML.includes('data-v2-empty="skills"'));
+        assert.ok(first.panels.capabilityPanel.innerHTML.includes('data-v2-empty="capability"'));
+        assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
+        assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
 
         setPlan({
           id: "plan-1",

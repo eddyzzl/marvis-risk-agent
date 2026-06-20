@@ -1,5 +1,6 @@
 import { attachCapabilityHandlers } from "./capability.js";
 import { attachJoinHandlers } from "./join_review.js";
+import { renderLoopEvents } from "./loop_progress.js";
 import { attachPlanConfirmHandlers } from "./plan_confirm.js";
 import { renderPlanView } from "./plan_view.js";
 import { attachPluginHandlers } from "./plugin_manager.js";
@@ -10,6 +11,9 @@ const panelDefinitions = [
   { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
   { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 sub agents" },
   { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 plugins" },
+  { id: "skillPanel", className: "v2-skill-panel", label: "V2 workflow templates" },
+  { id: "capabilityPanel", className: "v2-capability-panel", label: "V2 capability tiers" },
+  { id: "loopPanel", className: "v2-loop-panel", label: "V2 loop progress" },
   { id: "artifactPanel", className: "v2-artifact-panel", label: "V2 artifacts" },
 ];
 
@@ -40,6 +44,14 @@ function ensurePanel(root, definition) {
   return panel;
 }
 
+function renderEmptyPanel(container, key, text) {
+  if (!container) {
+    return () => {};
+  }
+  container.innerHTML = `<div class="v2-empty" data-v2-empty="${key}">${text}</div>`;
+  return () => {};
+}
+
 export function mountV2(root) {
   if (!root || typeof root.querySelector !== "function" || typeof root.appendChild !== "function") {
     throw new Error("mountV2 requires a stable root element");
@@ -52,6 +64,11 @@ export function mountV2(root) {
     const cleanups = [
       renderPlanView(panels.planPanel),
       renderSubAgentView(panels.subAgentPanel),
+      renderEmptyPanel(panels.pluginPanel, "plugins", "暂无插件数据"),
+      renderEmptyPanel(panels.skillPanel, "skills", "暂无 Workflow 模板数据"),
+      renderEmptyPanel(panels.capabilityPanel, "capability", "暂无能力档位数据"),
+      renderLoopEvents(panels.loopPanel),
+      renderEmptyPanel(panels.artifactPanel, "artifact", "暂无工件预览"),
     ];
     if (typeof root.addEventListener === "function") {
       cleanups.push(
