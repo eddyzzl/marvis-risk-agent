@@ -105,6 +105,26 @@ def test_model_report_compute_functions_are_deterministic(tmp_path):
     assert set(low_pricing["by_ratio"]) == {"0.25", "0.5"}
 
 
+def test_compute_vintage_report_aligns_headers_to_sorted_mob_axis(tmp_path):
+    path = tmp_path / "vintage_unsorted.parquet"
+    pd.DataFrame({
+        "loan_month": ["2026-01", "2026-01"],
+        "mob3": [1, 1],
+        "mob1": [0, 1],
+    }).to_parquet(path, index=False)
+
+    vintage = compute_vintage_report(
+        DataBackend(tmp_path),
+        path,
+        loan_month_col="loan_month",
+        mob_observe_cols=("mob3", "mob1"),
+        amount_col=None,
+    )
+
+    assert vintage["headers"] == ["mob1", "mob3"]
+    assert vintage["curves"]["2026-01"] == pytest.approx([0.5, 0.75])
+
+
 def test_amount_bin_table_computes_credit_utilization_by_bin(tmp_path):
     frame = pd.DataFrame({
         "score": [0.1, 0.2, 0.8, 0.9],

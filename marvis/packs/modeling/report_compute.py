@@ -138,7 +138,7 @@ def compute_vintage_report(
     counts, amounts = _vintage_cohort_business_columns(points)
     return {
         "cohorts": sorted({point.cohort for point in points}),
-        "headers": list(mob_observe_cols),
+        "headers": _vintage_headers(points, mob_observe_cols),
         "counts": counts,
         "amounts": amounts,
         "curves": vintage_curve_wide(points, metric="cum_bad_rate"),
@@ -301,6 +301,14 @@ def _vintage_cohort_business_columns(points) -> tuple[dict[str, int], dict[str, 
             average = _ratio(total, float(point.sample_count))
             amounts[point.cohort] = {"total": total, "average": average}
     return counts, amounts
+
+
+def _vintage_headers(points, mob_observe_cols: tuple[str, ...]) -> list[str]:
+    by_mob = {
+        _mob_number(column, fallback=index): str(column)
+        for index, column in enumerate(mob_observe_cols, start=1)
+    }
+    return [by_mob.get(mob, f"mob{mob}") for mob in sorted({point.mob for point in points})]
 
 
 def _has_business_column(business: BusinessColumns, field: str) -> bool:
