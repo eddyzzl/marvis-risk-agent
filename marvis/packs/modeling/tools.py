@@ -438,9 +438,18 @@ def _feature_importance_rows(artifact: ModelArtifact | None, *, feature_dictiona
     dictionary = feature_dictionary or {}
     metadata_keys = ("含义", "产品名称", "厂商名称")
     importance_pairs = artifact.feature_importance or tuple((feature, 0.0) for feature in artifact.feature_list)
+    total_importance = sum(float(importance) for _, importance in importance_pairs)
+    cumulative_importance = 0.0
     rows = []
     for feature, importance in importance_pairs:
-        row = {"feature": feature, "importance": float(importance)}
+        importance_value = float(importance)
+        cumulative_importance += importance_value
+        row = {
+            "feature": feature,
+            "importance": importance_value,
+            "importance_pct": _ratio(importance_value, total_importance),
+            "cumulative_importance_pct": _ratio(cumulative_importance, total_importance),
+        }
         if dictionary:
             metadata = dictionary.get(str(feature))
             row.update({
@@ -630,6 +639,10 @@ def _number_token_allowed(token: str, allowed: set[str]) -> bool:
 
 def _format_number_token(value: float) -> str:
     return f"{value:.12g}"
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return 0.0 if denominator == 0 else float(numerator / denominator)
 
 
 def _jsonable(value: Any):

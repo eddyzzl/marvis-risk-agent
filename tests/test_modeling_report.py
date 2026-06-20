@@ -380,11 +380,33 @@ def test_feature_importance_rows_keep_dictionary_columns_when_first_feature_has_
     assert rows[0] == {
         "feature": "x_missing",
         "importance": 0.0,
+        "importance_pct": 0.0,
+        "cumulative_importance_pct": 0.0,
         "含义": None,
         "产品名称": None,
         "厂商名称": None,
     }
     assert rows[1]["含义"] == "负债压力"
+
+
+def test_feature_importance_rows_compute_percentage_and_cumulative_share():
+    artifact = ModelArtifact(
+        id="artifact_1",
+        experiment_id="experiment_1",
+        algorithm="lr",
+        model_path="model.pkl",
+        pmml_path=None,
+        feature_list=("x1", "x2", "x3"),
+        params={},
+        woe_maps=None,
+        created_at="2026-01-01T00:00:00+00:00",
+        feature_importance=(("x1", 2.0), ("x2", 1.0), ("x3", 1.0)),
+    )
+
+    rows = modeling_tools._feature_importance_rows(artifact)
+
+    assert [row["importance_pct"] for row in rows] == pytest.approx([0.5, 0.25, 0.25])
+    assert [row["cumulative_importance_pct"] for row in rows] == pytest.approx([0.5, 0.75, 1.0])
 
 
 def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
