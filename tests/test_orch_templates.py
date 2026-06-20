@@ -88,6 +88,9 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
             "recipe": "lr",
             "seed": 7,
+            "business_columns": {"loan_month_col": "loan_month", "interest_rate_col": "rate"},
+            "feature_dictionary_id": "dict-1",
+            "project_meta": {"项目名称": "A卡模型"},
         },
         task_id="task-1",
     )
@@ -108,7 +111,9 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     assert compare_step.inputs == {"experiment_ids": [f"$ref:{train_step.id}.output.experiment_id"]}
     assert report_step.inputs["experiment_id"] == f"$ref:{train_step.id}.output.experiment_id"
     assert report_step.inputs["dataset_id"] == "dataset-1"
-    assert report_step.inputs["project_meta"] == {}
+    assert report_step.inputs["business_columns"] == {"loan_month_col": "loan_month", "interest_rate_col": "rate"}
+    assert report_step.inputs["feature_dictionary_id"] == "dict-1"
+    assert report_step.inputs["project_meta"] == {"项目名称": "A卡模型"}
     assert report_step.needs_confirmation is True
 
 

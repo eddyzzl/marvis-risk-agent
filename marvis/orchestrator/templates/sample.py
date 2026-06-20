@@ -98,6 +98,9 @@ STANDARD_MODELING = WorkflowTemplate(
         SlotSpec("split_values", True, "task_context", "Split value mapping"),
         SlotSpec("recipe", True, "user", "Modeling recipe id"),
         SlotSpec("seed", True, "task_context", "Reproducibility seed"),
+        SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
+        SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
+        SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
     ),
     steps=(
         StepTemplate(
@@ -187,8 +190,9 @@ STANDARD_MODELING = WorkflowTemplate(
             inputs_template={
                 "experiment_id": "$ref:训练模型.output.experiment_id",
                 "dataset_id": "{slot:dataset_id}",
-                "business_columns": {},
-                "project_meta": {},
+                "business_columns": "{slot:business_columns}",
+                "feature_dictionary_id": "{slot:feature_dictionary_id}",
+                "project_meta": "{slot:project_meta}",
             },
             depends_on_titles=("训练模型", "对比实验"),
             post_checks=(

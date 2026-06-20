@@ -93,9 +93,12 @@ class IntentRouter:
         slots = {}
         for slot in template.slots:
             if slot.source in {"task_context", "infer", "user"}:
-                slots[slot.name] = task_context.get(slot.name)
+                value = task_context.get(slot.name)
             else:
-                slots[slot.name] = None
+                value = None
+            if value is None and not slot.required:
+                continue
+            slots[slot.name] = value
         return slots
 
 

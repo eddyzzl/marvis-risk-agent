@@ -17,6 +17,8 @@ PLAN_SYS = (
     "铁律：你不计算任何指标；指标由工具产出。"
     "你只决定调用哪些工具、参数怎么接、依赖顺序。输出严格 JSON。"
 )
+
+_OMIT = object()
 REPLAN_SYS = (
     "你在修订一个 MARVIS 执行计划的剩余步骤。已完成步骤和结果在进度里，"
     "不要重做。只能从工具目录选工具。不要计算任何指标。不要偏离原始目标。"
@@ -60,6 +62,10 @@ class Planner:
         if missing:
             raise PlanningError(f"missing required slots: {', '.join(missing)}")
 
+        effective_slots = {
+            slot.name: slots[slot.name] if slot.name in slots and slots[slot.name] is not None else _OMIT
+            for slot in template.slots
+        }
         plan_id = uuid.uuid4().hex
         title_to_id = _title_to_step_id(template)
         steps = []
@@ -72,7 +78,7 @@ class Planner:
                     index=index,
                     title=step_template.title,
                     tool_ref=step_template.tool_ref,
-                    inputs=_fill_inputs(step_template.inputs_template, slots, title_to_id),
+                    inputs=_fill_inputs(step_template.inputs_template, effective_slots, title_to_id),
                     depends_on=[
                         _dependency_id(title, title_to_id)
                         for title in step_template.depends_on_titles
@@ -525,9 +531,18 @@ def _dependency_id(title: str, title_to_id: dict[str, str]) -> str:
 
 def _fill_inputs(value, slots: dict, title_to_id: dict[str, str]):
     if isinstance(value, dict):
-        return {key: _fill_inputs(item, slots, title_to_id) for key, item in value.items()}
+        output = {}
+        for key, item in value.items():
+            filled = _fill_inputs(item, slots, title_to_id)
+            if filled is not _OMIT:
+                output[key] = filled
+        return output
     if isinstance(value, list):
-        return [_fill_inputs(item, slots, title_to_id) for item in value]
+        return [
+            filled
+            for item in value
+            if (filled := _fill_inputs(item, slots, title_to_id)) is not _OMIT
+        ]
     if isinstance(value, str):
         if value.startswith("{slot:") and value.endswith("}"):
             slot_name = value[len("{slot:"):-1]
