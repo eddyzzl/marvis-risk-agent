@@ -74,6 +74,8 @@ class ToolRunner:
             return result
         effective_seed = seed
         if effective_seed is None and tool.determinism == "stochastic":
+            effective_seed = _input_seed(inputs)
+        if effective_seed is None and tool.determinism == "stochastic":
             effective_seed = _derive_seed(target_ref, task_id, inputs)
 
         job = {
@@ -333,6 +335,13 @@ def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
 def _hash_inputs(inputs: dict) -> str:
     raw = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _input_seed(inputs: dict) -> int | None:
+    value = inputs.get("seed")
+    if value is None:
+        return None
+    return int(value)
 
 
 def _derive_seed(target_ref: str, task_id: str, inputs: dict) -> int:

@@ -107,7 +107,8 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "key": {"type": "string"}
+          "key": {"type": "string"},
+          "seed": {"type": "integer"}
         },
         "required": ["key"],
         "additionalProperties": false

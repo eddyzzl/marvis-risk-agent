@@ -168,6 +168,8 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
     determinism = _required_text(item, "determinism", context=f"tool {name}")
     if determinism not in DETERMINISM_CHOICES:
         raise ManifestError(f"tool {name} determinism must be deterministic or stochastic")
+    if determinism == "stochastic":
+        _validate_stochastic_seed(input_schema, name)
     failure_policy = _required_text(item, "failure_policy", context=f"tool {name}")
     if failure_policy not in FAILURE_POLICY_CHOICES:
         raise ManifestError(f"tool {name} failure_policy must be fail, retry, or skip")
@@ -232,6 +234,15 @@ def _required_schema(data: dict[str, Any], field: str, *, context: str) -> dict[
     if not isinstance(value, dict) or not value:
         raise ManifestError(f"{context} {field} must be a non-empty object")
     return value
+
+
+def _validate_stochastic_seed(input_schema: dict[str, Any], tool_name: str) -> None:
+    properties = input_schema.get("properties")
+    if not isinstance(properties, dict) or "seed" not in properties:
+        raise ManifestError(f"tool {tool_name} stochastic tools must declare integer seed input")
+    seed_schema = properties["seed"]
+    if not isinstance(seed_schema, dict) or seed_schema.get("type") != "integer":
+        raise ManifestError(f"tool {tool_name} seed input must be an integer schema")
 
 
 def _parse_string_list(value: Any, label: str) -> list[str]:

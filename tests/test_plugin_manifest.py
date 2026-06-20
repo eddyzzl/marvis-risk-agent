@@ -115,6 +115,27 @@ def test_parse_manifest_rejects_invalid_tool_contract_values():
         parse_manifest(_manifest(tools=[tool]))
 
 
+def test_parse_manifest_requires_seed_input_for_stochastic_tools():
+    tool = dict(_manifest()["tools"][0])
+    tool["determinism"] = "stochastic"
+
+    with pytest.raises(ManifestError, match="seed"):
+        parse_manifest(_manifest(tools=[tool]))
+
+    tool["input_schema"] = {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string"},
+            "seed": {"type": "integer"},
+        },
+        "required": ["message"],
+    }
+
+    manifest = parse_manifest(_manifest(tools=[tool]))
+
+    assert manifest.tools[0].input_schema["properties"]["seed"] == {"type": "integer"}
+
+
 def test_parse_manifest_rejects_unknown_hook_event_and_missing_tool():
     with pytest.raises(ManifestError, match="unknown hook event"):
         parse_manifest(_manifest(hooks=[{"event": "unknown.event", "tool": "echo"}]))

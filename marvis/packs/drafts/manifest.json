@@ -13,7 +13,8 @@
         "type": "object",
         "properties": {
           "query": {"type": "string", "minLength": 1},
-          "max_results": {"type": "integer", "minimum": 1, "maximum": 10}
+          "max_results": {"type": "integer", "minimum": 1, "maximum": 10},
+          "seed": {"type": "integer"}
         },
         "required": ["query"],
         "additionalProperties": false
@@ -55,7 +56,8 @@
         "properties": {
           "goal": {"type": "string", "minLength": 1},
           "learning_note_id": {"type": "string", "minLength": 1},
-          "model_id": {"type": "string", "minLength": 1}
+          "model_id": {"type": "string", "minLength": 1},
+          "seed": {"type": "integer"}
         },
         "required": ["goal"],
         "additionalProperties": false

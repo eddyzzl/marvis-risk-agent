@@ -1,5 +1,8 @@
+import json
 from pathlib import Path
 import tomllib
+
+from marvis.plugins.manifest import parse_manifest
 
 
 def test_static_es_modules_are_declared_as_package_data():
@@ -36,3 +39,14 @@ def test_static_es_module_files_exist_for_declared_imports():
 
 def test_static_css_module_files_exist_for_declared_links():
     assert Path("marvis/static/css/welcome.css").is_file()
+
+
+def test_builtin_stochastic_tool_manifests_declare_seed_inputs():
+    for manifest_path in sorted(Path("marvis/packs").glob("*/manifest.json")):
+        manifest = parse_manifest(
+            json.loads(manifest_path.read_text(encoding="utf-8")),
+            builtin=True,
+        )
+        for tool in manifest.tools:
+            if tool.determinism == "stochastic":
+                assert "seed" in tool.input_schema["properties"], f"{manifest.name}.{tool.name}"

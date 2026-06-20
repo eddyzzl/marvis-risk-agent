@@ -66,6 +66,22 @@ def test_tool_runner_derives_seed_for_stochastic_tools(tmp_path):
     assert isinstance(first.output["seed"], int)
 
 
+def test_tool_runner_uses_input_seed_for_stochastic_tools(tmp_path):
+    runner = _runner(tmp_path)
+
+    first = runner.invoke(ToolRef("_sample", "random"), {"key": "a", "seed": 123}, task_id="task-1")
+    second = runner.invoke(ToolRef("_sample", "random"), {"key": "a", "seed": 123}, task_id="task-2")
+    different = runner.invoke(ToolRef("_sample", "random"), {"key": "a", "seed": 124}, task_id="task-1")
+
+    assert first.ok is True
+    assert second.ok is True
+    assert different.ok is True
+    assert first.output == second.output
+    assert first.output["seed"] == 123
+    assert different.output["seed"] == 124
+    assert different.output["value"] != first.output["value"]
+
+
 def test_tool_runner_returns_schema_error_before_worker(tmp_path):
     runner = _runner(tmp_path)
 

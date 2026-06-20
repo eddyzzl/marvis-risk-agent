@@ -257,7 +257,8 @@
           "dataset_id": {"type": "string", "minLength": 1},
           "business_columns": {"type": "object"},
           "feature_dictionary_id": {"type": "string", "minLength": 1},
-          "project_meta": {"type": "object"}
+          "project_meta": {"type": "object"},
+          "seed": {"type": "integer"}
         },
         "required": ["experiment_id", "dataset_id", "project_meta"],
         "additionalProperties": false
