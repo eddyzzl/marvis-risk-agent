@@ -112,6 +112,60 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     assert report_step.needs_confirmation is True
 
 
+def test_feature_derivation_template_marks_adaptive_decision_point(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("feature_derivation"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "feature_cols": ["income", "age"],
+            "derivation_recipe": [{"kind": "ratio", "num": "income", "den": "age"}],
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("feature", "compute_feature_metrics"),
+        ToolRef("feature", "cross_features"),
+        ToolRef("feature", "compute_feature_metrics"),
+    ]
+    assert [step.title for step in plan.steps if step.decision_point] == ["衍生特征"]
+    assert not get_template("model_validation").steps[-1].decision_point
+    assert not any(step.decision_point for step in get_template("standard_modeling").steps)
+
+
+def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("strategy_analysis"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "score_col": "score",
+            "strategy_type": "approval",
+            "rules": [{"condition": "score < 600", "decision": "reject"}],
+            "default_decision": "approve",
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("strategy", "build_strategy"),
+        ToolRef("strategy", "backtest_strategy"),
+        ToolRef("strategy", "tradeoff_view"),
+    ]
+    assert [step.title for step in plan.steps if step.decision_point] == ["回测策略"]
+
+
 def test_user_template_registration_cannot_shadow_builtin_and_can_reload():
     load_builtin_templates()
     clear_user_templates()

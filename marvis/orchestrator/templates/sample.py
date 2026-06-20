@@ -202,6 +202,117 @@ STANDARD_MODELING = WorkflowTemplate(
     source="builtin",
 )
 
+FEATURE_DERIVATION = WorkflowTemplate(
+    id="feature_derivation",
+    title="特征衍生与筛选",
+    goal_patterns=("特征衍生", "特征交叉", "衍生变量", "feature derivation", "feature crosses"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered feature dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("feature_cols", True, "task_context", "Base feature columns"),
+        SlotSpec("derivation_recipe", True, "user", "Explicit feature derivation recipe"),
+    ),
+    steps=(
+        StepTemplate(
+            title="计算基础特征指标",
+            tool_ref=ToolRef("feature", "compute_feature_metrics"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "features": "{slot:feature_cols}",
+                "target_col": "{slot:target_col}",
+                "bins": 10,
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
+        ),
+        StepTemplate(
+            title="衍生特征",
+            tool_ref=ToolRef("feature", "cross_features"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "recipe": "{slot:derivation_recipe}",
+            },
+            depends_on_titles=("计算基础特征指标",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "result_dataset_id"}),
+                PostCheck("nonempty", {"field": "new_columns"}),
+            ),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="分析衍生特征",
+            tool_ref=ToolRef("feature", "compute_feature_metrics"),
+            inputs_template={
+                "dataset_id": "$ref:衍生特征.output.result_dataset_id",
+                "features": "$ref:衍生特征.output.new_columns",
+                "target_col": "{slot:target_col}",
+                "bins": 10,
+            },
+            depends_on_titles=("衍生特征",),
+            post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
+STRATEGY_ANALYSIS = WorkflowTemplate(
+    id="strategy_analysis",
+    title="策略分析与回测",
+    goal_patterns=("策略分析", "策略回测", "策略权衡", "strategy analysis", "strategy backtest"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("score_col", True, "task_context", "Score column"),
+        SlotSpec("strategy_type", True, "user", "Strategy type"),
+        SlotSpec("rules", True, "user", "Ordered strategy rules"),
+        SlotSpec("default_decision", True, "user", "Fallback decision"),
+    ),
+    steps=(
+        StepTemplate(
+            title="构造策略",
+            tool_ref=ToolRef("strategy", "build_strategy"),
+            inputs_template={
+                "strategy_type": "{slot:strategy_type}",
+                "rules": "{slot:rules}",
+                "score_col": "{slot:score_col}",
+                "default_decision": "{slot:default_decision}",
+                "description": "Workflow generated strategy candidate",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
+            needs_confirmation=True,
+        ),
+        StepTemplate(
+            title="回测策略",
+            tool_ref=ToolRef("strategy", "backtest_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "$ref:构造策略.output.strategy_id",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=("构造策略",),
+            post_checks=(PostCheck("nonempty", {"field": "backtest_id"}),),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="生成策略权衡视图",
+            tool_ref=ToolRef("strategy", "tradeoff_view"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "score_col": "{slot:score_col}",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=("回测策略",),
+            post_checks=(PostCheck("nonempty", {"field": "points"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
 _register_builtin_template(SAMPLE_ECHO)
 _register_builtin_template(MODEL_VALIDATION)
 _register_builtin_template(STANDARD_MODELING)
+_register_builtin_template(FEATURE_DERIVATION)
+_register_builtin_template(STRATEGY_ANALYSIS)
