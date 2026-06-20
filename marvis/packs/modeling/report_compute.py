@@ -223,19 +223,31 @@ def stress_low_pricing(
     base_dist = bin_distribution(frame[score_col].to_numpy(dtype=float), edges)
     by_ratio = {}
     bins_by_ratio = {}
+    ks_by_ratio = {}
+    psi_by_ratio = {}
     for ratio in ratios:
         sampled = _resample_low_pricing(frame, interest_rate_col, threshold, float(ratio))
         scores = sampled[score_col].to_numpy(dtype=float)
         target = sampled[target_col].to_numpy(dtype=int)
         ratio_key = str(float(ratio)).rstrip("0").rstrip(".")
         sampled_distribution = bin_distribution(scores, edges)
+        ks = feature_ks(scores, target)
+        psi = compute_psi(base_dist, sampled_distribution)
         bins_by_ratio[ratio_key] = [float(value) for value in np.cumsum(sampled_distribution)]
+        ks_by_ratio[ratio_key] = ks
+        psi_by_ratio[ratio_key] = psi
         by_ratio[ratio_key] = {
-            "ks": feature_ks(scores, target),
-            "psi": compute_psi(base_dist, sampled_distribution),
+            "ks": ks,
+            "psi": psi,
             "sample_count": int(len(sampled)),
         }
-    return {"threshold": threshold, "bins_by_ratio": bins_by_ratio, "by_ratio": by_ratio}
+    return {
+        "threshold": threshold,
+        "bins_by_ratio": bins_by_ratio,
+        "ks_by_ratio": ks_by_ratio,
+        "psi_by_ratio": psi_by_ratio,
+        "by_ratio": by_ratio,
+    }
 
 
 def build_feature_dictionary(backend, dict_dataset_id, registry) -> dict:
