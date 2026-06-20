@@ -103,10 +103,11 @@
         "type": "object",
         "properties": {
           "join_plan_id": {"type": "string"},
+          "anchor_dataset_id": {"type": "string"},
           "status": {"type": "string"},
           "joins": {"type": "array", "items": {"type": "object"}}
         },
-        "required": ["join_plan_id", "status", "joins"],
+        "required": ["join_plan_id", "anchor_dataset_id", "status", "joins"],
         "additionalProperties": false
       },
       "determinism": "deterministic",

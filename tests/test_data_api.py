@@ -143,6 +143,7 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert propose.status_code == 201
     plan = propose.json()
     assert plan["status"] == "draft"
+    assert plan["anchor_dataset_id"] == anchor.id
     assert plan["joins"][0]["key_pairs"][0]["match_method"] == "hash:md5"
 
     blocked = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
@@ -157,8 +158,10 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     repeat = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
 
     assert confirm.status_code == 200
+    assert confirm.json()["anchor_dataset_id"] == anchor.id
     assert confirm.json()["joins"][0]["confirmed"] is True
     assert fetched.status_code == 200
+    assert fetched.json()["anchor_dataset_id"] == anchor.id
     assert execute.status_code == 200
     assert execute.json()["anchor_rows"] == 2
     assert execute.json()["joined_rows"] == 2

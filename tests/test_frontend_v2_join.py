@@ -118,6 +118,7 @@ def test_join_review_accepts_backend_join_plan_payload_shape():
 
         const html = joinReviewHtml({
           join_plan_id: "join-backend-1",
+          anchor_dataset_id: "anchor-backend",
           status: "draft",
           joins: [
             {
@@ -143,6 +144,7 @@ def test_join_review_accepts_backend_join_plan_payload_shape():
         assert.ok(html.includes('data-feature-dataset="feature-backend"'));
         assert.ok(html.includes('data-confirm-join="feature-backend"'));
         assert.ok(html.includes('data-exec-join="join-backend-1" disabled'));
+        assert.ok(html.includes("Anchor: anchor-backend"));
         assert.ok(html.includes("feature-backend"));
         """
     )

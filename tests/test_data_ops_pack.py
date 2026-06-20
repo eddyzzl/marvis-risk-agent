@@ -107,6 +107,7 @@ def test_data_ops_align_propose_and_execute_join_via_runner(tmp_path):
     assert align.ok is True
     assert align.output["alignments"][0]["key_pairs"][0]["match_method"] == "hash:md5"
     assert propose.ok is True
+    assert propose.output["anchor_dataset_id"] == anchor.id
     assert propose.output["joins"][0]["diagnostics"]["fan_out_detected"] is False
 
     unconfirmed = runner.invoke(

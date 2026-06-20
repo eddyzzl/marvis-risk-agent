@@ -249,6 +249,7 @@ def _dataset_payload(dataset) -> dict:
 def _join_plan_payload(plan) -> dict:
     return {
         "join_plan_id": plan.id,
+        "anchor_dataset_id": plan.anchor_dataset_id,
         "status": plan.status,
         "joins": [
             {
