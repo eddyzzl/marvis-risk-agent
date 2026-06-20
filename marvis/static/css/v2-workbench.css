@@ -48,6 +48,28 @@
   gap: 10px;
 }
 
+.goal-composer {
+  display: grid;
+  gap: 10px;
+}
+
+.goal-composer textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+}
+
+.goal-composer label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.goal-composer button {
+  justify-self: start;
+}
+
 .plan-step,
 .subagent-row,
 .plugin-row,

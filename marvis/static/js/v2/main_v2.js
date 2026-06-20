@@ -6,8 +6,10 @@ import { renderPlanView } from "./plan_view.js";
 import { attachPluginHandlers } from "./plugin_manager.js";
 import { attachSkillHandlers } from "./skill_manager.js";
 import { renderSubAgentView } from "./subagent_view.js";
+import { attachGoalHandlers, renderGoalComposer } from "./workflow_create.js";
 
 const panelDefinitions = [
+  { id: "goalPanel", className: "v2-goal-panel", label: "V2 goal composer" },
   { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
   { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 sub agents" },
   { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 plugins" },
@@ -52,7 +54,7 @@ function renderEmptyPanel(container, key, text) {
   return () => {};
 }
 
-export function mountV2(root) {
+export function mountV2(root, options = {}) {
   if (!root || typeof root.querySelector !== "function" || typeof root.appendChild !== "function") {
     throw new Error("mountV2 requires a stable root element");
   }
@@ -62,6 +64,7 @@ export function mountV2(root) {
   }
   if (!root[mountStateKey]) {
     const cleanups = [
+      renderGoalComposer(panels.goalPanel),
       renderPlanView(panels.planPanel),
       renderSubAgentView(panels.subAgentPanel),
       renderEmptyPanel(panels.pluginPanel, "plugins", "暂无插件数据"),
@@ -74,6 +77,7 @@ export function mountV2(root) {
       cleanups.push(
         attachCapabilityHandlers(root),
         attachJoinHandlers(root),
+        attachGoalHandlers(root, options.taskId || ""),
         attachPlanConfirmHandlers(root),
         attachPluginHandlers(root),
         attachSkillHandlers(root),

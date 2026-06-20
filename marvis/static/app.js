@@ -1443,7 +1443,7 @@ function setV2WorkspaceStatus(message = "", kind = "") {
 
 function mountV2Runtime() {
   const root = $("v2RuntimeMount");
-  return root ? mountV2(root) : null;
+  return root ? mountV2(root, { taskId: () => selectedTaskId }) : null;
 }
 
 function openV2WorkspaceDialog() {

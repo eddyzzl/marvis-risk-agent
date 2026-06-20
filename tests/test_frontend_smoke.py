@@ -64,6 +64,7 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "async function refreshV2Plugins" in app_response.text
     assert "async function refreshV2Skills" in app_response.text
     assert "async function refreshV2Capability" in app_response.text
+    assert "mountV2(root, { taskId: () => selectedTaskId })" in app_response.text
     assert '$("openV2WorkspaceButton").onclick = openV2WorkspaceDialog;' in app_response.text
     assert '$("closeV2WorkspaceButton").onclick = closeV2WorkspaceDialog;' in app_response.text
     assert parser.stylesheet_hrefs == [

@@ -93,6 +93,89 @@ def test_goal_handlers_create_plan_and_update_state():
     )
 
 
+def test_goal_handlers_resolve_dynamic_task_id():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachGoalHandlers } from "./marvis/static/js/v2/workflow_create.js";
+
+        const calls = [];
+        const listeners = {};
+        const controls = {
+          "#goalInput": { value: "Build a validation workflow" },
+          "#tierSelect": { value: "conservative" },
+          "#novelMode": { value: "" },
+          "[data-plan-problems]": { innerHTML: "", dataset: {} },
+        };
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) { return controls[selector] || null; },
+        };
+        let taskId = "task-a";
+        attachGoalHandlers(root, () => taskId, {
+          createPlan: async (resolvedTaskId, body) => {
+            calls.push([resolvedTaskId, body.goal]);
+            return { id: "plan-dynamic", goal: body.goal, status: "validated", steps: [] };
+          },
+        });
+
+        const createTarget = {
+          closest(selector) {
+            return selector === "#createPlanBtn" ? this : null;
+          },
+        };
+        taskId = "task-b";
+        await listeners.click({ target: createTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, [["task-b", "Build a validation workflow"]]);
+        """
+    )
+
+
+def test_goal_handlers_require_task_before_create_plan():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachGoalHandlers } from "./marvis/static/js/v2/workflow_create.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        const problemsSlot = { innerHTML: "", dataset: {} };
+        const controls = {
+          "#goalInput": { value: "No task yet" },
+          "#tierSelect": { value: "balanced" },
+          "#novelMode": { value: "" },
+          "[data-plan-problems]": problemsSlot,
+        };
+        const listeners = {};
+        let createCalls = 0;
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector(selector) { return controls[selector] || null; },
+        };
+        attachGoalHandlers(root, () => "", {
+          createPlan: async () => {
+            createCalls += 1;
+            return { id: "should-not-create" };
+          },
+        });
+
+        const createTarget = {
+          closest(selector) {
+            return selector === "#createPlanBtn" ? this : null;
+          },
+        };
+        await listeners.click({ target: createTarget, preventDefault() {} });
+
+        assert.equal(createCalls, 0);
+        assert.equal(problemsSlot.dataset.v2PlanProblems, "true");
+        assert.ok(problemsSlot.innerHTML.includes("select or create a task"));
+        """
+    )
+
+
 def test_goal_handlers_render_422_plan_validation_problems():
     run_node(
         """

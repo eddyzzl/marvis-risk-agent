@@ -314,6 +314,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         const second = mountV2(root);
 
         assert.deepEqual(Object.keys(first.panels), [
+          "goalPanel",
           "planPanel",
           "subAgentPanel",
           "pluginPanel",
@@ -322,9 +323,11 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "loopPanel",
           "artifactPanel",
         ]);
+        assert.equal(first.panels.goalPanel, second.panels.goalPanel);
         assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 7);
+        assert.equal(root.children.length, 8);
         assert.deepEqual(root.children.map((child) => child.id), [
+          "goalPanel",
           "planPanel",
           "subAgentPanel",
           "pluginPanel",
@@ -334,6 +337,8 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "artifactPanel",
         ]);
         assert.equal(root.dataset.v2Mounted, "true");
+        assert.equal(first.panels.goalPanel.dataset.v2GoalComposer, "true");
+        assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
         assert.ok(first.panels.pluginPanel.innerHTML.includes('data-v2-empty="plugins"'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-v2-empty="skills"'));
@@ -404,7 +409,7 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         const mounted = mountV2(root);
         mountV2(root);
 
-        assert.equal((listeners.click || []).length, 4);
+        assert.equal((listeners.click || []).length, 5);
         assert.equal((listeners.change || []).length, 2);
         assert.equal((listeners.input || []).length, 1);
 

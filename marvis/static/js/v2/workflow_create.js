@@ -17,6 +17,11 @@ function controlValue(root, selector) {
   return String(root.querySelector?.(selector)?.value || "").trim();
 }
 
+function resolveTaskId(taskId) {
+  const value = typeof taskId === "function" ? taskId() : taskId;
+  return String(value || "").trim();
+}
+
 function tierOptionsHtml(tiers, defaultTier) {
   return tiers.map((tier) => {
     const selected = tier.name === defaultTier ? " selected" : "";
@@ -54,6 +59,7 @@ export function renderGoalComposer(container, options = {}) {
     container.dataset.v2GoalComposer = "true";
   }
   container.innerHTML = goalComposerHtml(options);
+  return () => {};
 }
 
 function validationProblems(error) {
@@ -91,6 +97,17 @@ export function attachGoalHandlers(root, taskId, deps = {}) {
       return;
     }
     event.preventDefault?.();
+    const resolvedTaskId = resolveTaskId(taskId);
+    if (!resolvedTaskId) {
+      const problemSlot = root.querySelector?.("[data-plan-problems]");
+      const message = "select or create a task before creating a V2 plan";
+      if (problemSlot) {
+        renderPlanValidationProblems(problemSlot, [message]);
+      } else {
+        actions.showError(message);
+      }
+      return;
+    }
     const goal = controlValue(root, "#goalInput");
     const tier = controlValue(root, "#tierSelect");
     const novelMode = controlValue(root, "#novelMode");
@@ -98,7 +115,7 @@ export function attachGoalHandlers(root, taskId, deps = {}) {
     if (tier) body.tier = tier;
     if (novelMode) body.novel_mode = novelMode;
     try {
-      const payload = await actions.createPlan(taskId, body);
+      const payload = await actions.createPlan(resolvedTaskId, body);
       const plan = payload?.plan || payload;
       if (plan) {
         setPlan(plan);
