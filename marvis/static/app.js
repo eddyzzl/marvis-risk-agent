@@ -50,6 +50,7 @@ const taskBusyActions = new Map();
 const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let globalBusyAction = null;
+let actionStatusOverride = null;
 let themePreference = "light";
 let currentTheme = "light";
 let taskSearchQuery = "";
@@ -116,6 +117,8 @@ const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;
 // across at most this many ticks so big late chunks still feel like a reveal
 // instead of a dump, but finish in well under a second.
 const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;
+const AGENT_NO_ENABLED_MODEL_MESSAGE = "请先在设置中配置并启用大模型，再发送 Agent 消息。";
+const AGENT_NO_SELECTED_MODEL_MESSAGE = "请先选择一个可用大模型，再发送 Agent 消息。";
 // Follow-mode state machine: the typewriter only pulls the viewport to the
 // bottom while agentAutoScrollFollows is true. recomputeAgentAutoScrollFollow
 // runs on scroll events that arrive within AGENT_USER_SCROLL_INPUT_WINDOW_MS
@@ -1093,6 +1096,20 @@ function setActionStatus(message, kind = "info", detail = "") {
   requestAnimationFrame(syncTaskHeroGlassLayout);
 }
 
+function setActionStatusOverride(message, kind = "info", detail = "") {
+  if (!selectedTaskId) {
+    setActionStatus(message, kind, detail);
+    return;
+  }
+  actionStatusOverride = { taskId: selectedTaskId, message, kind, detail };
+  setActionStatus(message, kind, detail);
+}
+
+function clearActionStatusOverride(taskId = selectedTaskId) {
+  if (!actionStatusOverride) return;
+  if (!taskId || actionStatusOverride.taskId === taskId) actionStatusOverride = null;
+}
+
 function taskFailureActionStatusMessage(task = selectedTask) {
   if (!task || !["failed", "review_required"].includes(task.status)) return "";
   if (task.status === "review_required") return "全部流程已完成，请查看右侧报告并进行人工复核。";
@@ -1174,6 +1191,8 @@ function setTaskFailureActionStatus(task = selectedTask) {
 
 function actionFailureStatusTitle(actionId) {
   switch (actionId) {
+    case "agent":
+      return "Agent 执行失败。";
     case "scan":
       return "材料识别失败。";
     case "notebook":
@@ -2301,7 +2320,10 @@ function renderCurrentTask({ force = false } = {}) {
   title.textContent = taskDisplayName(selectedTask);
   subtitle.textContent = "";
   renderTaskSnapshot();
-  if (!setTaskFailureActionStatus(selectedTask)) {
+  const statusOverride = actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null;
+  if (statusOverride) {
+    setActionStatus(statusOverride.message, statusOverride.kind, statusOverride.detail);
+  } else if (!setTaskFailureActionStatus(selectedTask)) {
     const snapshot = taskActionStatusSnapshot(selectedTask);
     setActionStatus(snapshot.message, snapshot.kind);
   }
@@ -4169,6 +4191,48 @@ function agentPreferredModelId(enabledModels = llmSettings.enabled_models || [])
   return enabledModels.find((model) => model.model_id)?.model_id || "";
 }
 
+function setAgentComposerNotice(message = "", kind = "info") {
+  const notice = $("agentComposerNotice");
+  if (!notice) return;
+  if (!message) clearActionStatusOverride();
+  notice.textContent = message || "";
+  notice.className = `agent-composer-notice ${message ? kind : ""}`.trim();
+  notice.setAttribute("role", kind === "error" ? "alert" : "status");
+  notice.setAttribute("aria-live", kind === "error" ? "assertive" : "polite");
+  requestAnimationFrame(syncAgentComposerClearance);
+}
+
+function agentModelUnavailableMessage() {
+  const enabledModels = llmSettings.enabled_models || [];
+  if (enabledModels.length === 0) return AGENT_NO_ENABLED_MODEL_MESSAGE;
+  const selectedId = $("agentModelSelect")?.value || "";
+  if (!selectedId) return AGENT_NO_SELECTED_MODEL_MESSAGE;
+  return "";
+}
+
+function agentModelConfigurationErrorMessage(error) {
+  const message = String(error?.message || error || "");
+  if (!message) return "";
+  if (message.includes("请先在设置中配置至少一个启用的大模型")) {
+    return AGENT_NO_ENABLED_MODEL_MESSAGE;
+  }
+  if (message.includes("当前选择的模型不可用")) {
+    return "当前选择的模型不可用，请重新选择或到设置中检查配置。";
+  }
+  if (message.includes("当前选择的模型缺少 API Base URL 或模型名")) {
+    return "当前选择的模型缺少 API Base URL 或模型名，请到设置中补全配置。";
+  }
+  return "";
+}
+
+function showAgentModelGuidance(message) {
+  if (!message) return false;
+  setAgentComposerNotice(message, "error");
+  setActionStatusOverride(message, "error");
+  $("agentModelSelect")?.focus();
+  return true;
+}
+
 function renderAgentEffortPreference() {
   const select = $("agentEffortSelect");
   if (!select) return;
@@ -5040,6 +5104,9 @@ async function startAgentValidation() {
     setActionStatus("请输入要交给 Agent 的任务。", "error");
     return;
   }
+  const unavailableModelMessage = agentModelUnavailableMessage();
+  if (showAgentModelGuidance(unavailableModelMessage)) return;
+  setAgentComposerNotice("");
   const modelId = $("agentModelSelect").value || "";
   input.value = "";
   autoGrowComposerInput();
@@ -5066,6 +5133,7 @@ async function startAgentValidation() {
     input.value = originalValue;
     autoGrowComposerInput();
     updateAgentSendDisabled();
+    if (showAgentModelGuidance(agentModelConfigurationErrorMessage(error))) return;
     throw error;
   }
   agentMessages = result.messages || agentMessages;
@@ -5712,6 +5780,7 @@ $("llmModelProfiles").addEventListener("keydown", (event) => {
 });
 $("agentModelSelect").onchange = (event) => {
   agentSelectedModelId = event.target.value;
+  setAgentComposerNotice("");
   persistCurrentAgentComposerPreference({ model_id: agentSelectedModelId });
   event.target.blur();
 };

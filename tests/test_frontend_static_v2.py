@@ -4701,6 +4701,57 @@ def test_agent_send_clears_composer_and_renders_user_message_before_network_wait
     assert "input.value = originalValue;" in send_body
 
 
+def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
+    app_js = _read_static("app.js")
+
+    helpers_start = app_js.index("function setAgentComposerNotice")
+    helpers_end = app_js.index("function renderAgentEffortPreference", helpers_start)
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-1';",
+            "let llmSettings = { enabled_models: [] };",
+            "let apiCalls = 0;",
+            "let focusedModel = false;",
+            "const AGENT_NO_ENABLED_MODEL_MESSAGE = '请先在设置中配置并启用大模型，再发送 Agent 消息。';",
+            "const AGENT_NO_SELECTED_MODEL_MESSAGE = '请先选择一个可用大模型，再发送 Agent 消息。';",
+            "const statuses = [];",
+            "const input = { value: '开始验证', style: {} };",
+            "const modelSelect = { value: '', focus() { focusedModel = true; } };",
+            "const notice = { textContent: '', className: '', attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } };",
+            "function $(id) { if (id === 'agentComposerInput') return input; if (id === 'agentModelSelect') return modelSelect; if (id === 'agentComposerNotice') return notice; return null; }",
+            "function requestAnimationFrame(fn) { fn(); }",
+            "function syncAgentComposerClearance() {}",
+            "function setActionStatus(message, kind = 'info', detail = '') { statuses.push({ message, kind, detail }); }",
+            "function setActionStatusOverride(message, kind = 'info', detail = '') { setActionStatus(message, kind, detail); }",
+            "function clearActionStatusOverride() {}",
+            "function autoGrowComposerInput() { throw new Error('composer should not clear before model guidance'); }",
+            "function updateAgentSendDisabled() { throw new Error('send state should not update before model guidance'); }",
+            "async function api() { apiCalls += 1; throw new Error('network should not be called'); }",
+            app_js[helpers_start:helpers_end],
+            app_js[send_start:send_end],
+            "await startAgentValidation();",
+            "process.stdout.write(JSON.stringify({ apiCalls, focusedModel, inputValue: input.value, noticeText: notice.textContent, noticeClass: notice.className, status: statuses[statuses.length - 1] }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["apiCalls"] == 0
+    assert payload["inputValue"] == "开始验证"
+    assert payload["focusedModel"] is True
+    assert "配置并启用大模型" in payload["noticeText"]
+    assert "error" in payload["noticeClass"]
+    assert payload["status"]["kind"] == "error"
+    assert "配置并启用大模型" in payload["status"]["message"]
+
+
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
@@ -4766,6 +4817,10 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "function updateAgentSendDisabled() {}",
             "function setActionStatus() {}",
             "function renderAgentConversation() { renderSnapshots.push(agentMessages.map((message) => ({ role: message.role, content: message.content, metadata: message.metadata || {} }))); }",
+            "function agentModelUnavailableMessage() { return ''; }",
+            "function showAgentModelGuidance() { return false; }",
+            "function setAgentComposerNotice() {}",
+            "function agentModelConfigurationErrorMessage() { return ''; }",
             "function agentEffort() { return 'high'; }",
             "function agentAcceptanceModeValue() { return 'normal'; }",
             "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
@@ -4822,6 +4877,10 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "function updateAgentSendDisabled() {}",
             "function setActionStatus() {}",
             "function renderAgentConversation() {}",
+            "function agentModelUnavailableMessage() { return ''; }",
+            "function showAgentModelGuidance() { return false; }",
+            "function setAgentComposerNotice() {}",
+            "function agentModelConfigurationErrorMessage() { return ''; }",
             "function agentEffort() { return 'high'; }",
             "function agentAcceptanceModeValue() { return 'normal'; }",
             "function sleep() { return new Promise((resolve) => setTimeout(resolve, 0)); }",
