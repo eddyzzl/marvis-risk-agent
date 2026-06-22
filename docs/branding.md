@@ -6,8 +6,8 @@ Branding is runtime-configurable from the local workspace. Source code defaults 
 
 When no local config exists, the app uses:
 
-- platform name: `MARVIS-全能风控智能体`
-- browser title: `MARVIS-全能风控智能体`
+- platform name: `MARVIS-全能信贷风控智能体`
+- browser title: `MARVIS-全能信贷风控智能体`
 - primary color: `#000000`
 - logo: `marvis/static/brand/marvis-logo.png`
 - favicon: `marvis/static/brand/marvis-favicon.png`

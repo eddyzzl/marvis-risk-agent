@@ -11,7 +11,7 @@
 - Personality: restrained local professional tool, closer to Xcode or Finder utility panels than SaaS landing pages.
 - Trust signals: clear task state, human-readable execution evidence, stable report output paths, visible errors near the triggering action, and auditable Agent statements.
 - Avoid: marketing hero pages, decorative glass effects, heavy shadows, redundant rails, generic AI claims, and JSON as the default user-facing result.
-- Default public brand: `MARVIS-全能风控智能体`.
+- Default public brand: `MARVIS-全能信贷风控智能体`.
 - Branding must be runtime-configurable without source-code edits. The configurable surface is logo, favicon/web logo, primary theme color, platform display name, and browser page title.
 - Private/customer branding belongs in `workspace/branding/brand.json` plus sibling assets, and must not be required for the open-source checkout to run.
 - When no branding config exists, the platform uses the public MARVIS defaults: black primary color and the built-in MARVIS logo/favicon.

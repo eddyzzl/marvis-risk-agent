@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
 
     changed = update_release_files(old_tag, new_tag)
     create_release_commit(new_tag, changed)
-    run(["git", "tag", "-a", new_tag, "-m", f"MARVIS Risk Agent {new_tag}"])
+    run(["git", "tag", "-a", new_tag, "-m", f"MARVIS-全能信贷风控智能体 {new_tag}"])
     if not args.no_push:
         push_release(args.remote, args.branch, new_tag)
     print(f"released {new_tag}")
