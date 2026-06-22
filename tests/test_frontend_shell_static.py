@@ -18,13 +18,13 @@ def _css_rule(css: str, selector: str) -> str:
 def test_browser_chrome_uses_public_default_branding():
     index_html = _read_static("index.html")
 
-    assert "<title>MARVIS-全能信贷风控智能体</title>" in index_html
+    assert "<title>MARVIS-Agent</title>" in index_html
     assert '<link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png' in index_html
     assert 'id="brandLogo"' in index_html
     assert 'class="brand-mark"' in index_html
     assert 'src="static/brand/marvis-logo.png' in index_html
     assert 'id="platformName"' in index_html
-    assert "MARVIS-全能信贷风控智能体" in index_html
+    assert "MARVIS-Agent" in index_html
     assert "private-logo.svg" not in index_html
     assert 'href="data:,"' not in index_html
 

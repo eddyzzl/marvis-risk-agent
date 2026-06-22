@@ -49,8 +49,8 @@ def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
 
     assert response.status_code == 200
     assert response.json() == {
-        "platformName": "MARVIS-全能信贷风控智能体",
-        "browserTitle": "MARVIS-全能信贷风控智能体",
+        "platformName": "MARVIS-Agent",
+        "browserTitle": "MARVIS-Agent",
         "primaryColor": "#000000",
         "logoUrl": "static/brand/marvis-logo.png",
         "faviconUrl": "static/brand/marvis-favicon.png",
@@ -171,7 +171,7 @@ def test_index_html_is_prebranded_from_workspace_config(tmp_path: Path):
     assert '<h1 id="platformName">本地风控模型验证平台</h1>' in html
     assert 'style="--brand-primary: #1f6feb;' in html
     assert "--brand-primary-hover:" in html
-    assert "<title>MARVIS-全能信贷风控智能体</title>" not in html
+    assert "<title>MARVIS-Agent</title>" not in html
 
 
 def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):

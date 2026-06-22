@@ -8,8 +8,8 @@ export const selectedTaskStorageKey = "marvis_selected_task_id";
 export const agentTaskComposerStorageKey = "marvis_agent_task_composer_preferences";
 
 export const defaultBranding = {
-  platformName: "MARVIS-全能信贷风控智能体",
-  browserTitle: "MARVIS-全能信贷风控智能体",
+  platformName: "MARVIS-Agent",
+  browserTitle: "MARVIS-Agent",
   primaryColor: "#000000",
   logoUrl: "static/brand/marvis-logo.png",
   faviconUrl: "static/brand/marvis-favicon.png",

@@ -98,7 +98,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     init_db(settings.db_path)
     reclaim_stale_running_tasks(settings.db_path)
 
-    app = FastAPI(title="MARVIS-全能信贷风控智能体")
+    app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
 
     @app.middleware("http")

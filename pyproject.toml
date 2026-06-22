@@ -1,7 +1,7 @@
 [project]
 name = "marvis"
 version = "1.1.6"
-description = "MARVIS all-purpose credit-risk agent for model development, validation, data processing, feature analysis, and strategy workflows"
+description = "MARVIS-Agent: all-purpose credit-risk agent for model development, validation, data processing, feature analysis, and strategy workflows"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

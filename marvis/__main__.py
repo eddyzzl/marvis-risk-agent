@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="marvis",
-        description="MARVIS-全能信贷风控智能体 CLI",
+        description="MARVIS-Agent CLI",
     )
     _add_serve_options(parser)
 
@@ -42,7 +42,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     serve_parser = subparsers.add_parser(
         "serve",
         help="Start the FastAPI app",
-        description="MARVIS-全能信贷风控智能体 CLI",
+        description="MARVIS-Agent CLI",
     )
     _add_serve_options(serve_parser)
 
@@ -141,7 +141,7 @@ def _serve(args: argparse.Namespace) -> None:
             f"MARVIS profile '{options.profile}' uses workspace {options.workspace}"
             f" and port {options.port}."
         )
-    print(f"MARVIS-全能信贷风控智能体 running at http://{options.host}:{options.port}")
+    print(f"MARVIS-Agent running at http://{options.host}:{options.port}")
     print("If running behind JupyterHub, try the matching /proxy/<port>/ URL.")
     uvicorn.run(app, host=options.host, port=options.port)
 
@@ -239,7 +239,7 @@ def _run_process(command: list[str], *, cwd: Path) -> None:
 def _print_version() -> None:
     from marvis import __version__
 
-    print(f"MARVIS-全能信贷风控智能体 {__version__}")
+    print(f"MARVIS-Agent {__version__}")
 
 
 if __name__ == "__main__":
