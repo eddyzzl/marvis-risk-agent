@@ -1,6 +1,20 @@
+# Local workflow instructions and generated review artifacts
+AGENTS.md
+CLAUDE.md
+CODE_REVIEW_*.md
+CODEBASE_DESIGN_AUDIT_*.md
+docs/superpowers/
+.claude/
+.codex/
+.cursor/
 .omx/
 .omc/
 .superpowers/
+.aider*
+.roo/
+.windsurf/
+.github/copilot-instructions.md
+
 workspace/
 workspace-*/
 .pytest_cache/

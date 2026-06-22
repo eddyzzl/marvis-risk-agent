@@ -1028,7 +1028,7 @@ def test_sidebar_empty_state_is_compact():
     assert "text-align: center" in task_empty_rule
 
 
-def test_shell_has_collapsible_codex_style_sidebar():
+def test_shell_has_collapsible_compact_sidebar():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
@@ -2882,7 +2882,7 @@ def test_only_selected_pet_assets_are_bundled():
     ]
 
 
-def test_naitang_uses_codex_pet_atlas_rows_and_drag_directions():
+def test_naitang_uses_pet_atlas_rows_and_drag_directions():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
     pyproject = (STATIC_DIR.parents[1] / "pyproject.toml").read_text(encoding="utf-8")

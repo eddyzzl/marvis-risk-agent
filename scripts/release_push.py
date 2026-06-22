@@ -121,7 +121,6 @@ Scope-risk: narrow
 Directive: Use scripts/release_push.py for release pushes instead of raw git push.
 Tested: release_push updated release metadata and created tag {tag}.
 Not-tested: Full application regression is expected before invoking release_push.
-Co-authored-by: OmX <omx@oh-my-codex.dev>
 """
 
 
