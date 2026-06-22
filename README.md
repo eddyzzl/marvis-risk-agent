@@ -2,7 +2,7 @@
   <img src="marvis/static/brand/marvis-logo.png" alt="MARVIS all-purpose credit-risk agent logo" width="148" />
 </p>
 
-<h1 align="center">MARVIS-全能信贷风控智能体</h1>
+<h1 align="center">MARVIS All-Purpose Credit Risk Agent</h1>
 
 <p align="center">
   An all-purpose credit-risk agent for modeling, validation, data processing, feature analysis, and strategy workflows.
@@ -16,7 +16,7 @@
 
 ---
 
-MARVIS-全能信贷风控智能体 is built for governed credit-risk work that should stay close to local files, local runtimes, and auditable evidence. It is positioned as an all-purpose credit-risk agent for model development, model validation, data processing, feature derivation, feature analysis, strategy generation, strategy validation, monitoring, and governed task automation.
+MARVIS All-Purpose Credit Risk Agent is built for governed credit-risk work that should stay close to local files, local runtimes, and auditable evidence. It covers model development, model validation, data processing, feature derivation, feature analysis, strategy generation, strategy validation, monitoring, and governed task automation.
 
 The current V1.1.6 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
 
