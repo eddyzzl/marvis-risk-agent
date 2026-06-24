@@ -28,7 +28,7 @@ def test_cli_help_returns_without_loading_validation_stack(args):
     )
 
     assert result.returncode == 0
-    assert "MARVIS Risk Agent" in result.stdout
+    assert "MARVIS-Agent" in result.stdout
 
 
 def test_cli_validate_dispatches_pipeline(tmp_path, monkeypatch):

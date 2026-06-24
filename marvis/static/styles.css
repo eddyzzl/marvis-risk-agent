@@ -4178,6 +4178,22 @@ body[data-theme="dark"] .agent-code-token.number {
   flex-wrap: nowrap;
 }
 
+.agent-composer-notice {
+  min-height: 18px;
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.agent-composer-notice:empty {
+  display: none;
+}
+
+.agent-composer-notice.error {
+  color: var(--danger);
+}
+
 .agent-composer-mode-controls {
   flex: 0 0 auto;
 }

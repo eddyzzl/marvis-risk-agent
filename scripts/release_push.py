@@ -121,7 +121,6 @@ Scope-risk: narrow
 Directive: Use scripts/release_push.py for release pushes instead of raw git push.
 Tested: release_push updated release metadata and created tag {tag}.
 Not-tested: Full application regression is expected before invoking release_push.
-Co-authored-by: OmX <omx@oh-my-codex.dev>
 """
 
 
@@ -178,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
 
     changed = update_release_files(old_tag, new_tag)
     create_release_commit(new_tag, changed)
-    run(["git", "tag", "-a", new_tag, "-m", f"MARVIS Risk Agent {new_tag}"])
+    run(["git", "tag", "-a", new_tag, "-m", f"MARVIS-Agent {new_tag}"])
     if not args.no_push:
         push_release(args.remote, args.branch, new_tag)
     print(f"released {new_tag}")

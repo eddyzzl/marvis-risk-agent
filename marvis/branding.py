@@ -9,8 +9,8 @@ from urllib.parse import quote, unquote
 
 
 DEFAULT_BRANDING: dict[str, Any] = {
-    "platformName": "MARVIS-全能风控智能体",
-    "browserTitle": "MARVIS-全能风控智能体",
+    "platformName": "MARVIS-Agent",
+    "browserTitle": "MARVIS-Agent",
     "primaryColor": "#000000",
     "logoUrl": "static/brand/marvis-logo.png",
     "faviconUrl": "static/brand/marvis-favicon.png",
@@ -80,7 +80,7 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
         1,
     )
     html = html.replace(
-        "<title>MARVIS-全能风控智能体</title>",
+        "<title>MARVIS-Agent</title>",
         f"<title>{browser_title}</title>",
         1,
     )
@@ -91,11 +91,11 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
     )
     html = html.replace('src="static/brand/marvis-logo.png"', f'src="{logo_url}"')
     html = html.replace(
-        'alt="MARVIS-全能风控智能体 logo"',
+        'alt="MARVIS-Agent logo"',
         f'alt="{platform_name} logo"',
     )
     html = html.replace(
-        '<h1 id="platformName">MARVIS-全能风控智能体</h1>',
+        '<h1 id="platformName">MARVIS-Agent</h1>',
         f'<h1 id="platformName">{platform_name}</h1>',
         1,
     )
