@@ -10,6 +10,34 @@
   gap: 12px;
 }
 
+.v2-workspace-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.v2-workspace-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+}
+
+.v2-workspace-summary strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.v2-workspace-summary span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .v2-workspace-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -19,7 +47,12 @@
 
 .v2-runtime-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(280px, 0.86fr);
+  grid-template-areas:
+    "goal plan plugin"
+    "join subagent skill"
+    "loop artifact draft"
+    "capability memory memory";
   gap: 12px;
   min-height: 360px;
 }
@@ -32,6 +65,115 @@
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px;
+}
+
+.v2-goal-panel {
+  grid-area: goal;
+}
+
+.v2-plan-panel {
+  grid-area: plan;
+}
+
+.v2-join-panel {
+  grid-area: join;
+}
+
+.v2-subagent-panel {
+  grid-area: subagent;
+}
+
+.v2-plugin-panel {
+  grid-area: plugin;
+}
+
+.v2-skill-panel {
+  grid-area: skill;
+}
+
+.v2-draft-panel {
+  grid-area: draft;
+}
+
+.v2-capability-panel {
+  grid-area: capability;
+}
+
+.v2-memory-panel {
+  grid-area: memory;
+}
+
+.v2-loop-panel {
+  grid-area: loop;
+}
+
+.v2-artifact-panel {
+  grid-area: artifact;
+}
+
+.v2-panel::before {
+  content: attr(data-panel-title) "\A" attr(data-panel-description);
+  display: block;
+  white-space: pre-line;
+  margin: -2px 0 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.v2-panel[data-panel-description=""]::before {
+  content: attr(data-panel-title);
+}
+
+.governance-settings-dialog .v2-workspace-summary,
+.governance-settings-dialog .v2-workspace-toolbar {
+  display: none;
+}
+
+.governance-settings-dialog .v2-runtime-shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-areas: none;
+  gap: 12px;
+  min-height: 0;
+}
+
+.governance-settings-dialog .v2-panel {
+  display: none;
+  grid-area: auto;
+  max-height: none;
+}
+
+/* The governance dialog already shows the per-view title + description in its own
+   header, so suppress the duplicate panel/page headings (cuts repeated content). */
+.governance-settings-dialog .v2-panel::before {
+  display: none;
+}
+
+/* The dialog header already shows the per-view title/description and now also
+   carries the single refresh icon, so the whole in-panel page-head is redundant.
+   (The #governanceRuntimeTitle/Description nodes stay in the DOM for JS.) */
+.governance-settings-dialog .governance-page-head {
+  display: none;
+}
+
+.governance-settings-dialog[data-v2-view="plugins"] .v2-plugin-panel,
+.governance-settings-dialog[data-v2-view="workflows"] .v2-skill-panel,
+.governance-settings-dialog[data-v2-view="capabilities"] .v2-capability-panel {
+  display: grid;
+}
+
+/* The "待转正草稿" drill-in lives in the runtime panel but only belongs to the
+   plugins view (drafts get promoted into plugins). */
+.governance-settings-dialog #draftManageDetails {
+  display: none;
+}
+
+.governance-settings-dialog[data-v2-view="plugins"] #draftManageDetails {
+  display: block;
 }
 
 .v2-empty {
@@ -141,11 +283,9 @@
   gap: 8px;
 }
 
-.plugin-row header,
 .memory-distillation-row,
 .memory-distillation-row button:first-child,
-.memory-manager-toolbar,
-.plugin-row label {
+.memory-manager-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -180,8 +320,79 @@
   accent-color: var(--brand-primary);
 }
 
-.plugin-row button {
-  justify-self: start;
+.governance-settings-dialog .plugin-row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 38px;
+  min-width: 38px;
+  max-width: none;
+  height: 22px;
+  min-height: 22px;
+  max-height: none;
+}
+
+.plugin-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-row-id {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.plugin-row-id strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.plugin-row-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.plugin-row-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plugin-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.plugin-action {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.plugin-action:hover {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.plugin-action.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.plugin-action.danger:hover {
+  background: var(--danger-soft);
 }
 
 .plugin-version,
@@ -198,6 +409,54 @@
 .plugin-tools {
   display: grid;
   gap: 8px;
+}
+
+.plugin-tools:not(:empty) {
+  margin-top: 2px;
+}
+
+.plugin-tool {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.plugin-tool-head {
+  display: grid;
+  gap: 2px;
+}
+
+.plugin-tool-head strong {
+  font-size: 13px;
+}
+
+.plugin-tool-head span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.plugin-tool-schemas > summary {
+  width: max-content;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: revert;
+}
+
+.plugin-tool-schemas[open] > summary {
+  margin-bottom: 6px;
+}
+
+.plugin-schema-label {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
 .plugin-tool-schema {
@@ -219,11 +478,273 @@
 }
 
 @media (max-width: 860px) {
+  .v2-workspace-summary,
   .v2-runtime-shell {
     grid-template-columns: 1fr;
+    grid-template-areas: none;
+  }
+
+  .v2-panel {
+    grid-area: auto;
   }
 
   .plugin-tool-schema {
     grid-template-columns: 1fr;
   }
+}
+
+/* --- generic plan-driver inline tables (data_join / feature / modeling) --- */
+.agent-message-tables {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.agent-inline-table-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  margin-bottom: 5px;
+}
+.agent-inline-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+}
+.agent-inline-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-inline-table th,
+.agent-inline-table td {
+  padding: 6px 12px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+}
+.agent-inline-table thead th {
+  background: var(--surface-subtle, #f6f8fb);
+  font-weight: 600;
+  color: var(--text-primary, var(--text, #374151));
+}
+.agent-inline-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* --- plan rail (non-validation tasks) follows the validation right rail: phases
+   are big `.step` rows, tool calls are nested `.notebook-step` subtasks. --- */
+.plan-rail-step {
+  cursor: default;
+}
+.plan-rail-step:hover {
+  background: transparent;
+}
+.plan-rail-substeps {
+  margin-top: 6px;
+}
+.plan-rail-substeps .notebook-step {
+  align-items: start;
+}
+.plan-rail-substeps .check-icon,
+.plan-rail-substeps .notebook-step-no {
+  margin-top: 2px;
+}
+.plan-substep-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.plan-substep-copy small {
+  grid-column: auto;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-rail-substeps .plan-step-confirm {
+  min-height: 26px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+.plan-step-await {
+  align-self: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warning-strong, #b7791f);
+  background: var(--warning-soft, #fef3c7);
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.plan-rail-empty {
+  padding: 16px 6px;
+  color: var(--text-muted, #9aa3af);
+  font-size: 13px;
+}
+/* Manual-mode gate confirm, lives in the step rail (not the middle) */
+.plan-step-confirm {
+  margin-left: auto;
+  align-self: center;
+  white-space: nowrap;
+}
+/* Modeling algorithm multi-select (create dialog, manual mode) */
+/* The shared .task-form-section is a 2-col grid (label | field). The algorithm
+   section is a single stacked block instead, so heading / hint / choices don't get
+   split across columns. */
+#createTaskAlgorithmField,
+#createTaskMetricField {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+#createTaskAlgorithmField .dialog-subtitle,
+#createTaskMetricField .dialog-subtitle {
+  margin: 0 0 4px;
+}
+.algorithm-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.algorithm-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.algorithm-choice:hover {
+  border-color: var(--brand-primary, #000);
+}
+.algorithm-choice:has(input:checked) {
+  border-color: var(--brand-primary, #000);
+  background: var(--surface-soft, #f7f7f8);
+}
+.algorithm-choice input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand-primary, #000);
+}
+
+/* Plan-level 开始 control, shown under the steps before the plan starts */
+.plan-rail-start {
+  display: flex;
+  justify-content: stretch;
+  margin-top: 14px;
+}
+.plan-rail-start .plan-step-confirm {
+  margin-left: 0;
+  width: 100%;
+}
+/* Download button, shown under the steps once a report has been generated */
+.plan-rail-download {
+  display: flex;
+  margin-top: 10px;
+}
+.plan-rail-download .button {
+  width: 100%;
+}
+
+/* --- Manual-mode analysis view (driver tasks) --- */
+/* Manual mode is a tool, not a conversation: render step outputs as plain analysis
+   sections with no speaker labels / chat bubbles. */
+.driver-analysis-mode .agent-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.driver-analysis-section {
+  padding: 18px 4px;
+  border-top: 1px solid var(--border-color, var(--border, #eceef1));
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary, #1f2430);
+}
+.driver-analysis-section:first-child {
+  border-top: none;
+}
+.driver-analysis-section > p:first-child {
+  margin-top: 0;
+}
+.driver-analysis-section strong {
+  font-weight: 600;
+}
+.driver-analysis-section.is-error {
+  color: var(--danger-strong, #b42318);
+}
+
+/* --- C1 file-role assignment form (data_join) --- */
+.c1-form {
+  margin-top: 10px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.c1-form-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.c1-form-table th,
+.c1-form-table td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+  white-space: nowrap;
+}
+.c1-form-table thead th {
+  background: var(--surface-subtle, #f6f8fb);
+  font-weight: 600;
+}
+.c1-form-table .c1-file {
+  font-weight: 600;
+}
+.c1-form-table select.c1-role {
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color, var(--border, #d7dbe0));
+  background: var(--surface, #fff);
+}
+.c1-form-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--surface-subtle, #f9fafb);
+}
+.c1-target-label {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.c1-target-label select.c1-target {
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color, var(--border, #d7dbe0));
+  background: var(--surface, #fff);
+  max-width: 220px;
+}
+.c1-form-foot .c1-confirm {
+  margin-left: auto;
+}
+
+/* Manual-mode gate confirm control (no free-text composer in manual mode). */
+.driver-gate-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
 }

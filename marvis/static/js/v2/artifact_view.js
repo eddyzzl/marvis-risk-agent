@@ -28,11 +28,20 @@ function outputRefKind(value) {
   return new Set(["dataset", "metrics", "artifact", "value"]).has(kind) ? kind : "";
 }
 
+function outputRefKindLabel(kind) {
+  return {
+    dataset: "数据集",
+    metrics: "指标",
+    artifact: "工件",
+    value: "值",
+  }[kind] || kind;
+}
+
 function metricsCellHtml(value) {
   const text = cellText(value);
   const kind = outputRefKind(text);
   if (kind) {
-    return `<button type="button" data-artifact="${escapeHtml(text)}">Open ${escapeHtml(kind)}</button>`;
+    return `<button type="button" data-artifact="${escapeHtml(text)}">查看${escapeHtml(outputRefKindLabel(kind))}</button>`;
   }
   return escapeHtml(text);
 }
@@ -91,7 +100,7 @@ export function datasetTableHtml(preview = {}) {
     return `<tr>${cells}</tr>`;
   }).join("");
   const truncated = preview.truncated
-    ? '<div class="dataset-truncated">Preview truncated</div>'
+    ? '<div class="dataset-truncated">预览已截断</div>'
     : "";
   return `<section class="dataset-preview">
     ${truncated}
@@ -117,16 +126,16 @@ export function artifactFileHtml(artifactId) {
     return `<section class="artifact-file artifact-image">
       <span>${escapeHtml(id)}</span>
       <img data-artifact-image src="${url}" alt="${escapeHtml(id)}">
-      <a data-artifact-download href="${url}">Download</a>
+      <a data-artifact-download href="${url}">下载</a>
     </section>`;
   }
   const preview = isPreviewableReportArtifact(id)
-    ? `<a data-artifact-preview href="${url}/preview">Preview</a>`
+    ? `<a data-artifact-preview href="${url}/preview">预览</a>`
     : "";
   return `<section class="artifact-file">
     <span>${escapeHtml(id)}</span>
     ${preview}
-    <a data-artifact-download href="${url}">Download</a>
+    <a data-artifact-download href="${url}">下载</a>
   </section>`;
 }
 
@@ -196,13 +205,13 @@ export function attachArtifactHandlers(root, container = null, deps = {}) {
     const previewContainer = resolvePreviewContainer(container)
       || root.querySelector?.("#artifactPanel");
     if (!previewContainer) {
-      actions.showError("artifact preview panel unavailable");
+      actions.showError("工件预览面板不可用");
       return;
     }
     try {
       await actions.renderArtifact(previewContainer, artifactButton.dataset.artifact);
     } catch (error) {
-      actions.showError(error?.message || "artifact preview failed");
+      actions.showError(error?.message || "工件预览失败");
     }
   };
 

@@ -55,10 +55,10 @@ def test_tier_settings_show_guardrail_constant_note_and_tier_limits():
           ],
         });
 
-        assert.ok(html.includes("Guardrails remain constant"));
-        assert.ok(html.includes("balanced"));
+        assert.ok(html.includes("安全护栏保持一致"));
+        assert.ok(html.includes("均衡"));
         assert.ok(html.includes("autonomy_level"));
-        assert.ok(html.includes("max_replans"));
+        assert.ok(html.includes("最大重规划"));
         """
     )
 

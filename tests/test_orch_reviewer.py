@@ -91,6 +91,18 @@ def test_reviewer_deterministic_range_allows_declared_null_metric():
     assert verdict.passed is True
 
 
+def test_reviewer_deterministic_check_supports_list_index_paths():
+    step = _step([PostCheck("range", {"field": "metrics.0.ks", "min": 0.0, "max": 1.0})])
+
+    verdict = Reviewer(lambda: FakeLLM("{}")).deterministic_check(
+        step,
+        {"metrics": [{"ks": 1.7}]},
+    )
+
+    assert verdict.passed is False
+    assert any("metrics.0.ks=1.7 > 1.0" in reason for reason in verdict.reasons)
+
+
 def test_reviewer_deterministic_one_of_blocks_unexpected_status():
     step = _step([PostCheck("one_of", {"field": "status", "values": ["ok"]})])
 

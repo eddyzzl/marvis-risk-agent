@@ -71,6 +71,36 @@ def test_vintage_count_and_balance_denominators_are_distinct_and_monotonic():
         assert rates == sorted(rates)
 
 
+def test_vintage_curve_uses_snapshot_cohort_denominator_without_pooling():
+    frame = pd.DataFrame({
+        "cohort": ["202601"] * 8,
+        "mob": [0] * 4 + [1] * 4,
+        "bad": [0, 0, 0, 1, 0, 1, 1, 1],
+        "balance": [100.0] * 8,
+    })
+
+    count_points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+    )
+    balance_points = compute_vintage_curve(
+        frame,
+        cohort_col="cohort",
+        mob_col="mob",
+        target_col="bad",
+        balance_col="balance",
+        denominator="balance",
+    )
+
+    count_by_mob = {point.mob: point for point in count_points}
+    balance_by_mob = {point.mob: point for point in balance_points}
+    assert count_by_mob[0].cum_bad_rate == pytest.approx(0.25)
+    assert count_by_mob[1].cum_bad_rate == pytest.approx(0.75)
+    assert balance_by_mob[1].cum_bad_rate == pytest.approx(0.75)
+
+
 def test_vintage_curve_wide_aligns_mob_axis_and_preserves_missing():
     frame = pd.DataFrame({
         "cohort": ["202501", "202501", "202502", "202502"],
@@ -82,7 +112,7 @@ def test_vintage_curve_wide_aligns_mob_axis_and_preserves_missing():
     wide = vintage_curve_wide(points)
     bad_rate = vintage_curve_wide(points, metric="bad_rate")
 
-    assert wide["2025-01"] == [0.0, 0.5, None]
+    assert wide["2025-01"] == [0.0, 1.0, None]
     assert wide["2025-02"] == [None, 1.0, 1.0]
     assert bad_rate["2025-02"] == [None, 1.0, 1.0]
     with pytest.raises(ValueError, match="metric"):

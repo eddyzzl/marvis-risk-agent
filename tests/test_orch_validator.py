@@ -50,6 +50,42 @@ def _metrics_manifest():
                     "timeout_seconds": 10,
                     "failure_policy": "fail",
                     "entrypoint": "tool_score_metrics",
+                },
+                {
+                    "name": "nested_metrics",
+                    "summary": "Compute nested metrics",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"dataset": {"type": "string"}},
+                        "required": ["dataset"],
+                        "additionalProperties": False,
+                    },
+                    "output_schema": {
+                        "type": "object",
+                        "properties": {
+                            "metrics": {
+                                "type": "object",
+                                "properties": {"ks": {"type": "number"}},
+                                "required": ["ks"],
+                                "additionalProperties": False,
+                            },
+                            "bins": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"total_iv": {"type": "number"}},
+                                    "required": ["total_iv"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["metrics", "bins"],
+                        "additionalProperties": False,
+                    },
+                    "determinism": "deterministic",
+                    "timeout_seconds": 10,
+                    "failure_policy": "fail",
+                    "entrypoint": "tool_nested_metrics",
                 }
             ],
             "hooks": [],
@@ -274,6 +310,29 @@ def test_plan_validator_requires_range_checks_for_metric_fields(tmp_path):
 
     assert any("ks" in problem for problem in problems)
     assert any("auc" in problem for problem in problems)
+    assert _validator(tmp_path).validate(_plan(checked)) == []
+
+
+def test_plan_validator_requires_range_checks_for_nested_metric_fields(tmp_path):
+    missing_checks = _step(
+        "step-1",
+        ToolRef("metrics_pack", "nested_metrics"),
+        {"dataset": "sample"},
+    )
+    checked = _step(
+        "step-1",
+        ToolRef("metrics_pack", "nested_metrics"),
+        {"dataset": "sample"},
+        post_checks=[
+            PostCheck("range", {"field": "metrics.ks", "min": 0.0, "max": 1.0}),
+            PostCheck("range", {"field": "bins.0.total_iv", "min": 0.0}),
+        ],
+    )
+
+    problems = _validator(tmp_path).validate(_plan(missing_checks))
+
+    assert any("metrics.ks" in problem for problem in problems)
+    assert any("bins.0.total_iv" in problem for problem in problems)
     assert _validator(tmp_path).validate(_plan(checked)) == []
 
 

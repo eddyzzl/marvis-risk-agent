@@ -67,7 +67,7 @@ class Planner:
             for slot in template.slots
         }
         plan_id = uuid.uuid4().hex
-        title_to_id = _title_to_step_id(template)
+        title_to_id = _title_to_step_id(template, plan_id)
         steps = []
         for index, step_template in enumerate(template.steps):
             step_id = title_to_id[step_template.title]
@@ -88,6 +88,7 @@ class Planner:
                     decision_point=step_template.decision_point,
                     sub_agent_scope=step_template.sub_agent_scope,
                     granted_tools=list(step_template.granted_tools),
+                    phase=step_template.phase,
                 )
             )
         return Plan(
@@ -162,6 +163,7 @@ class Planner:
         observation: dict,
         reason: str,
         tier: CapabilityTier,
+        instruction: str | None = None,
     ) -> Plan:
         if plan.replan_count >= tier.max_replan_iterations:
             raise ReplanError(f"replan budget exhausted ({tier.max_replan_iterations})")
@@ -184,6 +186,7 @@ class Planner:
                 observation=observation,
                 reason=reason,
                 last_error=last_error,
+                instruction=instruction,
             )
             raw = self._llm_factory().complete(
                 system_prompt=REPLAN_SYS,
@@ -355,28 +358,30 @@ def build_replan_prompt(
     observation: dict,
     reason: str,
     last_error: str | None,
+    instruction: str | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "goal": plan.goal,
-            "reason": reason,
-            "available_tools": catalog,
-            "context_items": context_items,
-            "observation": observation,
-            "remaining_steps": [
-                {"id": step.id, "title": step.title, "status": step.status.value}
-                for step in plan.steps
-                if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
-            ],
-            "last_error": last_error,
-            "instruction": (
-                "Return only revised remaining steps. Preserve useful dependencies on "
-                "completed step ids when needed; do not include completed steps."
-            ),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    payload = {
+        "goal": plan.goal,
+        "reason": reason,
+        "available_tools": catalog,
+        "context_items": context_items,
+        "observation": observation,
+        "remaining_steps": [
+            {"id": step.id, "title": step.title, "status": step.status.value}
+            for step in plan.steps
+            if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
+        ],
+        "last_error": last_error,
+        "instruction": (
+            "Return only revised remaining steps. Preserve useful dependencies on "
+            "completed step ids when needed; do not include completed steps."
+        ),
+    }
+    if instruction:
+        # The user's free-text replanning constraint (driver §3 提指令→重规划): the
+        # revised steps MUST honour it.
+        payload["user_constraint"] = instruction
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def _parse_steps_json(
@@ -473,7 +478,9 @@ def _step_from_json(item: Any, *, index: int, plan_id: str) -> PlanStep:
     if not isinstance(item, dict):
         raise PlanningError(f"steps[{index}] must be an object")
     return PlanStep(
-        id=str(item.get("id") or f"step-{index + 1}"),
+        # Namespace the fallback id by plan_id so LLM responses that omit step ids
+        # do not collide across plans (plan_steps.id is a primary key).
+        id=str(item.get("id") or f"{plan_id}-step-{index + 1}"),
         plan_id=plan_id,
         index=index,
         title=_required_text(item, "title", f"steps[{index}]"),
@@ -491,6 +498,7 @@ def _step_from_json(item: Any, *, index: int, plan_id: str) -> PlanStep:
             _tool_ref_from_json(ref, f"steps[{index}].granted_tools")
             for ref in item.get("granted_tools") or []
         ],
+        phase=_optional_text(item.get("phase")),
     )
 
 
@@ -513,12 +521,15 @@ def _post_check_from_json(value: Any, index: int) -> PostCheck:
     return PostCheck(kind=_required_text(value, "kind", f"post_checks[{index}]"), spec=spec)
 
 
-def _title_to_step_id(template: WorkflowTemplate) -> dict[str, str]:
+def _title_to_step_id(template: WorkflowTemplate, plan_id: str) -> dict[str, str]:
+    # Step ids must be globally unique (plan_steps.id is a primary key), so namespace
+    # them by the plan's unique id — otherwise instantiating the same template twice
+    # collides on "step-1"/"step-2"/… across plans (UNIQUE constraint failure).
     title_to_id = {}
     for index, step in enumerate(template.steps):
         if step.title in title_to_id:
             raise PlanningError(f"duplicate step title: {step.title}")
-        title_to_id[step.title] = f"step-{index + 1}"
+        title_to_id[step.title] = f"{plan_id}-step-{index + 1}"
     return title_to_id
 
 

@@ -26,11 +26,12 @@
         "type": "object",
         "properties": {
           "cohorts": {"type": "array", "items": {"type": "string"}},
+          "mob_axis": {"type": "array", "items": {"type": "integer"}},
           "curves": {"type": "object"},
           "counts": {"type": "object"},
           "summary": {"type": "object"}
         },
-        "required": ["cohorts", "curves", "counts", "summary"],
+        "required": ["cohorts", "mob_axis", "curves", "counts", "summary"],
         "additionalProperties": false
       },
       "determinism": "deterministic",
@@ -158,7 +159,8 @@
           "baseline_strategy_id": {"type": "string", "minLength": 1},
           "profit_params": {"type": "object"},
           "ead_col": {"type": "string", "minLength": 1},
-          "pd_col": {"type": "string", "minLength": 1}
+          "pd_col": {"type": "string", "minLength": 1},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "strategy_id", "target_col"],
         "additionalProperties": false
@@ -177,7 +179,8 @@
           "swap_out_count": {"type": "integer"},
           "swap_in_bad_rate": {"type": "number"},
           "swap_out_bad_rate": {"type": "number"},
-          "by_segment": {"type": "array", "items": {"type": "object"}}
+          "by_segment": {"type": "array", "items": {"type": "object"}},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
         "required": ["backtest_id", "strategy_id", "approval_rate", "approved_count", "approved_bad_rate", "rejected_bad_rate", "expected_profit", "swap_in_count", "swap_out_count", "swap_in_bad_rate", "swap_out_bad_rate", "by_segment"],
         "additionalProperties": false
@@ -203,7 +206,8 @@
           "ead_col": {"type": "string", "minLength": 1},
           "pd_col": {"type": "string", "minLength": 1},
           "objective": {"type": "string", "enum": ["max_profit", "max_approval"]},
-          "max_bad_rate": {"type": "number"}
+          "max_bad_rate": {"type": "number"},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "score_col", "target_col"],
         "additionalProperties": false
@@ -212,7 +216,8 @@
         "type": "object",
         "properties": {
           "points": {"type": "array", "items": {"type": "object"}},
-          "recommended": {"type": ["object", "null"]}
+          "recommended": {"type": ["object", "null"]},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
         "required": ["points", "recommended"],
         "additionalProperties": false

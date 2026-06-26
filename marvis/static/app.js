@@ -27,6 +27,7 @@ import {
   metricOverviewCompleteStatuses,
   notebookReproducibilityCompleteStatuses,
   requiredMaterialRoles,
+  resultScrollPositionsStorageKey,
   roleLabels,
   scanFailurePrefix,
   selectedTaskStorageKey,
@@ -98,7 +99,10 @@ let agentAutoScrollFrame = null;
 const taskFrozenSectionSnapshots = new Map();
 let pendingResultScrollRestoreTaskId = null;
 let resultScrollRestoreFrame = null;
+let resultScrollPersistFrame = null;
 let suppressAgentAutoScrollTaskId = null;
+let pendingTaskContentLoadTaskId = null;
+let taskContentSettleTimer = null;
 let latestNotebookSteps = [];
 let sidebarCollapsed = false;
 let taskSearchActive = false;
@@ -112,10 +116,120 @@ let petReactionTimer = null;
 let taskHeroGlassFrame = null;
 let taskHeroGlassActive = null;
 let taskHeroCanScroll = false;
+let platformConfirmResolver = null;
 const materialSourceController = createMaterialSourceController({
   $,
   onFilesChanged: renderMaterialUploadSelection,
 });
+
+const defaultTaskType = "validation";
+const taskTypeDefinitions = {
+  feature_analysis: {
+    label: "特征分析",
+    dialogTitle: "创建特征分析任务",
+    dialogSubtitle: "上传样本或特征表，Agent 会检查字段质量、分箱和可用性。",
+    nameLabel: "任务名称",
+    namePlaceholder: "例如：现金贷申请特征画像",
+    validatorLabel: "负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "数据材料目录",
+    sourcePlaceholder: "/path/to/feature-data",
+    reportFields: false,
+    metricField: true,
+    defaultRunMode: "",
+    manualEnabled: true,
+    manualModeDescription: "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
+    agentModeDescription: "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
+    initialGoal: "请基于当前任务材料做特征分析。先识别可用数据集、目标列、时间切分和候选特征；如果缺少字段请先提问。随后生成 V2 Workflow，执行字段画像、IV/KS/PSI、分箱或衍生变量检查，并把关键风险点整理给我确认。",
+  },
+  data_join: {
+    label: "数据处理",
+    dialogTitle: "创建数据处理任务",
+    dialogSubtitle: "上传主表和特征表，Agent 会先诊断数据处理风险，再等待确认。",
+    nameLabel: "任务名称",
+    namePlaceholder: "例如：申请主表与征信特征处理",
+    validatorLabel: "负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "数据材料目录",
+    sourcePlaceholder: "/path/to/join-data",
+    reportFields: false,
+    defaultRunMode: "",
+    manualEnabled: true,
+    manualModeDescription: "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
+    agentModeDescription: "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
+    initialGoal: "请基于当前任务材料做数据处理。先识别主表、特征表和候选 join key；对命中率、行数膨胀、键不唯一和去重策略做诊断。任何 join 执行前都要把风险和方案列出来让我确认。",
+  },
+  modeling: {
+    label: "模型开发",
+    dialogTitle: "创建模型开发任务",
+    dialogSubtitle: "上传建模样本，Agent 会组织建模准备、训练、实验比较和报告。",
+    nameLabel: "模型或任务名称",
+    namePlaceholder: "例如：贷前评分卡 MOB3 建模",
+    validatorLabel: "建模负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "建模材料目录",
+    sourcePlaceholder: "/path/to/modeling-data",
+    reportFields: false,
+    algorithmField: true,
+    defaultRunMode: "",
+    manualEnabled: true,
+    manualModeDescription: "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
+    agentModeDescription: "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
+    initialGoal: "开始建模吧。请读取建模样本，先和我确认目标列与 train/test/oot 切分，再做泄漏感知的特征筛选交我过目，然后调参、训练，开发出尽量高 KS 的 LightGBM 模型。",
+  },
+  validation: {
+    label: "模型验证",
+    dialogTitle: "创建验证任务",
+    dialogSubtitle: "支持手动模式，也可以让 Agent 辅助完成验证和报告。",
+    nameLabel: "模型名称",
+    namePlaceholder: "例如：贷前评分卡 MOB3 v202604",
+    validatorLabel: "验证人员",
+    validatorPlaceholder: "填写验证人员姓名",
+    sourceLabel: "材料目录",
+    sourcePlaceholder: "/path/to/project",
+    reportFields: true,
+    defaultRunMode: "",
+    manualEnabled: true,
+    manualModeDescription: "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
+    agentModeDescription: "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
+    initialGoal: "请基于当前任务材料开始模型验证。先扫描材料并确认 Notebook、样本、PMML 和数据字典是否齐全；如果材料完备，再按平台证据逐步完成一致性、效果、稳定性、压力测试和报告草稿。",
+  },
+  strategy: {
+    label: "策略开发",
+    dialogTitle: "创建策略开发任务",
+    dialogSubtitle: "上传评分或申请数据，Agent 会构造规则、回测并比较策略收益。",
+    nameLabel: "策略任务名称",
+    namePlaceholder: "例如：额度准入策略回测",
+    validatorLabel: "策略负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "策略数据目录",
+    sourcePlaceholder: "/path/to/strategy-data",
+    reportFields: false,
+    defaultRunMode: "",
+    manualEnabled: false,
+    manualModeDescription: "手动策略控件暂未接入；后续提供规则编辑、阈值调整和回测确认",
+    agentModeDescription: "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
+    initialGoal: "请基于当前任务材料做策略开发。先识别评分列、目标列、客群字段和候选规则；如果缺少规则口径请先提问。随后生成 V2 Workflow，构造策略、执行回测、计算收益和 swap 分析，并给出阈值权衡建议。",
+  },
+  vintage: {
+    label: "风险分析",
+    dialogTitle: "创建风险分析任务",
+    dialogSubtitle: "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据，Agent 会生成风险观察和结论。",
+    nameLabel: "分析任务名称",
+    namePlaceholder: "例如：2024H2 新客风险分析",
+    validatorLabel: "分析负责人",
+    validatorPlaceholder: "填写负责人姓名",
+    sourceLabel: "风险分析数据目录",
+    sourcePlaceholder: "/path/to/risk-analysis-data",
+    reportFields: false,
+    defaultRunMode: "",
+    manualEnabled: false,
+    manualModeDescription: "手动风险分析控件暂未接入；后续提供 Vintage、滚动率、FPD 与回收率图表",
+    agentModeDescription: "Agent 识别 Vintage、滚动率、FPD、入催回收率字段，生成风险观察和结论",
+    initialGoal: "请基于当前任务材料做风险分析。先识别资产Vintage&滚动率分析、FPD、入催回收率分析相关字段和目标口径；如果缺少字段请先提问。随后生成 V2 Workflow，计算资产Vintage曲线、滚动率、FPD 表现、入催回收率和风险观察。",
+  },
+};
+let activeTaskType = defaultTaskType;
 
 const PET_REACTION_DURATION_MS = 6500;
 const AGENT_STREAM_POLL_INTERVAL_MS = 180;
@@ -142,7 +256,8 @@ const SIDEBAR_WIDTH_MAX = 520;
 const PROGRESS_WIDTH_MIN = 314;
 const PROGRESS_WIDTH_MAX = 560;
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
-const taskGroupModes = new Set(["none", "validator", "created_month"]);
+const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
+const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
 
 const petDefinitions = {
@@ -260,6 +375,7 @@ function taskListSignature(tasks, totalTaskCount) {
     list.map((task) => [
       task.id || "",
       task.name || "",
+      task.task_type || "",
       task.status || "",
       task.updated_at || "",
       task.active_job_kind || "",
@@ -300,10 +416,93 @@ function resetValidationRenderSignatures() {
   resetMetricPreviewRenderSignature();
 }
 
-function openTaskDialog() {
+function taskTypeDefinition(taskType = activeTaskType) {
+  return taskTypeDefinitions[taskType] || taskTypeDefinitions[defaultTaskType];
+}
+
+function taskTypeLabel(taskOrType = selectedTask) {
+  const taskType = typeof taskOrType === "string" ? taskOrType : taskOrType?.task_type;
+  return taskTypeDefinition(taskType).label;
+}
+
+function setRunModeCardState(mode, { disabled = false, checked = false } = {}) {
+  const input = document.querySelector(`input[name="runMode"][value="${mode}"]`);
+  if (!input) return;
+  input.disabled = disabled;
+  input.checked = checked;
+  const card = input.closest(".run-mode-card");
+  card?.classList.toggle("disabled", disabled);
+  card?.setAttribute("aria-disabled", disabled ? "true" : "false");
+  if (!disabled) {
+    card?.removeAttribute("aria-disabled");
+  }
+}
+
+function setRunModeDescription(mode, description = "") {
+  const descriptionElement = document.querySelector(`[data-run-mode-description="${mode}"]`);
+  if (!descriptionElement) return;
+  descriptionElement.textContent = description;
+}
+
+function applyTaskTypeToDialog(taskType = defaultTaskType) {
+  activeTaskType = taskTypeDefinition(taskType) === taskTypeDefinitions[defaultTaskType]
+    ? defaultTaskType
+    : taskType;
+  const definition = taskTypeDefinition(activeTaskType);
+  $("taskType").value = activeTaskType;
+  $("taskDialogTitle").textContent = definition.dialogTitle;
+  $("taskDialogSubtitle").textContent = definition.dialogSubtitle;
+  $("modelNameLabel").textContent = definition.nameLabel;
+  $("modelName").placeholder = definition.namePlaceholder;
+  $("validatorLabel").textContent = definition.validatorLabel;
+  $("validator").placeholder = definition.validatorPlaceholder;
+  $("sourceDirLabel").textContent = definition.sourceLabel;
+  $("sourceDir").placeholder = definition.sourcePlaceholder;
+  $("createTaskReportFields").hidden = !definition.reportFields;
+  $("createTaskReportFields").classList.toggle("hidden", !definition.reportFields);
+  setRunModeCardState("manual", {
+    disabled: !definition.manualEnabled,
+    checked: false,
+  });
+  setRunModeDescription("manual", definition.manualModeDescription);
+  setRunModeCardState("agent", {
+    disabled: false,
+    checked: false,
+  });
+  setRunModeDescription("agent", definition.agentModeDescription);
+  updateAlgorithmFieldVisibility();
+}
+
+// The modeling algorithm multi-select (and the feature optional-metric multi-select)
+// are shown ONLY in manual mode (spec §3 / §2): agent mode shows no options and
+// recommends instead. So visibility depends on both task_type and run mode.
+function updateAlgorithmFieldVisibility() {
+  const definition = taskTypeDefinition($("taskType")?.value || activeTaskType || defaultTaskType);
+  const runMode = document.querySelector('input[name="runMode"]:checked')?.value;
+  _toggleConditionalField("createTaskAlgorithmField", Boolean(definition.algorithmField) && runMode === "manual");
+  _toggleConditionalField("createTaskMetricField", Boolean(definition.metricField) && runMode === "manual");
+}
+
+function _toggleConditionalField(id, show) {
+  const field = $(id);
+  if (!field) return;
+  field.hidden = !show;
+  field.classList.toggle("hidden", !show);
+}
+
+function resetModelAlgorithmChoices() {
+  document.querySelectorAll('input[name="modelAlgorithm"], input[name="featureMetric"]').forEach((input) => {
+    input.checked = false;
+  });
+}
+
+function openTaskDialog(taskType = defaultTaskType) {
+  applyTaskTypeToDialog(taskType);
   document.querySelectorAll('input[name="runMode"]').forEach((input) => {
     input.checked = false;
   });
+  resetModelAlgorithmChoices();
+  updateAlgorithmFieldVisibility();
   document.querySelectorAll(".run-mode-card").forEach((card) => {
     delete card.dataset.wasChecked;
   });
@@ -312,6 +511,12 @@ function openTaskDialog() {
   prefillCreateTaskReportFields();
   $("taskDialog").showModal();
   $("modelName").focus();
+}
+
+function openTaskDialogFromCard(event) {
+  const card = event.target.closest("[data-task-kind]");
+  if (!card) return;
+  openTaskDialog(card.dataset.taskKind || defaultTaskType);
 }
 
 function openTaskTypeWelcome() {
@@ -329,6 +534,66 @@ function openTaskTypeWelcome() {
 
 function closeTaskDialog() {
   $("taskDialog").close();
+}
+
+function closeDialogOnBackdropClick(event) {
+  const dialog = event.currentTarget;
+  if (!(dialog instanceof HTMLDialogElement)) return;
+  if (event.target !== dialog || !dialog.open) return;
+  dialog.close();
+}
+
+function bindDialogBackdropDismissal() {
+  document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("click", closeDialogOnBackdropClick);
+  });
+}
+
+function closePlatformConfirmDialog(confirmed = false) {
+  const resolver = platformConfirmResolver;
+  platformConfirmResolver = null;
+  if ($("platformConfirmDialog")?.open) {
+    $("platformConfirmDialog").close(confirmed ? "confirm" : "cancel");
+  }
+  if (resolver) resolver(confirmed);
+}
+
+function showPlatformConfirm({
+  title = "确认操作",
+  message = "此操作不能撤销。",
+  confirmText = "确认",
+  cancelText = "取消",
+  tone = "default",
+} = {}) {
+  const dialog = $("platformConfirmDialog");
+  if (!dialog) return Promise.resolve(false);
+  if (platformConfirmResolver) closePlatformConfirmDialog(false);
+
+  $("platformConfirmTitle").textContent = title;
+  $("platformConfirmMessage").textContent = message;
+  $("platformConfirmConfirmButton").textContent = confirmText;
+  $("platformConfirmCancelButton").textContent = cancelText;
+  dialog.dataset.tone = tone;
+
+  return new Promise((resolve) => {
+    platformConfirmResolver = resolve;
+    dialog.showModal();
+    $("platformConfirmCancelButton").focus({ preventScroll: true });
+  });
+}
+
+function bindPlatformConfirmDialog() {
+  const dialog = $("platformConfirmDialog");
+  if (!dialog) return;
+  $("platformConfirmCancelButton").onclick = () => closePlatformConfirmDialog(false);
+  $("platformConfirmConfirmButton").onclick = () => closePlatformConfirmDialog(true);
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closePlatformConfirmDialog(false);
+  });
+  dialog.addEventListener("close", () => {
+    if (platformConfirmResolver) closePlatformConfirmDialog(false);
+  });
 }
 
 function renderMaterialUploadSelection(files = materialSourceController.selectedFiles()) {
@@ -377,27 +642,212 @@ function bindRunModeDeselectableCards() {
     card.addEventListener("pointerdown", handleRunModeCardPointerDown);
     card.addEventListener("click", handleRunModeCardClick);
   });
+  // The modeling algorithm multi-select is manual-mode only, so re-evaluate its
+  // visibility whenever the run mode changes (agent → hide, manual → show).
+  document.querySelectorAll('input[name="runMode"]').forEach((input) => {
+    input.addEventListener("change", updateAlgorithmFieldVisibility);
+  });
 }
 
 function openExecutionEnvironmentDialog() {
   $("executionEnvironmentStatus").textContent = "正在读取执行环境...";
   $("executionEnvironmentStatus").className = "status";
-  $("executionEnvironmentDialog").showModal();
-  loadExecutionEnvironmentSettings();
+  openGovernanceSettingsCenter("execution-environment");
 }
 
 function closeExecutionEnvironmentDialog() {
-  $("executionEnvironmentDialog").close();
+  closeGovernanceSettingsDialog();
 }
 
 function openLLMSettingsDialog() {
   setLLMSettingsStatus("正在读取大模型配置...");
-  $("llmSettingsDialog").showModal();
-  runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置..." });
+  openGovernanceSettingsCenter("llm");
 }
 
 function closeLLMSettingsDialog() {
-  $("llmSettingsDialog").close();
+  closeGovernanceSettingsDialog();
+}
+
+const governanceSettingsCopy = {
+  "execution-environment": {
+    title: "执行环境",
+    subtitle: "选择 Notebook 和工具运行使用的 Python 环境。",
+  },
+  llm: {
+    title: "模型引擎",
+    subtitle: "配置 Agent 会话可调用的大模型连接信息。",
+  },
+  "memory-policy": {
+    title: "记忆",
+    subtitle: "控制 Agent 记忆的引用范围、沉淀规则；展开下方可查看与管理记忆。",
+  },
+  plugins: {
+    title: "插件",
+    subtitle: "管理可调用工具包，启停插件并查看插件暴露的工具。",
+    runtimeTitle: "插件",
+    runtimeDescription: "管理可调用工具包，启停插件并查看插件暴露的工具。",
+  },
+  workflows: {
+    title: "Workflow 模板",
+    subtitle: "加载、校验和复用用户可编写的 Workflow 模板。",
+    runtimeTitle: "Workflow 模板",
+    runtimeDescription: "加载、校验和复用用户可编写的 Workflow 模板。",
+  },
+  capabilities: {
+    title: "能力档位",
+    subtitle: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
+    runtimeTitle: "能力档位",
+    runtimeDescription: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
+  },
+};
+
+let activeGovernanceNav = "execution-environment";
+
+function governanceNavButton(navKey) {
+  return document.querySelector(`[data-governance-nav="${navKey}"]`);
+}
+
+function activeGovernanceButton(navKey = activeGovernanceNav) {
+  return governanceNavButton(navKey) || governanceNavButton("execution-environment");
+}
+
+function setGovernanceCopy(navKey, button) {
+  const copy = governanceSettingsCopy[navKey] || governanceSettingsCopy["execution-environment"];
+  $("governanceSettingsTitle").textContent = copy.title;
+  $("governanceSettingsSubtitle").textContent = copy.subtitle;
+  if (button?.dataset?.v2View) {
+    $("governanceRuntimeTitle").textContent = copy.runtimeTitle || copy.title;
+    $("governanceRuntimeDescription").textContent = copy.runtimeDescription || copy.subtitle;
+  }
+}
+
+// Single, context-aware refresh for the dialog title bar. Only panels that load
+// remote data appear here; execution-environment keeps its own 扫描环境 action.
+const governanceRefreshActions = {
+  plugins: () => runV2WorkspaceAction(refreshV2Plugins),
+  workflows: () => runV2WorkspaceAction(refreshV2Skills),
+  capabilities: () => runV2WorkspaceAction(refreshV2Capability),
+};
+
+function syncGovernanceRefreshButton(navKey = activeGovernanceNav) {
+  const button = $("governanceRefreshButton");
+  if (!button) return;
+  const unavailable = !governanceRefreshActions[navKey];
+  button.classList.toggle("is-unavailable", unavailable);
+  button.disabled = unavailable;
+  button.setAttribute("aria-hidden", unavailable ? "true" : "false");
+}
+
+function refreshActiveGovernancePanel() {
+  const action = governanceRefreshActions[activeGovernanceNav];
+  if (!action) return;
+  const button = $("governanceRefreshButton");
+  if (button) {
+    button.classList.add("is-spinning");
+    window.setTimeout(() => button.classList.remove("is-spinning"), 700);
+  }
+  action();
+}
+
+function setGovernanceSettingsPanel(navKey = "execution-environment", options = {}) {
+  const button = activeGovernanceButton(navKey);
+  const normalizedNav = button?.dataset?.governanceNav || "execution-environment";
+  const panel = button?.dataset?.governancePanel || "execution-environment";
+  activeGovernanceNav = normalizedNav;
+  syncGovernanceRefreshButton(normalizedNav);
+  for (const item of document.querySelectorAll("[data-governance-nav]")) {
+    const selected = item === button;
+    item.classList.toggle("selected", selected);
+    item.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+  for (const section of document.querySelectorAll("[data-governance-panel-content]")) {
+    section.classList.toggle("selected", section.dataset.governancePanelContent === panel);
+  }
+  const dialog = $("governanceSettingsDialog");
+  dialog.dataset.governanceActive = normalizedNav;
+  dialog.dataset.v2View = button?.dataset?.v2View || "";
+  setGovernanceCopy(normalizedNav, button);
+  if (panel === "runtime") {
+    mountV2Runtime();
+    setV2WorkspaceStatus("");
+  }
+}
+
+function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
+  const button = activeGovernanceButton(navKey);
+  if (button?.dataset?.governancePanel === "execution-environment" && options.load !== false) {
+    runAction(loadExecutionEnvironmentSettings, {
+      actionId: "executionEnvironment",
+      busyText: "正在读取执行环境...",
+    });
+  }
+  if (button?.dataset?.governancePanel === "llm" && options.load !== false) {
+    runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置..." });
+  }
+  if (button?.dataset?.governancePanel === "memory-policy" && options.load !== false) {
+    runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略..." });
+  }
+}
+
+function openGovernanceSettingsCenter(navKey = "execution-environment", options = {}) {
+  closeSidebarSettingsMenu();
+  setGovernanceSettingsPanel(navKey, { reloadMemory: false });
+  const dialog = $("governanceSettingsDialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+  refreshGovernancePanel(navKey, options);
+}
+
+function closeGovernanceSettingsDialog() {
+  $("governanceSettingsDialog").close();
+}
+
+function closeSidebarSettingsMenu() {
+  const settings = $("sidebarSettings");
+  if (!settings) return;
+  settings.open = false;
+}
+
+let sidebarSettingsOpenFrame = 0;
+
+function scheduleGovernanceSettingsFromSidebar() {
+  if (sidebarSettingsOpenFrame || $("governanceSettingsDialog")?.open) return;
+  sidebarSettingsOpenFrame = window.requestAnimationFrame(() => {
+    sidebarSettingsOpenFrame = 0;
+    openGovernanceSettingsCenter("execution-environment");
+  });
+}
+
+function handleGovernanceSettingsNavClick(event) {
+  const viewTab = event.target.closest("[data-agent-memory-view]");
+  if (viewTab) {
+    setAgentMemoryViewMode(viewTab.dataset.agentMemoryView, { reload: true });
+    return;
+  }
+  const jump = event.target.closest("[data-governance-jump]");
+  const navKey = jump
+    ? jump.dataset.governanceJump
+    : event.target.closest("[data-governance-nav]")?.dataset.governanceNav;
+  if (!navKey) return;
+  setGovernanceSettingsPanel(navKey, { reloadMemory: false });
+  refreshGovernancePanel(navKey);
+}
+
+function handleGovernanceSettingsSearch(event) {
+  const query = String(event.target.value || "").trim().toLowerCase();
+  let visibleCount = 0;
+  for (const item of document.querySelectorAll("[data-governance-nav]")) {
+    const hidden = Boolean(query && !item.textContent.toLowerCase().includes(query));
+    item.classList.toggle("hidden", hidden);
+    if (!hidden) visibleCount += 1;
+  }
+  for (const group of document.querySelectorAll(".governance-nav-group")) {
+    const visibleItems = group.querySelectorAll("[data-governance-nav]:not(.hidden)");
+    group.classList.toggle("hidden", visibleItems.length === 0);
+  }
+  const empty = $("governanceSettingsNavEmpty");
+  if (empty) empty.hidden = visibleCount !== 0;
 }
 
 function syncAgentMemoryViewControls() {
@@ -435,25 +885,6 @@ function setAgentMemoryViewMode(mode, { reload = true } = {}) {
   if (reload) {
     runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
   }
-}
-
-function openAgentMemoryDialog() {
-  syncAgentMemoryViewControls();
-  $("agentMemoryDialog").showModal();
-  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
-}
-
-function closeAgentMemoryDialog() {
-  $("agentMemoryDialog").close();
-}
-
-function openDraftToolsDialog() {
-  $("draftToolsDialog").showModal();
-  runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
-}
-
-function closeDraftToolsDialog() {
-  $("draftToolsDialog").close();
 }
 
 function openWordPreviewDialog() {
@@ -1357,6 +1788,12 @@ function shouldShowReproducibilitySection() {
 }
 
 function renderReproducibilitySectionVisibility() {
+  // Driver tasks (data_join / feature / modeling) have no validation notebook
+  // section — they run through the conversation + plan rail.
+  if (taskUsesPlanRail(selectedTask)) {
+    $("notebookSection")?.classList.add("hidden");
+    return;
+  }
   $("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection());
 }
 
@@ -1373,6 +1810,12 @@ function shouldShowMetricSection() {
 }
 
 function renderMetricSectionVisibility() {
+  // Driver tasks render metrics inline in the conversation, not in the validation
+  // metric section.
+  if (taskUsesPlanRail(selectedTask)) {
+    $("metricSection")?.classList.add("hidden");
+    return;
+  }
   $("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection());
 }
 
@@ -1469,16 +1912,6 @@ function setV2WorkspaceStatus(message = "", kind = "") {
 function mountV2Runtime() {
   const root = $("v2RuntimeMount");
   return root ? mountV2(root, { taskId: () => selectedTaskId }) : null;
-}
-
-function openV2WorkspaceDialog() {
-  mountV2Runtime();
-  setV2WorkspaceStatus("");
-  $("v2WorkspaceDialog").showModal();
-}
-
-function closeV2WorkspaceDialog() {
-  $("v2WorkspaceDialog").close();
 }
 
 async function refreshV2Plugins() {
@@ -1688,7 +2121,14 @@ async function enableAgentMemory(memoryId) {
 
 async function deleteAgentMemory(memoryId) {
   if (!memoryId) return;
-  if (!window.confirm("删除后将从 Agent 记忆库移除，确定删除？")) return;
+  const confirmed = await showPlatformConfirm({
+    title: "删除记忆",
+    message: "删除后将从 Agent 记忆库移除，确定删除？",
+    confirmText: "删除",
+    cancelText: "取消",
+    tone: "danger",
+  });
+  if (!confirmed) return;
   const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
   agentMemoryItems = agentMemoryItems.filter((memory) => String(memory.id || memory.memory_id || "") !== memoryId);
   renderAgentMemoryItems();
@@ -1697,7 +2137,14 @@ async function deleteAgentMemory(memoryId) {
 
 async function rollbackAgentMemoryDistillation(memoryId) {
   if (!memoryId) return;
-  if (!window.confirm("回滚后该沉淀将不再用于 Agent 检索，确定回滚？")) return;
+  const confirmed = await showPlatformConfirm({
+    title: "回滚记忆沉淀",
+    message: "回滚后该沉淀将不再用于 Agent 检索，确定回滚？",
+    confirmText: "回滚",
+    cancelText: "取消",
+    tone: "warning",
+  });
+  if (!confirmed) return;
   await api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" });
   await loadAgentMemoryItems();
   await inspectAgentMemory(memoryId);
@@ -1735,8 +2182,11 @@ function handleAgentMemoryInlineInspect(event) {
   const memoryId = button.dataset.agentMemoryInlineInspect || "";
   if (!memoryId) return;
   const kind = button.dataset.agentMemoryInlineKind || "raw";
-  $("agentMemoryDialog").showModal();
-  setAgentMemoryViewMode(kind === "distillation" ? "distillation" : "raw", { reload: false });
+  openGovernanceSettingsCenter("memory-policy");
+  const details = $("memoryManageDetails");
+  if (details) details.open = true;
+  // reload so the list is populated even when the drawer was already open.
+  setAgentMemoryViewMode(kind === "distillation" ? "distillation" : "raw", { reload: true });
   runAction(() => inspectAgentMemory(memoryId), { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
 }
 
@@ -1930,7 +2380,14 @@ async function promoteDraftTool() {
     setDraftToolsStatus("请填写转正测试用例。", "error");
     return;
   }
-  if (!window.confirm("转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？")) return;
+  const confirmed = await showPlatformConfirm({
+    title: "转正草稿工具",
+    message: "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？",
+    confirmText: "转正",
+    cancelText: "取消",
+    tone: "warning",
+  });
+  if (!confirmed) return;
   setDraftToolsStatus("正在执行转正闸门...");
   const payload = await api(`/api/drafts/${encodeURIComponent(draftId)}/promote`, {
     method: "POST",
@@ -2013,13 +2470,6 @@ function executionEnvironmentSettingsMatch(option = {}, settings = {}) {
   return true;
 }
 
-function executionEnvironmentOptionText(option = {}) {
-  const suffixes = [];
-  if (option.note) suffixes.push(option.note);
-  if (option.available === false) suffixes.push("不可用");
-  return [option.label || option.id || "未命名环境", ...suffixes].join(" · ");
-}
-
 function executionEnvironmentSettingsLabel(settings = executionEnvironmentSettings, options = executionEnvironmentOptions) {
   const normalized = normalizeExecutionEnvironment(settings);
   const matchedOption = (options || []).find((option) => executionEnvironmentSettingsMatch(option, normalized));
@@ -2034,65 +2484,103 @@ function executionEnvironmentSettingsLabel(settings = executionEnvironmentSettin
 }
 
 function renderExecutionEnvironmentSummary() {
-  const summary = $("settingsExecutionEnvironmentValue");
-  if (!summary) return;
   const label = executionEnvironmentSettingsLabel();
-  summary.textContent = label;
-  $("openExecutionEnvironmentButton").title = `配置执行环境：${label}`;
+  const systemButton = $("openGovernanceSettingsButton");
+  if (systemButton) systemButton.title = `打开系统设置，当前执行环境：${label}`;
 }
 
-function addExecutionEnvironmentOption(select, option, settings, selected) {
-  const item = document.createElement("option");
-  item.value = option.id || JSON.stringify(executionEnvironmentSettingsFromOption(option));
-  item.textContent = executionEnvironmentOptionText(option);
-  item.disabled = option.available === false;
-  item.dataset.settings = JSON.stringify(executionEnvironmentSettingsFromOption(option));
-  if (selected) item.selected = true;
-  select.appendChild(item);
+function addExecutionEnvironmentRow(list, option, selected) {
+  const settings = executionEnvironmentSettingsFromOption(option);
+  const unavailable = option.available === false;
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "exec-env-row" + (selected ? " selected" : "");
+  row.setAttribute("role", "radio");
+  row.setAttribute("aria-checked", selected ? "true" : "false");
+  row.tabIndex = -1; // roving tabindex; the active row is promoted after render
+  row.disabled = unavailable;
+  row.dataset.settings = JSON.stringify(settings);
+  const title = option.label || option.id || "未命名环境";
+  const subParts = [];
+  if (option.note) subParts.push(option.note);
+  if (unavailable) subParts.push("不可用");
+  const sub = subParts.join(" · ");
+  row.innerHTML =
+    '<span class="exec-env-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"></path></svg></span>' +
+    '<span class="exec-env-row-text">' +
+    `<span class="exec-env-row-title">${escapeHtml(title)}</span>` +
+    (sub ? `<span class="exec-env-row-sub">${escapeHtml(sub)}</span>` : "") +
+    "</span>";
+  list.appendChild(row);
 }
 
 function renderExecutionEnvironmentOptions(options = [], settings = {}) {
   executionEnvironmentOptions = Array.isArray(options) ? options : [];
-  const select = $("executionEnvironmentSelect");
+  const list = $("executionEnvironmentList");
+  if (!list) return;
   const normalized = normalizeExecutionEnvironment(settings);
-  select.innerHTML = "";
-  select.disabled = false;
+  list.innerHTML = "";
 
+  const rows = [];
   let selected = false;
   for (const option of executionEnvironmentOptions) {
-    const matches = executionEnvironmentSettingsMatch(option, normalized);
-    addExecutionEnvironmentOption(select, option, normalized, matches);
+    // Only the first match is marked selected, so at most one row is checked.
+    const matches = !selected && executionEnvironmentSettingsMatch(option, normalized);
+    rows.push({ option, selected: matches });
     selected = selected || matches;
   }
 
   if (!selected && (normalized.kernel_name || normalized.conda_env_name || normalized.python_executable)) {
-    addExecutionEnvironmentOption(
-      select,
-      {
+    rows.push({
+      option: {
         id: "saved-current",
         label: "当前保存配置",
         ...normalized,
         note: "未在本次扫描结果中匹配",
+        available: true,
       },
-      normalized,
-      true
-    );
+      selected: true,
+    });
     selected = true;
   }
 
-  if (select.options.length === 0) {
-    const item = document.createElement("option");
-    item.value = "";
-    item.textContent = "未扫描到可用 Python 环境";
-    select.appendChild(item);
-    select.disabled = true;
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "exec-env-empty";
+    empty.textContent = "未扫描到可用 Python 环境";
+    list.appendChild(empty);
     return;
   }
 
   if (!selected) {
-    const firstAvailable = Array.from(select.options).find((option) => !option.disabled);
+    const firstAvailable = rows.find((row) => row.option.available !== false);
     if (firstAvailable) firstAvailable.selected = true;
   }
+
+  for (const row of rows) addExecutionEnvironmentRow(list, row.option, row.selected);
+
+  // Promote one row to the group's tab stop (roving tabindex): the selected
+  // row, else the first selectable row.
+  const focusTarget =
+    list.querySelector(".exec-env-row.selected:not(:disabled)") ||
+    list.querySelector(".exec-env-row:not(:disabled)");
+  if (focusTarget) focusTarget.tabIndex = 0;
+}
+
+function handleExecutionEnvironmentListKeydown(event) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const rows = [...$("executionEnvironmentList").querySelectorAll(".exec-env-row:not(:disabled)")];
+  if (!rows.length) return;
+  event.preventDefault();
+  const current = event.target.closest(".exec-env-row");
+  let idx = rows.indexOf(current);
+  if (event.key === "Home") idx = 0;
+  else if (event.key === "End") idx = rows.length - 1;
+  else if (event.key === "ArrowDown") idx = idx < 0 ? 0 : (idx + 1) % rows.length;
+  else idx = idx < 0 ? rows.length - 1 : (idx - 1 + rows.length) % rows.length;
+  const next = rows[idx];
+  for (const row of rows) row.tabIndex = row === next ? 0 : -1;
+  next.focus();
 }
 
 function populateExecutionEnvironmentForm(settings = {}, options = executionEnvironmentOptions) {
@@ -2102,22 +2590,23 @@ function populateExecutionEnvironmentForm(settings = {}, options = executionEnvi
   renderExecutionEnvironmentSummary();
 }
 
-function collectExecutionEnvironmentSettings() {
-  const selected = $("executionEnvironmentSelect").selectedOptions[0];
-  if (!selected || !selected.dataset.settings) {
-    throw new Error("请先扫描并选择一个可用 Python 环境。");
-  }
-  if (selected.disabled) {
-    throw new Error("当前环境不可用，请选择已注册 Jupyter Kernel 的 Python 环境。");
-  }
+function handleExecutionEnvironmentListClick(event) {
+  const row = event.target.closest(".exec-env-row");
+  if (!row || row.disabled) return;
+  let settings;
   try {
-    return {
-      ...defaultExecutionEnvironment,
-      ...JSON.parse(selected.dataset.settings),
-    };
+    settings = { ...defaultExecutionEnvironment, ...JSON.parse(row.dataset.settings || "{}") };
   } catch (_) {
-    throw new Error("执行环境配置解析失败，请重新扫描后再保存。");
+    setExecutionEnvironmentStatus("执行环境配置解析失败，请重新扫描后再选择。", "error");
+    return;
   }
+  // Optimistically move the checkmark; saveExecutionEnvironmentSettings reverts on failure.
+  for (const item of $("executionEnvironmentList").querySelectorAll(".exec-env-row")) {
+    const on = item === row;
+    item.classList.toggle("selected", on);
+    item.setAttribute("aria-checked", on ? "true" : "false");
+  }
+  saveExecutionEnvironmentSettings(settings);
 }
 
 function renderExecutionEnvironmentValidation(validation = {}) {
@@ -2149,18 +2638,24 @@ async function refreshExecutionEnvironmentOptions() {
   await loadExecutionEnvironmentSettings();
 }
 
-async function saveExecutionEnvironmentSettings() {
+async function saveExecutionEnvironmentSettings(settings) {
+  const list = $("executionEnvironmentList");
   try {
-    setExecutionEnvironmentStatus("正在保存执行环境...");
+    setExecutionEnvironmentStatus("正在验证并保存环境...");
+    if (list) list.classList.add("is-saving");
     const payload = await api("/api/settings/execution-environment", {
       method: "PUT",
-      body: JSON.stringify(collectExecutionEnvironmentSettings()),
+      body: JSON.stringify({ ...defaultExecutionEnvironment, ...(settings || {}) }),
     });
     populateExecutionEnvironmentForm(payload.settings, executionEnvironmentOptions);
     renderExecutionEnvironmentValidation(payload.validation);
     if (!payload.validation) setExecutionEnvironmentStatus("执行环境已保存。", "success");
   } catch (error) {
+    // Revert the optimistic checkmark to the last known-good selection.
+    populateExecutionEnvironmentForm(executionEnvironmentSettings, executionEnvironmentOptions);
     setExecutionEnvironmentStatus(error.message || "执行环境保存失败。", "error");
+  } finally {
+    if (list) list.classList.remove("is-saving");
   }
 }
 
@@ -2289,18 +2784,17 @@ function resetAgentComposerToGlobalDefaults() {
 }
 
 function renderLLMSettingsSummary() {
-  const summary = $("settingsLLMValue");
-  if (!summary) return;
   const models = llmSettings.models || [];
+  const systemButton = $("openGovernanceSettingsButton");
   if (models.length === 0) {
-    summary.textContent = "未配置";
-    $("openLLMSettingsButton").title = "配置大模型";
+    if (systemButton) systemButton.dataset.llmSummary = "未配置";
     return;
   }
   const primary = models.find((model) => model.model_id === llmSettings.default_model_id) || models[0];
   const name = llmModelDisplayName(primary);
-  summary.textContent = models.length > 1 ? `${name} 等 ${models.length} 个` : name;
-  $("openLLMSettingsButton").title = `配置大模型：${summary.textContent}`;
+  if (systemButton) {
+    systemButton.dataset.llmSummary = models.length > 1 ? `${name} 等 ${models.length} 个` : name;
+  }
 }
 
 function llmModelDisplayName(model = {}) {
@@ -2382,6 +2876,57 @@ async function saveLLMSettings() {
   renderLLMModelProfiles();
   renderLLMSettingsSummary();
   renderAgentModelOptions();
+}
+
+function setMemoryPolicyStatus(message, kind = "info") {
+  const status = $("memoryPolicyStatus");
+  if (!status) return;
+  status.textContent = message || "";
+  status.className = `status ${kind}`;
+}
+
+function applyMemoryPolicy(settings = {}) {
+  for (const input of document.querySelectorAll(".memory-policy-switch")) {
+    const key = input.dataset.memoryPolicy;
+    if (key && key in settings) input.checked = Boolean(settings[key]);
+  }
+}
+
+function collectMemoryPolicy() {
+  const out = {};
+  for (const input of document.querySelectorAll(".memory-policy-switch")) {
+    if (input.dataset.memoryPolicy) out[input.dataset.memoryPolicy] = Boolean(input.checked);
+  }
+  return out;
+}
+
+async function loadMemoryPolicySettings({ silent = false } = {}) {
+  try {
+    const payload = await api("/api/settings/memory-policy");
+    applyMemoryPolicy(payload.settings || {});
+    if (!silent) setMemoryPolicyStatus("");
+  } catch (error) {
+    if (!silent) setMemoryPolicyStatus(error.message || "记忆策略读取失败。", "error");
+  }
+}
+
+async function saveMemoryPolicySettings() {
+  try {
+    setMemoryPolicyStatus("正在保存记忆策略...");
+    const payload = await api("/api/settings/memory-policy", {
+      method: "PUT",
+      body: JSON.stringify(collectMemoryPolicy()),
+    });
+    applyMemoryPolicy(payload.settings || {});
+    setMemoryPolicyStatus("记忆策略已保存。", "success");
+  } catch (error) {
+    setMemoryPolicyStatus(error.message || "记忆策略保存失败。", "error");
+    loadMemoryPolicySettings({ silent: true });
+  }
+}
+
+function handleMemoryPolicyChange(event) {
+  if (event.target.closest(".memory-policy-switch")) saveMemoryPolicySettings();
 }
 
 function addLLMModelProfile() {
@@ -2485,6 +3030,62 @@ function storedSelectedTaskId() {
   }
 }
 
+function loadResultScrollPositions() {
+  resultScrollPositionsByTask.clear();
+  let raw = "";
+  try {
+    raw = localStorage.getItem(resultScrollPositionsStorageKey) || "";
+  } catch (_) {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    Object.entries(parsed).forEach(([taskId, scrollTop]) => {
+      const normalized = Number(scrollTop);
+      if (taskId && Number.isFinite(normalized) && normalized >= 0) {
+        resultScrollPositionsByTask.set(taskId, normalized);
+      }
+    });
+  } catch (_) {
+    // Ignore stale or malformed browser storage.
+  }
+}
+
+function persistResultScrollPositions() {
+  try {
+    const payload = {};
+    resultScrollPositionsByTask.forEach((scrollTop, taskId) => {
+      if (!taskId || !Number.isFinite(scrollTop) || scrollTop < 0) return;
+      payload[taskId] = scrollTop;
+    });
+    if (Object.keys(payload).length === 0) {
+      localStorage.removeItem(resultScrollPositionsStorageKey);
+      return;
+    }
+    localStorage.setItem(resultScrollPositionsStorageKey, JSON.stringify(payload));
+  } catch (_) {
+    // Browser storage can be unavailable in private or embedded contexts.
+  }
+}
+
+function scheduleResultScrollPositionsPersist() {
+  if (resultScrollPersistFrame !== null) return;
+  resultScrollPersistFrame = window.requestAnimationFrame(() => {
+    resultScrollPersistFrame = null;
+    persistResultScrollPositions();
+  });
+}
+
+function restoreSelectedTaskPlaceholder() {
+  if (selectedTaskId) return;
+  const storedTaskId = storedSelectedTaskId();
+  if (!storedTaskId) return;
+  selectedTaskId = storedTaskId;
+  selectedTask = null;
+}
+
 function syncSelectedTaskFromCache() {
   if (!selectedTaskId) {
     const storedTaskId = storedSelectedTaskId();
@@ -2504,8 +3105,13 @@ function syncSelectedTaskFromCache() {
   }
   const current = taskCache.find((task) => task.id === selectedTaskId);
   if (current) {
+    const wasPlaceholder = !selectedTask;
     selectedTask = current;
     rememberSelectedTaskId(current.id);
+    if (wasPlaceholder) {
+      applyAgentTaskComposerPreferences(current.id);
+      prepareResultScrollRestoreForTask(current.id);
+    }
     return;
   }
   selectedTaskId = null;
@@ -2533,10 +3139,10 @@ function selectedTaskIsAgentMode(task = selectedTask) {
 }
 
 function workspaceGreetingForHour(hour) {
-  if (hour >= 5 && hour < 9) return "早上好，开启活力一天";
-  if (hour >= 9 && hour < 12) return "上午好，记得多补充水份";
-  if (hour >= 12 && hour < 18) return "下午好，记得起来活动一下";
-  return "晚上好，工作辛苦了";
+  if (hour >= 5 && hour < 9) return "早上好";
+  if (hour >= 9 && hour < 12) return "上午好";
+  if (hour >= 12 && hour < 18) return "下午好";
+  return "晚上好";
 }
 
 function updateWorkspaceGreeting(now = new Date()) {
@@ -2563,10 +3169,50 @@ function updateTaskHeroGlassState({ measureScroll = false } = {}) {
   setTaskHeroGlassActive(hero, workspace, glassActive);
 }
 
+function beginTaskContentLoad(taskId) {
+  if (taskContentSettleTimer !== null) {
+    window.clearTimeout(taskContentSettleTimer);
+    taskContentSettleTimer = null;
+  }
+  pendingTaskContentLoadTaskId = taskId || null;
+  const workspace = $("validationWorkspace");
+  workspace?.classList.remove("is-task-content-settling");
+  workspace?.classList.toggle("is-task-content-loading", Boolean(taskId));
+}
+
+function finishTaskContentLoad(taskId = pendingTaskContentLoadTaskId) {
+  if (taskId && pendingTaskContentLoadTaskId !== taskId) return;
+  pendingTaskContentLoadTaskId = null;
+  const workspace = $("validationWorkspace");
+  if (!workspace) return;
+  workspace.classList.remove("is-task-content-loading");
+  if (!taskId) {
+    workspace.classList.remove("is-task-content-settling");
+    return;
+  }
+  workspace.classList.add("is-task-content-settling");
+  taskContentSettleTimer = window.setTimeout(() => {
+    taskContentSettleTimer = null;
+    workspace.classList.remove("is-task-content-settling");
+  }, 220);
+}
+
+function clearTaskContentLoad() {
+  if (taskContentSettleTimer !== null) {
+    window.clearTimeout(taskContentSettleTimer);
+    taskContentSettleTimer = null;
+  }
+  pendingTaskContentLoadTaskId = null;
+  const workspace = $("validationWorkspace");
+  workspace?.classList.remove("is-task-content-loading");
+  workspace?.classList.remove("is-task-content-settling");
+}
+
 function rememberResultScrollPosition(taskId = selectedTaskId) {
   const scrollContent = $("resultScrollContent");
   if (!scrollContent || !taskId) return;
   resultScrollPositionsByTask.set(taskId, scrollContent.scrollTop);
+  scheduleResultScrollPositionsPersist();
 }
 
 function cancelResultScrollRestoreFrame() {
@@ -2597,6 +3243,37 @@ function applyResultScrollPosition(taskId = selectedTaskId) {
   updateTaskHeroGlassState({ measureScroll: true });
 }
 
+function syncAgentAutoScrollFollowFromCurrentPosition(taskId = selectedTaskId) {
+  if (taskId !== selectedTaskId || !selectedTaskIsAgentMode()) return;
+  const scrollContent = $("resultScrollContent");
+  if (!scrollContent) return;
+  if (scrollContent.scrollHeight <= scrollContent.clientHeight) {
+    agentAutoScrollFollows = true;
+    return;
+  }
+  const distance = scrollContent.scrollHeight - scrollContent.scrollTop - scrollContent.clientHeight;
+  agentAutoScrollFollows = distance <= AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX;
+}
+
+function nextAnimationFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(resolve));
+}
+
+async function restoreResultScrollPositionAfterRender(taskId = selectedTaskId) {
+  if (!taskId) return;
+  cancelResultScrollRestoreFrame();
+  await nextAnimationFrame();
+  await nextAnimationFrame();
+  if (selectedTaskId !== taskId) {
+    if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+    return;
+  }
+  applyResultScrollPosition(taskId);
+  if (pendingResultScrollRestoreTaskId === taskId) pendingResultScrollRestoreTaskId = null;
+  if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+  syncAgentAutoScrollFollowFromCurrentPosition(taskId);
+}
+
 function scheduleResultScrollRestore(taskId = selectedTaskId) {
   if (!taskId) return;
   prepareResultScrollRestoreForTask(taskId);
@@ -2611,6 +3288,7 @@ function scheduleResultScrollRestore(taskId = selectedTaskId) {
       applyResultScrollPosition(taskId);
       pendingResultScrollRestoreTaskId = null;
       if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+      syncAgentAutoScrollFollowFromCurrentPosition(taskId);
     });
   });
 }
@@ -2701,10 +3379,19 @@ function renderCurrentTask({ force = false } = {}) {
   if (!force && renderSignatures.currentTask === nextSignature) return;
   renderSignatures.currentTask = nextSignature;
 
-  $("validationWorkspace").classList.toggle("is-empty", !selectedTask);
+  const hasTaskContext = Boolean(selectedTask || selectedTaskId);
+  $("validationWorkspace").classList.toggle("is-empty", !hasTaskContext);
   const title = $("currentTaskTitle");
   const subtitle = $("currentTaskSubtitle");
   if (!selectedTask) {
+    if (selectedTaskId) {
+      title.textContent = "正在恢复任务";
+      subtitle.textContent = "正在加载任务内容";
+      renderTaskSnapshot();
+      setActionStatus("");
+      requestAnimationFrame(syncTaskHeroGlassLayout);
+      return;
+    }
     updateWorkspaceGreeting();
     title.textContent = "验证任务";
     subtitle.textContent = "创建任务或从左侧选择已有任务";
@@ -2795,7 +3482,7 @@ function stepDownloadActionsHtml(step) {
     '<button class="button compact step-action-button secondary" type="button" data-step-action="previewWordReport">',
     "预览",
     "</button>",
-    '<button class="button compact step-action-button primary" type="button" data-step-action="downloadWordReport">',
+    '<button class="button compact step-action-button primary word" type="button" data-step-action="downloadWordReport">',
     "下载Word",
     "</button>",
     '<button class="button compact step-action-button excel" type="button" data-step-action="downloadExcelAnalysis">',
@@ -3152,7 +3839,219 @@ function refreshWorkflowStepperElapsedTimes() {
   });
 }
 
+// --- V2 plan rail -----------------------------------------------------------
+// For non-validation agent tasks (data_join / feature_analysis / modeling) the
+// right rail uses the same visual grammar as the validation stepper: a phase is
+// the big `.step`, and each tool call in that phase is a nested numbered
+// `.notebook-step` subtask. The plan is fetched per task and refreshed while it
+// is still running. Validation tasks are untouched.
+const v2PlanCache = new Map();
+const v2PlanLastFetch = new Map();
+// Short human subtitle per tool, mirroring the validation stepper's step hints.
+const PLAN_STEP_HINTS = {
+  "data_ops.propose_join": "诊断匹配键 / 命中率 / 膨胀",
+  "data_ops.confirm_join": "确认拼接规格",
+  "data_ops.execute_join": "左连接生成锚样本",
+  "modeling.screen_features": "泄漏感知特征筛选",
+  "modeling.tune_hyperparameters": "超参搜索调优",
+  "modeling.train_model": "训练模型",
+  "modeling.compare_experiments": "对比候选实验",
+  "modeling.generate_model_report": "生成模型开发报告",
+};
+
+// Map a plan step's status to the validation stepper's status vocabulary so it
+// reuses stepCheckerHtml() (the checkmark / ring / etc.) and the .step CSS.
+function planStepToCheckerStatus(status) {
+  switch (status) {
+    case "done":
+    case "skipped":
+      return "succeeded";
+    case "running":
+    case "checking":
+      return "running";
+    case "failed":
+      return "failed";
+    case "awaiting_confirm":
+      return "review";
+    default:
+      return "pending";
+  }
+}
+
+function planPhaseStatus(steps = []) {
+  const statuses = steps.map((step) => planStepToCheckerStatus(step.status || "pending"));
+  if (statuses.includes("failed")) return "failed";
+  if (statuses.includes("review")) return "review";
+  if (statuses.includes("running")) return "running";
+  if (statuses.length && statuses.every((status) => status === "succeeded")) return "succeeded";
+  return "pending";
+}
+
+function planPhaseHint(phase, steps = []) {
+  const titles = steps
+    .map((step) => String(step?.title || "").trim())
+    .filter(Boolean);
+  if (!titles.length) return `${phase}任务`;
+  if (titles.length <= 3) return titles.join("、");
+  return `${titles.slice(0, 3).join("、")}等 ${titles.length} 个子任务`;
+}
+
+function planSubstepGroupHtml(steps = [], parentNumber = "") {
+  if (!steps.length) return "";
+  return [
+    '<section class="notebook-step-group plan-rail-substeps">',
+    `<h4>子任务 · ${steps.length}</h4>`,
+    ...steps.map((step, index) => {
+      const status = step.status || "pending";
+      const checkerStatus = planStepToCheckerStatus(status);
+      const ref = step.tool_ref || {};
+      const description = step.description || step.summary || PLAN_STEP_HINTS[`${ref.plugin}.${ref.tool}`] || "";
+      const subNumber = parentNumber ? `${parentNumber}.${index + 1}` : `${index + 1}`;
+      // Manual mode confirms each gate from the rail (the middle is analysis
+      // only); agent mode shows a read-only "待确认" badge because the LLM
+      // operates the gate. The button reuses the document-level
+      // data-driver-confirm handler.
+      const awaiting = status === "awaiting_confirm"
+        ? (selectedTaskIsAgentMode()
+          ? '<span class="plan-step-await">待确认</span>'
+          : '<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">确认</button>')
+        : "";
+      const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
+      return [
+        `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,
+        stepCheckerHtml(checkerStatus),
+        `<span class="notebook-step-no">${escapeHtml(subNumber)}</span>`,
+        '<span class="plan-substep-copy">',
+        `<strong>${escapeHtml(step.title || "未命名步骤")}</strong>`,
+        descriptionHtml,
+        "</span>",
+        awaiting,
+        "</div>",
+      ].join("");
+    }),
+    "</section>",
+  ].join("");
+}
+
+// Only these wired driver task types drive the plan rail / analysis flow. strategy &
+// vintage are advertised welcome entries but NOT wired this round (spec §6 暂不接 +
+// backend 501): they must not render a dead "计划生成中…" rail, so they fall back to
+// the default handling like any other non-driver task.
+const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling"]);
+function taskUsesPlanRail(task) {
+  return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
+}
+
+// True when the driver's latest assistant message is a blocking error (e.g. a
+// setup failure that prevented any plan from being built). Used to give the plan
+// rail an honest empty state instead of a perpetual "计划生成中…".
+function driverHasBlockingError() {
+  for (let i = agentMessages.length - 1; i >= 0; i -= 1) {
+    const message = agentMessages[i];
+    if (message?.role !== "assistant") continue;
+    return Boolean((message.metadata || {}).error);
+  }
+  return false;
+}
+
+function maybeFetchV2Plan(taskId) {
+  if (!taskId) return;
+  // Note: we intentionally do NOT short-circuit on a terminal cached plan. Re-engaging
+  // a finished driver task now builds a FRESH plan (see _active_plan in api.py), so the
+  // rail must be able to pick that new plan up. Driver tasks aren't on a polling loop,
+  // so this only fetches on render events (throttled below), not continuously.
+  const now = Date.now();
+  if (now - (v2PlanLastFetch.get(taskId) || 0) < 900) return;
+  v2PlanLastFetch.set(taskId, now);
+  fetch(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      const plans = (data && data.plans) || [];
+      const next = plans.length ? plans[plans.length - 1] : null;
+      const changed = JSON.stringify(v2PlanCache.get(taskId)) !== JSON.stringify(next);
+      v2PlanCache.set(taskId, next);
+      if (changed && selectedTaskId === taskId) renderWorkflowStepper({ force: true });
+    })
+    .catch(() => {});
+}
+
+function planRailHtml(plan, { blocked = false } = {}) {
+  if (!plan || !(plan.steps || []).length) {
+    // A driver task can fail setup before any plan is built (e.g. modeling with no
+    // train/test/oot split column). Don't claim a plan is "生成中" forever — point
+    // the user at the conversation message that explains what to fix.
+    return blocked
+      ? '<div class="plan-rail-empty">尚未生成计划。请按对话中的提示处理后重新发起。</div>'
+      : '<div class="plan-rail-empty">计划生成中…</div>';
+  }
+  const steps = [...plan.steps].sort(
+    (left, right) => (Number(left.index) || 0) - (Number(right.index) || 0),
+  );
+  const order = [];
+  const byPhase = new Map();
+  for (const step of steps) {
+    const phase = step.phase || "步骤";
+    if (!byPhase.has(phase)) {
+      byPhase.set(phase, []);
+      order.push(phase);
+    }
+    byPhase.get(phase).push(step);
+  }
+  const phasesHtml = order
+    .map((phase, phaseIndex) => {
+      const phaseSteps = byPhase.get(phase) || [];
+      const phaseNumber = phaseIndex + 1;
+      const phaseStatus = planPhaseStatus(phaseSteps);
+      return [
+        `<div class="step plan-rail-step ${escapeHtml(phaseStatus)}" role="group" aria-label="${phaseNumber}. ${escapeHtml(phase)}">`,
+        '<div class="step-head">',
+        stepCheckerHtml(phaseStatus),
+        `<span class="step-number">${phaseNumber}</span>`,
+        '<span class="step-copy">',
+        `<strong class="step-title">${escapeHtml(phase)}</strong>`,
+        `<small class="step-hint">${escapeHtml(planPhaseHint(phase, phaseSteps))}</small>`,
+        "</span>",
+        "</div>",
+        planSubstepGroupHtml(phaseSteps, phaseNumber),
+        "</div>",
+      ].join("");
+    })
+    .join("");
+  // Plan-level overview gate: the plan is built but has not started (status
+  // "validated"). In manual mode the user confirms 开始 from the rail; agent mode
+  // auto-confirms (AUTO) or uses the composer (NORMAL), so no button.
+  const awaitingStart = plan.status === "validated" && !selectedTaskIsAgentMode();
+  const startControl = awaitingStart
+    ? '<div class="plan-rail-start"><button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">开始执行</button></div>'
+    : "";
+  // Download button once a report-producing step (model / feature report) has run.
+  const reportDone = steps.some((step) => {
+    const tool = (step.tool_ref || {}).tool;
+    return (tool === "generate_model_report" || tool === "generate_feature_report")
+      && (step.status || "") === "done";
+  });
+  const downloadControl = reportDone
+    ? '<div class="plan-rail-download"><button type="button" class="button compact secondary" data-driver-report-download="1">下载报告</button></div>'
+    : "";
+  return phasesHtml + startControl + downloadControl;
+}
+
 function renderWorkflowStepper({ force = false } = {}) {
+  const railTitle = document.querySelector("#progressRail .step-rail-head h3");
+  if (taskUsesPlanRail(selectedTask)) {
+    if (railTitle) railTitle.textContent = "计划步骤";
+    maybeFetchV2Plan(selectedTaskId);
+    const plan = v2PlanCache.get(selectedTaskId);
+    const blocked = driverHasBlockingError();
+    const planSignature = JSON.stringify({ task: selectedTaskId, plan, blocked });
+    if (force || renderSignatures.workflowStepper !== planSignature) {
+      renderSignatures.workflowStepper = planSignature;
+      const planStepper = $("workflowStepper");
+      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked });
+    }
+    return;
+  }
+  if (railTitle) railTitle.textContent = "验证步骤";
   const nextSignature = workflowStepperSignature(selectedTask);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
     // Structure unchanged; still tick elapsed-seconds spans so running steps
@@ -3240,6 +4139,17 @@ function sortMonthGroups([left], [right]) {
   return left.localeCompare(right, "zh-CN") * direction;
 }
 
+function sortTaskTypeGroups([left], [right]) {
+  const leftType = left || defaultTaskType;
+  const rightType = right || defaultTaskType;
+  const leftRank = taskTypeDisplayOrder.indexOf(leftType);
+  const rightRank = taskTypeDisplayOrder.indexOf(rightType);
+  if (leftRank >= 0 && rightRank >= 0) return leftRank - rightRank;
+  if (leftRank >= 0) return -1;
+  if (rightRank >= 0) return 1;
+  return taskTypeLabel(leftType).localeCompare(taskTypeLabel(rightType), "zh-CN");
+}
+
 function compareTasks(left, right) {
   if (taskSortMode === "name_asc") {
     return left.model_name.localeCompare(right.model_name, "zh-CN");
@@ -3279,10 +4189,11 @@ function appendTaskRow(list, task) {
   row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
   const tone = taskStatusTone(task);
   const validatorName = escapeHtml(task.validator || "-");
+  const typeLabel = escapeHtml(taskTypeLabel(task));
   row.innerHTML = [
     '<span class="task-row-top">',
     `<strong class="task-row-name">${escapeHtml(task.model_name)}</strong>`,
-    `<span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span>`,
+    `<span class="task-row-badges"><span class="pill neutral">${typeLabel}</span><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
     "</span>",
     '<span class="task-row-meta">',
     `<small class="task-row-validator" aria-label="验证人员：${validatorName}">`,
@@ -3340,6 +4251,7 @@ function renderTaskSnapshot() {
   snapshot.className = "workspace-task-meta";
   snapshot.innerHTML = [
     '<div class="task-snapshot-list">',
+    snapshotItem("type", "任务类型", taskTypeLabel(selectedTask)),
     snapshotItem("mode", "执行模式", runModeLabel(selectedTask.run_mode)),
     snapshotItem("folder", "材料目录", selectedTask.source_dir),
     "</div>",
@@ -3349,6 +4261,7 @@ function renderTaskSnapshot() {
 function metaIcon(name) {
   const paths = {
     person: '<circle cx="12" cy="8" r="3.4"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0"/>',
+    type: '<path d="M4 6.5h7v7H4z"/><path d="M13 4h7v7h-7z"/><path d="M10 15h7v5h-7z"/>',
     mode: '<path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/>',
     folder: '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2h8A1.5 1.5 0 0 1 20 9.7V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   };
@@ -3396,6 +4309,19 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
     return;
   }
 
+  if (taskGroupMode === "task_type") {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = task.task_type || defaultTaskType;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
+    }
+    [...groups.entries()]
+      .sort(sortTaskTypeGroups)
+      .forEach(([taskType, groupTasks]) => appendTaskGroup(list, taskTypeLabel(taskType), groupTasks));
+    return;
+  }
+
   if (taskGroupMode === "created_month") {
     const groups = new Map();
     for (const task of tasks) {
@@ -3414,8 +4340,11 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
 
 function selectTask(task) {
   rememberResultScrollPosition();
-  if (selectedTaskId === task.id) {
-    deselectCurrentTask();
+  if (selectedTaskId === task.id && selectedTask) {
+    selectedTask = task;
+    rememberSelectedTaskId(task.id);
+    renderCurrentTask();
+    renderTaskList();
     return;
   }
   // Task identity is changing — drop any in-flight typewriter state so a
@@ -3426,8 +4355,8 @@ function selectTask(task) {
   selectedTask = task;
   rememberSelectedTaskId(task.id);
   applyAgentTaskComposerPreferences(task.id);
+  beginTaskContentLoad(task.id);
   prepareResultScrollRestoreForTask(task.id);
-  applyResultScrollPosition(task.id);
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
@@ -3438,13 +4367,16 @@ function selectTask(task) {
       await loadReportFields();
       await loadAgentMessages(task.id);
     } finally {
-      scheduleResultScrollRestore(task.id);
+      renderAll();
+      await restoreResultScrollPositionAfterRender(task.id);
+      finishTaskContentLoad(task.id);
     }
-  });
+  }, { renderAfter: false });
 }
 
 function deselectCurrentTask() {
   rememberResultScrollPosition();
+  clearTaskContentLoad();
   selectedTaskId = null;
   selectedTask = null;
   rememberSelectedTaskId(null);
@@ -4478,6 +5410,14 @@ function scanSummaryHasResult() {
 function updateAgentScanSectionVisibility() {
   const scanSection = $("scanSection");
   if (!scanSection) return;
+  // Driver tasks (data_join / feature / modeling) never use the validation
+  // scan→notebook→metrics flow — they drive everything through the conversation +
+  // plan rail. Hide the scan section entirely so a manual driver task doesn't show
+  // a dead "点击扫描材料开始" prompt with no scan button to click.
+  if (taskUsesPlanRail(selectedTask)) {
+    scanSection.classList.add("hidden");
+    return;
+  }
   if (!selectedTaskIsAgentMode()) {
     scanSection.classList.remove("hidden");
     return;
@@ -4667,8 +5607,12 @@ function renderAgentConversation() {
   const workspace = $("resultWorkspace");
   if (!panel) return;
   const isAgent = selectedTaskIsAgentMode();
-  panel.classList.toggle("hidden", !isAgent);
-  panel.setAttribute("aria-hidden", isAgent ? "false" : "true");
+  // Driver tasks (data_join / feature / modeling) show the same conversation +
+  // controls in BOTH modes. Manual = the user operates the controls (no free-text
+  // composer, no LLM); agent = an LLM operates them + free-text composer.
+  const showConversation = isAgent || taskUsesPlanRail(selectedTask);
+  panel.classList.toggle("hidden", !showConversation);
+  panel.setAttribute("aria-hidden", showConversation ? "false" : "true");
   composer?.classList.toggle("hidden", !isAgent);
   composer?.setAttribute("aria-hidden", isAgent ? "false" : "true");
   workspace?.classList.toggle("agent-composer-active", isAgent);
@@ -4676,7 +5620,20 @@ function renderAgentConversation() {
   renderAgentModelOptions();
   renderAgentEffortPreference();
   requestAnimationFrame(syncAgentComposerClearance);
-  if (!isAgent) {
+  panel.classList.remove("driver-analysis-mode");
+  panel.setAttribute("aria-label", "Agent 对话");
+  // Manual mode for a driver task is a TOOL, not a conversation: render the step
+  // outputs as analysis panels (no speaker labels / chat bubbles) and put the gate
+  // confirm controls in the step rail — exactly like 模型验证 manual mode. Only agent
+  // mode is a genuine LLM conversation; keeping manual mode conversation-free is what
+  // proves the agent-mode dialogue isn't pre-written.
+  if (showConversation && !isAgent && taskUsesPlanRail(selectedTask)) {
+    renderDriverManualAnalysis(agentMessages);
+    v2PlanLastFetch.delete(selectedTaskId);
+    renderWorkflowStepper({ force: true });
+    return;
+  }
+  if (!showConversation) {
     agentMessages = [];
     lastAgentRenderSignature = null;
     lastAgentStructuralSignature = null;
@@ -4718,6 +5675,14 @@ function renderAgentConversation() {
   clearAgentStageMessages();
   renderAgentTimeline(displayedMessages);
   requestAgentConversationScrollToLatest();
+  // The conversation just changed (a driver turn likely created/advanced the
+  // plan). Plan-rail tasks have no validation poll tick to refresh the right
+  // rail, so force a fresh plan fetch + re-render here (only on real changes,
+  // since this is the post-signature full-rebuild path).
+  if (taskUsesPlanRail(selectedTask)) {
+    v2PlanLastFetch.delete(selectedTaskId);
+    renderWorkflowStepper({ force: true });
+  }
 }
 
 function agentStructuralSignature(messages = [], visibleStages = []) {
@@ -5292,6 +6257,69 @@ function renderAgentTimeline(messages = []) {
   }
 }
 
+// Lines that only make sense in a chat ("回复「确认」继续…"). In manual mode the
+// confirm is a step-rail button, so these instructions are stripped from the
+// analysis text — what is left is the factual statistical summary.
+function stripChatInstructions(content) {
+  return String(content || "")
+    .split("\n")
+    .filter((line) => !/(回复「确认」|确认请回复|要调整可|可直接说明|请确认.*回复)/.test(line))
+    .join("\n")
+    .trim();
+}
+
+// Manual mode for driver tasks (data_join / feature / modeling): render each step's
+// output as a plain analysis section — no speaker label, no chat bubble, no
+// pre-written dialogue. The plan overview is omitted (the step rail already shows the
+// plan) and the gate confirm lives in the rail.
+function driverManualAnalysisHtml(messages) {
+  const sections = [];
+  for (const message of messages || []) {
+    if (message?.role !== "assistant") continue;
+    const meta = message.metadata || {};
+    if (meta.kind === "overview") continue; // the step rail is the plan
+    if (meta.error) {
+      sections.push(
+        `<section class="driver-analysis-section is-error">${renderAgentMarkdown(message.content || "")}</section>`,
+      );
+      continue;
+    }
+    const intro = renderAgentMarkdown(stripChatInstructions(message.content || ""));
+    if (meta.join_c1) {
+      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageC1FormHtml(message)}</section>`);
+      continue;
+    }
+    const tables = agentMessageTablesHtml(message);
+    if (!String(message.content || "").trim() && !tables) continue;
+    sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
+  }
+  return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
+}
+
+function renderDriverManualAnalysis(messages) {
+  const panel = $("agentConversationPanel");
+  const container = $("agentMessages");
+  if (!panel || !container) return;
+  removeAgentTimelineBuckets();
+  resetAgentTypingState();
+  panel.classList.remove("hidden");
+  panel.classList.add("driver-analysis-mode");
+  panel.setAttribute("aria-hidden", "false");
+  panel.setAttribute("aria-label", "分析结果");
+  container.innerHTML = driverManualAnalysisHtml(messages);
+  // Keep the (hidden-for-driver) validation sections ordered after the analysis
+  // panel so a later switch to a validation task restores cleanly.
+  const scrollContent = $("resultScrollContent");
+  if (scrollContent) {
+    scrollContent.appendChild(panel);
+    for (const elementId of agentPersistentTimelineElementIds()) {
+      if (elementId === "agentConversationPanel") continue;
+      const element = $(elementId);
+      if (element) scrollContent.appendChild(element);
+    }
+  }
+}
+
 function resetAgentTypingState() {
   agentTypingState.clear();
   agentTypingCompleted.clear();
@@ -5415,6 +6443,184 @@ function agentMemoryReferencesHtml(references = []) {
   ].join("");
 }
 
+// Inline rich tables carried by the generic plan driver (data_join / future
+// feature / modeling). Format is the driver's simple {title, columns, rows};
+// validation metric tables use a different path (metadata.sections) and are
+// untouched. Each driver message is appended whole, so this renders once on the
+// full timeline rebuild — no streaming fast-path interaction.
+function agentMessageTablesHtml(message) {
+  const tables = message?.metadata?.tables;
+  if (!Array.isArray(tables) || !tables.length) return "";
+  const blocks = tables
+    .map((table) => {
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      const rows = Array.isArray(table?.rows) ? table.rows : [];
+      if (!columns.length && !rows.length) return "";
+      const head = columns.length
+        ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(String(col))}</th>`).join("")}</tr></thead>`
+        : "";
+      const body = `<tbody>${rows
+        .map((row) => {
+          const cells = Array.isArray(row) ? row : [row];
+          return `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`;
+        })
+        .join("")}</tbody>`;
+      const caption = table?.title
+        ? `<div class="agent-inline-table-title">${escapeHtml(String(table.title))}</div>`
+        : "";
+      return `<div class="agent-inline-table">${caption}<div class="agent-inline-table-scroll"><table>${head}${body}</table></div></div>`;
+    })
+    .join("");
+  return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
+}
+
+// C1 file-role assignment form (data_join). Rendered from message.metadata.join_c1:
+// a role <select> per file (样本主表/特征表/忽略) + a target-column <select> + a
+// 确认角色 button that posts a structured "[C1]{...}" assignment the driver parses.
+function agentMessageC1FormHtml(message) {
+  const c1 = message?.metadata?.join_c1;
+  if (!c1 || !Array.isArray(c1.files) || !c1.files.length) return "";
+  const messageId = message?.id ? String(message.id) : "";
+  const roleSelect = (datasetId, selected) => {
+    const opt = (value, label) =>
+      `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
+    return (
+      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}">`
+      + opt("anchor", "样本主表")
+      + opt("feature", "特征表")
+      + opt("ignore", "忽略")
+      + "</select>"
+    );
+  };
+  const rows = c1.files
+    .map(
+      (file) => `<tr>
+      <td class="c1-file">${escapeHtml(file.name || "")}</td>
+      <td>${escapeHtml(String(file.row_count ?? ""))}</td>
+      <td>${escapeHtml(String(file.n_cols ?? ""))}</td>
+      <td>${file.has_target ? "✓" : ""}</td>
+      <td>${roleSelect(file.dataset_id || "", file.proposed_role || "feature")}</td>
+    </tr>`,
+    )
+    .join("");
+  const columns = [];
+  const seen = new Set();
+  for (const file of c1.files) {
+    for (const col of file.columns || []) {
+      if (!seen.has(col)) {
+        seen.add(col);
+        columns.push(col);
+      }
+    }
+  }
+  const targetOptions = ['<option value="">（不指定）</option>']
+    .concat(
+      columns.map(
+        (col) => `<option value="${escapeHtml(col)}"${col === c1.target_col ? " selected" : ""}>${escapeHtml(col)}</option>`,
+      ),
+    )
+    .join("");
+  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}">
+    <table class="c1-form-table">
+      <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="c1-form-foot">
+      <label class="c1-target-label">目标列 <select class="c1-target">${targetOptions}</select></label>
+      <button type="button" class="button compact primary c1-confirm" data-c1-confirm="${escapeHtml(messageId)}">确认角色</button>
+    </div>
+  </div>`;
+}
+
+async function submitC1Assignment(button) {
+  const form = button.closest(".c1-form");
+  const taskId = selectedTaskId;
+  if (!form || !taskId) return;
+  let anchorId = "";
+  const featureIds = [];
+  for (const select of form.querySelectorAll(".c1-role")) {
+    const datasetId = select.getAttribute("data-c1-dataset");
+    if (select.value === "anchor" && !anchorId) anchorId = datasetId;
+    else if (select.value === "feature") featureIds.push(datasetId);
+  }
+  if (!anchorId) {
+    setActionStatus("请先把一张表选为「样本主表」。", "error");
+    return;
+  }
+  const targetCol = form.querySelector(".c1-target")?.value || "";
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: "[C1]" + JSON.stringify({ anchor_id: anchorId, feature_ids: featureIds, "target_col": targetCol }),
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "确认角色失败", "error");
+  }
+}
+
+function handleC1ConfirmClick(event) {
+  const button = event.target?.closest?.("[data-c1-confirm]");
+  if (!button) return;
+  event.preventDefault();
+  void submitC1Assignment(button);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleC1ConfirmClick);
+}
+
+// In manual mode there is no free-text composer, so a needs-confirmation gate
+// message carries a 确认 control button. Agent mode confirms via the composer / LLM.
+function agentMessageGateButtonHtml(message) {
+  if (message?.metadata?.kind !== "gate" || selectedTaskIsAgentMode()) return "";
+  return '<div class="driver-gate-actions">'
+    + '<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1">确认</button>'
+    + "</div>";
+}
+
+async function submitDriverConfirm(button) {
+  const taskId = selectedTaskId;
+  if (!taskId) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "确认" }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "确认失败", "error");
+  }
+}
+
+function handleDriverConfirmClick(event) {
+  const button = event.target?.closest?.("[data-driver-confirm]");
+  if (!button) return;
+  event.preventDefault();
+  void submitDriverConfirm(button);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDriverConfirmClick);
+}
+
+function handleDriverReportDownloadClick(event) {
+  const button = event.target?.closest?.("[data-driver-report-download]");
+  if (!button || !selectedTaskId) return;
+  event.preventDefault();
+  window.location.href = `api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDriverReportDownloadClick);
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
   const className = role === "user" ? "agent-message user" : "agent-message assistant";
@@ -5432,6 +6638,10 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     `<article class="${className}"${idAttr}>`,
     role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentStageLabel(labelStage))}</div>` : "",
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    role === "assistant"
+      ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : agentMessageTablesHtml(message))
+      : "",
+    role === "assistant" ? agentMessageGateButtonHtml(message) : "",
     memoryReferencesHtml,
     "</article>",
   ].join("");
@@ -5465,7 +6675,10 @@ function shouldPreserveOptimisticAgentMessages(nextMessages = []) {
 }
 
 async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic = false } = {}) {
-  if (!taskId || !selectedTaskIsAgentMode(findTaskInCache(taskId) || selectedTask)) {
+  const messageTask = findTaskInCache(taskId) || selectedTask;
+  // Driver tasks have a conversation in manual mode too (controls, no LLM).
+  const hasConversation = selectedTaskIsAgentMode(messageTask) || taskUsesPlanRail(messageTask);
+  if (!taskId || !hasConversation) {
     agentMessages = [];
     renderAgentConversation();
     return;
@@ -5505,6 +6718,10 @@ async function startAgentValidation() {
     setActionStatus("请输入要交给 Agent 的任务。", "error");
     return;
   }
+  // Agent mode is, by definition, "manual mode with the operator's decisions made
+  // by an LLM" — so it always requires a configured LLM. Without one, error out and
+  // prompt the user to configure a model (no canned/default agent conversation).
+  // The deterministic, no-LLM flow is the *manual* mode, reached a different way.
   const unavailableModelMessage = agentModelUnavailableMessage();
   if (showAgentModelGuidance(unavailableModelMessage)) return;
   setAgentComposerNotice("");
@@ -5633,6 +6850,16 @@ async function uploadMaterialFiles(files) {
   });
 }
 
+function prefillAgentTaskInstruction(task) {
+  if (task?.run_mode !== "agent") return;
+  const input = $("agentComposerInput");
+  if (!input || input.value.trim()) return;
+  const definition = taskTypeDefinition(task.task_type || activeTaskType);
+  input.value = definition.initialGoal;
+  autoGrowComposerInput();
+  updateAgentSendDisabled();
+}
+
 async function createTask() {
   setCreateStatus("");
   const selectedRunMode = document.querySelector('input[name="runMode"]:checked')?.value;
@@ -5640,14 +6867,31 @@ async function createTask() {
     setCreateStatus("请选择执行模式。", "error");
     return null;
   }
+  const taskType = $("taskType")?.value || activeTaskType || defaultTaskType;
+  const definition = taskTypeDefinition(taskType);
   const payload = {
+    task_type: taskType,
     model_name: $("modelName").value.trim(),
     model_version: "",
     validator: $("validator").value.trim(),
     source_dir: $("sourceDir").value.trim(),
     run_mode: selectedRunMode,
-    report_values: collectCreateTaskReportValues(),
+    report_values: definition.reportFields ? collectCreateTaskReportValues() : {},
   };
+  // Manual modeling: the user must pick ≥1 algorithm (no default — spec §3 无默认每次必选).
+  // Agent mode shows no options here; the agent recommends during the flow.
+  if (definition.algorithmField && selectedRunMode === "manual") {
+    payload.recipes = [...document.querySelectorAll('input[name="modelAlgorithm"]:checked')].map((box) => box.value);
+    if (payload.recipes.length === 0) {
+      setCreateStatus("请至少选择一个建模算法。", "error");
+      return null;
+    }
+  }
+  // Manual feature analysis: optional metrics (e.g. VIF). Empty is valid — base
+  // per-feature metrics are always computed (spec §2: 选了才算).
+  if (definition.metricField && selectedRunMode === "manual") {
+    payload.metrics = [...document.querySelectorAll('input[name="featureMetric"]:checked')].map((box) => box.value);
+  }
   if (materialSourceController.mode() === "upload") {
     const files = materialSourceController.selectedFiles();
     if (files.length === 0) {
@@ -5655,7 +6899,10 @@ async function createTask() {
       return null;
     }
     if (!payload.model_name || !payload.validator) {
-      setCreateStatus("请先填写模型名称和验证人员。", "error");
+      setCreateStatus(
+        definition.reportFields ? "请先填写模型名称和验证人员。" : "请先填写任务名称和负责人。",
+        "error",
+      );
       return null;
     }
     setCreateStatus("正在上传材料...");
@@ -5663,7 +6910,10 @@ async function createTask() {
     payload.source_dir = upload.source_dir;
   }
   if (!payload.model_name || !payload.validator || !payload.source_dir) {
-    setCreateStatus("请先填写模型名称、验证人员和材料目录。", "error");
+    setCreateStatus(
+      definition.reportFields ? "请先填写模型名称、验证人员和材料目录。" : "请先填写任务名称、负责人和材料目录。",
+      "error",
+    );
     return null;
   }
   const task = await api("api/tasks", {
@@ -5678,6 +6928,7 @@ async function createTask() {
   await loadReportFields();
   setCreateStatus("任务已创建。");
   closeTaskDialog();
+  prefillAgentTaskInstruction(task);
   return task;
 }
 
@@ -5720,10 +6971,29 @@ async function createTaskAndScan() {
   if (!task) return;
   if (task.run_mode === "agent") {
     const taskId = task.id || selectedTaskId;
-    setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
+    const definition = taskTypeDefinition(task.task_type || activeTaskType);
+    const isValidationTask = (task.task_type || activeTaskType || defaultTaskType) === "validation";
     setBusy(null, "", taskId);
     await loadAgentMessages(taskId);
     renderAll();
+    if (!isValidationTask && definition.initialGoal) {
+      // createTask() already seeded the conversation composer via
+      // prefillAgentTaskInstruction; just focus it (the V2 plan dialog is retired).
+      $("agentComposerInput")?.focus?.();
+      setActionStatus(`${definition.label}任务已创建，已填入建议目标，确认后发送即可。`, "success");
+      return;
+    }
+    setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
+    return;
+  }
+  // Manual mode for a driver task (data_join / feature / modeling): start the
+  // deterministic, control-driven flow (no LLM). Validation manual still scans.
+  if (taskUsesPlanRail(task)) {
+    const taskId = task.id || selectedTaskId;
+    setBusy(null, "", taskId);
+    await dispatchDriverStart(taskId);
+    renderAll();
+    setActionStatus(`${taskTypeDefinition(task.task_type).label}任务已创建，请在下方逐步确认。`, "success");
     return;
   }
   setBusy(null, "", null);
@@ -5735,6 +7005,18 @@ async function createTaskAndScan() {
   } finally {
     setBusy(null, "", task.id);
   }
+}
+
+// Start a driver-based task's deterministic flow (manual mode, no LLM): POST the
+// agent-start endpoint, which routes to the plan-conversation driver.
+async function dispatchDriverStart(taskId = selectedTaskId) {
+  const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "启动");
+  const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  agentMessages = result.messages || agentMessages;
+  renderAgentConversation();
 }
 
 async function pollValidationProgress(
@@ -5953,9 +7235,13 @@ async function deleteTask(task) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
-  const confirmed = window.confirm(
-    `确认删除任务「${taskDisplayName(task)}」？删除后将移除任务记录和本地输出文件，不能撤销。`
-  );
+  const confirmed = await showPlatformConfirm({
+    title: "删除任务",
+    message: `确认删除任务「${taskDisplayName(task)}」？删除后将移除任务记录和本地输出文件，不能撤销。`,
+    confirmText: "删除",
+    cancelText: "取消",
+    tone: "danger",
+  });
   if (!confirmed) {
     setActionStatus("已取消删除。");
     return;
@@ -5972,6 +7258,7 @@ async function deleteTask(task) {
       rememberSelectedTaskId(null);
     }
     resultScrollPositionsByTask.delete(task.id);
+    persistResultScrollPositions();
     await refreshTasks();
     renderStoredStateSummaries();
     await loadReportFields();
@@ -5987,10 +7274,12 @@ async function deleteTask(task) {
 async function runAction(action, options = {}) {
   const actionId = options.actionId || null;
   const taskId = options.taskId || selectedTaskId;
+  let shouldRenderAfter = options.renderAfter !== false;
   try {
     if (actionId) setBusy(actionId, options.busyText || "正在处理...", taskId);
     await action();
   } catch (error) {
+    shouldRenderAfter = true;
     if (error?.name === "AbortError") {
       if (actionId) setActionStatus(actionCancelledStatusTitle(actionId), "success");
       return;
@@ -6010,7 +7299,7 @@ async function runAction(action, options = {}) {
     else setCreateStatus(message, "error");
   } finally {
     if (actionId) setBusy(null, "", taskId);
-    renderAll();
+    if (shouldRenderAfter) renderAll();
   }
 }
 
@@ -6042,6 +7331,18 @@ function closeSidebarSettingsOnOutsideClick(event) {
   const target = event.target;
   if (target instanceof Element && target.closest("#sidebarSettings")) return;
   settings.open = false;
+}
+
+function openGovernanceSettingsFromSidebar() {
+  closeSidebarSettingsMenu();
+  scheduleGovernanceSettingsFromSidebar();
+}
+
+function handleGovernanceSettingsPointerDown(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  closeSidebarSettingsMenu();
+  scheduleGovernanceSettingsFromSidebar();
 }
 
 function workflowActionConfig(actionId) {
@@ -6123,28 +7424,20 @@ function handleWorkflowStepperKeydown(event) {
 }
 
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
-$("welcomeModelValidationCard").onclick = openTaskDialog;
+$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;
+$("welcomeTaskCards").onclick = openTaskDialogFromCard;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
-$("openExecutionEnvironmentButton").onclick = openExecutionEnvironmentDialog;
-$("closeExecutionEnvironmentButton").onclick = closeExecutionEnvironmentDialog;
-$("openLLMSettingsButton").onclick = openLLMSettingsDialog;
-$("closeLLMSettingsButton").onclick = closeLLMSettingsDialog;
-$("openAgentMemoryButton").onclick = openAgentMemoryDialog;
-$("closeAgentMemoryButton").onclick = closeAgentMemoryDialog;
-$("openDraftToolsButton").onclick = openDraftToolsDialog;
-$("closeDraftToolsButton").onclick = closeDraftToolsDialog;
-$("openV2WorkspaceButton").onclick = openV2WorkspaceDialog;
-$("closeV2WorkspaceButton").onclick = closeV2WorkspaceDialog;
-$("refreshV2PluginsButton").onclick = () => runV2WorkspaceAction(refreshV2Plugins);
-$("refreshV2SkillsButton").onclick = () => runV2WorkspaceAction(refreshV2Skills);
-$("refreshV2CapabilityButton").onclick = () => runV2WorkspaceAction(refreshV2Capability);
-$("agentMemoryRawTab").onclick = () => setAgentMemoryViewMode("raw");
-$("agentMemoryDistillationTab").onclick = () => setAgentMemoryViewMode("distillation");
+$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);
+$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;
+$("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;
+$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);
+$("governanceSettingsDialog").addEventListener("change", handleMemoryPolicyChange);
+$("governanceSettingsSearch").oninput = handleGovernanceSettingsSearch;
+$("governanceRefreshButton").onclick = refreshActiveGovernancePanel;
 $("closeWordPreviewButton").onclick = closeWordPreviewDialog;
 $("refreshExecutionEnvironmentOptionsButton").onclick = refreshExecutionEnvironmentOptions;
-$("saveExecutionEnvironmentButton").onclick = saveExecutionEnvironmentSettings;
-$("refreshAgentMemoryButton").onclick = () =>
-  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+$("executionEnvironmentList").addEventListener("click", handleExecutionEnvironmentListClick);
+$("executionEnvironmentList").addEventListener("keydown", handleExecutionEnvironmentListKeydown);
 $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
@@ -6168,9 +7461,19 @@ $("taskList").addEventListener("click", () => closeTaskSearch());
 $("settingsMenu").onchange = handleSettingsMenuChange;
 $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
 document.addEventListener("click", handleAgentMemoryInlineInspect);
+$("refreshAgentMemoryButton").onclick = () =>
+  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+$("memoryManageDetails").addEventListener("toggle", (event) => {
+  if (event.target.open && !agentMemoryItems.length) {
+    runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+  }
+});
+$("draftManageDetails").addEventListener("toggle", (event) => {
+  if (event.target.open && !$("draftToolsList")?.children.length) {
+    runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
+  }
+});
 $("draftStatusFilter").onchange = () =>
-  runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
-$("refreshDraftToolsButton").onclick = () =>
   runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
 $("draftToolsList").addEventListener("click", handleDraftToolsListClick);
 $("draftToolsList").addEventListener("keydown", handleDraftToolsListKeydown);
@@ -6319,6 +7622,8 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
+bindDialogBackdropDismissal();
+bindPlatformConfirmDialog();
 mountV2Runtime();
 materialSourceController.bindTabs();
 materialSourceController.bindDropzone();
@@ -6369,17 +7674,31 @@ restorePetPreference();
 restorePetPosition();
 restoreLayoutWidths();
 restoreSidebarCollapsed();
-// Enable slide animations only after the initial (instant) layout is painted.
-requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add("anim-ready")));
 updateWorkspaceGreeting();
 setInterval(updateWorkspaceGreeting, 60 * 1000);
 renderSettingsState();
 loadBranding();
 loadExecutionEnvironmentSettings({ silent: true });
 loadLLMSettings({ silent: true });
+loadResultScrollPositions();
+restoreSelectedTaskPlaceholder();
+renderCurrentTask({ force: true });
 renderMetricPreview({});
 renderStoredStateSummaries();
 initializeApp();
+
+function enableAppAnimationsAfterBoot() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      document.body.classList.add("anim-ready");
+    });
+  });
+}
+
+function finishAppBoot() {
+  document.body.classList.remove("app-booting");
+  enableAppAnimationsAfterBoot();
+}
 
 async function initializeApp() {
   try {
@@ -6394,5 +7713,7 @@ async function initializeApp() {
     setCreateStatus(detail || "服务连接失败，请检查后端是否运行。", "error");
   } finally {
     renderAll();
+    await restoreResultScrollPositionAfterRender(selectedTaskId);
+    finishAppBoot();
   }
 }

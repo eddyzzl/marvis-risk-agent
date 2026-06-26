@@ -380,7 +380,55 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
     assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
 
 
-def test_completed_report_actions_render_below_step_copy_with_excel_green():
+def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
+    app_js = _read_static("app.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    plan_start = app_js.index("function planRailHtml")
+    plan_end = app_js.index("function renderWorkflowStepper", plan_start)
+    plan_renderer = app_js[plan_start:plan_end]
+    substeps_start = app_js.index("function planSubstepGroupHtml")
+    substeps_end = app_js.index("function taskUsesPlanRail", substeps_start)
+    substeps_renderer = app_js[substeps_start:substeps_end]
+
+    assert "function planPhaseStatus" in app_js
+    assert "function planPhaseHint" in app_js
+    assert "function planSubstepGroupHtml" in app_js
+    assert "const phaseNumber = phaseIndex + 1;" in plan_renderer
+    assert 'class="step plan-rail-step' in plan_renderer
+    assert '<span class="step-number">${phaseNumber}</span>' in plan_renderer
+    assert '<strong class="step-title">${escapeHtml(phase)}</strong>' in plan_renderer
+    assert "planSubstepGroupHtml(phaseSteps, phaseNumber)" in plan_renderer
+    assert '<section class="notebook-step-group plan-rail-substeps">' in substeps_renderer
+    assert '<h4>子任务 · ${steps.length}</h4>' in substeps_renderer
+    assert "const subNumber = parentNumber ? `${parentNumber}.${index + 1}` : `${index + 1}`;" in substeps_renderer
+    assert '<span class="notebook-step-no">${escapeHtml(subNumber)}</span>' in substeps_renderer
+    assert '<span class="plan-substep-copy">' in substeps_renderer
+    assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
+    assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
+    assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
+    assert "descriptionHtml" in substeps_renderer
+    assert ': "";' in substeps_renderer
+    assert '<section class="plan-rail-phase"' not in plan_renderer
+    assert "plan-rail-major-number" not in plan_renderer
+    assert "plan-rail-phase-name" not in plan_renderer
+    assert "plan-rail-substep" not in plan_renderer
+    assert "let number = 0;" not in plan_renderer
+
+    plan_step_rule = _css_rule(v2_css, ".plan-rail-step")
+    assert "cursor: default" in plan_step_rule
+
+    plan_substeps_rule = _css_rule(v2_css, ".plan-rail-substeps")
+    assert "margin-top: 6px" in plan_substeps_rule
+    assert ".plan-substep-copy" in v2_css
+    assert "display: grid" in _css_rule(v2_css, ".plan-substep-copy")
+    assert "white-space: nowrap" in _css_rule(v2_css, ".plan-substep-copy small")
+
+    assert ".plan-rail-phase" not in v2_css
+    assert ".plan-rail-major-number" not in v2_css
+
+
+def test_completed_report_actions_render_below_step_copy_with_office_colors():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
 
@@ -400,6 +448,7 @@ def test_completed_report_actions_render_below_step_copy_with_excel_green():
     assert 'data-step-action="previewWordReport"' in downloads_renderer
     assert 'data-step-action="downloadWordReport"' in downloads_renderer
     assert 'data-step-action="downloadExcelAnalysis"' in downloads_renderer
+    assert "step-action-button primary word" in downloads_renderer
     assert "step-action-button excel" in downloads_renderer
 
     step_renderer_start = app_js.index("function renderWorkflowStepper")
@@ -416,12 +465,37 @@ def test_completed_report_actions_render_below_step_copy_with_excel_green():
     assert "flex-wrap: nowrap;" in action_rule
     assert "justify-content: stretch;" in action_rule
 
+    word_start = styles_css.index(".step-action-button.word")
+    word_end = styles_css.index("}", word_start)
+    word_rule = styles_css[word_start:word_end]
+    assert "background: #2b579a;" in word_rule
+    assert "border-color: #2b579a;" in word_rule
+    assert "color: #fff;" in word_rule
+    assert "box-shadow: var(--button-solid-shadow)" in word_rule
+    assert "var(--brand-primary)" not in word_rule
+
+    word_hover_start = styles_css.index(".step-action-button.word:hover")
+    word_hover_end = styles_css.index("}", word_hover_start)
+    word_hover_rule = styles_css[word_hover_start:word_hover_end]
+    assert "background: #244a85;" in word_hover_rule
+    assert "border-color: #244a85;" in word_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in word_hover_rule
+
     excel_start = styles_css.index(".step-action-button.excel")
     excel_end = styles_css.index("}", excel_start)
     excel_rule = styles_css[excel_start:excel_end]
-    assert "background: #1f7a3f;" in excel_rule
-    assert "border-color: #1f7a3f;" in excel_rule
+    assert "background: #217346;" in excel_rule
+    assert "border-color: #217346;" in excel_rule
     assert "color: #fff;" in excel_rule
+    assert "box-shadow: var(--button-solid-shadow)" in excel_rule
+    assert "var(--brand-primary)" not in excel_rule
+
+    excel_hover_start = styles_css.index(".step-action-button.excel:hover")
+    excel_hover_end = styles_css.index("}", excel_hover_start)
+    excel_hover_rule = styles_css[excel_hover_start:excel_hover_end]
+    assert "background: #185c37;" in excel_hover_rule
+    assert "border-color: #185c37;" in excel_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in excel_hover_rule
 
 
 def test_report_download_readiness_requires_generated_report_flag():
@@ -689,16 +763,12 @@ def test_create_dialog_hides_v2_config_controls():
         assert f'id="{element_id}"' in index_html
 
 
-def test_create_dialog_omits_algorithm_choice_without_frontend_training_description_default():
-    index_html = _read_static("index.html")
+def test_create_dialog_omits_legacy_model_training_description_autofill():
     app_js = _read_static("app.js")
 
-    assert 'id="modelAlgorithm"' not in index_html
-    assert "模型算法" not in index_html
-    assert '$("modelAlgorithm").value' not in app_js
-    create_task_start = app_js.index("async function createTask")
-    create_task_end = app_js.index("if (!payload.model_name", create_task_start)
-    assert '"algorithm":' not in app_js[create_task_start:create_task_end]
+    # The legacy auto-filled "model_training_description" report value stays removed —
+    # the modeling algorithm is now a real user choice (the create-dialog picker),
+    # not an auto-derived training blurb.
     defaults_start = app_js.index("function defaultCreateReportValues")
     defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
     defaults = app_js[defaults_start:defaults_end]
@@ -755,6 +825,9 @@ def test_create_dialog_uses_visual_run_mode_cards():
 
     assert ".run-mode-cards {" in styles_css
     assert ".run-mode-card {" in styles_css
+    run_mode_rule = _css_rule(styles_css, ".run-mode-card")
+    assert "border-radius: var(--radius)" in run_mode_rule
+    assert "border-radius: var(--radius-control)" not in run_mode_rule
     assert ".run-mode-card:hover:not(.disabled) {\n" not in styles_css
     hover_start = styles_css.index(".run-mode-card:hover:not(.disabled):not(:has(input:checked))")
     hover_end = styles_css.index("}", hover_start)
@@ -781,6 +854,91 @@ def test_create_dialog_uses_visual_run_mode_cards():
     assert "@keyframes run-mode-robot-crank" in styles_css
     assert "@keyframes run-mode-robot-float" not in styles_css
     assert ".mode-choice" not in styles_css
+
+
+def test_create_dialog_updates_run_mode_copy_by_task_type():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'data-run-mode-description="manual"' in index_html
+    assert 'data-run-mode-description="agent"' in index_html
+    assert "function setRunModeDescription" in app_js
+    assert 'setRunModeDescription("manual", definition.manualModeDescription);' in app_js
+    assert 'setRunModeDescription("agent", definition.agentModeDescription);' in app_js
+    assert "由验证人员逐步执行材料扫描、Notebook 验证与报告生成" not in index_html
+    assert "智能解析材料、规划验证步骤并辅助生成验证报告" not in index_html
+
+    definitions_start = app_js.index("const taskTypeDefinitions = {")
+    definitions_end = app_js.index("let activeTaskType", definitions_start)
+    definitions = app_js[definitions_start:definitions_end]
+    expected_copy = {
+        "data_join": [
+            "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
+            "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
+        ],
+        "feature_analysis": [
+            "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
+            "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
+        ],
+        "modeling": [
+            "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
+            "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
+        ],
+        "validation": [
+            "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
+            "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
+        ],
+        "strategy": [
+            "手动策略控件暂未接入；后续提供规则编辑、阈值调整和回测确认",
+            "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
+        ],
+        "vintage": [
+            "手动风险分析控件暂未接入；后续提供 Vintage、滚动率、FPD 与回收率图表",
+            "Agent 识别 Vintage、滚动率、FPD、入催回收率字段，生成风险观察和结论",
+        ],
+    }
+    for task_type, copy_items in expected_copy.items():
+        task_start = definitions.index(f"  {task_type}: {{")
+        task_end = definitions.index("\n  },", task_start)
+        task_definition = definitions[task_start:task_end]
+        assert "manualModeDescription:" in task_definition
+        assert "agentModeDescription:" in task_definition
+        for copy in copy_items:
+            assert copy in task_definition
+
+
+def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+
+    assert 'name="runMode" type="radio" value="manual" checked' not in index_html
+    assert 'name="runMode" type="radio" value="agent" checked' not in index_html
+    assert 'name="modelAlgorithm" value="lgb" checked' not in index_html
+    assert 'name="modelAlgorithm" value="xgb" checked' not in index_html
+    assert 'name="modelAlgorithm" value="lr" checked' not in index_html
+    assert 'name="modelAlgorithm" value="scorecard" checked' not in index_html
+
+    definitions_start = app_js.index("const taskTypeDefinitions = {")
+    definitions_end = app_js.index("let activeTaskType", definitions_start)
+    definitions = app_js[definitions_start:definitions_end]
+    assert 'defaultRunMode: "manual"' not in definitions
+    assert 'defaultRunMode: "agent"' not in definitions
+    assert definitions.count('defaultRunMode: ""') == 6
+
+    dialog_start = app_js.index("function openTaskDialog")
+    dialog_end = app_js.index("function openTaskDialogFromCard", dialog_start)
+    dialog_body = app_js[dialog_start:dialog_end]
+    assert "input.checked = false;" in dialog_body
+    assert "resetModelAlgorithmChoices();" in dialog_body
+    assert "updateAlgorithmFieldVisibility();" in dialog_body
+    assert "definition.defaultRunMode ===" not in dialog_body
+
+    assert "function resetModelAlgorithmChoices" in app_js
+    apply_start = app_js.index("function applyTaskTypeToDialog")
+    apply_end = app_js.index("function updateAlgorithmFieldVisibility", apply_start)
+    apply_body = app_js[apply_start:apply_end]
+    assert "checked: false" in apply_body
+    assert "checked: definition.defaultRunMode" not in apply_body
 
 
 def test_create_task_requires_run_mode_and_allows_agent_mode():
@@ -824,25 +982,39 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert 'aria-selected="false"' in material_section
     assert 'id="materialSourcePathPanel"' in material_section
     assert 'id="materialSourceUploadPanel"' in material_section
+    assert 'class="material-source-panel material-upload-panel hidden"' not in material_section
+    assert 'class="material-source-panel material-upload-panel"' in material_section
     assert 'id="sourceDir"' in material_section
     assert "材料目录" in material_section
     assert 'id="materialUploadInput" class="visually-hidden" type="file" multiple />' in material_section
-    assert 'id="materialFolderUploadInput"' in material_section
-    assert "webkitdirectory" in material_section
+    assert 'id="materialFolderUploadInput"' not in material_section
+    assert "webkitdirectory" not in material_section
     assert 'class="material-upload-dropzone"' in material_section
-    assert 'class="material-upload-dropzone" role="button"' not in material_section
+    assert 'role="button"' in material_section
+    assert 'tabindex="0"' in material_section
+    assert 'aria-describedby="materialUploadStatus"' in material_section
     assert 'class="material-upload-icon"' in material_section
     assert 'id="materialUploadStatus"' in material_section
     assert "点击或拖拽上传" in material_section
-    assert "选择文件夹" in material_section
+    assert 'id="materialUploadFileButton"' not in material_section
+    assert 'id="materialUploadFolderButton"' not in material_section
+    assert ">选择文件</button>" not in material_section
+    assert ">选择文件夹</button>" not in material_section
+    assert "material-upload-actions" not in material_section
     assert "暂未开放" not in material_section
 
     assert "export function createMaterialSourceController" in dialogs_js
     assert "function bindDropzone()" in dialogs_js
     assert "captureFiles(input.files)" in dialogs_js
-    assert "file.webkitRelativePath" in dialogs_js
-    assert "captureFiles(event.dataTransfer?.files)" in dialogs_js
+    assert "file?.webkitRelativePath" in dialogs_js
+    assert 'dropzone.addEventListener("click", openFilePicker)' in dialogs_js
+    assert 'dropzone.addEventListener("keydown", (event) =>' in dialogs_js
+    assert "function walkDroppedEntry" in dialogs_js
+    assert "typeof item.webkitGetAsEntry" in dialogs_js
+    assert "captureFileItems(await droppedFileItems(event.dataTransfer))" in dialogs_js
     assert 'dropzone.classList.add("is-dragover")' in dialogs_js
+    assert 'pathPanel.classList.toggle("hidden", !isPath)' in dialogs_js
+    assert 'uploadPanel.classList.toggle("hidden", isPath)' in dialogs_js
     assert "materialSourceController.bindDropzone();" in app_js
 
     assert ".material-source-section" in styles_css
@@ -850,8 +1022,12 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert ".material-source-tab" in styles_css
     assert ".material-upload-dropzone" in styles_css
     assert ".material-upload-dropzone.is-dragover" in styles_css
+    assert ".material-upload-actions" not in styles_css
     segment_rule = _css_rule(styles_css, ".material-source-segment")
     assert "width: 100%;" in segment_rule
+    assert "border-radius: var(--radius-control)" in segment_rule
+    source_tab_rule = _css_rule(styles_css, ".material-source-tab")
+    assert "border-radius: var(--radius-control)" in source_tab_rule
 
 
 def test_create_task_upload_mode_posts_materials_before_creating_task():
@@ -909,6 +1085,12 @@ def test_create_dialog_sections_are_unframed():
     assert "background:" not in section_rule
     assert "padding: 0" in section_rule
 
+    form_control_start = styles_css.index("\ninput,\ntextarea,\nselect {\n  width: 100%;")
+    form_control_end = styles_css.index("}", form_control_start)
+    form_control_rule = styles_css[form_control_start:form_control_end]
+    assert "border-radius: var(--radius-control)" in form_control_rule
+    assert "border-radius: var(--radius)" not in form_control_rule
+
 
 def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     styles_css = _read_static("styles.css")
@@ -924,7 +1106,7 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     head_end = styles_css.index("}", head_start)
     head_rule = styles_css[head_start:head_end]
     assert "height: 55px" in head_rule
-    assert "padding: 10px 16px" in head_rule
+    assert "padding: 11px 16px" in head_rule
 
     panel_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-dialog-panel {")
     panel_end = styles_css.index("}", panel_start)
@@ -1010,6 +1192,7 @@ def test_report_editor_form_and_summary_are_removed_from_frontend():
 
 
 def test_sidebar_empty_state_is_compact():
+    index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
@@ -1018,6 +1201,7 @@ def test_sidebar_empty_state_is_compact():
     empty_rule = styles_css[empty_start:empty_end]
     assert "padding: 9px 12px" in empty_rule
     assert '<div class="empty-state">暂无任务</div>' in app_js
+    assert '<div class="empty-state">暂无任务</div>' in index_html
     assert "暂无任务。先创建一个验证任务。" not in app_js
 
     task_empty_start = styles_css.index(".task-list > .empty-state {")
@@ -1036,18 +1220,30 @@ def test_shell_has_collapsible_compact_sidebar():
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     assert root_vars["--collapsed-entry-size"] == "44px"
     assert root_vars["--collapsed-entry-gutter"] == "16px"
+    assert root_vars["--collapsed-search-top"] == "79px"
     assert root_vars["--collapsed-popover-left"] == (
         "calc(var(--collapsed-entry-gutter) + var(--collapsed-entry-size) + 10px)"
     )
 
     assert 'id="sidebarCollapseButton"' in index_html
     assert 'id="sidebarBrandTrigger"' in index_html
+    assert 'id="collapsedCreateTaskButton"' in index_html
     assert 'aria-label="收起侧栏"' in index_html
     assert "toggleSidebarCollapsed" in app_js
     assert "expandSidebarFromBrand" in app_js
     assert "handleSidebarBrandKeydown" in app_js
     assert "restoreSidebarCollapsed" in app_js
+    assert '$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;' in app_js
     assert 'localStorage.setItem("sidebarCollapsed"' in app_js
+    assert 'localStorage.getItem("marvis_layout")' in index_html
+    assert 'style.setProperty("--sidebar-width"' in index_html
+    assert 'style.setProperty("--progress-width"' in index_html
+    assert 'localStorage.getItem("sidebarCollapsed") === "1"' in index_html
+    assert 'classList.add("sidebar-collapsed")' in index_html
+    assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("marvis_layout")')
+    assert index_html.index('localStorage.getItem("marvis_layout")') < index_html.index('id="taskSidebar"')
+    assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("sidebarCollapsed") === "1"')
+    assert index_html.index('localStorage.getItem("sidebarCollapsed") === "1"') < index_html.index('id="taskSidebar"')
     assert ".app-shell.sidebar-collapsed" in styles_css
     assert "--sidebar-width: 314px" in styles_css
     assert "--sidebar-width: 0px" in styles_css
@@ -1098,7 +1294,7 @@ def test_shell_has_collapsible_compact_sidebar():
     collapsed_brand_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo")
     assert "cursor: pointer" in collapsed_brand_rule
     assert "pointer-events: auto" in collapsed_brand_rule
-    assert "border-radius: 14px" in collapsed_brand_rule
+    assert "border-radius: var(--radius)" in collapsed_brand_rule
     collapsed_brand_hover_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo:hover")
     assert "background: transparent" in collapsed_brand_hover_rule
     assert "box-shadow: none" in collapsed_brand_hover_rule
@@ -1142,6 +1338,14 @@ def test_shell_has_collapsible_compact_sidebar():
     )
     assert "display: none" in collapsed_hidden_rule
 
+    collapsed_list_head_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .list-head")
+    assert "top: var(--collapsed-search-top)" in collapsed_list_head_rule
+    assert "flex-direction: column" in collapsed_list_head_rule
+    assert "gap: 8px" in collapsed_list_head_rule
+
+    collapsed_create_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .collapsed-create-toggle")
+    assert "display: inline-flex" in collapsed_create_rule
+
 
 def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     index_html = _read_static("index.html")
@@ -1167,6 +1371,9 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     brand_token_rule = _css_rule(styles_css, ":root")
     assert "--sidebar-control-size: 34px" in brand_token_rule
     assert "--sidebar-control-icon-size: 17px" in brand_token_rule
+    assert "--radius-control: 10px" in brand_token_rule
+    assert "--brand-primary: #303034" in brand_token_rule
+    assert "--brand-primary-hover: #3b3b42" in brand_token_rule
     assert "--brand-icon-color: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
     assert "--brand-icon-hover-bg:" not in brand_token_rule
     assert "--brand-icon-ring: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
@@ -1174,6 +1381,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     collapse_rule = _css_rule(styles_css, ".sidebar-collapse-button")
     assert "width: var(--sidebar-control-size)" in collapse_rule
     assert "height: var(--sidebar-control-size)" in collapse_rule
+    assert "border-radius: var(--radius-control)" in collapse_rule
     assert "color: var(--text)" in collapse_rule
 
     search_toggle_start = styles_css.index("\n.list-search-toggle {")
@@ -1181,13 +1389,25 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     search_toggle_rule = styles_css[search_toggle_start:search_toggle_end]
     assert "width: var(--sidebar-control-size)" in search_toggle_rule
     assert "height: var(--sidebar-control-size)" in search_toggle_rule
+    assert "border-radius: var(--radius-control)" in search_toggle_rule
     assert "color: var(--text)" in search_toggle_rule
+
+    collapsed_create_start = styles_css.index("\n.collapsed-create-toggle {")
+    collapsed_create_end = styles_css.index("}", collapsed_create_start)
+    collapsed_create_rule = styles_css[collapsed_create_start:collapsed_create_end]
+    assert "display: none" in collapsed_create_rule
+    assert "width: var(--collapsed-entry-size)" in collapsed_create_rule
+    assert "height: var(--collapsed-entry-size)" in collapsed_create_rule
+    assert "border-radius: var(--radius-control)" in collapsed_create_rule
+    assert "color: var(--text)" in collapsed_create_rule
 
     settings_summary_start = styles_css.index("\n.sidebar-settings summary {")
     settings_summary_end = styles_css.index("}", settings_summary_start)
     settings_summary_rule = styles_css[settings_summary_start:settings_summary_end]
     assert "min-height: var(--sidebar-control-size)" in settings_summary_rule
+    assert "border-radius: var(--radius-control)" in settings_summary_rule
     assert "color: var(--text)" in settings_summary_rule
+    assert "font-size: 14px" in settings_summary_rule
 
     shared_icon_rule_start = styles_css.index(".nav-action svg,")
     shared_icon_rule_end = styles_css.index("}", shared_icon_rule_start)
@@ -1195,6 +1415,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     for selector in [
         ".sidebar-collapse-button svg",
         ".list-search-toggle svg",
+        ".collapsed-create-toggle svg",
         ".sidebar-settings summary svg",
     ]:
         assert selector in shared_icon_rule
@@ -1230,12 +1451,14 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     assert "var(--accent" not in search_close_hover_rule
 
     search_toggle_hover_start = styles_css.index(
-        ".list-search-toggle:hover,\n.list-search-toggle:focus-visible {"
+        ".list-search-toggle:hover,\n.list-search-toggle:focus-visible,"
     )
     search_toggle_hover_end = styles_css.index("}", search_toggle_hover_start)
     search_toggle_hover_rule = styles_css[search_toggle_hover_start:search_toggle_hover_end]
     assert "color: var(--text)" in search_toggle_hover_rule
     assert "background: var(--option-hover)" in search_toggle_hover_rule
+    assert ".collapsed-create-toggle:hover" in search_toggle_hover_rule
+    assert ".collapsed-create-toggle:focus-visible" in search_toggle_hover_rule
     assert "var(--brand-icon-hover-bg)" not in search_toggle_hover_rule
     assert "var(--brand-icon-ring)" not in search_toggle_hover_rule
     assert "var(--accent" not in search_toggle_hover_rule
@@ -1257,7 +1480,7 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
     styles_css = _read_static("styles.css")
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
-    assert root_vars["--collapsed-search-top"] == "92px"
+    assert root_vars["--collapsed-search-top"] == "79px"
 
     scrim_rule = _css_rule(styles_css, ".search-scrim")
     assert "z-index: 50" in scrim_rule
@@ -1266,18 +1489,42 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
     active_sidebar_selector = "body.search-active .app-shell.sidebar-collapsed .task-sidebar"
     assert f"{active_sidebar_selector} {{" in styles_css
     active_sidebar_rule = _css_rule(styles_css, active_sidebar_selector)
-    assert "z-index: 70" in active_sidebar_rule
+    assert "position: static" in active_sidebar_rule
+    assert "z-index: auto" in active_sidebar_rule
+
+    active_brand_selector = "body.search-active .app-shell.sidebar-collapsed .sidebar-head"
+    active_brand_rule = _css_rule(styles_css, active_brand_selector)
+    assert "opacity: 0" not in active_brand_rule
+    assert "pointer-events: none" in active_brand_rule
 
     flyout_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-list-wrap")
     assert "top: calc(var(--collapsed-search-top) - 10px)" in flyout_rule
     assert "top: 58px" not in flyout_rule
     assert "z-index: 60" in flyout_rule
     assert "pointer-events: auto" in flyout_rule
+    assert "padding: 10px" in flyout_rule
+    assert "background: var(--sidebar-bg)" in flyout_rule
+    assert "border: 1px solid var(--sidebar-border)" in flyout_rule
+    assert "background: var(--surface)" not in flyout_rule
+    assert "border: 1px solid transparent" not in flyout_rule
+    assert "body.search-active .task-row {\n  box-shadow:" not in styles_css
+
+    active_collapsed_create_rule = _css_rule(
+        styles_css, "body.search-active .app-shell.sidebar-collapsed .collapsed-create-toggle"
+    )
+    assert "display: none" in active_collapsed_create_rule
 
     collapsed_search_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-search")
     assert "width: 100%" in collapsed_search_rule
     assert "opacity: 1" in collapsed_search_rule
     assert "transition: none" in collapsed_search_rule
+
+    collapsed_head_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .list-head")
+    assert "padding: 0 0 10px" in collapsed_head_rule
+
+    collapsed_task_list_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-list")
+    assert "display: grid" in collapsed_task_list_rule
+    assert "padding: 0" in collapsed_task_list_rule
 
 
 def test_sidebar_brand_title_stays_on_one_line():
@@ -1320,20 +1567,55 @@ def test_sidebar_brand_title_stays_on_one_line():
 
 
 def test_sidebar_footer_and_create_action_match_brand_treatment():
+    index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+
+    assert "<span>新建任务</span>" in index_html
+    assert "<span>创建任务</span>" not in index_html
+    assert 'aria-label="新建任务"' in index_html
+    assert 'title="新建任务"' in index_html
 
     footer_start = styles_css.index(".sidebar-footer {")
     footer_end = styles_css.index("}", footer_start)
     footer_rule = styles_css[footer_start:footer_end]
     assert "border-top" not in footer_rule
 
+    toolbar_start = styles_css.index(".list-toolbar {")
+    toolbar_end = styles_css.index("}", toolbar_start)
+    toolbar_rule = styles_css[toolbar_start:toolbar_end]
+    assert "padding: 2px 10px 10px" in toolbar_rule
+
     create_start = styles_css.index(".nav-action {")
     create_end = styles_css.index("}", create_start)
     create_rule = styles_css[create_start:create_end]
     assert "color: #ffffff" in create_rule
     assert "background: var(--brand-primary)" in create_rule
-    assert "border: 1px solid var(--brand-primary)" in create_rule
+    assert "border: 0" in create_rule
+    assert "border-radius: var(--radius-control)" in create_rule
+    assert "box-shadow: var(--button-solid-shadow)" in create_rule
+    assert "0 7px 10px" not in create_rule
+    assert "0 5px 10px" not in create_rule
+    assert "0 10px 14px" not in create_rule
+    assert "linear-gradient" not in create_rule
+    assert "inset" not in create_rule
     assert "justify-content: center" in create_rule
+    assert "transform 140ms ease" not in create_rule
+
+    create_hover_start = styles_css.index(".nav-action:hover,")
+    create_hover_end = styles_css.index("}", create_hover_start)
+    create_hover_rule = styles_css[create_hover_start:create_hover_end]
+    assert "background: var(--brand-primary-hover)" in create_hover_rule
+    assert "outline: none" in create_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in create_hover_rule
+    assert "0 8px 12px" not in create_hover_rule
+    assert "0 7px 14px" not in create_hover_rule
+    assert "0 12px 18px" not in create_hover_rule
+    assert "transform:" not in create_hover_rule
+    assert "linear-gradient" not in create_hover_rule
+    assert "inset" not in create_hover_rule
+    assert "border-color" not in create_hover_rule
+    assert 'body[data-theme="dark"] .nav-action {' not in styles_css
+    assert 'body[data-theme="dark"] .nav-action:hover,' not in styles_css
 
 
 def test_empty_workspace_copy_is_shorter_and_direct():
@@ -1370,7 +1652,7 @@ def test_selected_task_header_omits_local_validation_subtitle():
     ]
 
 
-def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_only():
+def test_task_selection_keeps_same_task_active_and_refresh_restores_remembered_task():
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
@@ -1389,8 +1671,13 @@ def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function renderMetricPreview", select_start)
     select_renderer = app_js[select_start:select_end]
-    assert "if (selectedTaskId === task.id)" in select_renderer
-    assert "deselectCurrentTask()" in select_renderer
+    assert "if (selectedTaskId === task.id && selectedTask)" in select_renderer
+    same_task_start = select_renderer.index("if (selectedTaskId === task.id && selectedTask)")
+    same_task_end = select_renderer.index("resetAgentTypingState", same_task_start)
+    same_task_branch = select_renderer[same_task_start:same_task_end]
+    assert "selectedTask = task;" in same_task_branch
+    assert "rememberSelectedTaskId(task.id);" in same_task_branch
+    assert "deselectCurrentTask()" not in same_task_branch
     assert "rememberSelectedTaskId(task.id);" in select_renderer
     assert "rememberSelectedTaskId(null);" in select_renderer
     assert "renderMetricPreview({});" in select_renderer
@@ -1405,6 +1692,57 @@ def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_
     delete_end = app_js.index("async function runAction", delete_start)
     delete_renderer = app_js[delete_start:delete_end]
     assert "rememberSelectedTaskId(null);" in delete_renderer
+
+
+def test_refresh_restores_selected_task_before_async_detail_loads():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+    state_js = _read_static("js/state.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";' in state_js
+    assert "function loadResultScrollPositions" in app_js
+    assert "function restoreResultScrollPositionAfterRender" in app_js
+
+    restore_body = _slice_function(app_js, "function restoreSelectedTaskPlaceholder")
+    assert "const storedTaskId = storedSelectedTaskId();" in restore_body
+    assert "selectedTaskId = storedTaskId;" in restore_body
+    assert "selectedTask = null;" in restore_body
+
+    current_body = _slice_function(app_js, "function renderCurrentTask")
+    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in current_body
+    assert 'classList.toggle("is-empty", !hasTaskContext)' in current_body
+    assert "正在恢复任务" in current_body
+
+    load_scroll_call = app_js.index("loadResultScrollPositions();")
+    restore_call = app_js.index("restoreSelectedTaskPlaceholder();")
+    initialize_call = app_js.index("initializeApp();")
+    assert load_scroll_call < restore_call
+    assert restore_call < initialize_call
+
+    init_body = _slice_function(app_js, "async function initializeApp")
+    assert "await refreshTasks();" in init_body
+    assert 'class="app-booting"' in index_html
+    assert "function finishAppBoot" in app_js
+    assert "finishAppBoot();" in init_body
+    assert "document.body.classList.remove(\"app-booting\")" in app_js
+    assert "body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
+    assert "body.app-booting :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
+    assert "function enableAppAnimationsAfterBoot" in app_js
+    assert "document.body.classList.add(\"anim-ready\")" in _slice_function(app_js, "function enableAppAnimationsAfterBoot")
+    assert "enableAppAnimationsAfterBoot();" in _slice_function(app_js, "function finishAppBoot")
+    assert "requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add(\"anim-ready\")));" not in app_js
+
+    app_shell_rule = _css_rule(styles_css, ".app-shell")
+    assert "transition:" not in app_shell_rule
+
+    first_render = init_body.index("renderAll();")
+    message_load = init_body.index("await loadAgentMessages();")
+    restore_scroll = init_body.index("await restoreResultScrollPositionAfterRender(selectedTaskId);")
+    finish_boot = init_body.index("finishAppBoot();")
+    assert message_load < first_render
+    assert first_render < restore_scroll < finish_boot
+    assert "if (selectedTaskId) renderAll();" not in init_body
 
 
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
@@ -1597,7 +1935,7 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "background: var(--option-hover)" in settings_summary_rule
     assert "var(--accent" not in settings_summary_rule
 
-    settings_hover_start = styles_css.index(".settings-environment-button:hover,")
+    settings_hover_start = styles_css.index(".settings-system-row:hover,")
     settings_hover_end = styles_css.index("}", settings_hover_start)
     settings_hover_rule = styles_css[settings_hover_start:settings_hover_end]
     assert ".settings-select:focus-visible" in settings_hover_rule
@@ -1607,13 +1945,19 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "#b9d7fb" not in settings_hover_rule
     assert "#f1f7ff" not in settings_hover_rule
     assert (
-        "\n\n.settings-environment-button:focus-visible,\n.settings-select:focus-visible {\n  outline:"
+        "\n\n.settings-system-row:focus-visible,\n.settings-select:focus-visible {\n  outline:"
         not in styles_css
     )
 
     model_card_hover_start = styles_css.index(".llm-engine-item:hover,")
     model_card_hover_end = styles_css.index("}", model_card_hover_start)
     model_card_hover_rule = styles_css[model_card_hover_start:model_card_hover_end]
+    model_card_rule = _css_rule(styles_css, ".llm-engine-item")
+    assert "border-radius: var(--radius-control)" in model_card_rule
+    engine_delete_rule = _css_rule(styles_css, ".engine-del-btn")
+    assert "border-radius: var(--radius-control)" in engine_delete_rule
+    engine_add_rule = _css_rule(styles_css, ".llm-engine-add")
+    assert "border-radius: var(--radius-control)" in engine_add_rule
     assert ".llm-engine-item:focus-visible" in model_card_hover_rule
     assert "border-color: var(--option-hover)" in model_card_hover_rule
     assert "background: var(--option-hover)" in model_card_hover_rule
@@ -1628,15 +1972,16 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     task_hover_end = styles_css.index("}", task_hover_start)
     task_hover_rule = styles_css[task_hover_start:task_hover_end]
     assert ".task-row-shell:hover .task-row" in task_hover_rule
-    assert "border-color: var(--option-hover)" in task_hover_rule
+    assert "border-color" not in task_hover_rule
     assert "background: var(--option-hover)" in task_hover_rule
     assert "#9fbfe4" not in task_hover_rule
     assert "#fbfdff" not in task_hover_rule
 
     task_selected_rule = _css_rule(styles_css, ".task-row.selected")
-    assert "border-color: var(--option-selected)" in task_selected_rule
+    assert "border-color" not in task_selected_rule
     assert "background: var(--option-selected)" in task_selected_rule
-    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" in task_selected_rule
+    assert "box-shadow: none" in task_selected_rule
+    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" not in task_selected_rule
     assert "var(--accent" not in task_selected_rule
     assert "#f8fbff" not in task_selected_rule
 
@@ -1681,68 +2026,111 @@ def test_dark_theme_shell_columns_follow_reference_tones():
 def test_dark_workspace_masks_match_center_background():
     styles_css = _read_static("styles.css")
 
+    base_workspace_rule = _css_rule(styles_css, ".validation-workspace")
+    assert "--workspace-mask-bg: var(--surface)" in base_workspace_rule
+
     workspace_rule = _css_rule(styles_css, 'body[data-theme="dark"] .validation-workspace')
     assert "--workspace-mask-bg: var(--bg)" in workspace_rule
 
     head_rule = _css_rule(styles_css, ".workspace-head")
-    assert "var(--workspace-mask-bg, var(--surface)) 16.5px" in head_rule
+    assert "transparent calc(var(--radius) - 1px)" in head_rule
+    assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)" in head_rule
+    assert "background-position: left -1px top -1px, right -1px top -1px" in head_rule
+    assert "background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in head_rule
     assert "transparent 16px, var(--surface) 16.5px" not in head_rule
 
     composer_mask_rule = _css_rule(styles_css, ".agent-composer::before")
-    assert "var(--workspace-mask-bg, var(--surface)) 24.5px" in composer_mask_rule
+    composer_rule = _css_rule(styles_css, ".agent-composer")
+    assert "--agent-composer-mask-bg: var(--workspace-mask-bg, var(--surface))" in composer_rule
+    assert "--agent-composer-mask-bg: #ffffff" not in composer_rule
+    assert "--agent-composer-mask-bg: var(--bg)" not in composer_rule
+    dark_composer_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-composer')
+    assert "--agent-composer-mask-bg: var(--workspace-mask-bg, var(--surface))" in dark_composer_rule
+    assert "left: -1px" in composer_mask_rule
+    assert "right: -1px" in composer_mask_rule
+    assert "bottom: -1px" in composer_mask_rule
+    assert "height: calc(var(--radius) + 2px)" in composer_mask_rule
+    assert "background: var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface)))" in composer_mask_rule
+    assert "radial-gradient" not in composer_mask_rule
+    assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) + 0.5px)" not in composer_mask_rule
     assert "transparent 24px, var(--surface) 24.5px" not in composer_mask_rule
 
 
 def test_primary_step_action_hover_keeps_button_text_readable():
     styles_css = _read_static("styles.css")
+    root_rule = _css_rule(styles_css, ":root")
+
+    assert "--button-solid-shadow:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.10)" in root_rule
+    assert "0 3px 6px rgba(0, 0, 0, 0.10)" in root_rule
+    assert "0 6px 10px rgba(0, 0, 0, 0.07)" in root_rule
+    assert "--button-solid-shadow-hover:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.12)" in root_rule
+    assert "0 4px 8px rgba(0, 0, 0, 0.12)" in root_rule
+    assert "0 7px 12px rgba(0, 0, 0, 0.08)" in root_rule
+    assert "--button-secondary-shadow:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.06)" in root_rule
+    assert "0 2px 4px rgba(0, 0, 0, 0.04)" in root_rule
+    assert "0 5px 8px rgba(0, 0, 0, 0.035)" in root_rule
+    assert "--button-secondary-shadow-hover:" in root_rule
+    assert "0 3px 6px rgba(0, 0, 0, 0.06)" in root_rule
+    assert "0 6px 10px rgba(0, 0, 0, 0.045)" in root_rule
+
+    primary_rule = _css_rule(styles_css, ".button.primary")
+    assert "color: #ffffff" in primary_rule
+    assert "background: var(--brand-primary)" in primary_rule
+    assert "border-color: var(--brand-primary)" in primary_rule
+    assert "box-shadow: var(--button-solid-shadow)" in primary_rule
 
     assert ".button.primary:hover:not(:disabled)" in styles_css
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
     assert "color: #ffffff" in hover_rule
-    assert "background: #005ecb" in hover_rule
-    assert "border-color: #005ecb" in hover_rule
+    assert "background: var(--brand-primary-hover)" in hover_rule
+    assert "border-color: var(--brand-primary-hover)" in hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in hover_rule
+    assert "transform:" not in hover_rule
+
+    secondary_rule = _css_rule(styles_css, ".button.secondary")
+    assert "border-color: var(--border-strong)" in secondary_rule
+    assert "background: var(--surface)" in secondary_rule
+    assert "box-shadow: var(--button-secondary-shadow)" in secondary_rule
+
+    secondary_hover_rule = _css_rule(
+        styles_css, ".button.secondary:hover:not(:disabled),\n.button.secondary:focus-visible:not(:disabled)"
+    )
+    assert "border-color: var(--border-strong)" in secondary_hover_rule
+    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in secondary_hover_rule
+    assert "box-shadow: var(--button-secondary-shadow-hover)" in secondary_hover_rule
 
 
 def test_brand_primary_token_drives_create_environment_and_model_buttons():
     styles_css = _read_static("styles.css")
 
-    create_start = styles_css.index("#createTaskButton.button.primary,")
-    create_end = styles_css.index("}", create_start)
-    solid_brand_rule = styles_css[create_start:create_end]
+    # The execution-environment panel auto-saves on row click (radiogroup), so
+    # the #saveExecutionEnvironmentButton was retired and no longer carries the
+    # solid brand styling.
+    assert "#saveExecutionEnvironmentButton" not in styles_css
     for selector in [
         "#createTaskButton.button.primary",
-        "#saveExecutionEnvironmentButton.button.primary",
         "#saveLLMEngineEditButton.button.primary",
-    ]:
-        assert selector in solid_brand_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary" not in solid_brand_rule
-    assert "background: var(--brand-primary)" in solid_brand_rule
-    assert "border-color: var(--brand-primary)" in solid_brand_rule
-
-    solid_hover_start = styles_css.index(
-        "#createTaskButton.button.primary:hover:not(:disabled),"
-    )
-    solid_hover_end = styles_css.index("}", solid_hover_start)
-    solid_hover_rule = styles_css[solid_hover_start:solid_hover_end]
-    for selector in [
-        "#saveExecutionEnvironmentButton.button.primary:hover:not(:disabled)",
-        "#saveExecutionEnvironmentButton.button.primary:focus-visible:not(:disabled)",
+        "#createTaskButton.button.primary:hover:not(:disabled)",
         "#saveLLMEngineEditButton.button.primary:hover:not(:disabled)",
-        "#saveLLMEngineEditButton.button.primary:focus-visible:not(:disabled)",
     ]:
-        assert selector in solid_hover_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover" not in solid_hover_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible" not in solid_hover_rule
-    assert "background: var(--brand-primary-hover)" in solid_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in solid_hover_rule
+        assert selector not in styles_css
 
     nav_start = styles_css.index(".nav-action {")
     nav_end = styles_css.index("}", nav_start)
     nav_rule = styles_css[nav_start:nav_end]
     assert "background: var(--brand-primary)" in nav_rule
-    assert "border: 1px solid var(--brand-primary)" in nav_rule
+    assert "border: 0" in nav_rule
+    assert "box-shadow: var(--button-solid-shadow)" in nav_rule
+    assert "0 7px 10px" not in nav_rule
+    assert "0 5px 10px" not in nav_rule
+    assert "0 10px 14px" not in nav_rule
+    assert "linear-gradient" not in nav_rule
+    assert "inset" not in nav_rule
 
     send_start = styles_css.index(".agent-send {")
     send_end = styles_css.index("}", send_start)
@@ -1758,29 +2146,25 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     assert "border-color: var(--brand-primary-hover)" in llm_add_hover_rule
     assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in llm_add_hover_rule
 
-    scan_environment_rule = _css_rule(styles_css, "#refreshExecutionEnvironmentOptionsButton.button.secondary")
-    assert "color: var(--brand-primary)" in scan_environment_rule
-    assert "border: 1px dashed var(--brand-primary)" in scan_environment_rule
-    assert "background: transparent" in scan_environment_rule
+    settings_action_width_start = styles_css.index(
+        "#refreshExecutionEnvironmentOptionsButton.button.secondary,"
+    )
+    settings_action_width_end = styles_css.index("}", settings_action_width_start)
+    settings_action_width_rule = styles_css[settings_action_width_start:settings_action_width_end]
+    assert "#addLLMModelButton.button.secondary" in settings_action_width_rule
+    assert "width: 84px" in settings_action_width_rule
 
-    scan_environment_hover_start = styles_css.index(
-        "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled),"
-    )
-    scan_environment_hover_end = styles_css.index("}", scan_environment_hover_start)
-    scan_environment_hover_rule = styles_css[scan_environment_hover_start:scan_environment_hover_end]
-    assert (
-        "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)"
-        in scan_environment_hover_rule
-    )
-    assert "color: var(--brand-primary-hover)" in scan_environment_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in scan_environment_hover_rule
-    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in scan_environment_hover_rule
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary {\n" not in styles_css
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled)" not in styles_css
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)" not in styles_css
+    assert 'body[data-theme="dark"] #refreshExecutionEnvironmentOptionsButton.button.secondary' not in styles_css
+    assert "border: 1px dashed var(--brand-primary)" not in settings_action_width_rule
 
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
-    assert "background: #005ecb" in hover_rule
-    assert "border-color: #005ecb" in hover_rule
+    assert "background: var(--brand-primary-hover)" in hover_rule
+    assert "border-color: var(--brand-primary-hover)" in hover_rule
 
 
 def test_sidebar_task_card_is_two_line_compact_without_icon():
@@ -1823,6 +2207,7 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     row_rule = styles_css[row_start:row_end]
     assert "--task-card-action-space: 36px" in row_rule
     assert "padding: 11px 12px" in row_rule
+    assert "border: 1px solid transparent" in row_rule
     assert "padding: 11px 42px" not in row_rule
 
     top_start = styles_css.index(".task-row-top {")
@@ -1872,6 +2257,7 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     date_start = styles_css.index(".task-row .task-row-date {")
     date_end = styles_css.index("}", date_start)
     date_rule = styles_css[date_start:date_end]
+    assert "font-size: 12px" in date_rule
     assert "white-space: nowrap" in date_rule
 
     pill_start = styles_css.index(".task-row-top .pill {")
@@ -1885,6 +2271,22 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     run_pill_rule = styles_css[run_pill_start:run_pill_end]
     assert "color: var(--accent)" in run_pill_rule
     assert "background: var(--accent-soft)" in run_pill_rule
+
+
+def test_task_list_selected_card_has_no_visible_border_or_outline():
+    styles_css = _read_static("styles.css")
+
+    task_list_start = styles_css.index("\n.task-list {\n  display: grid")
+    task_list_end = styles_css.index("}", task_list_start)
+    task_list_rule = styles_css[task_list_start:task_list_end]
+    assert "overflow-y: auto" in task_list_rule
+    assert "padding: 3px 10px 14px" in task_list_rule
+
+    selected_rule = _css_rule(styles_css, ".task-row.selected")
+    assert "border-color" not in selected_rule
+    assert "background: var(--option-selected)" in selected_rule
+    assert "box-shadow: none" in selected_rule
+    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" not in selected_rule
 
 
 def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
@@ -2288,11 +2690,42 @@ def test_workflow_step_status_separates_next_action_from_running_action():
     assert "if (index === activeIndex) return \"running\";" not in status_renderer
 
 
-def test_algorithm_selector_was_removed_from_create_dialog():
+def test_modeling_create_dialog_has_algorithm_selector():
+    """The create dialog exposes a manual-mode modeling algorithm multi-select
+    (G2: 算法可选), gated to modeling tasks via the algorithmField flag, and
+    posted as `payload.recipes`."""
     index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
 
-    assert 'id="modelAlgorithm"' not in index_html
-    assert "模型算法" not in index_html
+    assert 'id="createTaskAlgorithmField"' in index_html
+    assert 'id="modelAlgorithmChoices"' in index_html
+    assert 'name="modelAlgorithm"' in index_html
+    for recipe in ('value="lgb"', 'value="xgb"', 'value="lr"', 'value="scorecard"'):
+        assert recipe in index_html
+    assert "algorithmField: true" in app_js
+    assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
+    assert "请至少选择一个建模算法。" in app_js
+    assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
+
+
+def test_feature_create_dialog_has_optional_metric_selector():
+    """The feature-analysis create dialog exposes a manual-mode optional-metric
+    multi-select (spec §2: 选了才算), gated via the metricField flag and posted as
+    `payload.metrics`. VIF is the first wired optional metric; empty is valid."""
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="createTaskMetricField"' in index_html
+    assert 'id="featureMetricChoices"' in index_html
+    assert 'name="featureMetric" value="vif"' in index_html
+    assert 'name="featureMetric" value="head_tail_lift"' in index_html
+    assert 'name="featureMetric" value="importance"' in index_html
+    # no optional metric is pre-checked (base metrics always compute, optional opt-in)
+    assert 'name="featureMetric" value="vif" checked' not in index_html
+    assert 'name="featureMetric" value="head_tail_lift" checked' not in index_html
+    assert 'name="featureMetric" value="importance" checked' not in index_html
+    assert "metricField: true" in app_js
+    assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in app_js
 
 
 def test_stage_failures_keep_completed_previous_steps_green():
@@ -2410,21 +2843,47 @@ def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
 
 def test_result_workspace_preserves_scroll_position_per_task_switch():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
 
     assert "const resultScrollPositionsByTask = new Map();" in app_js
+    assert "let resultScrollPersistFrame = null;" in app_js
     assert "function rememberResultScrollPosition" in app_js
+    assert "function loadResultScrollPositions" in app_js
+    assert "function persistResultScrollPositions" in app_js
     assert "function prepareResultScrollRestoreForTask" in app_js
     assert "function applyResultScrollPosition" in app_js
-    assert "function scheduleResultScrollRestore" in app_js
+    assert "function restoreResultScrollPositionAfterRender" in app_js
+    assert "function beginTaskContentLoad" in app_js
+    assert "function finishTaskContentLoad" in app_js
     assert 'addEventListener("scroll", handleResultScroll' in app_js
+    assert "scheduleResultScrollPositionsPersist();" in _slice_function(app_js, "function rememberResultScrollPosition")
+    assert "persistResultScrollPositions();" in _slice_function(app_js, "async function deleteTask")
+    assert "await restoreResultScrollPositionAfterRender(selectedTaskId);" in _slice_function(app_js, "async function initializeApp")
 
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function deselectCurrentTask", select_start)
     select_renderer = app_js[select_start:select_end]
     assert "rememberResultScrollPosition();" in select_renderer
+    assert "beginTaskContentLoad(task.id);" in select_renderer
     assert "prepareResultScrollRestoreForTask(task.id);" in select_renderer
-    assert "applyResultScrollPosition(task.id);" in select_renderer
-    assert "scheduleResultScrollRestore(task.id);" in select_renderer
+    assert "applyResultScrollPosition(task.id);" not in select_renderer
+    assert "scheduleResultScrollRestore(task.id);" not in select_renderer
+    assert "renderAll();" in select_renderer
+    assert "await restoreResultScrollPositionAfterRender(task.id);" in select_renderer
+    assert "finishTaskContentLoad(task.id);" in select_renderer
+    assert "}, { renderAfter: false });" in select_renderer
+
+    run_action = _slice_function(app_js, "async function runAction")
+    assert "let shouldRenderAfter = options.renderAfter !== false;" in run_action
+    assert "shouldRenderAfter = true;" in run_action
+    assert "if (shouldRenderAfter) renderAll();" in run_action
+
+    assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail)" in styles_css
+    assert ".validation-workspace.is-task-content-loading :is(.result-workspace, .progress-rail)" not in styles_css
+    assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.workspace-head)" in styles_css
+    assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.result-scroll-content)" in styles_css
+    assert "transition: opacity 150ms ease 90ms;" in styles_css
+    assert ".validation-workspace.is-task-content-settling :is(.task-hero)" in styles_css
 
     agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
     agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
@@ -2482,6 +2941,7 @@ def test_create_task_auto_scans_materials_after_creation():
 
 def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
 
     click_start = app_js.index('$("createTaskButton").onclick')
     click_end = app_js.index('$("workflowStepper").onclick', click_start)
@@ -2494,6 +2954,139 @@ def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     keydown_handler = app_js[keydown_start:keydown_end]
     assert 'runAction(createTaskAndScan);' in keydown_handler
     assert 'actionId: "scan"' not in keydown_handler
+    assert 'id="statusMessage" class="status" role="status" aria-live="polite"' in index_html
+    assert 'setCreateStatus("请选择执行模式。", "error")' in app_js
+    assert 'setCreateStatus("请先选择要上传的材料文件。", "error")' in app_js
+    assert 'setCreateStatus(\n      definition.reportFields ? "请先填写模型名称、验证人员和材料目录。"' in app_js
+
+
+def test_dialogs_close_when_clicking_backdrop():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+
+    for dialog_id in [
+        "taskDialog",
+        "llmEngineEditDialog",
+        "governanceSettingsDialog",
+        "wordPreviewDialog",
+    ]:
+        assert f'<dialog id="{dialog_id}"' in index_html
+
+    assert "function closeDialogOnBackdropClick" in app_js
+    assert "function bindDialogBackdropDismissal" in app_js
+    assert 'document.querySelectorAll("dialog").forEach((dialog) =>' in app_js
+    assert 'dialog.addEventListener("click", closeDialogOnBackdropClick);' in app_js
+    assert "event.target !== dialog || !dialog.open" in app_js
+    assert "bindDialogBackdropDismissal();" in app_js
+
+
+def test_dialog_close_buttons_render_as_x_controls():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    for button_id in [
+        "closeTaskDialogButton",
+        "closeLLMEngineEditButton",
+        "closeGovernanceSettingsButton",
+        "closeWordPreviewButton",
+    ]:
+        button_start = index_html.index(f'id="{button_id}"')
+        button_start = index_html.rfind("<button", 0, button_start)
+        button_end = index_html.index("</button>", button_start)
+        button_markup = index_html[button_start:button_end]
+        assert "dialog-close-button" in button_markup
+        assert 'aria-label="关闭"' in button_markup
+        assert 'title="关闭"' in button_markup
+        assert "<span aria-hidden=\"true\">&times;</span>" in button_markup
+        assert ">关闭" not in button_markup
+
+    close_button_rule = _css_rule(styles_css, ".button.dialog-close-button")
+    assert "width: 30px" in close_button_rule
+    assert "min-width: 30px" in close_button_rule
+    assert "height: 30px" in close_button_rule
+    assert "min-height: 30px" in close_button_rule
+    assert "padding: 0" in close_button_rule
+    assert "border: 0" in close_button_rule
+    assert "background: transparent" in close_button_rule
+    assert "color: var(--text-secondary)" in close_button_rule
+    assert "font-size: 18px" in close_button_rule
+
+    close_button_hover_rule = _css_rule(styles_css, ".button.dialog-close-button:hover:not(:disabled),\n.button.dialog-close-button:focus-visible:not(:disabled)")
+    assert "outline: none" in close_button_hover_rule
+    assert "border-color: transparent" in close_button_hover_rule
+    assert "background: var(--option-hover)" in close_button_hover_rule
+    assert "#f8fbff" not in close_button_hover_rule
+    assert "#9fbfe4" not in close_button_hover_rule
+
+    dark_close_button_rule = _css_rule(styles_css, 'body[data-theme="dark"] .button.dialog-close-button')
+    assert "border-color: transparent" in dark_close_button_rule
+    assert "background: transparent" in dark_close_button_rule
+
+    dark_close_button_hover_rule = _css_rule(
+        styles_css,
+        'body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled)',
+    )
+    assert "background: var(--option-hover)" in dark_close_button_hover_rule
+
+    assert 'id="governanceRefreshButton" class="governance-icon-button is-unavailable"' in index_html
+    assert 'aria-hidden="true" disabled' in index_html
+    assert 'button.hidden = !governanceRefreshActions[navKey]' not in app_js
+    assert 'button.classList.toggle("is-unavailable", unavailable);' in app_js
+    assert "button.disabled = unavailable;" in app_js
+    assert 'button.setAttribute("aria-hidden", unavailable ? "true" : "false");' in app_js
+
+    head_rule = _css_rule(styles_css, ".governance-settings-head")
+    assert "position: relative" in head_rule
+    assert "grid-template-columns: minmax(0, 1fr)" in head_rule
+    assert "padding: 20px 96px 16px 24px" in head_rule
+
+    actions_rule = _css_rule(styles_css, ".governance-head-actions")
+    assert "position: absolute" in actions_rule
+    assert "top: 20px" in actions_rule
+    assert "right: 24px" in actions_rule
+    assert "justify-content: flex-end" in actions_rule
+    assert "width: 68px" in actions_rule
+
+    shared_start = styles_css.index(".governance-head-actions .governance-icon-button {")
+    shared_end = styles_css.index("}", shared_start)
+    shared_rule = styles_css[shared_start:shared_end]
+    assert "width: 30px" in shared_rule
+    assert "min-width: 30px" in shared_rule
+    assert "height: 30px" in shared_rule
+    assert "min-height: 30px" in shared_rule
+    assert "border: 0" in shared_rule
+    assert "background: transparent" in shared_rule
+    assert ".governance-head-actions .dialog-close-button {" not in styles_css
+    unavailable_rule = _css_rule(styles_css, ".governance-icon-button.is-unavailable")
+    assert "visibility: hidden" in unavailable_rule
+    assert "pointer-events: none" in unavailable_rule
+
+    shared_hover_start = styles_css.index(
+        ".governance-head-actions .governance-icon-button:hover,"
+    )
+    shared_hover_end = styles_css.index("}", shared_hover_start)
+    shared_hover_rule = styles_css[shared_hover_start:shared_hover_end]
+    assert ".governance-head-actions .dialog-close-button" not in shared_hover_rule
+    assert "outline: none" in shared_hover_rule
+    assert "border-color: transparent" in shared_hover_rule
+    assert "background: var(--option-hover)" in shared_hover_rule
+    assert "#f8fbff" not in shared_hover_rule
+    assert "#9fbfe4" not in shared_hover_rule
+
+    dark_shared_start = styles_css.index('body[data-theme="dark"] .governance-head-actions .governance-icon-button {')
+    dark_shared_end = styles_css.index("}", dark_shared_start)
+    dark_shared_rule = styles_css[dark_shared_start:dark_shared_end]
+    assert "border-color: transparent" in dark_shared_rule
+    assert "background: transparent" in dark_shared_rule
+
+    dark_hover_start = styles_css.index(
+        'body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover,'
+    )
+    dark_hover_end = styles_css.index("}", dark_hover_start)
+    dark_hover_rule = styles_css[dark_hover_start:dark_hover_end]
+    assert 'body[data-theme="dark"] .governance-head-actions .dialog-close-button' not in dark_hover_rule
+    assert "background: var(--option-hover)" in dark_hover_rule
 
 
 def test_initial_load_restores_task_evidence_for_selected_task():
@@ -2513,7 +3106,7 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
-    for row in ["sort", "group", "appearance", "environment"]:
+    for row in ["sort", "group", "appearance", "pet", "system"]:
         assert f'data-settings-row="{row}"' in settings_markup
 
     assert 'id="settingsSortSelect"' in settings_markup
@@ -2523,14 +3116,22 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     for sort_value in ["created_desc", "created_asc", "name_asc", "name_desc"]:
         assert f'value="{sort_value}"' in settings_markup
 
-    for group_value in ["none", "validator", "created_month"]:
+    for group_value in ["none", "task_type", "validator", "created_month"]:
         assert f'value="{group_value}"' in settings_markup
 
     for theme_value in ["light", "dark", "system"]:
         assert f'value="{theme_value}"' in settings_markup
 
-    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
-    assert 'class="settings-environment-button"' in settings_markup
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert 'class="settings-system-value"' not in settings_markup
+    assert 'class="settings-system-row"' in settings_markup
+    assert 'class="settings-environment-button"' not in settings_markup
+    assert 'aria-label="系统设置"' not in settings_markup
+    assert 'class="settings-section-label">系统设置' not in settings_markup
+    assert 'data-settings-row="environment"' not in settings_markup
+    assert 'data-settings-row="llm"' not in settings_markup
+    assert 'data-settings-row="governance"' not in settings_markup
 
     assert 'id="taskSortSelect"' not in settings_markup
     assert 'id="taskGroupSelect"' not in settings_markup
@@ -2542,7 +3143,7 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert 'class="task-controls"' not in index_html
 
     assert 'const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);' in app_js
-    assert 'const taskGroupModes = new Set(["none", "validator", "created_month"]);' in app_js
+    assert 'const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);' in app_js
     assert "function restoreTaskListSettings" in app_js
     assert "function saveTaskListSettings" in app_js
     assert 'localStorage.getItem("marvis_task_list_settings")' in app_js
@@ -2561,15 +3162,20 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("await refreshTasks();")
 
 
-def test_task_group_setting_supports_created_month():
+def test_task_group_setting_supports_created_month_and_task_type():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
+    assert '<option value="task_type">按任务类型</option>' in settings_markup
     assert '<option value="created_month">按创建月份</option>' in settings_markup
+    assert 'taskGroupMode === "task_type"' in app_js
     assert 'taskGroupMode === "created_month"' in app_js
+    assert 'const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in app_js
+    assert "sortTaskTypeGroups" in app_js
+    assert "appendTaskGroup(list, taskTypeLabel(taskType), groupTasks)" in app_js
     assert "function taskCreatedMonth" in app_js
     assert "task.created_at || task.updated_at" in app_js
     assert "未知创建月份" in app_js
@@ -2587,21 +3193,89 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert 'class="settings-row"' in index_html
     assert 'class="settings-row-title"' in index_html
     assert 'class="settings-select"' in index_html
+    assert 'class="settings-system-row"' in index_html
+    for row in ["sort", "group", "appearance", "pet"]:
+        row_start = index_html.index(f'data-settings-row="{row}"')
+        row_start = index_html.rfind('<div class="settings-row"', 0, row_start)
+        row_end = index_html.index("</div>", index_html.index("</select>", row_start))
+        row_markup = index_html[row_start:row_end]
+        assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in row_markup
+    system_row_start = index_html.index('id="openGovernanceSettingsButton"')
+    system_row_start = index_html.rfind("<button", 0, system_row_start)
+    system_row_end = index_html.index("</button>", system_row_start)
+    system_row_markup = index_html[system_row_start:system_row_end]
+    assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in system_row_markup
+    assert 'class="settings-governance-card"' not in index_html
+    assert 'class="settings-governance-description"' not in index_html
     assert 'class="settings-option"' not in index_html
 
     assert ".settings-menu {" in styles_css
     menu_start = styles_css.index(".settings-menu {")
     menu_end = styles_css.index("}", menu_start)
     menu_rule = styles_css[menu_start:menu_end]
-    assert "width: 100%" in menu_rule
-    assert "max-width: 100%" in menu_rule
+    assert "left: 0" in menu_rule
     assert "right: 0" in menu_rule
+    assert "width: auto" in menu_rule
+    assert "max-width: 100%" in menu_rule
+    assert "padding: 14px 16px 16px" in menu_rule
     assert "width: min(520px" not in menu_rule
+    section_rule = _css_rule(styles_css, ".settings-menu-section")
+    assert "padding: 0" in section_rule
+    assert "border: 0" in section_rule
+    assert "background: transparent" in section_rule
+    assert "border-radius" not in section_rule
+    assert "gap: 12px" in section_rule
+    label_rule = _css_rule(styles_css, ".settings-section-label")
+    assert "padding: 0 2px" in label_rule
     assert ".settings-row {" in styles_css
     row_start = styles_css.index(".settings-row {")
     row_end = styles_css.index("}", row_start)
     row_rule = styles_css[row_start:row_end]
     assert "grid-template-columns: 72px minmax(0, 1fr)" in row_rule
+    assert "gap: 8px" in row_rule
+    row_title_rule = _css_rule(styles_css, ".settings-row-title")
+    assert "display: inline-flex" in row_title_rule
+    assert "align-self: center" in row_title_rule
+    assert "height: 34px" in row_title_rule
+    assert "gap: 7px" in row_title_rule
+    assert "margin: 0" in row_title_rule
+    assert "font-size: 14px" in row_title_rule
+    assert "line-height: 20px" in row_title_rule
+    assert "pointer-events: none" in row_title_rule
+    shared_icon_start = styles_css.index(".settings-row-title svg,")
+    shared_icon_end = styles_css.index("}", shared_icon_start)
+    shared_icon_rule = styles_css[shared_icon_start:shared_icon_end]
+    assert ".settings-system-row > svg" in shared_icon_rule
+    assert "width: 18px" in shared_icon_rule
+    assert "height: 18px" in shared_icon_rule
+    assert "stroke: currentColor" in shared_icon_rule
+    settings_control_start = styles_css.index(".settings-select,\n.settings-system-row {")
+    settings_control_end = styles_css.index("}", settings_control_start)
+    settings_control_rule = styles_css[settings_control_start:settings_control_end]
+    assert "border-radius: var(--radius-control)" in settings_control_rule
+    assert "min-height: 34px" in settings_control_rule
+    assert "font-size: 14px" in settings_control_rule
+    assert "line-height: 20px" in settings_control_rule
+    settings_select_rule = _css_rule(styles_css, ".settings-select")
+    assert "min-width: 0" in settings_select_rule
+    assert "padding: 6px 30px 6px 12px" in settings_select_rule
+    assert "text-overflow: ellipsis" in settings_select_rule
+    assert "font-size: 14px" in settings_select_rule
+    settings_select_option_rule = _css_rule(styles_css, ".settings-select option")
+    assert "font-size: 14px" in settings_select_option_rule
+    assert ".settings-row:hover" not in styles_css
+    system_row_start = styles_css.index(".settings-system-row {\n  display: flex")
+    system_row_end = styles_css.index("}", system_row_start)
+    system_row_rule = styles_css[system_row_start:system_row_end]
+    assert "display: flex" in system_row_rule
+    assert "justify-content: center" in system_row_rule
+    assert "gap: 7px" in system_row_rule
+    assert "height: 34px" in system_row_rule
+    assert "min-height: 34px" in system_row_rule
+    assert "padding: 6px 12px" in system_row_rule
+    assert "text-align: center" in system_row_rule
+    system_title_rule = _css_rule(styles_css, ".settings-system-row .settings-row-title")
+    assert "height: 20px" in system_title_rule
     assert ".task-sidebar {" in styles_css
     sidebar_start = styles_css.index(".task-sidebar {\n  display: flex")
     sidebar_end = styles_css.index("}", sidebar_start)
@@ -2621,6 +3295,7 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "left: var(--collapsed-popover-left)" in collapsed_menu_rule
     assert "right: auto" in collapsed_menu_rule
     assert "bottom: 12px" in collapsed_menu_rule
+    assert "width: 268px" in collapsed_menu_rule
 
     assert "function renderSettingsState" in app_js
     assert "function handleSettingsMenuChange" in app_js
@@ -2633,21 +3308,35 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
 
 def test_appearance_setting_supports_light_dark_and_system_modes():
     app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
 
     assert 'let themePreference = "light"' in app_js
     assert "function systemTheme" in app_js
     assert "function watchSystemTheme" in app_js
     assert 'themePreference === "system"' in app_js
     assert 'localStorage.setItem("marvis_theme", themePreference)' in app_js
-    assert 'id="settingsThemeSelect"' in _read_static("index.html")
-    assert 'value="system"' in _read_static("index.html")
-    assert "跟随系统" in _read_static("index.html")
+    assert 'id="settingsThemeSelect"' in index_html
+    assert 'value="system"' in index_html
+    assert "跟随系统" in index_html
+    appearance_start = index_html.index('data-settings-row="appearance"')
+    appearance_start = index_html.rfind('<div class="settings-row"', 0, appearance_start)
+    appearance_end = index_html.index("</div>", index_html.index("</select>", appearance_start))
+    appearance_markup = index_html[appearance_start:appearance_end]
+    assert '<circle cx="12" cy="12" r="3.4"></circle>' in appearance_markup
+    assert '<path d="m18.4 5.6-1.55 1.55"></path>' in appearance_markup
+    assert '<path d="m7.15 16.85-1.55 1.55"></path>' in appearance_markup
+    assert 'localStorage.getItem("marvis_theme") || "light"' in index_html
+    assert 'document.body.dataset.theme = resolvedTheme;' in index_html
+    assert index_html.index('<body class="app-booting" data-theme="light">') < index_html.index('localStorage.getItem("marvis_theme")')
+    assert index_html.index('localStorage.getItem("marvis_theme")') < index_html.index('id="taskDialog"')
 
 
 def test_sidebar_settings_closes_on_outside_click_only():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
 
     assert "function closeSidebarSettingsOnOutsideClick" in app_js
+    assert "function openGovernanceSettingsFromSidebar" in app_js
     assert 'document.addEventListener("click", closeSidebarSettingsOnOutsideClick)' in app_js
 
     handler_start = app_js.index("function closeSidebarSettingsOnOutsideClick")
@@ -2657,26 +3346,45 @@ def test_sidebar_settings_closes_on_outside_click_only():
     assert "settings.open" in handler
     assert 'target.closest("#sidebarSettings")' in handler
     assert "settings.open = false" in handler
+    assert "function closeSidebarSettingsMenu" in app_js
+    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
+    assert "function handleGovernanceSettingsPointerDown" in app_js
+    assert "window.requestAnimationFrame" in app_js
+    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
+    assert "function setSidebarSettingsSuppressed" not in app_js
+    assert "modal-suppressed" not in app_js
+    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
+
+    assert ".sidebar-settings.modal-suppressed" not in styles_css
+    closed_menu_rule = _css_rule(styles_css, ".sidebar-settings:not([open]) .settings-menu")
+    assert "display: none" in closed_menu_rule
 
 
-def test_sidebar_settings_exposes_execution_environment_dialog():
+def test_system_settings_exposes_execution_environment_panel():
     index_html = _read_static("index.html")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
-    assert 'id="openExecutionEnvironmentButton"' in settings_markup
-    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
-    assert "执行环境" in settings_markup
-    assert 'id="executionEnvironmentDialog"' in index_html
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert "系统设置" in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert 'id="openExecutionEnvironmentButton"' not in settings_markup
+    assert 'id="settingsExecutionEnvironmentValue"' not in settings_markup
+    assert 'id="executionEnvironmentDialog"' not in index_html
+    assert 'data-governance-nav="execution-environment"' in index_html
+    assert 'data-governance-panel-content="execution-environment"' in index_html
 
     for element_id in [
-        "executionEnvironmentSelect",
+        "executionEnvironmentList",
         "refreshExecutionEnvironmentOptionsButton",
         "executionEnvironmentStatus",
-        "saveExecutionEnvironmentButton",
     ]:
         assert f'id="{element_id}"' in index_html
+    # The panel is now a click-to-select radiogroup that persists on click, so
+    # the old <select> + explicit save button were retired.
+    assert 'id="executionEnvironmentSelect"' not in index_html
+    assert 'id="saveExecutionEnvironmentButton"' not in index_html
 
 
 def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
@@ -2693,9 +3401,26 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '<option value="none">不显示</option>' in settings_markup
     assert '<option value="naitang">蛋黄</option>' in settings_markup
     assert '<option value="xiaojiu">小九</option>' in settings_markup
+    pet_row_start = settings_markup.index('data-settings-row="pet"')
+    pet_row_start = settings_markup.rfind('<div class="settings-row"', 0, pet_row_start)
+    pet_row_end = settings_markup.index("</div>", settings_markup.index("</select>", pet_row_start))
+    pet_row_markup = settings_markup[pet_row_start:pet_row_end]
+    assert "M8.2 10.4C8.7 6.7 10.2 3.8 12 3.8s3.3 2.9 3.8 6.6" in pet_row_markup
+    assert "M6.4 12.2 8.2 10.4l1.65 2.05 2-2.75" in pet_row_markup
+    assert "M6.8 12.4c-1 4.35 1.35 7.25 5.2 7.25" in pet_row_markup
+    assert "M9.7 13.4c.4-1.15 1.18-1.78 2.3-1.78" in pet_row_markup
+    assert '<circle cx="7.2" cy="9.2" r="1.65"></circle>' not in pet_row_markup
     assert 'id="petCompanion"' in index_html
-    assert 'class="pet-companion hidden"' in index_html
+    assert 'class="pet-companion"' in index_html
+    assert 'data-pet-id="naitang"' in index_html
     assert 'id="petSticker"' in index_html
+    assert 'class="pet-sprite"' in index_html
+    assert 'background-image: url("static/pets/naitang/spritesheet.webp")' in index_html
+    assert 'localStorage.getItem("marvis_pet")' in index_html
+    assert 'localStorage.getItem("marvis_pet_none_explicit") === "1"' in index_html
+    assert 'localStorage.getItem("marvis_pet_position")' in index_html
+    assert 'pet.classList.add("hidden");' in index_html
+    assert 'pet.style.left = `${Math.round(left)}px`;' in index_html
     assert 'id="petCompanionLabel"' not in index_html
     assert 'class="pet-companion-label"' not in index_html
     assert 'aria-live="polite"' in index_html
@@ -3024,23 +3749,23 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
         assert f'id="{removed_element_id}"' not in index_html
 
 
-def test_execution_environment_summary_and_dialog_are_compact():
+def test_execution_environment_panel_is_in_system_settings():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
+    index_html = _read_static("index.html")
 
     assert "executionEnvironmentSettingsLabel" in app_js
     assert "renderExecutionEnvironmentSummary" in app_js
-    assert "settingsExecutionEnvironmentValue" in app_js
-
-    dialog_start = styles_css.index(".environment-dialog {")
-    dialog_end = styles_css.index("}", dialog_start)
-    dialog_rule = styles_css[dialog_start:dialog_end]
-    assert "width: min(520px, calc(100vw - 32px))" in dialog_rule
+    assert "settingsExecutionEnvironmentValue" not in app_js
+    assert 'data-governance-nav="execution-environment"' in index_html
+    assert 'data-governance-panel-content="execution-environment"' in index_html
 
     section_start = styles_css.index(".environment-dialog .execution-environment-section {")
     section_end = styles_css.index("}", section_start)
     section_rule = styles_css[section_start:section_end]
     assert "grid-template-columns: 1fr" in section_rule
+    assert ".settings-panel-form" in styles_css
+    assert ".governance-panel-actions" in styles_css
 
 
 def test_execution_environment_api_fields_are_wired():
@@ -3635,6 +4360,8 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     hero_rule = styles_css[hero_start:hero_end]
     assert "overflow: hidden;" in hero_rule
     assert "isolation: isolate;" in hero_rule
+    assert "border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);" in hero_rule
+    assert "border: 1px solid transparent;" not in hero_rule
     assert "transform: translateZ(0);" in hero_rule
     assert "contain: paint;" in hero_rule
     assert "will-change: transform;" in hero_rule
@@ -3659,6 +4386,8 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     active_start = styles_css.index(".task-hero.is-glass-active {")
     active_end = styles_css.index("}", active_start)
     active_rule = styles_css[active_start:active_end]
+    assert "border-color: color-mix(in srgb, var(--border) 62%, transparent);" in active_rule
+    assert "border-color: transparent;" not in active_rule
     assert "var(--accent)" not in active_rule
     assert "rgba(0, 113, 227" not in active_rule
     assert "0 18px" not in active_rule
@@ -3667,6 +4396,8 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     dark_hero_start = styles_css.index('body[data-theme="dark"] .task-hero {')
     dark_hero_end = styles_css.index("}", dark_hero_start)
     dark_hero_rule = styles_css[dark_hero_start:dark_hero_end]
+    assert "border-color: color-mix(in srgb, var(--border) 58%, transparent);" in dark_hero_rule
+    assert "border-color: transparent;" not in dark_hero_rule
     assert "0 16px 42px" not in dark_hero_rule
     assert "rgba(0, 0, 0" not in dark_hero_rule
     assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
@@ -3765,7 +4496,7 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     assert "startAgentValidation" in app_js
 
 
-def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
+def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_composer():
     app_js = _read_static("app.js")
 
     create_scan_start = app_js.index("async function createTaskAndScan")
@@ -3775,7 +4506,17 @@ def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
     agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
     agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
 
+    assert 'const definition = taskTypeDefinition(task.task_type || activeTaskType);' in agent_branch
+    assert 'const isValidationTask = (task.task_type || activeTaskType || defaultTaskType) === "validation";' in agent_branch
+    # Non-validation agent tasks route to the inline conversation composer:
+    # createTask() already seeded it via prefillAgentTaskInstruction, so the
+    # branch only focuses the composer (the V2 plan dialog is retired).
+    assert "if (!isValidationTask && definition.initialGoal)" in agent_branch
+    assert '$("agentComposerInput")?.focus?.();' in agent_branch
+    assert "已填入建议目标，确认后发送即可。" in agent_branch
     assert 'setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");' in agent_branch
+    assert "openV2WorkspaceWithGoal(" not in agent_branch
+    assert "已打开 V2 Workflow 计划面板" not in agent_branch
     assert "await dispatchAgentValidation(taskId);" not in agent_branch
     assert "await scanCurrentTask();" not in agent_branch
     assert "正在自动识别材料" not in agent_branch
@@ -3784,6 +4525,60 @@ def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
 
     assert "async function dispatchAgentValidation" in app_js
     assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in app_js
+
+
+def test_welcome_task_cards_share_the_same_visual_treatment():
+    index_html = _read_static("index.html")
+    welcome_css = _read_static("css/welcome.css")
+
+    cards_start = index_html.index('id="welcomeTaskCards"')
+    cards_end = index_html.index("</div>", cards_start)
+    cards_markup = index_html[cards_start:cards_end]
+
+    assert 'class="welcome-task-card available primary-task"' not in cards_markup
+    assert ".welcome-task-card.primary-task" not in welcome_css
+    for task_kind in [
+        "feature_analysis",
+        "data_join",
+        "modeling",
+        "validation",
+        "strategy",
+        "vintage",
+    ]:
+        task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
+        class_start = cards_markup.rfind('class="', 0, task_index)
+        class_end = cards_markup.index('"', class_start + len('class="'))
+        assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card available"'
+
+
+def test_agent_task_creation_prefills_conversation_composer_with_goal():
+    app_js = _read_static("app.js")
+
+    # The V2 plan-composer dialog is retired; agent tasks now prefill the inline
+    # conversation composer with the task type's suggested goal.
+    helper_start = app_js.index("function prefillAgentTaskInstruction")
+    helper_end = app_js.index("async function createTask", helper_start)
+    helper_body = app_js[helper_start:helper_end]
+
+    assert 'if (task?.run_mode !== "agent") return;' in helper_body
+    assert 'const input = $("agentComposerInput");' in helper_body
+    # Only seed when the composer is empty, so a user's draft is never clobbered.
+    assert "if (!input || input.value.trim()) return;" in helper_body
+    assert "const definition = taskTypeDefinition(task.task_type || activeTaskType);" in helper_body
+    assert "input.value = definition.initialGoal;" in helper_body
+    assert "autoGrowComposerInput();" in helper_body
+    assert "updateAgentSendDisabled();" in helper_body
+    assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in app_js
+    assert "资产Vintage&滚动率分析、FPD、入催回收率分析相关字段" in app_js
+    assert "入催回收率和风险观察" in app_js
+    assert "营利性测算" not in app_js
+
+    # createTask() invokes the prefill once the task is created.
+    assert "prefillAgentTaskInstruction(task);" in app_js
+    # The retired V2 workspace composer helpers are gone.
+    assert "function seedV2GoalComposer" not in app_js
+    assert "function openV2WorkspaceWithGoal" not in app_js
+    assert "function showV2WorkspaceDialog" not in app_js
 
 
 def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
@@ -3814,6 +4609,81 @@ def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
 
     assert "taskServerBusyAction(task)" in delete_body
     assert 'task.status === "running"' not in delete_body
+
+
+def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    assert 'id="platformConfirmDialog"' in index_html
+    assert 'id="platformConfirmTitle"' in index_html
+    assert 'id="platformConfirmMessage"' in index_html
+    assert 'id="platformConfirmCancelButton"' in index_html
+    assert 'id="platformConfirmConfirmButton"' in index_html
+    assert '<svg viewBox="0 0 32 32" focusable="false">' in index_html
+    assert 'class="platform-confirm-icon-plate"' in index_html
+    assert 'class="platform-confirm-icon-triangle"' in index_html
+    assert 'class="platform-confirm-icon-mark"' in index_html
+    assert 'class="platform-confirm-icon-dot"' in index_html
+    assert 'M10.35 4.8 2.9 17.6' not in index_html
+    assert ".platform-confirm-dialog" in styles_css
+    assert ".platform-confirm-panel" in styles_css
+    confirm_icon_rule = _css_rule(styles_css, ".platform-confirm-icon")
+    assert "border-radius: 50%" not in confirm_icon_rule
+    assert "background: transparent" in confirm_icon_rule
+    assert "box-shadow: none" in confirm_icon_rule
+    confirm_icon_svg_rule = _css_rule(styles_css, ".platform-confirm-icon svg")
+    assert "display: block" in confirm_icon_svg_rule
+    assert "width: 32px" in confirm_icon_svg_rule
+    assert "height: 32px" in confirm_icon_svg_rule
+    assert "stroke-width: 1.8" in confirm_icon_svg_rule
+    confirm_icon_plate_rule = _css_rule(styles_css, ".platform-confirm-icon-plate")
+    assert "fill: color-mix(in srgb, currentColor 8%, transparent)" in confirm_icon_plate_rule
+    assert "stroke: color-mix(in srgb, currentColor 28%, transparent)" in confirm_icon_plate_rule
+    assert "stroke-width: 1.2" in confirm_icon_plate_rule
+    confirm_icon_triangle_rule = _css_rule(styles_css, ".platform-confirm-icon-triangle")
+    assert "fill: color-mix(in srgb, currentColor 7%, transparent)" in confirm_icon_triangle_rule
+    assert "stroke-width: 1.7" in confirm_icon_triangle_rule
+    confirm_icon_mark_rule = _css_rule(styles_css, ".platform-confirm-icon-mark")
+    assert "stroke-width: 2.1" in confirm_icon_mark_rule
+    confirm_icon_dot_rule = _css_rule(styles_css, ".platform-confirm-icon-dot")
+    assert "stroke-width: 2.4" in confirm_icon_dot_rule
+    confirm_icon_danger_rule = _css_rule(
+        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-icon'
+    )
+    assert "color: var(--danger)" in confirm_icon_danger_rule
+    assert "background:" not in confirm_icon_danger_rule
+    assert "box-shadow:" not in confirm_icon_danger_rule
+    assert "function showPlatformConfirm" in app_js
+    assert "function bindPlatformConfirmDialog" in app_js
+    assert "bindPlatformConfirmDialog();" in app_js
+    assert "window.confirm" not in app_js
+
+    delete_start = app_js.index("async function deleteTask")
+    delete_end = app_js.index("async function runAction", delete_start)
+    delete_body = app_js[delete_start:delete_end]
+
+    assert "await showPlatformConfirm({" in delete_body
+    assert "window.confirm" not in delete_body
+    assert 'title: "删除任务"' in delete_body
+    assert 'confirmText: "删除"' in delete_body
+    assert 'cancelText: "取消"' in delete_body
+    assert 'tone: "danger"' in delete_body
+
+    confirm_action_rule = _css_rule(
+        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative'
+    )
+    assert "background: var(--danger)" in confirm_action_rule
+    assert "border-color: var(--danger)" in confirm_action_rule
+    assert "box-shadow: var(--button-solid-shadow)" in confirm_action_rule
+
+    confirm_action_hover_rule = _css_rule(
+        styles_css,
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative:hover:not(:disabled),\n'
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative:focus-visible:not(:disabled)',
+    )
+    assert "box-shadow: var(--button-solid-shadow-hover)" in confirm_action_hover_rule
 
 
 def test_agent_stop_response_polls_until_active_agent_job_finishes():
@@ -3886,17 +4756,19 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     assert 'reportSection.setAttribute("aria-hidden", hasReportMessages ? "false" : "true");' in report_visibility_body
 
 
-def test_llm_settings_dialog_and_agent_model_selector_exist():
+def test_llm_settings_panel_and_agent_model_selector_exist():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
-    assert 'id="llmSettingsDialog"' in index_html
     assert "模型引擎" in index_html
-    assert 'id="openLLMSettingsButton"' in index_html
+    assert 'id="llmSettingsDialog"' not in index_html
+    assert 'id="openLLMSettingsButton"' not in index_html
+    assert 'data-governance-nav="llm"' in index_html
+    assert 'data-governance-panel-content="llm"' in index_html
     assert 'id="llmModelProfiles"' in index_html
     assert 'class="llm-model-profiles llm-engine-list"' in index_html
-    assert 'id="settingsLLMValue"' in index_html
+    assert 'id="settingsLLMValue"' not in index_html
     assert 'id="agentModelSelect"' in index_html
 
     # Connection details (incl. API key) are edited in a focused dialog; the
@@ -3916,41 +4788,186 @@ def test_llm_settings_dialog_and_agent_model_selector_exist():
     assert "renderAgentModelOptions" in app_js
     assert "openLLMEngineEdit" in app_js
     assert "saveLLMEngineEdit" in app_js
+    assert 'openGovernanceSettingsCenter("llm")' in app_js
     assert "enabled: model.enabled !== false" in app_js
     assert "enable_thinking: Boolean(model.enable_thinking)" in app_js
     assert "$(\"llmEngineEnableThinking\").checked = Boolean(model.enable_thinking)" in app_js
     assert "llm-engine-item" in app_js
     assert ".llm-engine-item" in styles_css
-    assert ".llm-engine-add" in styles_css
     assert ".checkbox-field" in styles_css
 
+    llm_edit_actions_rule = _css_rule(styles_css, ".llm-engine-edit-actions")
+    assert "justify-content: flex-end" in llm_edit_actions_rule
 
-def test_draft_tools_dialog_and_governance_controls_exist():
+    llm_edit_button_rule = _css_rule(styles_css, ".llm-engine-edit-actions .button")
+    assert "min-width: 84px" in llm_edit_button_rule
+    assert "min-height: 38px" in llm_edit_button_rule
+    assert "padding: 8px 18px" in llm_edit_button_rule
+
+    assert ".llm-engine-edit-actions .button.secondary" not in styles_css
+    assert ".llm-engine-edit-actions .button.secondary:hover" not in styles_css
+
+    llm_cancel_rule = _css_rule(styles_css, ".button.secondary")
+    assert "border-color: var(--border-strong)" in llm_cancel_rule
+    assert "background: var(--surface)" in llm_cancel_rule
+    assert "box-shadow: var(--button-secondary-shadow)" in llm_cancel_rule
+
+    llm_cancel_hover_rule = _css_rule(
+        styles_css, ".button.secondary:hover:not(:disabled),\n.button.secondary:focus-visible:not(:disabled)"
+    )
+    assert "#9fbfe4" not in llm_cancel_hover_rule
+    assert "#f8fbff" not in llm_cancel_hover_rule
+    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in llm_cancel_hover_rule
+
+
+def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
+    v2_css = _read_static("css/v2-workbench.css")
 
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
-    assert 'data-settings-row="draft-tools"' in settings_markup
-    assert 'id="openDraftToolsButton"' in settings_markup
-    assert "草稿工具" in settings_markup
-    assert 'id="draftToolsDialog"' in index_html
+    assert 'data-settings-row="system"' in settings_markup
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert 'class="settings-system-row"' in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert "系统设置" in settings_markup
+    assert "运行配置" not in settings_markup
+    assert "治理与扩展" not in settings_markup
+    assert "治理中心" not in settings_markup
+    assert 'id="openExecutionEnvironmentButton"' not in settings_markup
+    assert 'id="openLLMSettingsButton"' not in settings_markup
+    assert 'id="openDraftToolsButton"' not in settings_markup
+    assert 'id="openV2WorkspaceButton"' not in settings_markup
+    assert 'id="openAgentMemoryButton"' not in settings_markup
+    assert 'class="settings-governance-card"' not in settings_markup
+
+    assert 'id="governanceSettingsDialog"' in index_html
+    assert 'id="governanceSettingsNav"' in index_html
+    assert 'id="governanceSettingsSearch"' in index_html
+    search_field_start = index_html.index('class="governance-search-field"')
+    search_field_end = index_html.index("</label>", search_field_start)
+    search_field_markup = index_html[search_field_start:search_field_end]
+    assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in search_field_markup
+    assert '<circle cx="10.5" cy="10.5" r="6"></circle>' in search_field_markup
+    assert '<path d="m14.85 14.85 4.15 4.15"></path>' in search_field_markup
+    assert 'id="closeGovernanceSettingsButton"' in index_html
+    # The IA refactor consolidated 11 nav items into 6: memory records /
+    # distillations moved inside the memory-policy panel, while drafts +
+    # runtime-plan + audit collapsed into the shared runtime panel.
+    for nav in [
+        "execution-environment",
+        "llm",
+        "capabilities",
+        "memory-policy",
+        "plugins",
+        "workflows",
+    ]:
+        assert f'data-governance-nav="{nav}"' in index_html
+    for retired_nav in [
+        "memory-records",
+        "memory-distillations",
+        "drafts",
+        "runtime-plan",
+        "audit",
+    ]:
+        assert f'data-governance-nav="{retired_nav}"' not in index_html
+
+    assert 'data-governance-panel-content="execution-environment"' in index_html
+    assert 'data-governance-panel-content="llm"' in index_html
+    assert 'id="executionEnvironmentList"' in index_html
+    assert 'id="refreshExecutionEnvironmentOptionsButton"' in index_html
+    # Click-to-select radiogroup auto-saves; the <select> + save button are gone.
+    assert 'id="executionEnvironmentSelect"' not in index_html
+    assert 'id="saveExecutionEnvironmentButton"' not in index_html
+    assert 'id="llmModelProfiles"' in index_html
+    assert 'id="addLLMModelButton"' in index_html
+    assert "Notebook 和工具运行使用的 Python 环境" in index_html
+    assert "配置本地会话可调用的大模型连接信息" in index_html
+    assert "控制 Agent 记忆的引用范围" in app_js
+    # Memory policies are checkbox switches now; only the platform-forced
+    # (sensitive-material) row still renders a status badge.
+    assert 'class="memory-policy-switch" data-memory-policy="reference_cross_task"' in index_html
+    assert 'class="memory-policy-switch" data-memory-policy="auto_distill"' in index_html
+    assert 'class="governance-status-badge required">平台强制</span>' in index_html
+    assert 'class="governance-toggle"' not in index_html
+    assert "复核 Agent 产出的工具草稿" in index_html
+    assert "管理可调用工具包" in app_js
+    assert 'id="draftToolsDialog"' not in index_html
+    assert 'id="v2WorkspaceDialog"' not in index_html
+    assert 'id="agentMemoryDialog"' not in index_html
+    assert 'id="executionEnvironmentDialog"' not in index_html
+    assert 'id="llmSettingsDialog"' not in index_html
+
     assert 'id="draftToolsList"' in index_html
     assert 'id="draftToolDetail"' in index_html
     assert 'id="draftStatusFilter"' in index_html
-    assert 'id="refreshDraftToolsButton"' in index_html
+    # Drafts live in a collapsible <details> that lazy-loads on toggle; the
+    # standalone refresh button was retired.
+    assert 'id="draftManageDetails"' in index_html
+    assert 'id="refreshDraftToolsButton"' not in index_html
     assert 'id="draftRunInputs"' in index_html
     assert 'id="draftPromotionTestCases"' in index_html
     assert 'id="runDraftButton"' in index_html
     assert 'id="promoteDraftButton"' in index_html
     assert 'id="rejectDraftButton"' in index_html
     assert "无网时请在外部产出工具后通过插件上传导入" in index_html
+    assert 'class="draft-tools-sidebar"' in index_html
+    assert 'class="draft-tool-overview-card"' in index_html
+    assert 'class="draft-tool-section"' in index_html
+    assert "工具代码" in index_html
+    assert "输入 / 输出契约" in index_html
+    assert "试运行" in index_html
+    assert "转正闸门" in index_html
 
+    assert 'id="agentMemoryList"' in index_html
+    assert 'id="agentMemoryStatusFilter"' in index_html
+    assert 'data-agent-memory-view="raw"' in index_html
+    assert 'data-agent-memory-view="distillation"' in index_html
+    assert 'data-agent-memory-mode=' not in index_html
+    assert 'id="v2RuntimeMount"' in index_html
+    # Plugins / workflows / capabilities share the runtime panel and are
+    # selected via data-v2-view; their refresh controls are rendered into
+    # v2RuntimeMount by the runtime modules rather than baked into index.html.
+    assert 'data-governance-panel="runtime" data-v2-view="plugins"' in index_html
+    assert 'data-governance-panel="runtime" data-v2-view="workflows"' in index_html
+    assert 'data-governance-panel="runtime" data-v2-view="capabilities"' in index_html
+    capabilities_nav_start = index_html.index('data-governance-nav="capabilities"')
+    capabilities_nav_end = index_html.index("</button>", capabilities_nav_start)
+    capabilities_nav_markup = index_html[capabilities_nav_start:capabilities_nav_end]
+    assert '<path d="M3.34 19a10 10 0 1 1 17.32 0"></path>' in capabilities_nav_markup
+    assert '<path d="M12 14l4-4"></path>' in capabilities_nav_markup
+    assert '<circle cx="12" cy="18" r="1.5"></circle>' not in capabilities_nav_markup
+    memory_nav_start = index_html.index('data-governance-nav="memory-policy"')
+    memory_nav_end = index_html.index("</button>", memory_nav_start)
+    memory_nav_markup = index_html[memory_nav_start:memory_nav_end]
+    assert '<circle cx="14" cy="6" r="2"></circle>' in memory_nav_markup
+    assert '<circle cx="16" cy="18" r="2"></circle>' in memory_nav_markup
+
+    assert "function openGovernanceSettingsCenter" in app_js
+    assert "function openGovernanceSettingsFromSidebar" in app_js
+    assert "function closeSidebarSettingsMenu" in app_js
+    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
+    assert "function handleGovernanceSettingsPointerDown" in app_js
+    assert "function setSidebarSettingsSuppressed" not in app_js
+    assert "function handleGovernanceSettingsDialogClose" not in app_js
+    assert "function setGovernanceSettingsPanel" in app_js
+    assert "handleGovernanceSettingsSearch" in app_js
+    assert '$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;' in app_js
+    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
+    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
+    assert 'openGovernanceSettingsCenter("llm")' in app_js
+    assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
     assert "let draftTools = [];" in app_js
-    assert "function openDraftToolsDialog" in app_js
+    # Drafts open via the runtime panel's <details> toggle (lazy load) and the
+    # status filter, not a dedicated dialog or nav key.
+    assert '$("draftManageDetails").addEventListener("toggle"' in app_js
+    assert 'runAction(loadDraftTools, { actionId: "draftTools"' in app_js
+    assert "function openDraftToolsDialog" not in app_js
+    assert 'openGovernanceSettingsCenter("drafts")' not in app_js
     assert "async function loadDraftTools" in app_js
     assert "async function inspectDraftTool" in app_js
     assert "async function runDraftTool" in app_js
@@ -3964,10 +4981,78 @@ def test_draft_tools_dialog_and_governance_controls_exist():
     assert "请填写转正测试用例。" in app_js
     assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in app_js
 
-    assert ".draft-tools-dialog" in styles_css
+    assert "dialog.governance-settings-dialog" in styles_css
+    assert ".governance-settings-dialog" in styles_css
+    assert ".governance-settings-shell" in styles_css
+    assert ".governance-nav-item.selected" in styles_css
+    for selector in [
+        ".governance-search-field input",
+        ".governance-nav-item",
+    ]:
+        assert "border-radius: var(--radius-control)" in _css_rule(styles_css, selector)
+    nav_icon_rule = _css_rule(styles_css, ".governance-nav-icon")
+    assert "width: 20px" in nav_icon_rule
+    assert "height: 20px" in nav_icon_rule
+    nav_icon_svg_rule = _css_rule(styles_css, ".governance-nav-icon svg")
+    assert "display: block" in nav_icon_svg_rule
+    assert "width: 18px" in nav_icon_svg_rule
+    assert "height: 18px" in nav_icon_svg_rule
+    assert "stroke-width: 1.8" in nav_icon_svg_rule
+    nav_label_rule = _css_rule(styles_css, ".governance-nav-item strong")
+    assert "line-height: 20px" in nav_label_rule
+    search_field_rule = _css_rule(styles_css, ".governance-search-field")
+    assert "position: relative" in search_field_rule
+    search_icon_rule = _css_rule(styles_css, ".governance-search-field svg")
+    assert "left: 11px" in search_icon_rule
+    assert "width: var(--sidebar-control-icon-size)" in search_icon_rule
+    assert "stroke: currentColor" in search_icon_rule
+    search_input_rule = _css_rule(styles_css, ".governance-search-field input")
+    assert "padding: 0 12px 0 36px" in search_input_rule
+    nav_hover_rule = _css_rule(styles_css, ".governance-nav-item:hover")
+    assert "background: var(--option-hover)" in nav_hover_rule
+    assert "background: var(--surface)" not in nav_hover_rule
+    nav_focus_rule = _css_rule(styles_css, ".governance-nav-item:focus-visible")
+    assert "background: var(--option-hover)" in nav_focus_rule
+    assert "outline: 3px solid var(--option-focus-ring)" in nav_focus_rule
+    assert "var(--accent" not in nav_focus_rule
+    nav_selected_rule = _css_rule(styles_css, ".governance-nav-item.selected")
+    assert "background: var(--option-selected)" in nav_selected_rule
+    assert "box-shadow: none" in nav_selected_rule
+    assert "border-color" not in nav_selected_rule
+    assert "background: var(--surface)" not in nav_selected_rule
+    governance_icon_button_rule = _css_rule(styles_css, ".governance-head-actions .governance-icon-button")
+    assert "border-radius: var(--radius-control)" in governance_icon_button_rule
+    assert ".governance-setting-row .governance-status-badge" in styles_css
+    assert ".hidden,\n[hidden]" in styles_css
+    assert "display: none !important;" in styles_css
     assert ".draft-tools-layout" in styles_css
+    assert ".draft-tools-sidebar" in styles_css
+    assert ".draft-tool-section" in styles_css
     assert ".draft-tool-detail" in styles_css
     assert ".draft-code-block" in styles_css
+
+    assert ".v2-workspace-summary" in v2_css
+    assert "grid-template-areas:" in v2_css
+    for area in [
+        '"goal plan plugin"',
+        '"join subagent skill"',
+        '"loop artifact draft"',
+        '"capability memory memory"',
+    ]:
+        assert area in v2_css
+    for selector in [
+        ".v2-goal-panel",
+        ".v2-plan-panel",
+        ".v2-plugin-panel",
+        ".v2-skill-panel",
+        ".v2-draft-panel",
+        ".v2-capability-panel",
+        ".v2-memory-panel",
+    ]:
+        assert selector in v2_css
+    assert '.governance-settings-dialog .plugin-row input[type="checkbox"]' in v2_css
+    assert '.governance-settings-dialog[data-v2-view="plugins"] .v2-plugin-panel' in v2_css
+    assert '.governance-settings-dialog[data-v2-view="capabilities"] .v2-capability-panel' in v2_css
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():
@@ -4020,11 +5105,21 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     send_end = styles_css.index("}", send_start)
     send_rule = styles_css[send_start:send_end]
     assert "background: var(--brand-primary);" in send_rule
+    assert "0 3px 10px rgba(0, 0, 0, 0.18)" in send_rule
     send_hover_start = styles_css.index(".agent-send:hover:not(:disabled) {")
     send_hover_end = styles_css.index("}", send_hover_start)
     send_hover_rule = styles_css[send_hover_start:send_hover_end]
     assert "background: var(--brand-primary-hover);" in send_hover_rule
+    assert "transform:" not in send_hover_rule
     assert "background: #a91017;" not in send_hover_rule
+    send_active_rule = _css_rule(styles_css, ".agent-send:active:not(:disabled)")
+    assert "background: color-mix(in srgb, var(--brand-primary) 82%, #000000);" in send_active_rule
+
+    dark_send_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send')
+    assert "background:" not in dark_send_rule
+    assert 'body[data-theme="dark"] .agent-send:hover:not(:disabled)' not in styles_css
+    dark_send_active_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send:active:not(:disabled)')
+    assert "background: color-mix(in srgb, var(--brand-primary) 82%, #000000);" in dark_send_active_rule
 
     disabled_start = styles_css.index(".agent-send:disabled {")
     disabled_end = styles_css.index("}", disabled_start)
@@ -4036,7 +5131,12 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     conversation_end = styles_css.index("}", conversation_start)
     conversation_rule = styles_css[conversation_start:conversation_end]
     assert "margin-top: 0;" in conversation_rule
+    assert "padding: 8px 0 0;" in conversation_rule
     assert "min-height:" not in conversation_rule
+    assert "border:" not in conversation_rule
+    assert "background:" not in conversation_rule
+    assert "box-shadow:" not in conversation_rule
+    assert 'body[data-theme="dark"] .agent-conversation' not in styles_css
 
     messages_start = styles_css.index(".agent-messages {", styles_css.index(".agent-stage-messages.hidden"))
     messages_end = styles_css.index("}", messages_start)
@@ -4103,6 +5203,35 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert ".agent-message.user" in styles_css
     assert ".agent-message.user .agent-message-content" in styles_css
     assert "margin-left: auto;" in styles_css
+    user_start = styles_css.index(".agent-message.user .agent-message-content")
+    user_end = styles_css.index("}", user_start)
+    user_rule = styles_css[user_start:user_end]
+    assert "max-width: min(300px, 86%)" in user_rule
+    assert "background: linear-gradient(180deg, #f2f3f5, #e9ebef)" in user_rule
+    assert "0 1px 2px rgba(0, 0, 0, 0.05)" in user_rule
+    assert "inset 0 1px 0 rgba(255, 255, 255, 0.52)" in user_rule
+    assert "font-size: 14px" in user_rule
+    assert "line-height: 1.58" in user_rule
+    assert "border:" not in user_rule
+    assert "backdrop-filter" not in user_rule
+    assert "rgba(255, 255, 255, 0.62)" not in user_rule
+    assert "rgba(255, 255, 255, 0.16) 34%" not in user_rule
+    assert "0 8px 24px" not in user_rule
+    assert "var(--accent)" not in user_rule
+
+    dark_user_start = styles_css.index('body[data-theme="dark"] .agent-message.user .agent-message-content')
+    dark_user_end = styles_css.index("}", dark_user_start)
+    dark_user_rule = styles_css[dark_user_start:dark_user_end]
+    assert "background: linear-gradient(180deg, #3a3c40, #303236)" in dark_user_rule
+    assert "0 1px 2px rgba(0, 0, 0, 0.22)" in dark_user_rule
+    assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_user_rule
+    assert "border" not in dark_user_rule
+    assert "backdrop-filter" not in dark_user_rule
+    assert "rgba(255, 255, 255, 0.12)" not in dark_user_rule
+    assert "rgba(255, 255, 255, 0.04) 36%" not in dark_user_rule
+    assert "0 8px 24px" not in dark_user_rule
+    assert "var(--accent)" not in dark_user_rule
+
     assert ".agent-message.assistant .agent-message-content" in styles_css
     assert ".agent-message:last-child" not in styles_css
     assert "agent-message-rise" not in styles_css
@@ -4210,7 +5339,7 @@ def test_agent_memory_has_no_permanent_task_top_block():
         assert f".{name}" not in styles_css
         assert f'$("${name}")' not in app_js
 
-    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="governanceSettingsDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
 
 
@@ -4289,11 +5418,11 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
-    assert 'id="openAgentMemoryButton"' in index_html
-    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="openGovernanceSettingsButton"' in index_html
+    assert 'id="governanceSettingsDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
-    assert 'id="agentMemoryRawTab"' in index_html
-    assert 'id="agentMemoryDistillationTab"' in index_html
+    assert 'data-agent-memory-view="raw"' in index_html
+    assert 'data-agent-memory-view="distillation"' in index_html
     status_filter_start = index_html.index('id="agentMemoryStatusFilter"')
     status_filter_end = index_html.index("</select>", status_filter_start)
     status_filter = index_html[status_filter_start:status_filter_end]
@@ -4320,9 +5449,17 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
     assert "function syncAgentMemoryViewControls" in app_js
     assert "function setAgentMemoryViewMode" in app_js
-    assert ".agent-memory-dialog" in styles_css
-    assert ".agent-memory-view-switch" in styles_css
+    assert "dialog.agent-memory-dialog" in styles_css
+    assert ".governance-settings-dialog" in styles_css
+    assert ".governance-settings-shell" in styles_css
+    assert ".agent-memory-filter-card" in styles_css
+    assert ".agent-memory-workspace" in styles_css
+    assert ".agent-memory-detail:empty::before" in styles_css
     assert ".agent-memory-references" in styles_css
+    memory_switch_rule = _css_rule(styles_css, ".agent-memory-view-switch")
+    assert "border-radius: var(--radius-control)" in memory_switch_rule
+    memory_tab_rule = _css_rule(styles_css, ".agent-memory-view-tab")
+    assert "border-radius: var(--radius-control)" in memory_tab_rule
 
 
 def test_agent_memory_delete_keeps_audit_detail_visible():
@@ -4798,6 +5935,8 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     script = "\n".join(
         [
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let llmSettings = { enabled_models: [] };",
             "let apiCalls = 0;",
             "let focusedModel = false;",
@@ -4839,6 +5978,22 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     assert "配置并启用大模型" in payload["status"]["message"]
 
 
+def test_agent_send_always_requires_llm():
+    """Agent mode IS "manual mode whose operator decisions are made by an LLM", so
+    it always requires a configured model — no task type bypasses the gate, and
+    there is no canned/default agent conversation. The deterministic no-LLM path is
+    the separate manual mode."""
+    app_js = _read_static("app.js")
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    body = app_js[send_start:send_end]
+    assert "const unavailableModelMessage = agentModelUnavailableMessage();" in body
+    assert "showAgentModelGuidance(unavailableModelMessage)" in body
+    # no task-type bypass of the model-availability gate
+    assert "requiresLlm" not in body
+    assert "taskUsesPlanRail(selectedTask)" not in body
+
+
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
@@ -4872,6 +6027,14 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     assert '.agent-send[data-agent-send-state="stop"]' in styles_css
     assert ".agent-send-icon-stop" in styles_css
     assert ".agent-send[data-agent-send-state=\"stop\"] svg" in styles_css
+    stop_rule = _css_rule(styles_css, '.agent-send[data-agent-send-state="stop"]')
+    assert "background: #1d1f23" in stop_rule
+    dark_stop_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]')
+    assert "background: #1d1f23" in dark_stop_rule
+    dark_stop_hover_rule = _css_rule(
+        styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]:hover:not(:disabled)'
+    )
+    assert "background: #111318" in dark_stop_hover_rule
 
 
 def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
@@ -4894,6 +6057,8 @@ def test_agent_send_shows_thinking_message_before_network_wait():
     script = "\n".join(
         [
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
@@ -4953,6 +6118,8 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
         [
             "const AGENT_STREAM_POLL_INTERVAL_MS = 1;",
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "let pollCount = 0;",
@@ -5022,8 +6189,8 @@ def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_
     conversation_start = app_js.index("function renderAgentConversation")
     conversation_end = app_js.index("function agentTimelineStageDefinitions", conversation_start)
     conversation = app_js[conversation_start:conversation_end]
-    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!isAgent)")
-    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!isAgent)")
+    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!showConversation)")
+    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!showConversation)")
 
     model_change_start = app_js.index('$("agentModelSelect").onchange')
     model_change_end = app_js.index('$("sendAgentMessageButton").onclick', model_change_start)
@@ -5338,10 +6505,11 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
             "  data: isSafeAssetUrl('data:text/html,x'),",
             "};",
             "const fallback = normalizeBranding({ logoUrl: 'javascript:alert(1)', "
-            "faviconUrl: '//evil.test/f.ico' });",
+            "workspaceLogoUrl: 'data:image/png,x', faviconUrl: '//evil.test/f.ico' });",
             "const aliases = normalizeValidatorAliases({ '  A  ': '  a  ', B: '', C: 5, D: 'd' });",
             "process.stdout.write(JSON.stringify({ probes, logoUrl: fallback.logoUrl, "
-            "faviconUrl: fallback.faviconUrl, aliases, brandingAliases: fallback.validatorAliases }));",
+            "workspaceLogoUrl: fallback.workspaceLogoUrl, faviconUrl: fallback.faviconUrl, "
+            "aliases, brandingAliases: fallback.validatorAliases }));",
         ]
     )
     result = subprocess.run(
@@ -5362,6 +6530,7 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
     }
     # Unsafe URLs are dropped and the safe defaults are kept (never the injection).
     assert "javascript:" not in data["logoUrl"]
+    assert "data:" not in data["workspaceLogoUrl"]
     assert "evil.test" not in data["faviconUrl"]
     # Validator aliases are trimmed; empty / non-string entries are dropped.
     assert data["aliases"] == {"A": "a", "D": "d"}

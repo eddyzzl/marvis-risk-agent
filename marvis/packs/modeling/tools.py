@@ -37,8 +37,10 @@ from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
+from marvis.feature.screen import screen_features
 from marvis.packs.modeling.scenarios import apply_scenario
 from marvis.packs.modeling.select import select_features
+from marvis.packs.modeling.tune import tune_hyperparameters
 from marvis.packs.modeling.errors import ModelingError
 from marvis.settings import build_settings
 from marvis.validation.config import ValidationConfig
@@ -109,11 +111,71 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         vif_max=float(inputs.get("vif_max", 10.0)),
         top_k=_optional_int(inputs.get("top_k")),
         seed=int(ctx.seed or 0),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     return {
         "selected": list(result.selected),
         "dropped": [[feature, reason] for feature, reason in result.dropped],
         "scores": _jsonable(result.scores),
+        "nan_labels_dropped": result.nan_labels_dropped,
+    }
+
+
+def tool_screen_features(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    holdout = inputs.get("holdout_values")
+    result = screen_features(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        features=[str(item) for item in inputs["features"]],
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+        holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
+        leakage_ks=float(inputs.get("leakage_ks", 0.40)),
+        max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
+        top_k=_optional_int(inputs.get("top_k")),
+        batch_size=int(inputs.get("batch_size", 500)),
+    )
+    return {
+        "selected": list(result.selected),
+        "ranked": [[feature, ks] for feature, ks in result.ranked],
+        "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
+        "suspected": [[feature, ks, reason] for feature, ks, reason in result.suspected],
+        "unusable": [[feature, reason] for feature, reason in result.unusable],
+        "scores": _jsonable(result.scores),
+        "n_screened": result.n_screened,
+    }
+
+
+def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
+    # The random search is LightGBM-specific. For other recipes there is no lgb
+    # search to run (lr/scorecard have their own knobs, not a random search; xgb
+    # tuning is a later slice), so we skip tuning and let train_model use the
+    # recipe's own defaults.
+    recipe = str(inputs.get("recipe") or "lgb")
+    if recipe != "lgb":
+        return {"best_params": {}, "best_metrics": {}, "n_trials": 0, "trials": []}
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    result = tune_hyperparameters(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        features=[str(item) for item in inputs["features"]],
+        target_col=str(inputs["target_col"]),
+        split_col=str(inputs["split_col"]),
+        split_values=dict(inputs["split_values"]),
+        n_trials=int(inputs.get("n_trials", 40)),
+        seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
+        early_stopping_rounds=int(inputs.get("early_stopping_rounds", 100)),
+        max_boost_round=int(inputs.get("max_boost_round", 3000)),
+        overfit_penalty=float(inputs.get("overfit_penalty", 0.5)),
+    )
+    return {
+        "best_params": _jsonable(result.best_params),
+        "best_metrics": _jsonable(result.best_metrics),
+        "n_trials": result.n_trials,
+        "trials": _jsonable(result.trials),
     }
 
 
@@ -131,6 +193,7 @@ def tool_train_model(inputs: dict, ctx) -> dict:
         seed=int(inputs["seed"]),
         early_stopping_rounds=_optional_int(inputs.get("early_stopping_rounds")),
         recipe_id=recipe,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     if inputs.get("scenario"):
         config = apply_scenario(config, str(inputs["scenario"]))
@@ -161,7 +224,81 @@ def tool_train_model(inputs: dict, ctx) -> dict:
         "artifact_id": artifact.id,
         "metrics": _jsonable(experiment.metrics),
         "feature_importance": _jsonable(result.feature_importance),
+        "nan_labels_dropped": result.nan_labels_dropped,
     }
+
+
+def tool_train_models(inputs: dict, ctx) -> dict:
+    """Train each requested recipe and return all experiments plus the best by OOT KS
+    (test KS fallback). lgb uses the tuned params; other recipes train with their own
+    defaults. The single-recipe case (recipes=[lgb]) behaves like train_model."""
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    recipes = [str(item) for item in inputs["recipes"]]
+    tuned_params = dict(inputs.get("params") or {})
+    features = tuple(str(item) for item in inputs["features"])
+    target_col = str(inputs["target_col"])
+    split_col = str(inputs["split_col"])
+    split_values = dict(inputs["split_values"])
+    seed = int(inputs["seed"])
+    drop_nan = bool(inputs.get("drop_nan_labels"))
+
+    experiments: list[dict] = []
+    for recipe in recipes:
+        config = TrainConfig(
+            dataset_id=dataset.id,
+            features=features,
+            target_col=target_col,
+            split_col=split_col,
+            split_values=split_values,
+            # only the lgb recipe consumes the tuned params; others use their defaults
+            params=dict(tuned_params) if recipe == "lgb" else {},
+            seed=seed,
+            early_stopping_rounds=None,
+            recipe_id=recipe,
+            drop_nan_labels=drop_nan,
+        )
+        experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
+        try:
+            result = _train_recipe(
+                recipe,
+                runtime.backend,
+                runtime.registry.resolve_path(dataset.id),
+                config,
+                out_dir=_artifact_base_dir(runtime.settings, ctx.task_id),
+            )
+            runtime.experiments.attach_result(experiment_id, result)
+        except Exception:
+            runtime.experiments.set_status(experiment_id, "failed")
+            raise
+        experiment = runtime.experiments.get(experiment_id)
+        experiments.append({
+            "experiment_id": experiment_id,
+            "recipe": recipe,
+            "metrics": _jsonable(experiment.metrics) or {},
+        })
+
+    best = _pick_best_experiment(experiments)
+    return {
+        "experiments": experiments,
+        "experiment_ids": [exp["experiment_id"] for exp in experiments],
+        "best_experiment_id": best["experiment_id"],
+        "best_recipe": best["recipe"],
+    }
+
+
+def _pick_best_experiment(experiments: list[dict]) -> dict:
+    """Best by OOT KS, falling back to test KS, then first. OOT is the unbiased
+    final metric; test KS is the fallback when there is no OOT set."""
+    def score(experiment: dict) -> float:
+        metrics = experiment.get("metrics") or {}
+        for key in ("oot_ks", "test_ks"):
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return float("-inf")
+
+    return max(experiments, key=score)
 
 
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
@@ -244,6 +381,7 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         report_dataset_path,
         score_col=score_col,
         target_col=experiment.config.target_col,
+        config=experiment.config,
         business=business,
     )
     feature_dictionary_id = _optional_str(inputs.get("feature_dictionary_id"))
@@ -527,9 +665,13 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
             split_frame = frame[frame[config.split_col] == split_value]
             if split_frame.empty:
                 continue
+            target_series = pd.to_numeric(split_frame[config.target_col], errors="coerce")
+            if target_series.notna().sum() == 0:
+                # Scoring-only split (no labels): skip univariate label metrics for it.
+                continue
             metrics = feature_metrics(
                 split_frame[feature].to_numpy(dtype=float),
-                split_frame[config.target_col].to_numpy(dtype=int),
+                target_series.to_numpy(dtype=float),
                 feature=feature,
             )
             rows.append({
@@ -690,12 +832,18 @@ def _report_bin_table(
     *,
     score_col: str,
     target_col: str,
+    config: TrainConfig,
     business: BusinessColumns,
 ) -> list[dict]:
-    frame = runtime.backend.read_frame(dataset_path, columns=[score_col])
+    columns = _unique_columns([score_col, target_col, config.split_col])
+    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    oot_value = config.split_values.get("oot", "oot")
+    oot_frame = frame[frame[config.split_col] == oot_value]
+    if oot_frame.empty:
+        return []
     from marvis.validation.binning import equal_frequency_bin_edges
 
-    edges = equal_frequency_bin_edges(frame[score_col].to_numpy(dtype=float), 10)
+    edges = equal_frequency_bin_edges(oot_frame[score_col].to_numpy(dtype=float), 10)
     return compute_amount_bin_table(
         runtime.backend,
         dataset_path,
@@ -703,6 +851,7 @@ def _report_bin_table(
         target_col=target_col,
         edges=edges,
         business=business,
+        filters={config.split_col: oot_value},
     )
 
 

@@ -20,6 +20,12 @@ REQUIRED_ROLES = (
     FileRole.MODEL_PMML,
     FileRole.DATA_DICTIONARY,
 )
+ROLE_TASK_FIELDS = {
+    FileRole.NOTEBOOK: "notebook_path",
+    FileRole.SAMPLE: "sample_path",
+    FileRole.MODEL_PMML: "pmml_path",
+    FileRole.DATA_DICTIONARY: "dictionary_path",
+}
 
 
 def load_v1_task_context(ctx, task_id: str) -> V1TaskContext:
@@ -69,10 +75,27 @@ def material_payloads(context: V1TaskContext, artifacts: list[FileArtifact]) -> 
     ]
 
 
-def material_checks(artifacts: list[FileArtifact]) -> list[dict]:
+def material_checks(context: V1TaskContext, artifacts: list[FileArtifact]) -> list[dict]:
     by_role = {role: [artifact for artifact in artifacts if artifact.role == role] for role in REQUIRED_ROLES}
     checks = []
     for role in REQUIRED_ROLES:
+        try:
+            explicit = _explicit_material_path(context, role)
+        except ValueError as exc:
+            checks.append({
+                "name": role.value,
+                "status": "missing",
+                "detail": str(exc),
+            })
+            continue
+        if explicit is not None:
+            checks.append({
+                "name": role.value,
+                "status": "ok",
+                "detail": explicit.name,
+                "selected": safe_relative_path(explicit, Path(context.task.source_dir).resolve()),
+            })
+            continue
         matches = by_role[role]
         if not matches:
             checks.append({
@@ -171,6 +194,25 @@ def read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _explicit_material_path(context: V1TaskContext, role: FileRole) -> Path | None:
+    field = ROLE_TASK_FIELDS[role]
+    configured = getattr(context.task, field, None)
+    if not configured:
+        return None
+    source_dir = Path(context.task.source_dir).resolve()
+    raw_path = Path(configured)
+    path = raw_path if raw_path.is_absolute() else source_dir / raw_path
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ValueError(f"configured {field} does not exist: {path}") from exc
+    try:
+        resolved.relative_to(source_dir)
+    except ValueError as exc:
+        raise ValueError(f"configured {field} must be inside source_dir: {resolved}") from exc
+    return resolved
 
 
 def _preferred_overall_row(rows: list) -> dict:

@@ -20,7 +20,8 @@ def tradeoff_view(
 ) -> list[TradeoffPoint]:
     _assert_columns(df, [score_col, target_col])
     scores = pd.to_numeric(df[score_col], errors="raise")
-    target = pd.to_numeric(df[target_col], errors="raise").fillna(0).astype(int)
+    # NaN labels must never be coerced to 0; callers gate/drop them upstream (tool boundary).
+    target = pd.to_numeric(df[target_col], errors="raise").astype(int)
     return [
         TradeoffPoint(
             cutoff=cutoff,

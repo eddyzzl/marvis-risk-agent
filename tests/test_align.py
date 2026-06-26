@@ -131,15 +131,15 @@ def test_align_rejects_name_match_when_data_does_not_match(tmp_path):
 
 
 def test_align_uses_fuzzy_fallback_only_after_dictionary_miss(tmp_path):
-    anchor_frame = pd.DataFrame({"acct_num": ["A1", "B2", "C3"]})
-    feature_frame = pd.DataFrame({"acct_no": ["A1", "B2", "C3"]})
+    anchor_frame = pd.DataFrame({"customer_key": ["A1", "B2", "C3"]})
+    feature_frame = pd.DataFrame({"customerkey": ["A1", "B2", "C3"]})
     anchor_path, anchor = _write_csv(tmp_path, "anchor.csv", anchor_frame)
     feature_path, feature = _write_csv(tmp_path, "feature.csv", feature_frame)
 
     pairs = ColumnAligner(DataBackend(tmp_path)).align(anchor, anchor_path, feature, feature_path)
 
     assert len(pairs) == 1
-    assert pairs[0].anchor_col == "acct_num"
-    assert pairs[0].feature_col == "acct_no"
+    assert pairs[0].anchor_col == "customer_key"
+    assert pairs[0].feature_col == "customerkey"
     assert pairs[0].match_method == "exact"
     assert pairs[0].resolved_by == "fuzzy"

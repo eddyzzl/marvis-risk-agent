@@ -247,6 +247,10 @@ def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, 
             "created_at": "2026-06-20T00:00:00Z",
         }
     }
+    audits = client.app.state.plugin_repo.list_audit(kind="draft.learning_note.create")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "note-1"
+    assert audits[0]["detail"]["source_count"] == 1
 
 
 def test_draft_author_endpoint_creates_draft_from_saved_learning_note(tmp_path, monkeypatch):
@@ -292,6 +296,10 @@ def test_draft_author_endpoint_creates_draft_from_saved_learning_note(tmp_path, 
     assert response.json()["draft"]["source"] == "web_learning"
     assert response.json()["draft"]["learning_note_id"] == "note-1"
     assert response.json()["draft"]["code"] is None
+    audits = client.app.state.plugin_repo.list_audit(kind="draft.author")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "draft-1"
+    assert audits[0]["detail"]["task_id"] == "task-1"
 
 
 def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):

@@ -8,6 +8,7 @@ import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
+from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
@@ -16,6 +17,9 @@ from marvis.packs.modeling.recipes.common import compute_model_metrics, split_mo
 def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
     params = {
         **get_recipe("lr").default_params,
         **config.params,
@@ -29,6 +33,7 @@ def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> Tr
         test,
         oot,
         config,
+        oot_has_labels=oot_has_labels,
     )
     artifact = _save_lr_model(model, config, out_dir, params)
     return TrainResult(
@@ -36,6 +41,7 @@ def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> Tr
         metrics=metrics,
         feature_importance=_lr_importance(model, config.features),
         experiment_id="",
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 

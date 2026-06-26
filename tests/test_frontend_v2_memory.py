@@ -41,8 +41,8 @@ def test_memory_manager_html_renders_distillations_and_escapes_payloads():
         assert.ok(html.includes('data-consolidate-memory'));
         assert.ok(html.includes('data-memory-distillation-id="distill-1"'));
         assert.ok(html.includes('data-rollback-memory-distillation="distill-1"'));
-        assert.ok(html.includes("field_convention"));
-        assert.ok(html.includes("support 4"));
+        assert.ok(html.includes("字段口径"));
+        assert.ok(html.includes("支持证据 4"));
         assert.equal(html.includes("目标字段 <bad>"), false);
         assert.ok(html.includes("目标字段 &lt;bad&gt;"));
         """
@@ -80,7 +80,7 @@ def test_memory_detail_html_shows_sources_audit_and_restored_predecessor():
         assert.ok(html.includes("PSI 分箱 &lt;risk&gt;"));
         assert.ok(html.includes("source &lt;x&gt;"));
         assert.ok(html.includes("restored &lt;old&gt;"));
-        assert.ok(html.includes("superseded by distill-3"));
+        assert.ok(html.includes("被 distill-3 替代"));
         assert.ok(html.includes("rollback"));
         """
     )
@@ -175,7 +175,7 @@ def test_memory_handlers_load_detail_rollback_consolidate_and_filter():
           ["refreshMemories", { category: "field_convention" }],
         ]);
         assert.ok(detailSlot.innerHTML.includes("detail"));
-        assert.ok(messages.some((message) => message.includes("Consolidated")));
+        assert.ok(messages.some((message) => message.includes("已合并 1 条记忆沉淀")));
 
         detach();
         assert.equal(listeners.click, undefined);

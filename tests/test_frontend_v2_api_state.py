@@ -436,6 +436,8 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.equal(first.panels.draftPanel.dataset.v2DraftManager, "true");
         assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
         assert.equal(first.panels.memoryPanel.dataset.v2MemoryManager, "true");
+        assert.equal(first.panels.goalPanel.dataset.panelTitle, "计划生成");
+        assert.equal(first.panels.pluginPanel.dataset.panelTitle, "插件");
         assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
         assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
         assert.ok(first.panels.joinPanel.innerHTML.includes('data-v2-empty="join"'));
@@ -443,7 +445,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         assert.ok(first.panels.skillPanel.innerHTML.includes('id="reloadSkills"'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-validate-skill'));
         assert.ok(first.panels.draftPanel.innerHTML.includes("data-draft-status"));
-        assert.ok(first.panels.capabilityPanel.innerHTML.includes('Guardrails remain constant'));
+        assert.ok(first.panels.capabilityPanel.innerHTML.includes('安全护栏保持一致'));
         assert.ok(first.panels.memoryPanel.innerHTML.includes('data-consolidate-memory'));
         assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
         assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
@@ -788,6 +790,6 @@ def test_v2_mount_fetches_capability_tiers_into_panel_and_state():
         assert.equal(getCapabilityTiers()[0].name, "autonomous");
         assert.equal(mounted.panels.capabilityPanel.innerHTML.includes("Auto <mode>"), false);
         assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("Auto &lt;mode&gt;"));
-        assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("max_replans"));
+        assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("最大重规划"));
         """
     )

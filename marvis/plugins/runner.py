@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 from typing import Any
@@ -35,6 +37,7 @@ class ToolResult:
     duration_ms: int
     stdout_tail: str = ""
     stderr_tail: str = ""
+    error_detail: dict | None = None
 
 
 class ToolRunner:
@@ -90,14 +93,10 @@ class ToolRunner:
             "plugin_paths": [str(path) for path in self._plugin_paths],
         }
         try:
-            completed = subprocess.run(
-                [self._python_executable, "-m", "marvis.plugins.subprocess_worker"],
-                input=json.dumps(job, ensure_ascii=False),
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
+            completed = _run_worker(
+                self._python_executable,
+                job,
                 timeout=tool.timeout_seconds,
-                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             result = _failed_result(
@@ -123,12 +122,14 @@ class ToolRunner:
             return result
 
         if not protocol.get("ok"):
+            error_detail = protocol.get("error_detail")
             result = _failed_result(
                 started,
                 str(protocol.get("error_kind") or "execution"),
                 str(protocol.get("error") or "tool execution failed"),
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
+                error_detail=error_detail if isinstance(error_detail, dict) else None,
             )
             self._write_audit(target_ref, inputs, result, seed=effective_seed)
             return result
@@ -195,14 +196,10 @@ class ToolRunner:
             "plugin_paths": [str(path) for path in self._plugin_paths],
         }
         try:
-            completed = subprocess.run(
-                [self._python_executable, "-m", "marvis.plugins.subprocess_worker"],
-                input=json.dumps(job, ensure_ascii=False),
-                text=True,
-                encoding="utf-8",
-                capture_output=True,
+            completed = _run_worker(
+                self._python_executable,
+                job,
                 timeout=int(timeout_seconds),
-                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             result = _failed_result(
@@ -228,12 +225,14 @@ class ToolRunner:
             return result
 
         if not protocol.get("ok"):
+            error_detail = protocol.get("error_detail")
             result = _failed_result(
                 started,
                 str(protocol.get("error_kind") or "execution"),
                 str(protocol.get("error") or "tool execution failed"),
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
+                error_detail=error_detail if isinstance(error_detail, dict) else None,
             )
             self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
             return result
@@ -279,6 +278,8 @@ class ToolRunner:
             "duration_ms": result.duration_ms,
             "seed": seed,
         }
+        if result.error_detail:
+            detail["error_detail"] = result.error_detail
         if mode:
             detail["mode"] = mode
         self._repo.write_audit(
@@ -297,6 +298,7 @@ def _failed_result(
     *,
     stdout_tail: str = "",
     stderr_tail: str = "",
+    error_detail: dict | None = None,
 ) -> ToolResult:
     return ToolResult(
         ok=False,
@@ -306,7 +308,45 @@ def _failed_result(
         duration_ms=_duration_ms(started),
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
+        error_detail=error_detail,
     )
+
+
+def _run_worker(python_executable: str, job: dict, *, timeout: int) -> subprocess.CompletedProcess:
+    args = [python_executable, "-m", "marvis.plugins.subprocess_worker"]
+    process = subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        start_new_session=(os.name != "nt"),
+    )
+    try:
+        stdout, stderr = process.communicate(json.dumps(job, ensure_ascii=False), timeout=int(timeout))
+    except subprocess.TimeoutExpired as exc:
+        _kill_worker_tree(process)
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(args, int(timeout), output=stdout, stderr=stderr) from exc
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _kill_worker_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _duration_ms(started: float) -> int:

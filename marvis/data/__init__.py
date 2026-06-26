@@ -22,6 +22,7 @@ from marvis.data.errors import (
     DedupRequiredError,
     FanOutError,
     JoinNotConfirmedError,
+    NanLabelNotConfirmedError,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "DedupRequiredError",
     "FanOutError",
     "JoinNotConfirmedError",
+    "NanLabelNotConfirmedError",
 ]

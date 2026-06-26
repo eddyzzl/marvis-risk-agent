@@ -16,6 +16,7 @@ from marvis.agent_memory.extractors import (
 )
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import TaskRepository
+from marvis.memory_policy import load_memory_policy
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     FileArtifact,
@@ -1343,6 +1344,7 @@ def _load_arrow_sample_with_python(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=600,
         )
         if completed.returncode != 0:
@@ -1484,6 +1486,10 @@ def _capture_agent_memory_for_metrics_success(
     task_id: str,
     outputs_dir: Path,
 ) -> None:
+    # Gate on the user-facing "自动沉淀任务经验" (auto_distill) memory policy:
+    # when off, no automatic capture happens on this pipeline surface either.
+    if not load_memory_policy(repo.db_path.parent).auto_distill:
+        return
     try:
         task = repo.get_task(task_id)
         payload = _read_validation_results_payload(outputs_dir)
@@ -1507,6 +1513,9 @@ def _capture_agent_memory_for_failure(
     failure_kind: str,
     message: str,
 ) -> None:
+    # Gate on auto_distill (see _capture_agent_memory_for_metrics_success).
+    if not load_memory_policy(repo.db_path.parent).auto_distill:
+        return
     try:
         store = AgentMemoryStore(repo.db_path)
         payload = {

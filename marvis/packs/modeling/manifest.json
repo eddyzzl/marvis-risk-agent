@@ -1,6 +1,6 @@
 {
   "name": "modeling",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "display_name": "Modeling Pack",
   "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, PMML export, and V1 validation handoff tools.",
   "module": "marvis.packs.modeling.tools",
@@ -12,25 +12,42 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "target_col": {"type": "string", "minLength": 1}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["dataset_id"],
+        "required": [
+          "dataset_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "issues": {"type": "array", "items": {"type": "object"}}
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["issues"],
+        "required": [
+          "issues"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_check_data_quality",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -39,29 +56,62 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "target_col": {"type": "string", "minLength": 1},
-          "split_col": {"type": "string", "minLength": 1}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["dataset_id", "target_col"],
+        "required": [
+          "dataset_id",
+          "target_col"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "ready": {"type": "boolean"},
-          "blockers": {"type": "array", "items": {"type": "string"}},
-          "warnings": {"type": "array", "items": {"type": "string"}},
-          "stats": {"type": "object"}
+          "ready": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stats": {
+            "type": "object"
+          }
         },
-        "required": ["ready", "blockers", "warnings", "stats"],
+        "required": [
+          "ready",
+          "blockers",
+          "warnings",
+          "stats"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_modeling_readiness",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -70,30 +120,178 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "target_col": {"type": "string", "minLength": 1},
-          "feature_cols": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
-          "split_col": {"type": "string", "minLength": 1},
-          "split_config": {"type": "object"},
-          "seed": {"type": "integer"}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_config": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          }
         },
-        "required": ["dataset_id", "target_col", "feature_cols"],
+        "required": [
+          "dataset_id",
+          "target_col",
+          "feature_cols"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "result_dataset_id": {"type": "string"},
-          "split_counts": {"type": "object"}
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "split_counts": {
+            "type": "object"
+          }
         },
-        "required": ["result_dataset_id", "split_counts"],
+        "required": [
+          "result_dataset_id",
+          "split_counts"
+        ],
         "additionalProperties": false
       },
       "determinism": "stochastic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_prepare_modeling_frame",
-      "side_effects": ["read:dataset", "write:dataset"],
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "screen_features",
+      "summary": "Leakage-aware univariate KS/IV screen over a wide candidate set; flags suspected target leakage (very high single-feature KS) and model-output/score columns, and proposes a clean candidate set for user confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leakage_ks": {
+            "type": "number"
+          },
+          "max_missing_rate": {
+            "type": "number"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ranked": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "leakage": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "suspected": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "unusable": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "scores": {
+            "type": "object"
+          },
+          "n_screened": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "selected",
+          "ranked",
+          "leakage",
+          "suspected",
+          "unusable",
+          "scores"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_screen_features",
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -102,32 +300,180 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
-          "target_col": {"type": "string", "minLength": 1},
-          "iv_min": {"type": "number"},
-          "corr_max": {"type": "number"},
-          "vif_max": {"type": "number"},
-          "top_k": {"type": "integer", "minimum": 1}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "iv_min": {
+            "type": "number"
+          },
+          "corr_max": {
+            "type": "number"
+          },
+          "vif_max": {
+            "type": "number"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
         },
-        "required": ["dataset_id", "features", "target_col"],
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "selected": {"type": "array", "items": {"type": "string"}},
-          "dropped": {"type": "array", "items": {"type": "array"}},
-          "scores": {"type": "object"}
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dropped": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "scores": {
+            "type": "object"
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
-        "required": ["selected", "dropped", "scores"],
+        "required": [
+          "selected",
+          "dropped",
+          "scores"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_select_features",
-      "side_effects": ["read:dataset"],
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "tune_hyperparameters",
+      "summary": "Random-search LightGBM hyperparameters (seeded), selecting by test KS minus an overfit penalty; OOT is the unbiased final metric. Returns best_params for train_model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "early_stopping_rounds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_boost_round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "overfit_penalty": {
+            "type": "number"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "best_params": {
+            "type": "object"
+          },
+          "best_metrics": {
+            "type": "object"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trials": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "best_params",
+          "best_metrics",
+          "n_trials"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_tune_hyperparameters",
+      "side_effects": [
+        "read:dataset"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -136,36 +482,215 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "dataset_id": {"type": "string", "minLength": 1},
-          "recipe": {"type": "string", "enum": ["lgb", "xgb", "lr", "scorecard", "lgb_regressor"]},
-          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
-          "target_col": {"type": "string", "minLength": 1},
-          "split_col": {"type": "string", "minLength": 1},
-          "split_values": {"type": "object"},
-          "params": {"type": "object"},
-          "seed": {"type": "integer"},
-          "scenario": {"type": "string", "minLength": 1},
-          "early_stopping_rounds": {"type": "integer", "minimum": 1}
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recipe": {
+            "type": "string",
+            "enum": [
+              "lgb",
+              "xgb",
+              "lr",
+              "scorecard",
+              "lgb_regressor"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "scenario": {
+            "type": "string",
+            "minLength": 1
+          },
+          "early_stopping_rounds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
         },
-        "required": ["dataset_id", "recipe", "features", "target_col", "split_col", "split_values", "seed"],
+        "required": [
+          "dataset_id",
+          "recipe",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values",
+          "seed"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "experiment_id": {"type": "string"},
-          "artifact_id": {"type": "string"},
-          "metrics": {"type": "object"},
-          "feature_importance": {"type": "array", "items": {"type": "array"}}
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "feature_importance": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
-        "required": ["experiment_id", "artifact_id", "metrics", "feature_importance"],
+        "required": [
+          "experiment_id",
+          "artifact_id",
+          "metrics",
+          "feature_importance"
+        ],
         "additionalProperties": false
       },
       "determinism": "stochastic",
       "timeout_seconds": 180,
       "failure_policy": "fail",
       "entrypoint": "tool_train_model",
-      "side_effects": ["read:dataset", "write:model", "write:dataset", "write:experiment"],
+      "side_effects": [
+        "read:dataset",
+        "write:model",
+        "write:dataset",
+        "write:experiment"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "train_models",
+      "summary": "Train one or more recipes and return all experiments plus the best by OOT KS (test KS fallback). lgb uses the tuned params; other recipes train with their own defaults. The single-recipe case mirrors train_model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "lr",
+                "scorecard",
+                "lgb_regressor"
+              ]
+            },
+            "minItems": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "recipes",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values",
+          "seed"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "best_experiment_id": {
+            "type": "string"
+          },
+          "best_recipe": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "experiments",
+          "experiment_ids",
+          "best_experiment_id",
+          "best_recipe"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_models",
+      "side_effects": [
+        "read:dataset",
+        "write:model",
+        "write:dataset",
+        "write:experiment"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -174,24 +699,42 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "experiment_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          }
         },
-        "required": ["experiment_ids"],
+        "required": [
+          "experiment_ids"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "experiments": {"type": "array", "items": {"type": "object"}}
+          "experiments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["experiments"],
+        "required": [
+          "experiments"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 60,
       "failure_policy": "fail",
       "entrypoint": "tool_compare_experiments",
-      "side_effects": ["read:experiment"],
+      "side_effects": [
+        "read:experiment"
+      ],
       "memory_limit_mb": 2048
     },
     {
@@ -200,24 +743,37 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "artifact_id": {"type": "string", "minLength": 1}
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["artifact_id"],
+        "required": [
+          "artifact_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "pmml_path": {"type": "string"}
+          "pmml_path": {
+            "type": "string"
+          }
         },
-        "required": ["pmml_path"],
+        "required": [
+          "pmml_path"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_export_pmml",
-      "side_effects": ["read:model", "read:dataset", "write:model"],
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:model"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -226,25 +782,43 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "experiment_id": {"type": "string", "minLength": 1},
-          "sample_dataset_id": {"type": "string", "minLength": 1}
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sample_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["experiment_id", "sample_dataset_id"],
+        "required": [
+          "experiment_id",
+          "sample_dataset_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "validation_task_id": {"type": "string"}
+          "validation_task_id": {
+            "type": "string"
+          }
         },
-        "required": ["validation_task_id"],
+        "required": [
+          "validation_task_id"
+        ],
         "additionalProperties": false
       },
       "determinism": "deterministic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_handoff_to_validation",
-      "side_effects": ["read:model", "read:dataset", "write:task", "write:model"],
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:task",
+        "write:model"
+      ],
       "memory_limit_mb": 4096
     },
     {
@@ -253,34 +827,80 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "experiment_id": {"type": "string", "minLength": 1},
-          "dataset_id": {"type": "string", "minLength": 1},
-          "business_columns": {"type": "object"},
-          "feature_dictionary_id": {"type": "string", "minLength": 1},
-          "model_id": {"type": "string", "minLength": 1},
-          "project_meta": {"type": "object"},
-          "seed": {"type": "integer"}
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "business_columns": {
+            "type": "object"
+          },
+          "feature_dictionary_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "project_meta": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          }
         },
-        "required": ["experiment_id", "dataset_id"],
+        "required": [
+          "experiment_id",
+          "dataset_id"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "report_path": {"type": "string"},
-          "section_status": {"type": "array", "items": {"type": "object"}}
+          "report_path": {
+            "type": "string"
+          },
+          "section_status": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
         },
-        "required": ["report_path", "section_status"],
+        "required": [
+          "report_path",
+          "section_status"
+        ],
         "additionalProperties": false
       },
       "determinism": "stochastic",
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_generate_model_report",
-      "side_effects": ["read:model", "read:dataset", "write:report", "llm"],
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:report",
+        "llm"
+      ],
       "memory_limit_mb": 4096
     }
   ],
   "hooks": [],
-  "permissions": ["read:dataset", "write:dataset", "read:model", "write:model", "read:experiment", "write:experiment", "write:task", "write:report", "llm"]
+  "permissions": [
+    "read:dataset",
+    "write:dataset",
+    "read:model",
+    "write:model",
+    "read:experiment",
+    "write:experiment",
+    "write:task",
+    "write:report",
+    "llm"
+  ]
 }

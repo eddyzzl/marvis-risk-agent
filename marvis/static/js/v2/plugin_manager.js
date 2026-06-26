@@ -26,18 +26,21 @@ function schemaText(schema) {
 export function pluginToolsHtml(data = {}) {
   const tools = data.tools || [];
   if (!tools.length) {
-    return '<div class="v2-empty" data-v2-empty="plugin-tools">No tools</div>';
+    return '<div class="v2-empty" data-v2-empty="plugin-tools">暂无工具</div>';
   }
   return tools.map((tool) => (
     `<section class="plugin-tool">
-      <header>
+      <div class="plugin-tool-head">
         <strong>${escapeHtml(tool.name || "")}</strong>
-        <span>${escapeHtml(tool.description || "")}</span>
-      </header>
-      <div class="plugin-tool-schema">
-        <pre><code>${schemaText(tool.input_schema)}</code></pre>
-        <pre><code>${schemaText(tool.output_schema)}</code></pre>
+        ${tool.description ? `<span>${escapeHtml(tool.description)}</span>` : ""}
       </div>
+      <details class="plugin-tool-schemas">
+        <summary>输入 / 输出 schema</summary>
+        <div class="plugin-tool-schema">
+          <div><span class="plugin-schema-label">输入</span><pre><code>${schemaText(tool.input_schema)}</code></pre></div>
+          <div><span class="plugin-schema-label">输出</span><pre><code>${schemaText(tool.output_schema)}</code></pre></div>
+        </div>
+      </details>
     </section>`
   )).join("");
 }
@@ -47,22 +50,27 @@ export function pluginRowHtml(plugin) {
   const displayName = plugin?.display_name || name;
   const checked = plugin?.enabled ? " checked" : "";
   const builtin = Boolean(plugin?.builtin);
+  const description = plugin?.description || "";
   const remove = builtin
     ? ""
-    : `<button type="button" data-remove-plugin="${escapeHtml(name)}">Remove</button>`;
+    : `<button type="button" class="plugin-action danger" data-remove-plugin="${escapeHtml(name)}">移除</button>`;
   return `<section class="plugin-row${builtin ? " plugin-builtin" : ""}" data-plugin-row="${escapeHtml(name)}">
-    <header>
-      <strong>${escapeHtml(displayName)}</strong>
-      <span class="plugin-version">v${escapeHtml(plugin?.version || "")}</span>
-      ${builtin ? '<span class="plugin-builtin-badge">builtin</span>' : ""}
-    </header>
-    <label>
-      <input type="checkbox" data-toggle-plugin="${escapeHtml(name)}"${checked}>
-      enabled
-    </label>
-    <span class="plugin-tool-count">${escapeHtml(plugin?.tool_count ?? 0)} tools</span>
-    ${remove}
-    <button type="button" data-show-tools="${escapeHtml(name)}">Show tools</button>
+    <div class="plugin-row-head">
+      <div class="plugin-row-id">
+        <strong>${escapeHtml(displayName)}</strong>
+        <span class="plugin-version">v${escapeHtml(plugin?.version || "")}</span>
+        ${builtin ? '<span class="plugin-builtin-badge">内置</span>' : ""}
+      </div>
+      <input type="checkbox" class="plugin-toggle" data-toggle-plugin="${escapeHtml(name)}"${checked} aria-label="启用 ${escapeHtml(displayName)}">
+    </div>
+    ${description ? `<p class="plugin-row-desc">${escapeHtml(description)}</p>` : ""}
+    <div class="plugin-row-foot">
+      <span class="plugin-tool-count">${escapeHtml(plugin?.tool_count ?? 0)} 个工具</span>
+      <div class="plugin-row-actions">
+        <button type="button" class="plugin-action" data-show-tools="${escapeHtml(name)}">查看工具</button>
+        ${remove}
+      </div>
+    </div>
     <div class="plugin-tools" data-plugin-tools="${escapeHtml(name)}"></div>
   </section>`;
 }
@@ -71,11 +79,11 @@ export function pluginManagerHtml(data = {}) {
   const plugins = data.plugins || [];
   const rows = plugins.length
     ? plugins.map(pluginRowHtml).join("")
-    : '<div class="v2-empty" data-v2-empty="plugins">No plugins</div>';
+    : '<div class="v2-empty" data-v2-empty="plugins">暂无插件</div>';
   return `<section class="plugin-manager">
     <label class="plugin-upload">
       <input type="file" data-upload-plugin accept=".zip,.tar,.gz,.tgz">
-      Upload plugin
+      上传插件
     </label>
     <div class="plugin-list">${rows}</div>
   </section>`;
@@ -111,7 +119,7 @@ export async function renderPluginManager(container, deps = {}) {
 
 function defaultConfirmRemove(name) {
   if (typeof confirm === "function") {
-    return confirm(`Remove plugin ${name}?`);
+    return confirm(`确定移除插件 ${name}？`);
   }
   return true;
 }
@@ -126,15 +134,15 @@ function defaultShowError(message) {
 
 function pluginUploadErrorMessage(error) {
   if (error?.status === 409) {
-    return "Plugin is already installed. Remove it or upload a package with a new version.";
+    return "插件已安装。请先移除旧版本，或上传新版本包。";
   }
   if (error?.status === 422) {
-    return "Plugin manifest is invalid. Fix manifest.json and upload the package again.";
+    return "插件 manifest 无效。请修复 manifest.json 后重新上传。";
   }
   if (error?.status === 403) {
-    return "Plugin changes require local plugin admin confirmation.";
+    return "插件变更需要本地插件管理员确认。";
   }
-  return error?.message || "plugin upload failed";
+  return error?.message || "插件上传失败";
 }
 
 export function attachPluginHandlers(root, deps = {}) {
@@ -175,7 +183,7 @@ export function attachPluginHandlers(root, deps = {}) {
         await actions.setPluginEnabled(toggle.dataset.togglePlugin, Boolean(toggle.checked));
         await actions.refreshPlugins();
       } catch (error) {
-        actions.showError(error?.message || "plugin toggle failed");
+        actions.showError(error?.message || "插件启用状态更新失败");
       }
     }
   };
@@ -193,7 +201,7 @@ export function attachPluginHandlers(root, deps = {}) {
         await actions.removePlugin(name);
         await actions.refreshPlugins();
       } catch (error) {
-        actions.showError(error?.message || "plugin remove failed");
+        actions.showError(error?.message || "插件移除失败");
       }
       return;
     }
@@ -209,7 +217,7 @@ export function attachPluginHandlers(root, deps = {}) {
           slot.innerHTML = pluginToolsHtml(data);
         }
       } catch (error) {
-        actions.showError(error?.message || "plugin tools failed");
+        actions.showError(error?.message || "插件工具读取失败");
       }
     }
   };

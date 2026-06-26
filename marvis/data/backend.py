@@ -60,6 +60,19 @@ class DataBackend:
             return int(feather.read_table(path).num_rows)
         raise DataBackendError(f"unsupported dataset format: {path.suffix}")
 
+    def numeric_columns(self, path: Path) -> set[str]:
+        """Names of columns whose DuckDB type is numeric (used so agg_mean averages only
+        real numbers and leaves non-numeric columns intact instead of NULLing them)."""
+        path = self._resolve_path(path)
+        if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
+            return set()
+        rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
+        kinds = (
+            "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
+            "UINTEGER", "UBIGINT", "FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC",
+        )
+        return {str(row[0]) for row in rows if any(kind in str(row[1]).upper() for kind in kinds)}
+
     def column_names(self, path: Path) -> list[str]:
         path = self._resolve_path(path)
         suffix = path.suffix.lower()
@@ -188,10 +201,15 @@ class DataBackend:
         duckdb.sql(query)
         result_rows = self.row_count(out_path)
         anchor_rows = self.row_count(anchor_path)
-        if result_rows > anchor_rows:
+        # The sample must stay 1:1 (spec §7): assert strict equality, catching BOTH
+        # fan-out (key not unique) AND silent row loss / shrink (a bad key transform or
+        # an inner-join-like regression). A correct LEFT JOIN keeps anchor_rows exactly.
+        if result_rows != anchor_rows:
             out_path.unlink(missing_ok=True)
+            kind = "fan-out" if result_rows > anchor_rows else "row loss (shrink)"
             raise DataBackendError(
-                f"left_join produced {result_rows} rows from {anchor_rows} anchor rows",
+                f"left_join {kind}: produced {result_rows} rows from {anchor_rows} "
+                f"anchor rows (must be 1:1)",
             )
         return result_rows
 
@@ -202,7 +220,7 @@ class DataBackend:
         feature_path: Path,
         feature_keys: Sequence[str],
         *,
-        method: str,
+        method: str | Sequence[str],
         key_fingerprints: Sequence[Any],
         sample_n: int,
         seed: int,
@@ -211,6 +229,7 @@ class DataBackend:
             raise DataBackendError("anchor_keys and feature_keys must have the same length")
         if len(anchor_keys) != len(key_fingerprints):
             raise DataBackendError("key_fingerprints must align with key columns")
+        methods = _methods_for_keys(method, len(anchor_keys))
 
         self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
         self._validate_columns(feature_keys, set(self.column_names(feature_path)))
@@ -224,11 +243,11 @@ class DataBackend:
             tuple(
                 self._normalize_value(
                     row[feature_col],
-                    method=method,
+                    method=pair_method,
                     side="feature",
                     fingerprint=feature_fp,
                 )
-                for feature_col, (_, feature_fp) in zip(feature_keys, fingerprint_pairs)
+                for feature_col, pair_method, (_, feature_fp) in zip(feature_keys, methods, fingerprint_pairs)
             )
             for _, row in feature_frame.iterrows()
         }
@@ -243,11 +262,11 @@ class DataBackend:
             key = tuple(
                 self._normalize_value(
                     row[anchor_col],
-                    method=method,
+                    method=pair_method,
                     side="anchor",
                     fingerprint=anchor_fp,
                 )
-                for anchor_col, (anchor_fp, _) in zip(anchor_keys, fingerprint_pairs)
+                for anchor_col, pair_method, (anchor_fp, _) in zip(anchor_keys, methods, fingerprint_pairs)
             )
             if all(value is not None for value in key) and key in feature_key_set:
                 matched += 1
@@ -302,32 +321,77 @@ class DataBackend:
         )
         if dedup_strategy in {"first", "last"}:
             order = "ASC" if dedup_strategy == "first" else "DESC"
-            return (
-                "SELECT * EXCLUDE (__marvis_rn) FROM ("
-                "SELECT *, row_number() OVER ("
-                f"PARTITION BY {key_sql} ORDER BY __marvis_rowid {order}"
-                ") AS __marvis_rn FROM ("
-                f"SELECT *, row_number() OVER () AS __marvis_rowid FROM {rel}"
-                ")"
-                ") WHERE __marvis_rn = 1"
-            )
+            return self._first_last_dedup_sql(feature_path, rel, key_sql, feature_columns, order)
         if dedup_strategy in {"agg_mean", "agg_max"}:
-            projections = list(feature_key_columns)
-            for column in sorted(feature_columns - set(feature_key_columns)):
-                ident = sql_identifier(column, feature_columns)
-                alias = _quote_identifier(column)
-                if dedup_strategy == "agg_mean":
-                    projections.append(f"avg(try_cast({ident} AS DOUBLE)) AS {alias}")
-                else:
-                    projections.append(f"max({ident}) AS {alias}")
-            projection_sql = ", ".join(
-                sql_identifier(column, feature_columns)
-                if column in feature_columns
-                else column
-                for column in projections
+            numeric = self.numeric_columns(feature_path) if dedup_strategy == "agg_mean" else set()
+            return self._agg_dedup_sql(
+                rel, key_sql, feature_columns, feature_key_columns, dedup_strategy, numeric
             )
-            return f"SELECT {projection_sql} FROM {rel} GROUP BY {key_sql}"
         raise DataBackendError(f"unsupported dedup_strategy: {dedup_strategy}")
+
+    def _first_last_dedup_sql(
+        self,
+        feature_path: Path,
+        rel: str,
+        key_sql: str,
+        feature_columns: set[str],
+        order: str,
+    ) -> str:
+        # row_number() OVER () has no ordering and is non-reproducible across DuckDB
+        # versions/parallelism, so 'first'/'last' were non-deterministic. Prefer parquet's
+        # physical file_row_number (true file order); for any non-parquet path fall back to
+        # full-row content order, which is also deterministic.
+        # The synthetic rank column name is derived to be PROVABLY absent from the feature
+        # columns so it can never collide with (and silently drop or shadow) a real column.
+        rank = _unique_internal_name("__marvis_rn", feature_columns)
+        # file_row_number=true is rejected by DuckDB when a real column is already named
+        # 'file_row_number', so only use it when that name is free.
+        if feature_path.suffix.lower() == ".parquet" and "file_row_number" not in feature_columns:
+            rownum_rel = f"read_parquet({sql_string_literal(feature_path.as_posix())}, file_row_number=true)"
+            return (
+                f"SELECT * EXCLUDE (file_row_number, {rank}) FROM ("
+                "SELECT *, row_number() OVER ("
+                f"PARTITION BY {key_sql} ORDER BY file_row_number {order}"
+                f") AS {rank} FROM {rownum_rel}"
+                f") WHERE {rank} = 1"
+            )
+        content_order = ", ".join(
+            f"{sql_identifier(column, feature_columns)} {order}" for column in sorted(feature_columns)
+        )
+        return (
+            f"SELECT * EXCLUDE ({rank}) FROM ("
+            "SELECT *, row_number() OVER ("
+            f"PARTITION BY {key_sql} ORDER BY {content_order}"
+            f") AS {rank} FROM {rel}"
+            f") WHERE {rank} = 1"
+        )
+
+    def _agg_dedup_sql(
+        self,
+        rel: str,
+        key_sql: str,
+        feature_columns: set[str],
+        feature_key_columns: Sequence[str],
+        dedup_strategy: str,
+        numeric_columns: set[str] = frozenset(),
+    ) -> str:
+        projections = list(feature_key_columns)
+        for column in sorted(feature_columns - set(feature_key_columns)):
+            ident = sql_identifier(column, feature_columns)
+            alias = _quote_identifier(column)
+            if dedup_strategy == "agg_mean" and column in numeric_columns:
+                projections.append(f"avg({ident}) AS {alias}")
+            else:
+                # Non-numeric columns under agg_mean (and all columns under agg_max) take a
+                # deterministic max() rather than being silently NULLed by try_cast(DOUBLE).
+                projections.append(f"max({ident}) AS {alias}")
+        projection_sql = ", ".join(
+            sql_identifier(column, feature_columns)
+            if column in feature_columns
+            else column
+            for column in projections
+        )
+        return f"SELECT {projection_sql} FROM {rel} GROUP BY {key_sql}"
 
     def _join_condition(
         self,
@@ -349,9 +413,22 @@ class DataBackend:
         anchor_columns: set[str],
     ) -> str:
         selections = []
+        # Collision-safe aliasing: a feature column that collides with the (accumulating)
+        # anchor is renamed feature_{col}; if THAT is also taken — e.g. a second feature
+        # table in the same plan already contributed a feature_{col} — disambiguate with a
+        # numeric suffix so columns are never silently overwritten or duplicated.
+        taken = set(anchor_columns)
         for column in sorted(feature_columns - set(feature_key_columns)):
             source = "b." + sql_identifier(column, feature_columns)
-            alias = column if column not in anchor_columns else f"feature_{column}"
+            if column not in taken:
+                alias = column
+            else:
+                alias = f"feature_{column}"
+                suffix = 2
+                while alias in taken:
+                    alias = f"feature_{column}_{suffix}"
+                    suffix += 1
+            taken.add(alias)
             selections.append(f"{source} AS {_quote_identifier(alias)}")
         return ", " + ", ".join(selections) if selections else ""
 
@@ -386,6 +463,16 @@ def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _unique_internal_name(base: str, columns: set[str]) -> str:
+    """A synthetic SQL column name guaranteed absent from ``columns`` (append underscores
+    until unique), so an internal rank/rowid column never collides with a real feature
+    column and silently drop or shadow it."""
+    name = base
+    while name in columns:
+        name += "_"
+    return name
+
+
 def _value_text(value: Any) -> str:
     if isinstance(value, Integral) and not isinstance(value, bool):
         return str(int(value))
@@ -396,8 +483,17 @@ def _value_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _methods_for_keys(method: str | Sequence[str], key_count: int) -> list[str]:
+    if isinstance(method, str):
+        return [method] * key_count
+    methods = [str(item) for item in method]
+    if len(methods) != key_count:
+        raise DataBackendError("method list must align with key columns")
+    return methods
+
+
 def _sql_transform(method: str, expression: str, *, side: str, pair: KeyPair) -> str:
-    trimmed = f"trim(CAST({expression} AS VARCHAR))"
+    trimmed = _sql_value_text(expression)
     if method == "exact":
         return trimmed
     if method == "exact_lower":
@@ -416,6 +512,16 @@ def _sql_transform(method: str, expression: str, *, side: str, pair: KeyPair) ->
             return f"lower({algorithm}({trimmed}))"
         return f"lower({trimmed})"
     raise DataBackendError(f"unsupported match method: {method}")
+
+
+def _sql_value_text(expression: str) -> str:
+    trimmed = f"trim(CAST({expression} AS VARCHAR))"
+    return (
+        "CASE "
+        f"WHEN regexp_matches({trimmed}, '^-?[0-9]+\\.0+$') "
+        f"THEN regexp_replace({trimmed}, '\\.0+$', '') "
+        f"ELSE {trimmed} END"
+    )
 
 
 def _fingerprint_pair(item: Any) -> tuple[ColumnFingerprint, ColumnFingerprint]:

@@ -39,18 +39,25 @@ def safe_correlation(x: np.ndarray, y: np.ndarray) -> float:
     return float(corr) if np.isfinite(corr) else 0.0
 
 
+# VIF of perfectly-collinear features is mathematically infinite; cap at a large finite
+# sentinel so the value stays JSON-safe (Starlette serializes responses with
+# allow_nan=False, and a browser JSON.parse rejects `Infinity`). VIF > ~10 already means
+# "severe collinearity", so the cap only flattens the already-unusable extreme.
+_VIF_CAP = 1e9
+
+
 def vif(df: pd.DataFrame, features: list[str]) -> dict[str, float]:
-    clean = df[features].dropna()
-    if clean.empty:
-        return {feature: 0.0 for feature in features}
-    result = {}
-    for feature in features:
-        others = [item for item in features if item != feature]
-        if not others:
-            result[feature] = 0.0
-            continue
+    result = {feature: 0.0 for feature in features}
+    # Exclude entirely-NaN columns from the design matrix; otherwise a single all-NaN
+    # feature empties the listwise-dropped frame and would zero EVERY feature's VIF.
+    usable = [feature for feature in features if df[feature].notna().any()]
+    clean = df[usable].dropna()
+    if clean.empty or len(usable) < 2:
+        return result
+    for feature in usable:
+        others = [item for item in usable if item != feature]
         r2 = _ols_r2(clean[others].to_numpy(dtype=float), clean[feature].to_numpy(dtype=float))
-        result[feature] = float("inf") if r2 >= 1 else float(1.0 / (1.0 - r2))
+        result[feature] = _VIF_CAP if r2 >= 1 else min(_VIF_CAP, float(1.0 / (1.0 - r2)))
     return result
 
 

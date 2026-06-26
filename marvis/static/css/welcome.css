@@ -14,7 +14,7 @@
 
 .workspace-welcome-inner {
   display: grid;
-  width: min(760px, 100%);
+  width: min(1040px, 100%);
   justify-items: center;
   transform: translateY(-2vh);
 }
@@ -41,46 +41,82 @@
   white-space: nowrap;
 }
 
-.workspace-welcome p {
-  margin: 12px 0 0;
-  color: var(--text-secondary);
-  font-size: 15px;
-}
-
 .welcome-task-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   width: 100%;
-  max-width: 760px;
-  gap: 14px;
+  max-width: 1040px;
+  gap: 12px;
   margin-top: clamp(24px, 4vh, 36px);
 }
 
 .welcome-task-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: grid;
-  min-height: 122px;
   align-content: start;
-  gap: 8px;
-  padding: 16px;
+  gap: 12px;
+  padding: 18px 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
   background: var(--surface);
-  box-shadow: var(--shadow-floating);
   text-align: left;
   cursor: pointer;
   transition:
-    border-color 150ms ease,
-    box-shadow 150ms ease,
-    transform 150ms ease,
-    background 150ms ease;
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    transform 220ms ease;
 }
 
+/* tone-keyed corner glow, echoing the status hero's glass state */
+.welcome-task-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(
+    82% 130% at 100% -12%,
+    color-mix(in srgb, var(--tone, var(--accent)) 22%, transparent),
+    transparent 60%
+  );
+  transition: opacity 240ms ease;
+}
+
+.welcome-task-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* per-task accent tones (light) — coordinated "中等鲜明" palette */
+.welcome-task-card[data-task-kind="feature_analysis"] { --tone: #3d6fd1; }
+.welcome-task-card[data-task-kind="data_join"] { --tone: #1aa595; }
+.welcome-task-card[data-task-kind="modeling"] { --tone: #745fd6; }
+.welcome-task-card[data-task-kind="validation"] { --tone: #2aa158; }
+.welcome-task-card[data-task-kind="strategy"] { --tone: #df9326; }
+.welcome-task-card[data-task-kind="vintage"] { --tone: #d35d87; }
+
+/* per-task accent tones (dark, slightly brighter for contrast) */
+body[data-theme="dark"] .welcome-task-card[data-task-kind="feature_analysis"] { --tone: #6b93e6; }
+body[data-theme="dark"] .welcome-task-card[data-task-kind="data_join"] { --tone: #3fc7b4; }
+body[data-theme="dark"] .welcome-task-card[data-task-kind="modeling"] { --tone: #9c8bea; }
+body[data-theme="dark"] .welcome-task-card[data-task-kind="validation"] { --tone: #54c47e; }
+body[data-theme="dark"] .welcome-task-card[data-task-kind="strategy"] { --tone: #ecb24f; }
+body[data-theme="dark"] .welcome-task-card[data-task-kind="vintage"] { --tone: #e389aa; }
+
 .welcome-task-card.available:hover {
-  border-color: var(--border-strong);
-  background: color-mix(in srgb, var(--surface) 86%, var(--accent-soft));
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--tone, var(--accent)) 26%, var(--border));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--tone, var(--accent)) 12%, rgba(0, 0, 0, 0.05));
+  transform: translateY(-2px);
+}
+
+/* card-level tone glow in the corner on hover (this is the card glow the user
+   wants kept — only the under-icon glow was removed) */
+.welcome-task-card.available:hover::before {
+  opacity: 0.65;
 }
 
 .welcome-task-card:disabled {
@@ -90,55 +126,247 @@
   cursor: not-allowed;
 }
 
+/* plain icon (no tile, no resting shadow); on hover it grows + floats. */
 .welcome-task-icon {
+  position: relative;
   display: inline-flex;
-  width: 24px;
-  height: 24px;
+  width: 44px;
+  height: 44px;
   align-items: center;
   justify-content: center;
-  color: var(--text);
+  color: var(--tone, var(--accent));
+  transition: transform 240ms cubic-bezier(0.2, 0.7, 0.3, 1);
 }
+
+@keyframes welcome-icon-sheen {
+  0% { opacity: 0; transform: translateX(0) skewX(-18deg); }
+  8% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(72px) skewX(-18deg); }
+}
+
+/* Solid, layered "扎实" glyphs: filled by default, with stacked depth layers.
+   The hover drop-shadow lives HERE (on the glyph), not on the icon box, so it
+   only shadows the glyph silhouette — never the sheen overlay. Rest is a
+   transparent shadow so the hover transition is smooth (no flicker). */
+.welcome-task-icon svg {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  width: 35px;
+  height: 35px;
+  fill: currentColor;
+  stroke: none;
+  filter: drop-shadow(0 0 0 transparent);
+  transition: filter 240ms ease;
+}
+
+.welcome-task-icon svg .icon-sheen {
+  display: none;
+}
+
+.welcome-task-sheen {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  -webkit-mask-image: var(--welcome-icon-mask-image);
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: var(--welcome-icon-mask-size, 35px 35px);
+  mask-image: var(--welcome-icon-mask-image);
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: var(--welcome-icon-mask-size, 35px 35px);
+}
+
+.welcome-task-sheen::before {
+  content: "";
+  position: absolute;
+  top: -10px;
+  left: -18px;
+  width: 9px;
+  height: 60px;
+  border-radius: 999px;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.42) 28%,
+    rgba(255, 255, 255, 0.98) 50%,
+    rgba(255, 255, 255, 0.42) 72%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: translateX(0) skewX(-18deg);
+  will-change: transform, opacity;
+}
+
+/* Optical-size normalization: each glyph fills the 24×24 viewBox differently.
+   Model development is the visual target; other icons scale their largest
+   colored silhouette dimension to match its ~28.8px rendered size. */
+.welcome-task-card[data-task-kind="feature_analysis"] .welcome-task-icon svg {
+  width: 41px;
+  height: 41px;
+}
+
+.welcome-task-card[data-task-kind="validation"] .welcome-task-icon svg {
+  width: 39px;
+  height: 39px;
+}
+
+.welcome-task-card[data-task-kind="data_join"] .welcome-task-icon svg {
+  width: 40px;
+  height: 40px;
+}
+
+.welcome-task-card[data-task-kind="modeling"] .welcome-task-icon svg {
+  width: 36px;
+  height: 36px;
+}
+
+.welcome-task-card[data-task-kind="vintage"] .welcome-task-icon svg {
+  width: 41px;
+  height: 41px;
+}
+
+.welcome-task-card[data-task-kind="strategy"] .welcome-task-icon svg {
+  width: 43px;
+  height: 43px;
+}
+
+.welcome-task-card[data-task-kind="feature_analysis"] .welcome-task-icon {
+  --welcome-icon-mask-size: 41px 41px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%274.4%27%20y%3D%2716.6%27%20width%3D%2717%27%20height%3D%273.4%27%20rx%3D%271.6%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%275%27%20y%3D%2710.5%27%20width%3D%273.2%27%20height%3D%276.6%27%20rx%3D%271%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%279.2%27%20y%3D%277.5%27%20width%3D%273.2%27%20height%3D%279.6%27%20rx%3D%271%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%2713.4%27%20y%3D%275%27%20width%3D%273.2%27%20height%3D%2712.1%27%20rx%3D%271%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%2717.6%27%20y%3D%279%27%20width%3D%273.2%27%20height%3D%278.1%27%20rx%3D%271%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.welcome-task-card[data-task-kind="data_join"] .welcome-task-icon {
+  --welcome-icon-mask-size: 40px 40px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%273%27%20y%3D%278%27%20width%3D%2710.5%27%20height%3D%2710.5%27%20rx%3D%273%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%276.75%27%20y%3D%276.75%27%20width%3D%2710.5%27%20height%3D%2710.5%27%20rx%3D%273%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%2710.5%27%20y%3D%275.5%27%20width%3D%2710.5%27%20height%3D%2710.5%27%20rx%3D%273%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.welcome-task-card[data-task-kind="vintage"] .welcome-task-icon {
+  --welcome-icon-mask-size: 41px 41px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%273.5%27%20y%3D%276%27%20width%3D%2717%27%20height%3D%2712.5%27%20rx%3D%272%27%20fill%3D%27black%27%2F%3E%3Cpath%20d%3D%27M7.2%204.8v2.8M16.8%204.8v2.8%27%20stroke%3D%27black%27%20stroke-width%3D%272%27%20stroke-linecap%3D%27round%27%20fill%3D%27none%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.welcome-task-card[data-task-kind="modeling"] .welcome-task-icon {
+  --welcome-icon-mask-size: 36px 36px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20d%3D%27M12%202.4%2019.9%206.95v10.1L12%2021.6%204.1%2017.05V6.95Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.welcome-task-card[data-task-kind="validation"] .welcome-task-icon {
+  --welcome-icon-mask-size: 39px 39px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Cpath%20d%3D%27M12%202.8%2019.5%205.6v5.6c0%204.6-3.1%208-7.5%209.5-4.4-1.5-7.5-4.9-7.5-9.5V5.6Z%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+.welcome-task-card[data-task-kind="strategy"] .welcome-task-icon {
+  --welcome-icon-mask-size: 43px 43px;
+  --welcome-icon-mask-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%3E%3Crect%20x%3D%274%27%20y%3D%2713.8%27%20width%3D%2716%27%20height%3D%274.6%27%20rx%3D%271.8%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%274%27%20y%3D%279.6%27%20width%3D%2716%27%20height%3D%274.6%27%20rx%3D%271.8%27%20fill%3D%27black%27%2F%3E%3Crect%20x%3D%274%27%20y%3D%275%27%20width%3D%2716%27%20height%3D%275.6%27%20rx%3D%271.8%27%20fill%3D%27black%27%2F%3E%3C%2Fsvg%3E");
+}
+
+/* back / mid stack layers — OPAQUE lighter shades of the tone (not fill-opacity).
+   Opaque alpha is essential: a translucent fill lets the hover drop-shadow bleed
+   through it and look broken. These mixes match the old translucent look on the
+   card, but the glyph is now a fully solid silhouette so its shadow is clean. */
+.welcome-task-icon svg .back {
+  fill: color-mix(in srgb, var(--tone, var(--accent)) 30%, var(--surface));
+}
+
+.welcome-task-icon svg .mid {
+  fill: color-mix(in srgb, var(--tone, var(--accent)) 62%, var(--surface));
+}
+
+/* cutout details on solid shapes (content lines, etc.) */
+.welcome-task-icon svg .cut {
+  fill: var(--surface);
+}
+
+.welcome-task-icon svg .cs {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.welcome-task-icon svg .vintage-calendar-binding {
+  stroke-width: 2;
+}
+
+.welcome-task-icon svg .model-code-mark {
+  stroke-width: 2.2;
+}
+
+.welcome-task-icon svg .model-code-slash {
+  stroke-width: 1.85;
+}
+
+/* connector lines (e.g. network edges, axes) */
+.welcome-task-icon svg .ln {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* hover: the glyph grows/lifts and casts a SOLID gray shadow offset to the
+   lower-right (斜后方扎实灰色, like the shield's old back layer); the sheen
+   flashes across once. */
+.welcome-task-card.available:hover .welcome-task-icon {
+  transform: translateY(-3px) scale(1.22);
+}
+
+.welcome-task-card.available:hover .welcome-task-icon svg {
+  filter: drop-shadow(2.5px 3px 0 rgba(17, 20, 32, 0.3));
+}
+
+.welcome-task-card.available:hover .welcome-task-sheen::before {
+  animation: welcome-icon-sheen 560ms ease-out;
+}
+
 
 .welcome-task-card:disabled .welcome-task-icon {
   color: var(--text-muted);
 }
 
-.welcome-task-icon svg {
-  width: 24px;
-  height: 24px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.welcome-task-card strong,
-.welcome-task-card span,
-.welcome-task-card small {
-  display: block;
-}
-
+/* NB: do NOT use ".welcome-task-card span" here — it would override the icon
+   tile's display:inline-flex (the icon is a <span>) and break glyph centering. */
 .welcome-task-card strong {
+  display: block;
   font-size: 15px;
 }
 
-.welcome-task-card span:not(.welcome-task-icon) {
+.welcome-task-card span:not(.welcome-task-icon):not(.welcome-task-sheen) {
+  display: block;
+  max-width: 100%;
   color: var(--text-secondary);
   font-size: 13px;
-  line-height: 1.45;
-}
-
-.welcome-task-card small {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .validation-workspace.is-empty .workspace-welcome {
   display: grid;
   place-content: center;
   justify-items: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-task-card,
+  .welcome-task-icon,
+  .welcome-task-icon svg {
+    transition: none;
+  }
+  .welcome-task-card.available:hover,
+  .welcome-task-card.available:hover .welcome-task-icon {
+    transform: none;
+  }
+  .welcome-task-card.available:hover .welcome-task-sheen::before {
+    animation: none;
+  }
 }
 
 @media (max-width: 760px) {

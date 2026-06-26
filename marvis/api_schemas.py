@@ -16,6 +16,8 @@ class CreateTaskRequest(BaseModel):
     time_col: str = "apply_month"
     run_mode: str = "manual"
     feature_columns: list[str] = Field(default_factory=list)
+    recipes: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
     notebook_path: str | None = None
     sample_path: str | None = None
     pmml_path: str | None = None
@@ -38,6 +40,11 @@ class LLMSettingsRequest(BaseModel):
     default_model_id: str = ""
     capability_tier: str = ""
     models: list[dict] = Field(default_factory=list)
+
+
+class MemoryPolicyRequest(BaseModel):
+    reference_cross_task: bool = True
+    auto_distill: bool = True
 
 
 class ReportFieldsUpdateRequest(BaseModel):

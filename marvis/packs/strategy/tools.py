@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.data.backend import DataBackend
+from marvis.data.labels import resolve_labeled_frame
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, StrategyRepository
 from marvis.packs.strategy.backtest import backtest_strategy
@@ -38,6 +39,7 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
     )
     return {
         "cohorts": list(curve.cohorts),
+        "mob_axis": list(curve.mob_axis),
         "curves": _jsonable(curve.curves),
         "counts": _jsonable(curve.counts),
         "summary": vintage_summary(curve, ref_mob=int(inputs.get("ref_mob", 6))),
@@ -100,6 +102,9 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     baseline_id = _optional_str(inputs.get("baseline_strategy_id"))
     baseline = _strategy(runtime, baseline_id) if baseline_id else None
     frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     result = backtest_strategy(
         frame,
         strategy,
@@ -114,12 +119,16 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
         runtime.strategies.save_backtest(backtest_id, strategy.id, str(inputs["dataset_id"]), result)
     payload = _jsonable(result)
     payload["backtest_id"] = backtest_id
+    payload["nan_labels_dropped"] = nan_labels_dropped
     return payload
 
 
 def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     points = tradeoff_view(
         frame,
         score_col=str(inputs["score_col"]),
@@ -139,6 +148,7 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     return {
         "points": [_jsonable(point) for point in points],
         "recommended": _jsonable(recommended),
+        "nan_labels_dropped": nan_labels_dropped,
     }
 
 

@@ -153,6 +153,18 @@ def init_db(db_path: Path) -> None:
         _ensure_column(
             conn,
             table="tasks",
+            column="recipes_json",
+            definition="TEXT NOT NULL DEFAULT '[]'",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
+            column="metrics_json",
+            definition="TEXT NOT NULL DEFAULT '[]'",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
             column="notebook_path",
             definition="TEXT",
         )
@@ -358,10 +370,17 @@ def init_db(db_path: Path) -> None:
                 output_ref TEXT,
                 review_json TEXT NOT NULL DEFAULT '[]',
                 error TEXT,
+                phase TEXT,
                 confirmed INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="plan_steps",
+            column="phase",
+            definition="TEXT",
         )
         _ensure_column(
             conn,
@@ -573,6 +592,8 @@ class TaskRepository:
             split_col=payload.split_col,
             time_col=payload.time_col,
             feature_columns=list(payload.feature_columns),
+            recipes=list(payload.recipes),
+            metrics=list(payload.metrics),
             notebook_path=payload.notebook_path,
             sample_path=payload.sample_path,
             pmml_path=payload.pmml_path,
@@ -591,12 +612,12 @@ class TaskRepository:
                 (
                     id, task_type, model_name, model_version, validator, source_dir,
                     algorithm, run_mode, target_col, score_col, split_col,
-                    time_col, feature_columns_json, notebook_path, sample_path,
+                    time_col, feature_columns_json, recipes_json, metrics_json, notebook_path, sample_path,
                     pmml_path, dictionary_path, report_values_json,
                     report_values_revision, status, status_message,
                     status_reason_code, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -612,6 +633,8 @@ class TaskRepository:
                     record.split_col,
                     record.time_col,
                     _dump_json_list(record.feature_columns),
+                    _dump_json_list(record.recipes),
+                    _dump_json_list(record.metrics),
                     record.notebook_path,
                     record.sample_path,
                     record.pmml_path,
@@ -1131,7 +1154,7 @@ class PlanRepository:
                 SELECT id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                        inputs_json, depends_on_json, post_checks_json,
                        needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
-                       status, sub_agent_id, output_ref, review_json, error
+                       status, sub_agent_id, output_ref, review_json, error, phase
                   FROM plan_steps
                  WHERE plan_id = ?
                  ORDER BY idx, id
@@ -1139,6 +1162,16 @@ class PlanRepository:
                 (plan_id,),
             ).fetchall()
         return plan_from_dict(_plan_payload_from_rows(plan_row, step_rows))
+
+    def list_plans_for_task(self, task_id: str) -> list[Plan]:
+        """All plans for a task, oldest first. Used to resume/reload a task's
+        plan in the right rail (create returns the plan_id for first build)."""
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id FROM plans WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self.load_plan(row["id"]) for row in rows]
 
     def update_step(self, step) -> None:
         payload = plan_to_dict(
@@ -1172,7 +1205,8 @@ class PlanRepository:
                        sub_agent_id = ?,
                        output_ref = ?,
                        review_json = ?,
-                       error = ?
+                       error = ?,
+                       phase = ?
                  WHERE id = ?
                 """,
                 _step_update_values(payload),
@@ -1210,6 +1244,32 @@ class PlanRepository:
             _write_audit_row(
                 conn,
                 kind="plan.step.confirm",
+                target_ref=step_id,
+                outcome="succeeded",
+            )
+
+    def reset_step(self, step_id: str, *, inputs: dict | None = None) -> None:
+        """Reset a step to pending and clear its output / error / confirmation so it
+        can run again (the gate-adjust path). Optionally replace its inputs with a
+        parameter override. Used to re-run an analysis step with new parameters when
+        the user asks for an adjustment at a gate."""
+        with connect(self.db_path) as conn:
+            if inputs is not None:
+                conn.execute(
+                    "UPDATE plan_steps SET inputs_json = ? WHERE id = ?",
+                    (json.dumps(inputs, ensure_ascii=False), step_id),
+                )
+            # Leave review_json as-is (NOT NULL); the re-run overwrites it.
+            cursor = conn.execute(
+                "UPDATE plan_steps SET status = 'pending', confirmed = 0, "
+                "output_ref = NULL, error = NULL WHERE id = ?",
+                (step_id,),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(step_id)
+            _write_audit_row(
+                conn,
+                kind="plan.step.reset",
                 target_ref=step_id,
                 outcome="succeeded",
             )
@@ -1514,9 +1574,9 @@ class PlanRepository:
                 id, plan_id, idx, title, tool_plugin, tool_name, tool_version,
                 inputs_json, depends_on_json, post_checks_json,
                 needs_confirmation, decision_point, sub_agent_scope, granted_tools_json,
-                status, sub_agent_id, output_ref, review_json, error
+                status, sub_agent_id, output_ref, review_json, error, phase
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _step_insert_values(step),
         )
@@ -1648,6 +1708,10 @@ class DatasetRepository:
             )
             if cursor.rowcount == 0:
                 raise KeyError(plan_id)
+
+    def write_audit(self, **kwargs) -> None:
+        with connect(self.db_path) as conn:
+            _write_audit_row(conn, **kwargs)
 
 
 class ModelingRepository:
@@ -2300,6 +2364,7 @@ def _step_payload_from_row(row: sqlite3.Row) -> dict:
         "output_ref": row["output_ref"],
         "review_verdicts": _load_json_array(row["review_json"]),
         "error": row["error"],
+        "phase": row["phase"],
     }
 
 
@@ -2325,6 +2390,7 @@ def _step_insert_values(step: dict) -> tuple:
         step.get("output_ref"),
         _dump_json_any(step.get("review_verdicts") or []),
         step.get("error"),
+        step.get("phase"),
     )
 
 
@@ -2794,6 +2860,9 @@ def _normalize_loop_event(event: dict | None) -> dict | None:
     trigger_step_id = _optional_str(payload.get("trigger_step_id"))
     if trigger_step_id is not None:
         normalized["trigger_step_id"] = trigger_step_id
+    instruction = _optional_str(payload.get("instruction"))
+    if instruction is not None:
+        normalized["instruction"] = instruction[:500]  # keep the replan rationale, bounded
     return normalized
 
 
@@ -2874,6 +2943,8 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         split_col=row["split_col"],
         time_col=row["time_col"],
         feature_columns=_load_json_list(row["feature_columns_json"]),
+        recipes=_load_json_list(row["recipes_json"]),
+        metrics=_load_json_list(row["metrics_json"]),
         notebook_path=row["notebook_path"],
         sample_path=row["sample_path"],
         pmml_path=row["pmml_path"],

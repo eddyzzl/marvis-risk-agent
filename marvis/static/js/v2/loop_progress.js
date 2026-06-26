@@ -20,15 +20,15 @@ function sortedEvents(events) {
 function eventLabel(event) {
   const reason = event.reason || event.detail || "";
   if (event.type === "replan") {
-    return `Replan: ${reason}`;
+    return `重新规划：${reason}`;
   }
   if (event.type === "explore_segment") {
-    return `Explore segment: ${reason}`;
+    return `探索分支：${reason}`;
   }
   if (event.type === "no_progress") {
-    return `No progress: ${reason}`;
+    return `暂无进展：${reason}`;
   }
-  return `${event.type || "event"}: ${reason}`;
+  return `${event.type || "事件"}：${reason}`;
 }
 
 export function loopEventHtml(event) {
@@ -42,7 +42,7 @@ export function loopEventHtml(event) {
 
 export function loopEventsHtml(events = []) {
   if (!events.length) {
-    return '<div class="v2-empty" data-v2-empty="loop-events">No loop events</div>';
+    return '<div class="v2-empty" data-v2-empty="loop-events">暂无循环事件</div>';
   }
   return `<section class="loop-events">${sortedEvents(events).map(loopEventHtml).join("")}</section>`;
 }

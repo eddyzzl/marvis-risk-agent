@@ -207,8 +207,8 @@ def test_plugin_handlers_show_status_specific_upload_conflict_error():
         await listeners.change({ target: uploadTarget });
 
         assert.equal(messages.length, 1);
-        assert.ok(messages[0].includes("already installed"));
-        assert.ok(messages[0].includes("version"));
+        assert.ok(messages[0].includes("插件已安装"));
+        assert.ok(messages[0].includes("新版本"));
         assert.equal(messages[0].includes("duplicate plugin"), false);
         """
     )
@@ -249,7 +249,7 @@ def test_plugin_handlers_show_status_specific_upload_manifest_error():
 
         assert.equal(messages.length, 1);
         assert.ok(messages[0].includes("manifest"));
-        assert.ok(messages[0].includes("upload"));
+        assert.ok(messages[0].includes("重新上传"));
         assert.equal(messages[0].includes("unknown hook"), false);
         assert.equal(messages[0].includes("<script>"), false);
         """

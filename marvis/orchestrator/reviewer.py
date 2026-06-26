@@ -218,9 +218,18 @@ def _dig(value: dict, path: str):
     for part in path.split("."):
         if not part:
             return None
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
+        if isinstance(current, dict):
+            if part not in current:
+                return None
+            current = current[part]
+            continue
+        if isinstance(current, list | tuple) and part.isdigit():
+            index = int(part)
+            if index >= len(current):
+                return None
+            current = current[index]
+            continue
+        return None
     return current
 
 

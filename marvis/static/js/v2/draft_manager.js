@@ -21,19 +21,19 @@ function jsonText(value) {
 
 function statusLabel(status) {
   return {
-    draft: "Draft",
-    tested: "Tested",
-    promoted: "Promoted",
-    rejected: "Rejected",
-  }[status] || String(status || "unknown");
+    draft: "草稿",
+    tested: "已测试",
+    promoted: "已晋升",
+    rejected: "已拒绝",
+  }[status] || String(status || "未知");
 }
 
 function sourceLabel(source) {
   return {
-    web_learning: "Web learning",
-    llm_generated: "LLM generated",
-    hand_written: "Hand written",
-  }[source] || String(source || "unknown");
+    web_learning: "Web 学习",
+    llm_generated: "LLM 生成",
+    hand_written: "手写",
+  }[source] || String(source || "未知来源");
 }
 
 function statusOptionHtml(value, label, selectedStatus) {
@@ -70,7 +70,7 @@ function parseJsonField(root, selector, fallback) {
   try {
     return JSON.parse(field.value);
   } catch (_error) {
-    throw new Error("Invalid JSON");
+    throw new Error("JSON 格式无效");
   }
 }
 
@@ -117,14 +117,14 @@ function defaultShowError(message) {
 
 function defaultConfirmReject() {
   if (typeof prompt === "function") {
-    return prompt("Reject draft reason?", "");
+    return prompt("请输入拒绝草稿的原因", "");
   }
   return "";
 }
 
 function defaultConfirmPromote(id) {
   if (typeof confirm === "function") {
-    return confirm(`Promote draft ${id} into the trusted tool registry?`);
+    return confirm(`确定将草稿 ${id} 晋升到可信工具注册表？`);
   }
   return true;
 }
@@ -134,57 +134,57 @@ export function draftManagerHtml(data = {}, options = {}) {
   const selectedStatus = String(options.status || "");
   const rows = drafts.length
     ? drafts.map(draftRowHtml).join("")
-    : '<div class="v2-empty" data-v2-empty="drafts">No draft tools</div>';
+    : '<div class="v2-empty" data-v2-empty="drafts">暂无草稿工具</div>';
   return `<section class="draft-manager">
     <header class="draft-manager-head">
       <label>
-        Status
+        状态
         <select data-draft-status>
-          ${statusOptionHtml("", "All", selectedStatus)}
-          ${statusOptionHtml("draft", "Draft", selectedStatus)}
-          ${statusOptionHtml("tested", "Tested", selectedStatus)}
-          ${statusOptionHtml("promoted", "Promoted", selectedStatus)}
-          ${statusOptionHtml("rejected", "Rejected", selectedStatus)}
+          ${statusOptionHtml("", "全部", selectedStatus)}
+          ${statusOptionHtml("draft", "草稿", selectedStatus)}
+          ${statusOptionHtml("tested", "已测试", selectedStatus)}
+          ${statusOptionHtml("promoted", "已晋升", selectedStatus)}
+          ${statusOptionHtml("rejected", "已拒绝", selectedStatus)}
         </select>
       </label>
-      <button type="button" data-refresh-drafts>Refresh</button>
+      <button type="button" data-refresh-drafts>刷新</button>
     </header>
     <section class="draft-web-learning">
       <label>
-        Web learning
+        Web 学习
         <input type="search" data-draft-web-query>
       </label>
-      <button type="button" data-draft-web-search>Search</button>
+      <button type="button" data-draft-web-search>搜索</button>
       <label>
-        Task
+        任务
         <input type="text" data-draft-task-id>
       </label>
       <label>
-        Goal
+        目标
         <textarea data-draft-goal rows="2"></textarea>
       </label>
       <label>
-        Model
+        模型
         <input type="text" data-draft-model-id>
       </label>
       <div data-draft-web-result></div>
       <label>
-        Source
+        来源
         <input type="text" data-draft-learning-source>
       </label>
       <label>
-        Content
+        内容
         <textarea data-draft-learning-content rows="4"></textarea>
       </label>
       <input type="hidden" data-draft-learning-note-id>
-      <button type="button" data-draft-distill-learning>Distill</button>
-      <button type="button" data-draft-author>Author draft</button>
+      <button type="button" data-draft-distill-learning>沉淀学习</button>
+      <button type="button" data-draft-author>生成草稿</button>
       <div data-draft-learning-note></div>
     </section>
     <div class="draft-manager-layout">
       <div class="draft-list" data-draft-list>${rows}</div>
       <section class="draft-detail" data-draft-detail>
-        <div class="v2-empty" data-v2-empty="draft-detail">Select a draft tool</div>
+        <div class="v2-empty" data-v2-empty="draft-detail">请选择一个草稿工具</div>
       </section>
     </div>
   </section>`;
@@ -194,7 +194,7 @@ export function draftRowHtml(draft) {
   const id = String(draft?.id || "");
   return `<article class="draft-row draft-${escapeHtml(draft?.status || "unknown")}" data-draft-id="${escapeHtml(id)}" role="button" tabindex="0">
     <header>
-      <strong>${escapeHtml(draft?.name || "Unnamed draft")}</strong>
+      <strong>${escapeHtml(draft?.name || "未命名草稿")}</strong>
       <span>${escapeHtml(statusLabel(draft?.status))}</span>
     </header>
     ${draft?.summary ? `<p>${escapeHtml(draft.summary)}</p>` : ""}
@@ -204,11 +204,11 @@ export function draftRowHtml(draft) {
 
 export function webLearningResultHtml(payload = {}) {
   if (payload.offline) {
-    return `<div class="draft-web-guidance offline">${escapeHtml(payload.guidance || "No network. Produce the tool externally, then upload it as a plugin.")}</div>`;
+    return `<div class="draft-web-guidance offline">${escapeHtml(payload.guidance || "当前无网络。请在外部生成工具后，再通过插件上传导入。")}</div>`;
   }
   const results = payload.results || [];
   if (!results.length) {
-    return '<div class="v2-empty" data-v2-empty="draft-web-results">No web results</div>';
+    return '<div class="v2-empty" data-v2-empty="draft-web-results">暂无 Web 结果</div>';
   }
   const items = results.map((result) => {
     const safeUrl = safeWebResultUrl(result.url);
@@ -216,10 +216,10 @@ export function webLearningResultHtml(payload = {}) {
       ? `<a href="${escapeHtml(safeUrl)}" rel="noreferrer">${escapeHtml(safeUrl)}</a>`
       : escapeHtml(result.url || "");
     const fetchHtml = safeUrl
-      ? `<button type="button" data-draft-fetch-url="${escapeHtml(safeUrl)}">Fetch</button>`
+      ? `<button type="button" data-draft-fetch-url="${escapeHtml(safeUrl)}">抓取</button>`
       : "";
     return `<li>
-      <strong>${escapeHtml(result.title || result.url || "Result")}</strong>
+      <strong>${escapeHtml(result.title || result.url || "结果")}</strong>
       ${urlHtml}
       ${result.snippet ? `<p>${escapeHtml(result.snippet)}</p>` : ""}
       ${fetchHtml}
@@ -231,14 +231,14 @@ export function webLearningResultHtml(payload = {}) {
 export function draftDetailHtml(payload = {}) {
   const draft = payload.draft || null;
   if (!draft) {
-    return '<div class="v2-empty" data-v2-empty="draft-detail">Select a draft tool</div>';
+    return '<div class="v2-empty" data-v2-empty="draft-detail">请选择一个草稿工具</div>';
   }
   const id = String(draft.id || "");
   const terminal = ["promoted", "rejected"].includes(String(draft.status || ""));
   return `<article class="draft-detail-card">
     <header>
       <div>
-        <h3>${escapeHtml(draft.name || "Unnamed draft")}</h3>
+        <h3>${escapeHtml(draft.name || "未命名草稿")}</h3>
         ${draft.summary ? `<p>${escapeHtml(draft.summary)}</p>` : ""}
       </div>
       <span class="draft-status">${escapeHtml(statusLabel(draft.status))}</span>
@@ -246,24 +246,24 @@ export function draftDetailHtml(payload = {}) {
     ${learningNoteHtml(payload.learning_note)}
     <pre class="draft-code"><code>${escapeHtml(draft.code || "")}</code></pre>
     <div class="draft-schema-grid">
-      <section><strong>Input schema</strong><pre><code>${jsonText(draft.input_schema)}</code></pre></section>
-      <section><strong>Output schema</strong><pre><code>${jsonText(draft.output_schema)}</code></pre></section>
+      <section><strong>输入 schema</strong><pre><code>${jsonText(draft.input_schema)}</code></pre></section>
+      <section><strong>输出 schema</strong><pre><code>${jsonText(draft.output_schema)}</code></pre></section>
     </div>
     <section>
-      <strong>Run inputs</strong>
+      <strong>运行输入</strong>
       <textarea data-draft-run-inputs rows="4">{}</textarea>
-      <button type="button" data-run-draft="${escapeHtml(id)}">Run draft</button>
+      <button type="button" data-run-draft="${escapeHtml(id)}">运行草稿</button>
     </section>
     <section>
-      <strong>Promotion test cases</strong>
+      <strong>晋升测试用例</strong>
       <textarea data-draft-promotion-tests rows="4">[
   {"inputs": {}, "expect": {}}
 ]</textarea>
-      <button type="button" data-promote-draft="${escapeHtml(id)}"${terminal ? " disabled" : ""}>Promote</button>
-      <button type="button" data-reject-draft="${escapeHtml(id)}"${terminal ? " disabled" : ""}>Reject</button>
+      <button type="button" data-promote-draft="${escapeHtml(id)}"${terminal ? " disabled" : ""}>晋升</button>
+      <button type="button" data-reject-draft="${escapeHtml(id)}"${terminal ? " disabled" : ""}>拒绝</button>
     </section>
     <section>
-      <strong>Runs</strong>
+      <strong>运行记录</strong>
       ${runHistoryHtml(payload.runs || [])}
     </section>
   </article>`;
@@ -277,7 +277,7 @@ function learningNoteHtml(note) {
     .map((source) => `<li>${escapeHtml(source)}</li>`)
     .join("");
   return `<section class="draft-learning-note">
-    <strong>Learning note</strong>
+    <strong>学习沉淀</strong>
     <p>${escapeHtml(note.distilled || "")}</p>
     ${sources ? `<ul>${sources}</ul>` : ""}
   </section>`;
@@ -285,11 +285,11 @@ function learningNoteHtml(note) {
 
 function runHistoryHtml(runs) {
   if (!runs.length) {
-    return '<div class="v2-empty" data-v2-empty="draft-runs">No runs</div>';
+    return '<div class="v2-empty" data-v2-empty="draft-runs">暂无运行记录</div>';
   }
   return runs.map((run) => (
     `<div class="draft-run ${run.ok ? "ok" : "failed"}">
-      <span>${escapeHtml(run.ok ? "ok" : "failed")}</span>
+      <span>${escapeHtml(run.ok ? "成功" : "失败")}</span>
       <code>${escapeHtml(run.error || JSON.stringify(run.output || {}))}</code>
       <small>${escapeHtml(run.at || "")}</small>
     </div>`
@@ -346,7 +346,7 @@ export function attachDraftHandlers(root, deps = {}) {
     try {
       await refresh();
     } catch (error) {
-      actions.showError(error?.message || "draft refresh failed");
+      actions.showError(error?.message || "草稿工具刷新失败");
     }
   };
 
@@ -357,13 +357,13 @@ export function attachDraftHandlers(root, deps = {}) {
       event.preventDefault?.();
       const query = String(root.querySelector?.("[data-draft-web-query]")?.value || "").trim();
       if (!query) {
-        actions.showError("web learning query is required");
+        actions.showError("请输入 Web 学习搜索词。");
         return;
       }
       try {
         showWebLearningResult(root, await actions.webSearch(query));
       } catch (error) {
-        actions.showError(error?.message || "draft web learning failed");
+        actions.showError(error?.message || "草稿 Web 学习失败");
       }
       return;
     }
@@ -374,7 +374,7 @@ export function attachDraftHandlers(root, deps = {}) {
       try {
         showFetchedContent(root, await actions.fetchUrl(fetchButton.dataset.draftFetchUrl));
       } catch (error) {
-        actions.showError(error?.message || "draft web fetch failed");
+        actions.showError(error?.message || "Web 内容抓取失败");
       }
       return;
     }
@@ -387,7 +387,7 @@ export function attachDraftHandlers(root, deps = {}) {
       const source = fieldValue(root, "[data-draft-learning-source]");
       const modelId = fieldValue(root, "[data-draft-model-id]");
       if (!query || !content || !source) {
-        actions.showError("query, source, and content are required");
+        actions.showError("搜索词、来源和内容不能为空。");
         return;
       }
       const payload = {
@@ -402,7 +402,7 @@ export function attachDraftHandlers(root, deps = {}) {
         setFieldValue(root, "[data-draft-learning-note-id]", note?.id || "");
         showLearningNote(root, note);
       } catch (error) {
-        actions.showError(error?.message || "draft learning distillation failed");
+        actions.showError(error?.message || "学习沉淀失败");
       }
       return;
     }
@@ -415,7 +415,7 @@ export function attachDraftHandlers(root, deps = {}) {
       const learningNoteId = fieldValue(root, "[data-draft-learning-note-id]");
       const modelId = fieldValue(root, "[data-draft-model-id]");
       if (!taskId || !goal || !learningNoteId) {
-        actions.showError("task, goal, and learning note are required");
+        actions.showError("任务、目标和学习沉淀不能为空。");
         return;
       }
       const payload = {
@@ -431,7 +431,7 @@ export function attachDraftHandlers(root, deps = {}) {
           showDetail(root, await actions.getDraft(result.draft.id));
         }
       } catch (error) {
-        actions.showError(error?.message || "draft authoring failed");
+        actions.showError(error?.message || "草稿生成失败");
       }
       return;
     }
@@ -442,7 +442,7 @@ export function attachDraftHandlers(root, deps = {}) {
       try {
         showDetail(root, await actions.getDraft(draftItem.dataset.draftId));
       } catch (error) {
-        actions.showError(error?.message || "draft detail failed");
+        actions.showError(error?.message || "草稿详情读取失败");
       }
       return;
     }
@@ -455,7 +455,7 @@ export function attachDraftHandlers(root, deps = {}) {
         await actions.runDraft(runButton.dataset.runDraft, inputs);
         showDetail(root, await actions.getDraft(runButton.dataset.runDraft));
       } catch (error) {
-        actions.showError(error?.message || "draft run failed");
+        actions.showError(error?.message || "草稿运行失败");
       }
       return;
     }
@@ -467,7 +467,7 @@ export function attachDraftHandlers(root, deps = {}) {
         const draftId = promoteButton.dataset.promoteDraft;
         const testCases = parseJsonField(root, "[data-draft-promotion-tests]", []);
         if (!Array.isArray(testCases) || !testCases.length) {
-          throw new Error("Promotion test cases are required");
+          throw new Error("晋升测试用例不能为空");
         }
         if (!actions.confirmPromote(draftId, testCases)) {
           return;
@@ -475,7 +475,7 @@ export function attachDraftHandlers(root, deps = {}) {
         await actions.promoteDraft(draftId, testCases);
         await refresh();
       } catch (error) {
-        actions.showError(error?.message || "draft promotion failed");
+        actions.showError(error?.message || "草稿晋升失败");
       }
       return;
     }
@@ -491,7 +491,7 @@ export function attachDraftHandlers(root, deps = {}) {
         await actions.rejectDraft(rejectButton.dataset.rejectDraft, String(reason || ""));
         await refresh();
       } catch (error) {
-        actions.showError(error?.message || "draft reject failed");
+        actions.showError(error?.message || "草稿拒绝失败");
       }
       return;
     }

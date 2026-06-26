@@ -39,14 +39,19 @@ def worker_main() -> None:
         })
         _hard_exit(0)
     except Exception as exc:
-        _emit({
+        payload = {
             "ok": False,
             "error_kind": "execution",
             "error": str(exc),
             "stdout": stdout_buffer.getvalue(),
             "stderr": stderr_buffer.getvalue(),
             "traceback": traceback.format_exc(),
-        })
+        }
+        detail = _structured_error_detail(exc)
+        if detail is not None:
+            payload["error_kind"] = str(detail.get("kind") or "execution")
+            payload["error_detail"] = detail
+        _emit(payload)
         _hard_exit(0)
 
     _emit({
@@ -110,6 +115,28 @@ def _apply_resource_limits(memory_mb: int | None) -> None:
         resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     except (ImportError, OSError, ValueError):
         return
+
+
+def _structured_error_detail(exc: BaseException) -> dict | None:
+    """Return a JSON-serializable structured payload for errors that expose ``to_detail()``.
+
+    Lets typed errors (e.g. NanLabelNotConfirmedError) carry diagnostics across the
+    subprocess boundary as structured data instead of free text.
+    """
+    to_detail = getattr(exc, "to_detail", None)
+    if not callable(to_detail):
+        return None
+    try:
+        detail = to_detail()
+    except Exception:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    try:
+        json.dumps(detail)
+    except (TypeError, ValueError):
+        return None
+    return detail
 
 
 def _emit(obj: dict) -> None:

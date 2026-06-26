@@ -39,8 +39,8 @@ The current V1.1.x line already ships the Agent Memory Foundation for historical
 
 ## Public Default Brand
 
-- Platform name: `MARVIS-Agent`
-- Primary color: black
+- Platform name: `MARVIS-全能风控智能体`
+- Primary color: neutral charcoal (`#343438`)
 - Default logo and favicon: `marvis/static/brand/`
 
 ## Branding

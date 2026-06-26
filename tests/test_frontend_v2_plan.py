@@ -71,7 +71,7 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
         assert.ok(html.includes("data&lt;ops&gt;.join"));
         assert.equal(html.includes("metrics:step-2<script>"), false);
         assert.ok(html.includes('data-artifact="metrics:step-2&lt;script&gt;"'));
-        assert.ok(html.includes("Open output"));
+        assert.ok(html.includes("查看输出"));
         assert.ok(html.includes('class="dp-mark"'));
         assert.ok(html.includes('data-confirm-step="step-1"'));
         assert.equal(html.includes('data-confirm-step="step-2"'), false);
@@ -128,8 +128,8 @@ def test_plan_html_renders_validated_plan_actions_and_hides_terminal_actions():
         assert.ok(ready.includes('class="plan-actions"'));
         assert.ok(ready.includes('data-confirm-plan="plan-1"'));
         assert.ok(ready.includes('data-cancel-plan="plan-1"'));
-        assert.ok(ready.includes("Confirm and run"));
-        assert.ok(ready.includes("Cancel"));
+        assert.ok(ready.includes("确认并运行"));
+        assert.ok(ready.includes("取消"));
 
         const done = planHtml({
           id: "plan-2",
@@ -199,6 +199,54 @@ def test_start_plan_polling_dedupes_and_stops_at_terminal_status():
         const nextPoll = startPlanPolling("plan-1", { autoStart: false });
         assert.notEqual(nextPoll, poll);
         stopPlanPolling("plan-1");
+        """
+    )
+
+
+def test_start_plan_polling_ignores_inflight_response_after_stop():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import {
+          startPlanPolling,
+          stopPlanPolling,
+        } from "./marvis/static/js/v2/plan_view.js";
+        import {
+          getPlan,
+          resetV2State,
+          setPlan,
+        } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", status: "cancelled", goal: "stopped", steps: [] });
+        let resolveFetch;
+        globalThis.fetch = async () => new Promise((resolve) => {
+          resolveFetch = resolve;
+        });
+        const scheduled = [];
+        const poll = startPlanPolling("plan-1", {
+          autoStart: false,
+          setTimeoutFn: (fn, ms) => {
+            scheduled.push({ fn, ms });
+            return scheduled.length;
+          },
+        });
+
+        const pending = poll.tick();
+        stopPlanPolling("plan-1");
+        resolveFetch({
+          ok: true,
+          status: 200,
+          headers: { get: () => "application/json" },
+          json: async () => ({ plan: { id: "plan-1", status: "running", goal: "late", steps: [] } }),
+          text: async () => "",
+        });
+        const result = await pending;
+
+        assert.equal(result, null);
+        assert.equal(getPlan().status, "cancelled");
+        assert.equal(getPlan().goal, "stopped");
+        assert.equal(scheduled.length, 0);
         """
     )
 

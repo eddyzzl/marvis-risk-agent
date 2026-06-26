@@ -26,6 +26,8 @@ def test_default_marvis_logo_assets_are_transparent_squares():
     for relative_path in [
         "marvis/static/brand/marvis-logo.png",
         "marvis/static/brand/marvis-favicon.png",
+        "marvis/static/brand/marvis-workspace-logo.png",
+        "marvis/static/brand/marvis-chat-logo.png",
     ]:
         image = Image.open(PROJECT_ROOT / relative_path).convert("RGBA")
         width, height = image.size
@@ -49,11 +51,12 @@ def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
 
     assert response.status_code == 200
     assert response.json() == {
-        "platformName": "MARVIS-Agent",
-        "browserTitle": "MARVIS-Agent",
-        "primaryColor": "#000000",
-        "logoUrl": "static/brand/marvis-logo.png",
-        "faviconUrl": "static/brand/marvis-favicon.png",
+        "platformName": "MARVIS-全能风控智能体",
+        "browserTitle": "MARVIS-全能风控智能体",
+        "primaryColor": "#303034",
+        "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+        "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+        "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},
         "source": "default",
     }
@@ -129,6 +132,7 @@ def test_branding_reads_workspace_config_and_serves_asset(tmp_path: Path):
     assert payload["browserTitle"] == "本地智能模型验证平台"
     assert payload["primaryColor"] == "#1f6feb"
     assert payload["logoUrl"].startswith("branding/assets/private-logo.svg?v=")
+    assert payload["workspaceLogoUrl"].startswith("branding/assets/private-logo.svg?v=")
     assert payload["faviconUrl"].startswith("branding/assets/private-logo.svg?v=")
     assert payload["source"] == "workspace"
 
@@ -167,11 +171,12 @@ def test_index_html_is_prebranded_from_workspace_config(tmp_path: Path):
     assert "<title>本地智能模型验证平台</title>" in html
     assert f'href="{branding["faviconUrl"]}"' in html
     assert f'src="{branding["logoUrl"]}"' in html
+    assert f'src="{branding["workspaceLogoUrl"]}"' in html
     assert 'alt="本地风控模型验证平台 logo"' in html
     assert '<h1 id="platformName">本地风控模型验证平台</h1>' in html
     assert 'style="--brand-primary: #1f6feb;' in html
     assert "--brand-primary-hover:" in html
-    assert "<title>MARVIS-Agent</title>" not in html
+    assert "<title>MARVIS-全能风控智能体</title>" not in html
 
 
 def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):
@@ -198,9 +203,10 @@ def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):
     assert response.json() == {
         "platformName": "Private",
         "browserTitle": "Private",
-        "primaryColor": "#000000",
-        "logoUrl": "static/brand/marvis-logo.png",
-        "faviconUrl": "static/brand/marvis-favicon.png",
+        "primaryColor": "#303034",
+        "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+        "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+        "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},
         "source": "workspace",
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -28,6 +29,13 @@ ID_NAMES = (
     "cert_no",
     "cert",
     "identity",
+    "card",
+    "bankcard",
+    "bank_card",
+    "account",
+    "account_no",
+    "acct",
+    "acct_no",
     "id_md5",
     "idcard_md5",
 )
@@ -146,6 +154,10 @@ def _desensitize(value: Any, role: str) -> object:
         return _mask_text(value, keep_start=4, keep_end=2)
     if role == "id":
         return _mask_text(value, keep_start=4, keep_end=4)
+    if role == "categorical":
+        return _token_text(value)
+    if role not in {"amount", "date", "score", "target"} and _looks_like_sensitive_identifier(value):
+        return _mask_text(value, keep_start=4, keep_end=4)
     return value
 
 
@@ -167,6 +179,17 @@ def _mask_source_text(value: Any) -> str:
             if number.is_integer():
                 return str(int(number))
     return str(value).strip()
+
+
+def _token_text(value: Any) -> str:
+    text = _mask_source_text(value)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+    return f"value:{digest}"
+
+
+def _looks_like_sensitive_identifier(value: Any) -> bool:
+    text = re.sub(r"\D+", "", _mask_source_text(value))
+    return len(text) >= 12
 
 
 def _binary_value(value: Any) -> int | None:

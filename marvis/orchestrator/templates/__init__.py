@@ -26,6 +26,8 @@ class StepTemplate:
     decision_point: bool = False
     sub_agent_scope: str | None = None
     granted_tools: tuple[ToolRef, ...] = ()
+    # Display-only big-step grouping label, threaded onto each PlanStep.phase.
+    phase: str | None = None
 
 
 @dataclass(frozen=True)

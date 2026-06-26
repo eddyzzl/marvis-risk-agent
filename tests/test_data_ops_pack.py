@@ -173,3 +173,79 @@ def test_data_ops_clean_format_and_dedup_rows_via_runner(tmp_path):
     deduped_dataset = repo.get_dataset(deduped.output["dataset_id"])
     assert deduped_dataset is not None
     assert deduped_dataset.row_count == 2
+
+
+def test_dedup_rows_reports_same_key_conflict_without_dropping(tmp_path):
+    """spec §6: a same-key value conflict is reported, never silently dropped — only an
+    explicit strategy resolves it."""
+    runner, registry, repo = _runtime(tmp_path)
+    dataset = _register_csv(
+        registry,
+        tmp_path,
+        "conflicts",
+        pd.DataFrame({"acct": ["A1", "A1", "B2"], "value": ["1", "2", "9"]}),  # A1 disagrees
+        role="feature",
+    )
+
+    # No strategy → the conflict is surfaced for review, nothing removed.
+    reported = runner.invoke(
+        ToolRef("data_ops", "dedup_rows"),
+        {"dataset_id": dataset.id, "keys": ["acct"]},
+        task_id="task-1",
+    )
+    assert reported.ok is True, reported.error
+    assert reported.output["needs_conflict_review"] is True
+    assert reported.output["removed_rows"] == 0
+    report = reported.output["conflict_report"]
+    assert report["n_conflict_keys"] == 1
+    assert report["conflict_columns"] == ["value"]
+    assert repo.get_dataset(reported.output["dataset_id"]).row_count == 3  # conflict kept
+
+    # An explicit strategy resolves it deterministically.
+    resolved = runner.invoke(
+        ToolRef("data_ops", "dedup_rows"),
+        {"dataset_id": dataset.id, "keys": ["acct"], "strategy": "first"},
+        task_id="task-1",
+    )
+    assert resolved.ok is True, resolved.error
+    assert resolved.output["needs_conflict_review"] is False
+    assert resolved.output["removed_rows"] == 1
+    assert repo.get_dataset(resolved.output["dataset_id"]).row_count == 2
+
+
+def test_data_ops_confirm_join_enables_execute(tmp_path):
+    runner, registry, repo = _runtime(tmp_path)
+    phones = ["13800138000", "13900139000"]
+    anchor = _register_csv(registry, tmp_path, "anchor", pd.DataFrame({"mobile": phones}), role="sample")
+    feature = _register_csv(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [hashlib.md5(value.encode()).hexdigest() for value in phones],
+            "balance": [10, 20],
+        }),
+        role="feature",
+    )
+    propose = runner.invoke(
+        ToolRef("data_ops", "propose_join"),
+        {"anchor_id": anchor.id, "feature_ids": [feature.id]},
+        task_id="task-1",
+    )
+    plan_id = propose.output["join_plan_id"]
+
+    # execute is hard-blocked until the join is confirmed (join-safety invariant)
+    blocked = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert blocked.ok is False
+    assert "confirmed" in blocked.error
+
+    # confirm_join confirms each feature spec via the engine (unique key => no dedup needed)
+    confirm = runner.invoke(ToolRef("data_ops", "confirm_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert confirm.ok is True
+    assert confirm.output["status"] == "confirmed"
+    assert feature.id in confirm.output["confirmed"]
+
+    # now execute succeeds and preserves the anchor 1:1
+    executed = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert executed.ok is True
+    assert executed.output["anchor_rows"] == executed.output["joined_rows"] == 2

@@ -27,6 +27,7 @@ class TrainConfig:
     scenario_id: str | None = None
     target_type: str = "binary"
     eval_metric: str = "ks_auc"
+    drop_nan_labels: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class TrainResult:
     metrics: ModelMetrics
     feature_importance: tuple[tuple[str, float], ...]
     experiment_id: str
+    nan_labels_dropped: int = 0
 
 
 @dataclass(frozen=True)

@@ -44,10 +44,10 @@ def bin_table(
     target_col: str,
 ) -> list[BinRow]:
     scores = dataframe[score_col].to_numpy(dtype=float)
-    labels = dataframe[target_col].to_numpy(dtype=int)
+    labels = pd.to_numeric(dataframe[target_col], errors="coerce").to_numpy(dtype=float)
     bins = assign_bins(scores, edges)
-    valid = bins > 0
-    labels = labels[valid]
+    valid = (bins > 0) & np.isfinite(labels)
+    labels = labels[valid].astype(int)
     bins = bins[valid]
     total = len(labels)
     total_bad = int(labels.sum())

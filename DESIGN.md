@@ -11,10 +11,10 @@
 - Personality: restrained local professional tool, closer to Xcode or Finder utility panels than SaaS landing pages.
 - Trust signals: clear task state, human-readable execution evidence, stable report output paths, visible errors near the triggering action, and auditable Agent statements.
 - Avoid: marketing hero pages, decorative glass effects, heavy shadows, redundant rails, generic AI claims, and JSON as the default user-facing result.
-- Default public brand: `MARVIS-Agent`.
+- Default public brand: `MARVIS-全能风控智能体`.
 - Branding must be runtime-configurable without source-code edits. The configurable surface is logo, favicon/web logo, primary theme color, platform display name, and browser page title.
 - Private/customer branding belongs in `workspace/branding/brand.json` plus sibling assets, and must not be required for the open-source checkout to run.
-- When no branding config exists, the platform uses the public MARVIS defaults: black primary color and the built-in MARVIS logo/favicon.
+- When no branding config exists, the platform uses the public MARVIS defaults: neutral charcoal primary color and the built-in MARVIS logo/favicon.
 
 ## Product goals
 - Goals: make MARVIS a local-first credit-risk agent that assists governed validation, modeling, analysis, strategy, and monitoring work through structured workflows.
@@ -48,7 +48,7 @@
 - Tradeoffs: compact internal-tool density over decorative presentation; auditability over conversational smoothness when the two conflict.
 
 ## Visual language
-- Color: neutral light background and white panels. The default primary color is black; configured primary color drives primary actions such as create-task and Agent send.
+- Color: neutral light background and white panels. The default primary color is neutral charcoal (`#343438`); configured primary color drives primary actions such as create-task and Agent send.
 - Typography: system font, 12 / 14 / 17 / 22 / 28 size scale, 400 / 500 / 700 weights.
 - Spacing/layout rhythm: resizable workbench, central evidence console, right document canvas, 8px grid where practical.
 - Shape/radius/elevation: one 8px radius token; border-first surfaces with minimal shadow.

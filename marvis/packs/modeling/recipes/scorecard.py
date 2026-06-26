@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
+from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.binning import chimerge_edges
 from marvis.feature.encode import woe_encode
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
@@ -30,6 +31,9 @@ def train_scorecard(
 ) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
     max_bins = int(config.params.get("scorecard_max_bins", 6))
     woe_maps = _fit_woe_maps(train, config, max_bins=max_bins)
     train_woe = _encode_with_woe(train, config, woe_maps)
@@ -43,6 +47,7 @@ def train_scorecard(
         test,
         oot,
         config,
+        oot_has_labels=oot_has_labels,
     )
     factor = pdo / np.log(2)
     offset = base_score - factor * np.log(base_odds)
@@ -66,6 +71,7 @@ def train_scorecard(
         metrics=metrics,
         feature_importance=_lr_importance(model, config.features),
         experiment_id="",
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 
@@ -97,10 +103,25 @@ def _encode_with_woe(
 
 
 def _lr_params(config: TrainConfig) -> dict:
-    excluded = {"scorecard_max_bins"}
+    allowed = {
+        "C",
+        "class_weight",
+        "dual",
+        "fit_intercept",
+        "intercept_scaling",
+        "l1_ratio",
+        "max_iter",
+        "multi_class",
+        "n_jobs",
+        "penalty",
+        "solver",
+        "tol",
+        "verbose",
+        "warm_start",
+    }
     return {
         **get_recipe("scorecard").default_params,
-        **{key: value for key, value in config.params.items() if key not in excluded},
+        **{key: value for key, value in config.params.items() if key in allowed},
     }
 
 

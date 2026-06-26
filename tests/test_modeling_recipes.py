@@ -174,7 +174,7 @@ def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
         target_col="y",
         split_col="split",
         split_values={"train": "train", "test": "test", "oot": "oot"},
-        params={"C": 0.8, "scorecard_max_bins": 4},
+        params={"C": 0.8, "max_depth": 3, "scorecard_max_bins": 4},
         seed=41,
         early_stopping_rounds=None,
     )
@@ -187,6 +187,7 @@ def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
     assert first.artifact.algorithm == "scorecard"
     assert set(first.artifact.woe_maps or {}) == {"x1", "x2"}
     assert first.artifact.params["base_score"] == 600
+    assert "max_depth" not in first.artifact.params
     assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)
     assert [item[0] for item in first.feature_importance] == [item[0] for item in second.feature_importance]
     assert [item[1] for item in first.feature_importance] == pytest.approx(

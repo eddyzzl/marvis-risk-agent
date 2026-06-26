@@ -205,7 +205,6 @@ def _scoring_notebook_source(
     split_json = json.dumps(experiment.config.split_col, ensure_ascii=False)
     time_json = json.dumps(_time_col(experiment.config.params), ensure_ascii=False)
     algorithm_json = json.dumps(artifact.algorithm, ensure_ascii=False)
-    model_json = json.dumps(model_filename, ensure_ascii=False)
     return "\n".join(
         [
             "import json",
@@ -232,7 +231,7 @@ def _scoring_notebook_source(
             "    raise ValueError(f'unsupported sample format: {path.suffix}')",
             "",
             "RMC_SAMPLE_DF = _rmc_read_sample(RMC_SAMPLE_PATH)",
-            f"_RMC_MODEL = joblib.load(Path({model_json!r}))",
+            f"_RMC_MODEL = joblib.load(Path({model_filename!r}))",
             "",
             "def RMC_SCORE_FN(dataframe):",
             "    return _RMC_MODEL.predict_proba(dataframe[RMC_FEATURES])[:, 1]",

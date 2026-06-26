@@ -1,7 +1,8 @@
 import json
+import signal
+import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 from marvis.db import PluginRepository, init_db
 from marvis.plugins.loader import load_builtin_packs
@@ -47,21 +48,33 @@ def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeyp
     runner = _runner(tmp_path)
     calls = []
 
-    def fake_run(_args, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(
-            stdout=json.dumps({"ok": True, "output": {"echoed": "你好"}}, ensure_ascii=False),
-            stderr="",
-            returncode=0,
-        )
+    class FakeProcess:
+        pid = 123
+        returncode = 0
 
-    monkeypatch.setattr("marvis.plugins.runner.subprocess.run", fake_run)
+        def __init__(self, args):
+            self.args = args
+
+        def communicate(self, input=None, timeout=None):
+            calls.append({"input": input, "timeout": timeout})
+            return json.dumps({"ok": True, "output": {"echoed": "你好"}}, ensure_ascii=False), ""
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return FakeProcess(args)
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", fake_popen)
 
     result = runner.invoke(ToolRef("_sample", "echo"), {"message": "你好"}, task_id="task-1")
 
     assert result.ok is True
     assert result.output == {"echoed": "你好"}
-    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["kwargs"]["encoding"] == "utf-8"
+    assert calls[0]["kwargs"]["text"] is True
+    assert calls[0]["kwargs"]["start_new_session"] is True
 
 
 def test_tool_runner_records_invocation_audit(tmp_path):
@@ -144,6 +157,42 @@ def test_tool_runner_kills_timed_out_worker(tmp_path):
     assert result.ok is False
     assert result.error_kind == "timeout"
     assert "timed out" in result.error
+
+
+def test_tool_runner_kills_worker_process_group_on_timeout(tmp_path, monkeypatch):
+    runner = _runner(tmp_path)
+    killed = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, args):
+            self.args = args
+            self.communicate_calls = 0
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(self.args, timeout, output="out", stderr="err")
+            self.returncode = -9
+            return "out", "err"
+
+        def poll(self):
+            return self.returncode
+
+    def fake_popen(args, **_kwargs):
+        return FakeProcess(args)
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("marvis.plugins.runner.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("marvis.plugins.runner.os.killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    result = runner.invoke(ToolRef("_sample", "sleep"), {"seconds": 2}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "timeout"
+    assert killed == [(4321, signal.SIGKILL)]
 
 
 def test_tool_runner_invokes_adhoc_module_in_subprocess_and_audits_draft(tmp_path):

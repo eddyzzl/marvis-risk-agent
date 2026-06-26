@@ -55,6 +55,12 @@ _NAMED_LOCAL_HOSTS = {"localhost", "testclient"}
 _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
 _TRUSTED_PROXY_ENV = "MARVIS_TRUSTED_PROXY_HOSTS"
 _FORWARDED_CLIENT_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
+_STATIC_VERSION_FILES = (
+    "app.js",
+    "styles.css",
+    "css/welcome.css",
+    "css/v2-workbench.css",
+)
 
 
 def _is_local_client(host: str | None) -> bool:
@@ -108,6 +114,18 @@ def _remote_read_enabled() -> bool:
 
 def _is_public_read_path(path: str) -> bool:
     return path == "/" or path == "/api/health" or path.startswith("/static/")
+
+
+def _static_asset_version(static_dir: Path) -> str:
+    mtimes = []
+    for relative_path in _STATIC_VERSION_FILES:
+        try:
+            mtimes.append((static_dir / relative_path).stat().st_mtime_ns)
+        except OSError:
+            continue
+    if not mtimes:
+        return __version__
+    return f"{__version__}-{max(mtimes)}"
 
 
 def _is_local_only_path(path: str) -> bool:
@@ -191,7 +209,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     @app.get("/")
     def index(request: Request) -> HTMLResponse:
         index_html = (static_dir / "index.html").read_text(encoding="utf-8")
-        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", __version__)
+        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", _static_asset_version(static_dir))
         branding = load_branding(settings.workspace)
         if not _is_local_client(_effective_client_host(request)):
             branding = dict(DEFAULT_BRANDING)

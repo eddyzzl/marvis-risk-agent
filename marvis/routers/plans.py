@@ -94,6 +94,15 @@ def get_step_output(request: Request, step_id: str) -> dict:
         raise HTTPException(status_code=404, detail="step output not found") from exc
 
 
+@router.get("/tasks/{task_id}/plans")
+def list_task_plans(request: Request, task_id: str) -> dict:
+    """Plans belonging to a task (oldest first). Lets the right rail resume an
+    existing task's plan; empty list (not 404) when the task has no plans yet."""
+    repo = request.app.state.plan_repo
+    plans = repo.list_plans_for_task(task_id)
+    return {"plans": [_plan_payload(request, plan)["plan"] for plan in plans]}
+
+
 @router.get("/plans/{plan_id}")
 def get_plan(request: Request, plan_id: str) -> dict:
     return _load_plan_payload(request, plan_id)

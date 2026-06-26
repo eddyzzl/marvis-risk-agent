@@ -390,7 +390,7 @@ def test_draft_handlers_load_run_promote_reject_and_validate_json_inputs():
           },
           preventDefault() {},
         });
-        assert.ok(messages.at(-1).includes("Invalid JSON"));
+        assert.ok(messages.at(-1).includes("JSON 格式无效"));
 
         detach();
         assert.equal(listeners.click, undefined);

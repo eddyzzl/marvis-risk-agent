@@ -24,6 +24,7 @@ def vintage_curve(
         target_col=bad_col,
     )
     wide = vintage_curve_wide(points, metric="cum_bad_rate")
+    mob_axis = tuple(sorted({point.mob for point in points})[:mob_max])
     curves = {
         cohort: _truncate_or_pad(values, mob_max)
         for cohort, values in wide.items()
@@ -34,16 +35,17 @@ def vintage_curve(
         cohorts=tuple(sorted(curves)),
         curves=curves,
         counts=_cohort_counts_at_first_mob(points),
+        mob_axis=mob_axis,
     )
 
 
 def vintage_summary(curve: VintageCurve, *, ref_mob: int = 6) -> dict:
     if ref_mob < 1:
         raise ValueError("ref_mob must be positive")
-    index = ref_mob - 1
     at_ref = {}
     for cohort in curve.cohorts:
         values = curve.curves.get(cohort, [])
+        index = _mob_index(curve, ref_mob)
         if index < len(values) and values[index] is not None:
             at_ref[cohort] = float(values[index])
     ordered_values = [at_ref[cohort] for cohort in curve.cohorts if cohort in at_ref]
@@ -55,6 +57,15 @@ def _truncate_or_pad(values: list[float | None], length: int) -> list[float | No
     if len(trimmed) < length:
         trimmed.extend([None] * (length - len(trimmed)))
     return trimmed
+
+
+def _mob_index(curve: VintageCurve, ref_mob: int) -> int:
+    if curve.mob_axis:
+        try:
+            return curve.mob_axis.index(int(ref_mob))
+        except ValueError:
+            return len(curve.curves.get(curve.cohorts[0], [])) if curve.cohorts else 0
+    return int(ref_mob) - 1
 
 
 def _cohort_counts_at_first_mob(points) -> dict[str, int]:

@@ -21,9 +21,21 @@ class TaskStatus(StrEnum):
 TASK_STATUS_REASON_USER_CANCELLED = "user_cancelled"
 TASK_STATUS_REASON_SERVER_RESTART = "server_restart_while_running"
 TASK_TYPE_VALIDATION = "validation"
+TASK_TYPE_FEATURE_ANALYSIS = "feature_analysis"
+TASK_TYPE_DATA_JOIN = "data_join"
+TASK_TYPE_MODELING = "modeling"
+TASK_TYPE_STRATEGY = "strategy"
+TASK_TYPE_VINTAGE = "vintage"
 # Known task types. New capabilities (modeling/strategy/...) must register here
 # so _normalize_task_type can keep arbitrary strings out of the database.
-VALID_TASK_TYPES = frozenset({TASK_TYPE_VALIDATION})
+VALID_TASK_TYPES = frozenset({
+    TASK_TYPE_VALIDATION,
+    TASK_TYPE_FEATURE_ANALYSIS,
+    TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_MODELING,
+    TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
+})
 
 
 class FileRole(StrEnum):
@@ -49,6 +61,12 @@ class TaskCreate:
     split_col: str = "split"
     time_col: str = "apply_month"
     feature_columns: list[str] = field(default_factory=list)
+    # Modeling recipes the user picked (manual mode multi-select); empty → the agent
+    # recommends / modeling_setup defaults. Multi-element → multi-algorithm compare.
+    recipes: list[str] = field(default_factory=list)
+    # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
+    # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
+    metrics: list[str] = field(default_factory=list)
     notebook_path: str | None = None
     sample_path: str | None = None
     pmml_path: str | None = None
@@ -81,6 +99,8 @@ class TaskRecord:
     updated_at: str
     status_reason_code: str = ""
     task_type: str = TASK_TYPE_VALIDATION
+    recipes: list[str] = field(default_factory=list)
+    metrics: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

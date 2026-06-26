@@ -71,6 +71,10 @@ class PlanStep:
     output_ref: str | None = None
     review_verdicts: list[ReviewVerdict] = field(default_factory=list)
     error: str | None = None
+    # Display-only grouping label (e.g. "数据准备"/"特征"/"建模"/"报告"); does not
+    # affect execution semantics. Populated by templates so the right-rail can
+    # fold a flat step DAG into big-step phases. None for ungrouped steps.
+    phase: str | None = None
 
 
 @dataclass
@@ -97,6 +101,7 @@ class LoopEvent:
     reason: str
     at: str
     trigger_step_id: str | None = None
+    instruction: str | None = None  # free-text user constraint for user_instruction replans
 
 
 @dataclass
@@ -201,6 +206,7 @@ def _step_to_dict(step: PlanStep) -> dict[str, Any]:
         "output_ref": step.output_ref,
         "review_verdicts": [_review_verdict_to_dict(verdict) for verdict in step.review_verdicts],
         "error": step.error,
+        "phase": step.phase,
     }
 
 
@@ -232,6 +238,7 @@ def _step_from_dict(payload: dict[str, Any]) -> PlanStep:
             for item in payload.get("review_verdicts") or []
         ],
         error=_optional_str(payload.get("error")),
+        phase=_optional_str(payload.get("phase")),
     )
 
 
@@ -281,6 +288,8 @@ def _loop_event_to_dict(event: LoopEvent) -> dict[str, Any]:
     }
     if event.trigger_step_id is not None:
         payload["trigger_step_id"] = event.trigger_step_id
+    if event.instruction is not None:
+        payload["instruction"] = event.instruction
     return payload
 
 
@@ -290,6 +299,7 @@ def _loop_event_from_dict(payload: dict[str, Any]) -> LoopEvent:
         reason=str(payload.get("reason") or ""),
         at=str(payload.get("at") or ""),
         trigger_step_id=_optional_str(payload.get("trigger_step_id")),
+        instruction=_optional_str(payload.get("instruction")),
     )
 
 

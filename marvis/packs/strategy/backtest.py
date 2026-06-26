@@ -111,7 +111,8 @@ def _strategy_profit(
 
 
 def _target_series(df: pd.DataFrame, target_col: str) -> pd.Series:
-    return pd.to_numeric(df[target_col], errors="raise").fillna(0).astype(int)
+    # NaN labels must never be coerced to 0; callers gate/drop them upstream (tool boundary).
+    return pd.to_numeric(df[target_col], errors="raise").astype(int)
 
 
 def _bad_rate(target: pd.Series) -> float:

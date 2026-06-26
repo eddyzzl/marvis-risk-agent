@@ -41,13 +41,21 @@ def compute_model_metrics(
     test: pd.DataFrame,
     oot: pd.DataFrame | None,
     config: TrainConfig,
+    *,
+    oot_has_labels: bool = True,
 ) -> ModelMetrics:
     train_scores = _scores(score_fn, train)
     test_scores = _scores(score_fn, test)
     oot_scores = None if oot is None else _scores(score_fn, oot)
-    train_target = train[config.target_col].to_numpy(dtype=int)
-    test_target = test[config.target_col].to_numpy(dtype=int)
-    oot_target = None if oot is None else oot[config.target_col].to_numpy(dtype=int)
+    # train/test are label-resolved upstream; OOT may be scoring-only (no labels) -> never
+    # coerce its NaN target into a class, just skip OOT's label-dependent metrics.
+    train_target = train[config.target_col].to_numpy(dtype=float)
+    test_target = test[config.target_col].to_numpy(dtype=float)
+    oot_target = (
+        None
+        if oot is None or not oot_has_labels
+        else oot[config.target_col].to_numpy(dtype=float)
+    )
 
     train_ks = feature_ks(train_scores, train_target)
     test_ks = feature_ks(test_scores, test_target)
@@ -78,13 +86,19 @@ def compute_regression_metrics(
     test: pd.DataFrame,
     oot: pd.DataFrame | None,
     config: TrainConfig,
+    *,
+    oot_has_labels: bool = True,
 ) -> ModelMetrics:
     train_pred = _scores(score_fn, train)
     test_pred = _scores(score_fn, test)
     oot_pred = None if oot is None else _scores(score_fn, oot)
     train_target = train[config.target_col].to_numpy(dtype=float)
     test_target = test[config.target_col].to_numpy(dtype=float)
-    oot_target = None if oot is None else oot[config.target_col].to_numpy(dtype=float)
+    oot_target = (
+        None
+        if oot is None or not oot_has_labels
+        else oot[config.target_col].to_numpy(dtype=float)
+    )
 
     train_rmse, train_mae, train_r2 = _regression_values(train_target, train_pred)
     test_rmse, test_mae, test_r2 = _regression_values(test_target, test_pred)

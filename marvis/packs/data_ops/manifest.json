@@ -1,6 +1,6 @@
 {
   "name": "data_ops",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "display_name": "Data Operations Pack",
   "description": "Deterministic dataset ingestion, profiling, alignment, and guarded join tools.",
   "module": "marvis.packs.data_ops.tools",
@@ -117,6 +117,34 @@
       "side_effects": ["read:dataset", "write:join_plan"]
     },
     {
+      "name": "confirm_join",
+      "summary": "Confirm a proposed join plan's feature specs (per-feature, with optional dedup strategy) so execute_join is allowed; enforces the join-safety forced-confirmation invariant.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "join_plan_id": {"type": "string", "minLength": 1},
+          "dedup_strategies": {"type": "object"}
+        },
+        "required": ["join_plan_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "join_plan_id": {"type": "string"},
+          "confirmed": {"type": "array", "items": {"type": "string"}},
+          "status": {"type": "string"}
+        },
+        "required": ["join_plan_id", "confirmed", "status"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_confirm_join",
+      "side_effects": ["read:join_plan", "write:join_plan"]
+    },
+    {
       "name": "execute_join",
       "summary": "Execute an explicitly confirmed join plan.",
       "input_schema": {
@@ -132,7 +160,8 @@
           "anchor_rows": {"type": "integer"},
           "joined_rows": {"type": "integer"},
           "fan_out": {"type": "boolean"},
-          "warnings": {"type": "array", "items": {"type": "string"}}
+          "warnings": {"type": "array", "items": {"type": "string"}},
+          "per_table": {"type": "array", "items": {"type": "object"}}
         },
         "required": ["result_dataset_id", "anchor_rows", "joined_rows", "fan_out", "warnings"],
         "additionalProperties": false
@@ -185,7 +214,7 @@
     },
     {
       "name": "dedup_rows",
-      "summary": "Create a derived dataset by dropping duplicate rows by key.",
+      "summary": "Two-level dedup: drop whole-row duplicates (safe) and report same-key value conflicts (never silently dropped); resolve conflicts only on an explicit strategy.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -193,14 +222,17 @@
           "keys": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "strategy": {"type": "string", "enum": ["first", "last"]}
         },
-        "required": ["dataset_id", "keys", "strategy"],
+        "required": ["dataset_id", "keys"],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string"},
-          "removed_rows": {"type": "integer"}
+          "removed_rows": {"type": "integer"},
+          "safe_dropped": {"type": "integer"},
+          "needs_conflict_review": {"type": "boolean"},
+          "conflict_report": {"type": "object"}
         },
         "required": ["dataset_id", "removed_rows"],
         "additionalProperties": false

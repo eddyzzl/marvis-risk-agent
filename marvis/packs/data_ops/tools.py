@@ -7,6 +7,8 @@ import pandas as pd
 
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
+from marvis.data.dedup import two_level_dedup
+from marvis.data.errors import DedupRequiredError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
@@ -85,6 +87,39 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
     return _join_plan_payload(plan)
 
 
+def tool_confirm_join(inputs: dict, ctx) -> dict:
+    """Confirm a proposed join plan's feature specs so execute_join is allowed.
+
+    Confirmation is per-feature (the engine's forced-confirmation invariant): a
+    feature whose join key is not unique requires a dedup strategy ("first"/"last")
+    or the engine refuses. ``dedup_strategies`` maps feature_dataset_id -> strategy.
+    Features needing a strategy that wasn't supplied are surfaced as an actionable
+    error rather than silently joined.
+    """
+    runtime = _runtime(ctx)
+    join_plan_id = str(inputs["join_plan_id"])
+    strategies = inputs.get("dedup_strategies") or {}
+    plan = runtime.repo.load_join_plan(join_plan_id)
+    confirmed: list[str] = []
+    needs_dedup: list[str] = []
+    for spec in plan.joins:
+        feature_id = spec.feature_dataset_id
+        strategy = strategies.get(feature_id)
+        try:
+            runtime.join_engine.confirm_join_spec(
+                join_plan_id, feature_id, dedup_strategy=strategy
+            )
+            confirmed.append(feature_id)
+        except DedupRequiredError:
+            needs_dedup.append(feature_id)
+    if needs_dedup:
+        raise DedupRequiredError(
+            "以下特征的拼接键不唯一,需先为其选择去重策略(first/last)再确认:"
+            + ", ".join(needs_dedup)
+        )
+    return {"join_plan_id": join_plan_id, "confirmed": confirmed, "status": "confirmed"}
+
+
 def tool_execute_join(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     plan = runtime.repo.load_join_plan(str(inputs["join_plan_id"]))
@@ -93,12 +128,43 @@ def tool_execute_join(inputs: dict, ctx) -> dict:
         plan.id,
         out_dir=runtime.datasets_root / ctx.task_id / "joins",
     )
+    # §8 stage-completion summary from real per-table diagnostics (no longer hard-coded).
+    per_table = []
+    warnings = []
+    for spec in plan.joins:
+        diag = spec.diagnostics
+        per_table.append({
+            "feature_id": spec.feature_dataset_id,
+            "match_rate": round(float(diag.match_rate), 4),
+            "new_columns": int(diag.new_columns),
+            "new_columns_null_rate": round(float(diag.new_columns_null_rate), 4),
+            "dedup_strategy": spec.dedup_strategy or "无",
+        })
+        if diag.shrink_detected:
+            warnings.append(
+                f"{spec.feature_dataset_id}:命中率偏低({diag.match_rate:.2f}),新列缺失较多"
+            )
+        # conflict_report is a ConflictReport in-memory but an asdict-flattened dict after a
+        # DB round-trip (load_join_plan) — handle both so the warning never crashes here.
+        report = getattr(diag, "conflict_report", None)
+        if isinstance(report, dict):
+            conflict_keys = int(report.get("n_conflict_keys") or 0)
+        elif report is not None:
+            conflict_keys = int(getattr(report, "n_conflict_keys", 0) or 0)
+        else:
+            conflict_keys = 0
+        if conflict_keys and spec.dedup_strategy:
+            warnings.append(
+                f"{spec.feature_dataset_id}:{conflict_keys} 个同键冲突已按 "
+                f"'{spec.dedup_strategy}' 解决"
+            )
     return {
         "result_dataset_id": result.id,
         "anchor_rows": anchor.row_count,
         "joined_rows": result.row_count,
-        "fan_out": False,
-        "warnings": [],
+        "fan_out": result.row_count > anchor.row_count,
+        "warnings": warnings,
+        "per_table": per_table,
     }
 
 
@@ -132,15 +198,21 @@ def tool_dedup_rows(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     keys = [str(item) for item in inputs.get("keys") or []]
-    strategy = str(inputs["strategy"])
+    strategy = inputs.get("strategy")
     path = runtime.registry.resolve_path(dataset.id)
     frame = runtime.backend.read_frame(path)
     missing = sorted(set(keys) - set(frame.columns))
     if missing:
         raise KeyError(f"unknown keys: {', '.join(missing)}")
     before = len(frame)
-    keep = "first" if strategy == "first" else "last"
-    deduped = frame.drop_duplicates(subset=keys, keep=keep)
+    # Level-1 safe dedup (always) + level-2 conflict detection (never auto-dropped).
+    deduped, report = two_level_dedup(frame, keys)
+    # A same-key value-conflict is only resolved on an EXPLICIT, deterministic strategy
+    # (spec §6: 告警不静默删). With no strategy, conflicts are surfaced for review.
+    needs_conflict_review = report.has_conflicts and not strategy
+    if strategy and report.has_conflicts and keys:
+        keep = "first" if str(strategy) == "first" else "last"
+        deduped = deduped.drop_duplicates(subset=keys, keep=keep, ignore_index=True)
     out_path = runtime.datasets_root / ctx.task_id / "dedup" / f"{dataset.id}_dedup.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     deduped.to_parquet(out_path, index=False)
@@ -151,7 +223,24 @@ def tool_dedup_rows(inputs: dict, ctx) -> dict:
         anchor_target=dataset.id,
         seed=_seed(ctx),
     )
-    return {"dataset_id": result.id, "removed_rows": before - len(deduped)}
+    return {
+        "dataset_id": result.id,
+        "removed_rows": before - len(deduped),
+        "safe_dropped": report.safe_dropped,
+        "needs_conflict_review": needs_conflict_review,
+        "conflict_report": _conflict_report_json(report),
+    }
+
+
+def _conflict_report_json(report) -> dict:
+    return {
+        "key_columns": list(report.key_columns),
+        "conflict_columns": list(report.conflict_columns),
+        "n_conflict_keys": report.n_conflict_keys,
+        "n_conflict_rows": report.n_conflict_rows,
+        "safe_dropped": report.safe_dropped,
+        "sample_keys": [list(key) for key in report.sample_keys],
+    }
 
 
 class _Runtime:

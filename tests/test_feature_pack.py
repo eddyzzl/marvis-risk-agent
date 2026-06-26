@@ -3,10 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, init_db
+from marvis.feature.metrics import feature_metrics
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -143,6 +145,200 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     assert imputed.output["fill_values"]["missing"] == 5.0
     assert capped.output["bounds"]["amount"]["upper"] == 62.5
     assert crossed.output["new_columns"] == ["x1_ratio_x2", "amount_by_cat_mean"]
+
+
+def test_feature_metrics_tool_drops_unlabeled_target_rows_when_confirmed(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        "y": [0.0, 0.0, 1.0, np.nan, 1.0, np.nan, 0.0, 1.0],
+    })
+    path = tmp_path / "unlabeled.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    # Without confirmation the gate stops and reports the NaN labels (never coerced to 0).
+    blocked = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {"dataset_id": dataset.id, "features": ["x"], "target_col": "y", "bins": 3},
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "nan_label_not_confirmed"
+    assert blocked.error_detail["n_nan"] == 2
+
+    # Confirmed: the unlabeled rows are dropped (not coerced), metrics match the labeled subset.
+    result = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x"],
+            "target_col": "y",
+            "bins": 3,
+            "drop_nan_labels": True,
+        },
+        task_id="task-feature",
+    )
+
+    expected = feature_metrics(
+        frame["x"].to_numpy(dtype=float),
+        frame["y"].to_numpy(dtype=float),
+        feature="x",
+        bins=3,
+    )
+    assert result.ok is True, result.error
+    assert result.output["nan_labels_dropped"] == 2
+    actual = result.output["metrics"][0]
+    assert actual["iv"] == pytest.approx(expected.iv)
+    assert actual["ks"] == pytest.approx(expected.ks)
+    assert actual["auc"] == pytest.approx(expected.auc)
+
+
+def test_feature_metrics_computes_collinear_only_when_vif_selected(tmp_path):
+    """Optional metrics are computed only when selected (spec §2: 选了才算).
+
+    No selection → base per-feature metrics only, no collinear section. Selecting
+    VIF adds the collinear / VIF block alongside the base metrics.
+    """
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    base = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y", "bins": 3},
+        task_id="task-feature",
+    )
+    assert base.ok is True, base.error
+    assert "collinear" not in base.output
+
+    with_vif = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "bins": 3,
+            "metrics": ["vif"],
+        },
+        task_id="task-feature",
+    )
+    assert with_vif.ok is True, with_vif.error
+    assert with_vif.output["metrics"]  # base per-feature metrics still present
+    collinear = with_vif.output["collinear"]
+    assert set(collinear["vif"]) == {"x1", "x2"}
+    assert collinear["collinear_pairs"]  # x1/x2 are strongly correlated in the fixture
+
+
+def test_head_tail_lift_is_risk_direction_aware_and_deterministic():
+    """head/tail lift slices by RISK direction (corr sign), not raw feature magnitude,
+    so a feature and its negation report the same high-risk head. Tiny N → None."""
+    from marvis.feature.metrics import head_tail_lift
+
+    n = 200
+    feature = np.arange(n, dtype=float)
+    target = (feature >= 180).astype(float)  # top 20 rows bad → base rate 0.10
+
+    out = head_tail_lift(feature, target)
+    assert out["lift_head_10"] == pytest.approx(10.0)  # highest-risk 10% all bad: 1.0/0.10
+    assert out["lift_tail_10"] == pytest.approx(0.0)    # lowest-risk 10% all good
+    assert out["lift_head_5"] == pytest.approx(10.0)
+
+    # Negating the feature flips the correlation sign; the high-risk end must still be
+    # tracked (head stays the bad end), proving risk-direction awareness.
+    flipped = head_tail_lift(-feature, target)
+    assert flipped["lift_head_10"] == pytest.approx(10.0)
+    assert flipped["lift_tail_10"] == pytest.approx(0.0)
+
+    # Deterministic: identical inputs → identical output.
+    assert head_tail_lift(feature, target) == out
+
+    # Too few labelled rows → None (not a misleading 1-row slice).
+    tiny = head_tail_lift(np.arange(5.0), np.array([0.0, 1.0, 0.0, 1.0, 0.0]))
+    assert all(value is None for value in tiny.values())
+
+
+def test_feature_metrics_adds_head_tail_lift_only_when_selected(tmp_path):
+    """The head/tail lift keys ride inside each per-feature metrics dict, present ONLY
+    when the metric was selected (spec §2: 选了才算)."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    base = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y", "bins": 3},
+        task_id="task-feature",
+    )
+    assert base.ok is True, base.error
+    assert "lift_head_5" not in base.output["metrics"][0]
+
+    selected = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "bins": 3,
+            "metrics": ["head_tail_lift"],
+        },
+        task_id="task-feature",
+    )
+    assert selected.ok is True, selected.error
+    for key in ("lift_head_5", "lift_head_10", "lift_tail_5", "lift_tail_10"):
+        assert key in selected.output["metrics"][0]  # gating wired the keys into the row
+
+
+def test_feature_importance_is_deterministic_and_ranks_signal():
+    """Model-based gain importance is bit-reproducible (pinned seed + single-thread +
+    deterministic LGB) and ranks a real signal above noise; single-class → None."""
+    from marvis.feature.importance import feature_importance
+
+    rng = np.random.RandomState(0)
+    n = 600
+    signal = rng.normal(size=n)
+    noise = rng.normal(size=n)
+    p = 1 / (1 + np.exp(-(1.5 * signal)))
+    y = (rng.uniform(size=n) < p).astype(float)
+    frame = pd.DataFrame({"signal": signal, "noise": noise, "y": y})
+
+    first = feature_importance(frame, ["signal", "noise"], "y")
+    second = feature_importance(frame, ["signal", "noise"], "y")
+    assert first == second  # bit-identical across runs (determinism invariant)
+    assert first["signal"] > first["noise"]  # the predictive feature ranks higher
+    assert sum(first.values()) == pytest.approx(1.0)  # normalised to fraction of gain
+
+    degenerate = feature_importance(
+        pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [0.0, 0.0, 0.0, 0.0]}), ["x"], "y"
+    )
+    assert degenerate["x"] is None  # single-class target → cannot train → None
+
+
+def test_feature_metrics_adds_importance_only_when_selected(tmp_path):
+    """Importance rides inside each per-feature metrics dict, present ONLY when the
+    metric was selected (spec §2: 选了才算) — no model trains otherwise."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    base = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y", "bins": 3},
+        task_id="task-feature",
+    )
+    assert base.ok is True, base.error
+    assert "importance" not in base.output["metrics"][0]
+
+    selected = runner.invoke(
+        ToolRef("feature", "compute_feature_metrics"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "bins": 3,
+            "metrics": ["importance"],
+        },
+        task_id="task-feature",
+    )
+    assert selected.ok is True, selected.error
+    assert "importance" in selected.output["metrics"][0]  # gating wired the key in
 
 
 def _assert_registered_frame(repo, registry, backend, dataset_id: str, expected_columns: list[str]) -> None:

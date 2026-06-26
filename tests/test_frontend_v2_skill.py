@@ -99,7 +99,7 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
         assert.equal(scheduled.length, 1);
         await scheduled.shift()();
         assert.deepEqual(calls.splice(0), [["validateSkill", { id: "preview_echo" }]]);
-        assert.ok(resultSlot.innerHTML.includes("Valid skill"));
+        assert.ok(resultSlot.innerHTML.includes("模板有效"));
 
         const invalidTarget = {
           value: '{"id":',
@@ -109,7 +109,7 @@ def test_skill_handlers_reload_validate_and_report_local_json_errors():
         };
         await listeners.input({ target: invalidTarget });
         assert.deepEqual(calls, []);
-        assert.ok(resultSlot.innerHTML.includes("Invalid JSON"));
+        assert.ok(resultSlot.innerHTML.includes("JSON 格式无效"));
 
         detach();
         assert.equal(listeners.click, undefined);
@@ -178,7 +178,7 @@ def test_skill_handlers_debounce_validation_input_and_keep_latest_payload():
 
         await scheduled[1].fn();
         assert.deepEqual(calls, [["validateSkill", { id: "second" }]]);
-        assert.ok(resultSlot.innerHTML.includes("Valid skill"));
+        assert.ok(resultSlot.innerHTML.includes("模板有效"));
         """
     )
 
@@ -216,7 +216,7 @@ def test_skill_handlers_show_local_only_message_for_reload_403():
         await listeners.click({ target: reloadTarget, preventDefault() {} });
 
         assert.equal(messages.length, 1);
-        assert.ok(messages[0].includes("local workspace"));
+        assert.ok(messages[0].includes("本地工作区"));
         assert.equal(messages[0].includes("forbidden"), false);
         """
     )
@@ -265,7 +265,7 @@ def test_skill_handlers_show_local_only_message_for_validate_403():
         assert.equal(scheduled.length, 1);
         await scheduled.shift()();
 
-        assert.ok(resultSlot.innerHTML.includes("local workspace"));
+        assert.ok(resultSlot.innerHTML.includes("本地工作区"));
         assert.equal(resultSlot.innerHTML.includes("forbidden"), false);
         assert.equal(resultSlot.innerHTML.includes("<script>"), false);
         """

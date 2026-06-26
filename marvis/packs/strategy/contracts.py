@@ -11,6 +11,7 @@ class VintageCurve:
     cohorts: tuple[str, ...]
     curves: dict[str, list[float | None]]
     counts: dict[str, int]
+    mob_axis: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

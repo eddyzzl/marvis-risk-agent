@@ -160,7 +160,7 @@ def test_remote_index_uses_default_branding_instead_of_workspace_branding(tmp_pa
     assert response.status_code == 200
     assert "私有机构风控平台" not in response.text
     assert "私有机构" not in response.text
-    assert "MARVIS-Agent" in response.text
+    assert "MARVIS-全能风控智能体" in response.text
 
 
 def test_index_replaces_static_asset_version_placeholder(tmp_path):
@@ -170,5 +170,5 @@ def test_index_replaces_static_asset_version_placeholder(tmp_path):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert f"static/app.js?v={__version__}" in response.text
+    assert f"static/app.js?v={__version__}-" in response.text
     assert "__MARVIS_STATIC_VERSION__" not in response.text

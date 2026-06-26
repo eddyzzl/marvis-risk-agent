@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.data.backend import DataBackend
+from marvis.data.labels import require_labels_confirmed
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
 from marvis.feature.binning import (
@@ -22,7 +23,7 @@ from marvis.feature.derive import derive_batch
 from marvis.feature.encode import onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
-from marvis.feature.metrics import feature_metrics, feature_psi
+from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
 from marvis.feature.transform import (
     cap_outliers,
     impute_missing,
@@ -39,6 +40,11 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         str(inputs["dataset_id"]),
         _unique([*inputs["features"], inputs["target_col"]]),
     )
+    nan_labels_dropped = require_labels_confirmed(
+        frame,
+        str(inputs["target_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     compare_frame = None
     if inputs.get("compare_dataset_id"):
         _compare_dataset, compare_frame = _read_frame(
@@ -51,13 +57,59 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         compare_values = None if compare_frame is None else compare_frame[str(feature)].to_numpy(dtype=float)
         item = feature_metrics(
             frame[str(feature)].to_numpy(dtype=float),
-            frame[str(inputs["target_col"])].to_numpy(dtype=int),
+            _target_values(frame, str(inputs["target_col"])),
             feature=str(feature),
             bins=int(inputs.get("bins") or 10),
             compare_values=compare_values,
         )
         metrics.append(_jsonable(item))
-    return {"dataset_id": dataset.id, "metrics": metrics}
+    result = {"dataset_id": dataset.id, "metrics": metrics, "nan_labels_dropped": nan_labels_dropped}
+    # Optional metrics are computed only when selected (spec §2: 选了才算). VIF /
+    # collinear is the first wired one; missing selection → not computed.
+    selected = {str(metric).strip().lower() for metric in (inputs.get("metrics") or [])}
+    if selected & {"vif", "collinear", "共线"}:
+        report = correlation_report(
+            frame,
+            [str(feature) for feature in inputs["features"]],
+            method="pearson",
+            threshold=float(inputs.get("corr_threshold", 0.8)),
+        )
+        result["collinear"] = _jsonable(report)
+    if selected & {"head_tail_lift", "headtail_lift", "头尾lift"}:
+        # Merge the risk-direction-aware head/tail lift into each per-feature row so it
+        # rides the existing metrics echo (no new output key / $ref needed).
+        target_values = _target_values(frame, str(inputs["target_col"]))
+        for index, feature in enumerate(inputs["features"]):
+            metrics[index].update(
+                head_tail_lift(frame[str(feature)].to_numpy(dtype=float), target_values)
+            )
+    if selected & {"importance", "feature_importance", "重要性"}:
+        # Multivariate gain importance: train ONE capped, seed-pinned model over all
+        # features and merge each feature's share into its row (lazy lightgbm import).
+        from marvis.feature.importance import feature_importance
+
+        feature_names = [str(feature) for feature in inputs["features"]]
+        importance = feature_importance(frame, feature_names, str(inputs["target_col"]))
+        for index, feature in enumerate(feature_names):
+            metrics[index]["importance"] = importance.get(feature)
+    return result
+
+
+def tool_generate_feature_report(inputs: dict, ctx) -> dict:
+    """Write the per-feature metrics into a downloadable Excel report (FEATURE form A)."""
+    from marvis.output.feature_report import render_feature_report
+
+    metrics = [item for item in (inputs.get("metrics") or []) if isinstance(item, dict)]
+    collinear = inputs.get("collinear") if isinstance(inputs.get("collinear"), dict) else None
+    settings = build_settings(ctx.workspace)
+    out_path = Path(settings.tasks_dir) / ctx.task_id / "outputs" / "feature_report.xlsx"
+    render_feature_report(metrics, out_path, collinear=collinear)
+    # Echo metrics (+ optional collinear) so the driver renders the wide table, the VIF
+    # section, and the report link together.
+    out = {"report_path": str(out_path), "feature_count": len(metrics), "metrics": metrics}
+    if collinear is not None:
+        out["collinear"] = collinear
+    return out
 
 
 def tool_bin_feature(inputs: dict, ctx) -> dict:
@@ -67,16 +119,22 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
         str(inputs["dataset_id"]),
         [str(inputs["feature"]), str(inputs["target_col"])],
     )
+    nan_labels_dropped = require_labels_confirmed(
+        frame,
+        str(inputs["target_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     edges = _edges_for(frame, inputs, ctx)
     result = compute_woe_iv(
         frame[str(inputs["feature"])].to_numpy(dtype=float),
-        frame[str(inputs["target_col"])].to_numpy(dtype=int),
+        _target_values(frame, str(inputs["target_col"])),
         edges,
         feature=str(inputs["feature"]),
     )
     payload = _jsonable(result)
     payload["bins"] = [_jsonable(bin_row) for bin_row in result.bins]
     payload["na_bin"] = _jsonable(result.na_bin) if result.na_bin else None
+    payload["nan_labels_dropped"] = nan_labels_dropped
     return payload
 
 
@@ -122,13 +180,18 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     _assert_columns(frame, [*features, target_col])
     out = frame.copy()
+    nan_labels_dropped = require_labels_confirmed(
+        out,
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     woe_maps = {}
     new_columns = []
     for feature in features:
         edges = _edges_for(out, {**inputs, "feature": feature}, ctx)
         binning = compute_woe_iv(
             out[feature].to_numpy(dtype=float),
-            out[target_col].to_numpy(dtype=int),
+            _target_values(out, target_col),
             edges,
             feature=feature,
         )
@@ -138,7 +201,12 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
     result = _register_frame(runtime, out, dataset, ctx, "woe")
-    return {"result_dataset_id": result.id, "new_columns": new_columns, "woe_maps": woe_maps}
+    return {
+        "result_dataset_id": result.id,
+        "new_columns": new_columns,
+        "woe_maps": woe_maps,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
 
 
 def tool_onehot_encode(inputs: dict, ctx) -> dict:
@@ -268,10 +336,16 @@ def _edges_for(frame: pd.DataFrame, inputs: dict, ctx) -> np.ndarray:
     if method == "manual":
         return manual_edges([float(item) for item in inputs.get("breakpoints") or []])
     if method == "chimerge":
-        return chimerge_edges(values, frame[target_col].to_numpy(dtype=int), max_bins=max_bins)
+        return chimerge_edges(values, _target_values(frame, target_col), max_bins=max_bins)
     if method == "tree":
-        return tree_edges(values, frame[target_col].to_numpy(dtype=int), max_bins=max_bins, seed=int(ctx.seed or 0))
+        return tree_edges(values, _target_values(frame, target_col), max_bins=max_bins, seed=int(ctx.seed or 0))
     raise FeatureError("method must be equal_frequency, equal_width, manual, chimerge, or tree")
+
+
+def _target_values(frame: pd.DataFrame, target_col: str) -> np.ndarray:
+    if not target_col or target_col not in frame.columns:
+        raise FeatureError(f"missing target column: {target_col}")
+    return pd.to_numeric(frame[target_col], errors="coerce").to_numpy(dtype=float)
 
 
 def _apply_filter(frame: pd.DataFrame, spec: Any) -> pd.DataFrame:

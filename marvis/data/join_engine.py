@@ -6,6 +6,7 @@ from pathlib import Path
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import (
+    LARGE_ROW_THRESHOLD,
     SHRINK_WARN_THRESHOLD,
     SMALL_SAMPLE_N,
     ColumnProfile,
@@ -15,6 +16,7 @@ from marvis.data.contracts import (
     JoinSpec,
     KeyPair,
 )
+from marvis.data.dedup import two_level_dedup
 from marvis.data.errors import (
     DataBackendError,
     DedupRequiredError,
@@ -118,19 +120,19 @@ class JoinEngine:
             sampled = min(SMALL_SAMPLE_N, anchor_rows)
             matched = int(round(match_rate * sampled))
         else:
-            method = key_pairs[0].match_method
             matched, sampled = self._backend.match_rate_for_method(
                 anchor_path,
                 anchor_keys,
                 feature_path,
                 feature_keys,
-                method=method,
+                method=[pair.match_method for pair in key_pairs],
                 key_fingerprints=_key_fps(anchor, feature, key_pairs),
                 sample_n=SMALL_SAMPLE_N,
                 seed=seed,
             )
             match_rate = matched / sampled if sampled else 0.0
 
+        conflict_report = None
         if key_unique:
             joined_preview = anchor_rows
             fan_out = False
@@ -142,6 +144,15 @@ class JoinEngine:
                 + anchor_rows * (1 - match_rate),
             )
             fan_out = joined_preview > anchor_rows
+            # Break the non-unique key down (spec §6): how many duplicates are safe
+            # (whole-row identical) vs genuine same-key value conflicts that must not be
+            # silently dropped. Surfaced at the C2 gate so the user resolves consciously.
+            # Gated by LARGE_ROW_THRESHOLD like the rest of the backend — a full-frame read
+            # for the report would risk OOM on multi-million-row feature tables.
+            if feature_rows <= LARGE_ROW_THRESHOLD:
+                _deduped, conflict_report = two_level_dedup(
+                    self._backend.read_frame(feature_path), list(feature_keys)
+                )
 
         anchor_column_names = {column.name for column in anchor.columns}
         new_columns = len([
@@ -160,6 +171,7 @@ class JoinEngine:
             shrink_detected=match_rate < SHRINK_WARN_THRESHOLD,
             new_columns=new_columns,
             new_columns_null_rate=round(1 - match_rate, 4),
+            conflict_report=conflict_report,
         )
 
     def confirm_join_spec(
@@ -178,6 +190,28 @@ class JoinEngine:
         spec.dedup_strategy = dedup_strategy
         spec.confirmed = True
         self._repo.update_join_spec(join_plan_id, spec)
+        self._write_audit(
+            kind="join.confirmed",
+            target_ref=join_plan_id,
+            outcome="confirmed",
+            detail={
+                "task_id": plan.task_id,
+                "anchor_dataset_id": plan.anchor_dataset_id,
+                "feature_dataset_id": feature_dataset_id,
+                "dedup_strategy": dedup_strategy,
+                "match_rate": spec.diagnostics.match_rate,
+                "matched_rows": spec.diagnostics.matched_rows,
+                "key_pairs": [
+                    {
+                        "anchor_col": pair.anchor_col,
+                        "feature_col": pair.feature_col,
+                        "match_method": pair.match_method,
+                        "transform_side": pair.transform_side,
+                    }
+                    for pair in spec.key_pairs
+                ],
+            },
+        )
 
     def execute_join_plan(self, join_plan_id: str, *, out_dir: Path) -> Dataset:
         plan = self._repo.load_join_plan(join_plan_id)
@@ -209,10 +243,14 @@ class JoinEngine:
                 if "produced" in str(exc) and "anchor" in str(exc):
                     raise FanOutError(str(exc)) from exc
                 raise
-            if joined_rows > anchor_rows:
+            # Spec §7: the joined sample must equal the anchor exactly (1:1). The backend
+            # already asserts this; re-check defensively, distinguishing fan-out (grow)
+            # from silent row loss (shrink) so a mismatch routes back to C2.
+            if joined_rows != anchor_rows:
                 out_path.unlink(missing_ok=True)
+                kind = "fan-out" if joined_rows > anchor_rows else "row loss (shrink)"
                 raise FanOutError(
-                    f"join produced {joined_rows} > anchor {anchor_rows} rows",
+                    f"join {kind}: {joined_rows} rows vs anchor {anchor_rows} (must be 1:1)",
                 )
             current_path = out_path
 
@@ -225,7 +263,31 @@ class JoinEngine:
         plan.status = "executed"
         plan.result_dataset_id = result.id
         self._repo.set_join_plan_executed(join_plan_id, result.id)
+        self._write_audit(
+            kind="join.executed",
+            target_ref=join_plan_id,
+            outcome="succeeded",
+            detail={
+                "task_id": plan.task_id,
+                "anchor_dataset_id": plan.anchor_dataset_id,
+                "result_dataset_id": result.id,
+                "anchor_rows": anchor_rows,
+                "joined_rows": result.row_count,
+                "feature_dataset_ids": [spec.feature_dataset_id for spec in plan.joins],
+            },
+        )
         return result
+
+    def _write_audit(self, *, kind: str, target_ref: str, outcome: str, detail: dict) -> None:
+        if not hasattr(self._repo, "write_audit"):
+            return
+        self._repo.write_audit(
+            kind=kind,
+            target_ref=target_ref,
+            actor="system",
+            outcome=outcome,
+            detail=detail,
+        )
 
 
 def _find_spec(plan: JoinPlan, feature_dataset_id: str) -> JoinSpec:

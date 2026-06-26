@@ -86,8 +86,9 @@ class FakeAdaptivePlanner:
         self.replan_calls = []
         self.explore_calls = []
 
-    def replan(self, plan, *, completed_summaries, observation, reason, tier):
+    def replan(self, plan, *, completed_summaries, observation, reason, tier, instruction=None):
         self.replan_calls.append((plan.id, completed_summaries, observation, reason, tier.name))
+        self.last_instruction = instruction
         steps = self.replanned_steps(plan) if callable(self.replanned_steps) else self.replanned_steps
         return _plan_like(plan, steps, replan_count=plan.replan_count + 1, tier=tier.name)
 
@@ -384,6 +385,40 @@ def test_plan_executor_delegates_subagent_steps_and_stores_result_ref(tmp_path):
     assert subagents.run_calls == [("sub-1", {})]
     assert loaded_step.sub_agent_id == "sub-1"
     assert repo.load_step_output("step-1") == {"result_ref": "artifact:sub-summary"}
+
+
+def test_plan_executor_replan_from_instruction(tmp_path):
+    """A user-driven structural replan regenerates the remaining steps to satisfy a
+    free-text instruction (driver §3 提指令→重规划), passing the instruction to the planner;
+    with no planner it returns False so the caller keeps the current plan."""
+    plan = _plan(
+        _step("step-1"),
+        _step("step-2", index=1, depends_on=["step-1"]),
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([])
+    planner = FakeAdaptivePlanner(
+        replanned_steps=lambda loaded: [
+            _step("step-A"),
+            _step("step-B", index=1, depends_on=["step-A"]),
+        ]
+    )
+
+    ok = _adaptive_executor(repo, runner, planner).replan_from_instruction(
+        "plan-1", "把流程改成只跑 A、B 两步"
+    )
+
+    assert ok is True
+    assert planner.last_instruction == "把流程改成只跑 A、B 两步"
+    loaded = repo.load_plan("plan-1")
+    assert [step.id for step in loaded.steps] == ["step-A", "step-B"]
+    assert loaded.replan_count == 1
+    assert loaded.loop_events[-1].type == "replan"
+    assert loaded.loop_events[-1].reason == "user_instruction"
+    assert loaded.loop_events[-1].instruction == "把流程改成只跑 A、B 两步"  # audit trail kept
+
+    # No planner → graceful False; the current plan is untouched.
+    assert _executor(repo, FakeRunner([])).replan_from_instruction("plan-1", "x") is False
 
 
 def test_plan_executor_replans_after_decision_point(tmp_path):

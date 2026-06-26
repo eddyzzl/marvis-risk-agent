@@ -17,8 +17,14 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
       uploadTab.classList.toggle("selected", !isPath);
       uploadTab.setAttribute("aria-selected", isPath ? "false" : "true");
     }
-    if (pathPanel) pathPanel.hidden = !isPath;
-    if (uploadPanel) uploadPanel.hidden = isPath;
+    if (pathPanel) {
+      pathPanel.hidden = !isPath;
+      pathPanel.classList.toggle("hidden", !isPath);
+    }
+    if (uploadPanel) {
+      uploadPanel.hidden = isPath;
+      uploadPanel.classList.toggle("hidden", isPath);
+    }
     if (!isPath && uploadPanel) {
       uploadPanel.scrollIntoView({ block: "nearest" });
     }
@@ -30,18 +36,68 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
     notifyFilesChanged();
   }
 
-  function captureFiles(fileList) {
-    files = Array.from(fileList || []).map((file) => {
-      const relativePath = (file.webkitRelativePath || file.name || "未命名文件")
-        .replace(/^\/+/, "");
-      return {
-        file,
-        name: file.name || "未命名文件",
-        relativePath,
-        size: Number(file.size || 0),
-      };
-    });
+  function fileItem(file, relativePath = "") {
+    const fallbackName = file?.name || "未命名文件";
+    return {
+      file,
+      name: fallbackName,
+      relativePath: (relativePath || file?.webkitRelativePath || fallbackName).replace(/^\/+/, ""),
+      size: Number(file?.size || 0),
+    };
+  }
+
+  function captureFileItems(fileItems) {
+    files = fileItems.map((item) => fileItem(item.file, item.relativePath));
     notifyFilesChanged();
+  }
+
+  function captureFiles(fileList) {
+    captureFileItems(Array.from(fileList || []).map((file) => ({ file })));
+  }
+
+  function fileFromEntry(entry) {
+    return new Promise((resolve, reject) => {
+      entry.file(resolve, reject);
+    });
+  }
+
+  function readDirectoryEntries(reader) {
+    return new Promise((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+  }
+
+  async function walkDroppedEntry(entry, parentPath = "") {
+    if (!entry) return [];
+    if (entry.isFile) {
+      const file = await fileFromEntry(entry);
+      return [{ file, relativePath: `${parentPath}${file.name || entry.name}` }];
+    }
+    if (!entry.isDirectory) return [];
+    const reader = entry.createReader();
+    const children = [];
+    while (true) {
+      const batch = await readDirectoryEntries(reader);
+      if (!batch.length) break;
+      children.push(...batch);
+    }
+    const nextPath = `${parentPath}${entry.name}/`;
+    const nested = await Promise.all(children.map((child) => walkDroppedEntry(child, nextPath)));
+    return nested.flat();
+  }
+
+  async function droppedFileItems(dataTransfer) {
+    const entries = Array.from(dataTransfer?.items || [])
+      .map((item) => (
+        typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null
+      ))
+      .filter(Boolean);
+    if (entries.length) {
+      const nested = await Promise.all(entries.map((entry) => walkDroppedEntry(entry)));
+      const entryFiles = nested.flat();
+      if (entryFiles.length) return entryFiles;
+    }
+    return Array.from(dataTransfer?.files || []).map((file) => ({ file }));
   }
 
   function selectedFiles() {
@@ -64,31 +120,18 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
 
   function bindDropzone() {
     const input = $("materialUploadInput");
-    const folderInput = $("materialFolderUploadInput");
-    const fileButton = $("materialUploadFileButton");
-    const folderButton = $("materialUploadFolderButton");
     const dropzone = document.querySelector(".material-upload-dropzone");
     if (!input || !dropzone) return;
-    dropzone.onclick = (event) => {
-      if (event.target.closest("button")) return;
+    const openFilePicker = () => {
       input.click();
     };
-    if (fileButton) {
-      fileButton.onclick = (event) => {
-        event.stopPropagation();
-        input.click();
-      };
-    }
-    if (folderButton && folderInput) {
-      folderButton.onclick = (event) => {
-        event.stopPropagation();
-        folderInput.click();
-      };
-    }
+    dropzone.addEventListener("click", openFilePicker);
+    dropzone.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      openFilePicker();
+    });
     input.onchange = () => captureFiles(input.files);
-    if (folderInput) {
-      folderInput.onchange = () => captureFiles(folderInput.files);
-    }
     ["dragenter", "dragover"].forEach((eventName) => {
       dropzone.addEventListener(eventName, (event) => {
         event.preventDefault();
@@ -100,9 +143,9 @@ export function createMaterialSourceController({ $, onFilesChanged }) {
         dropzone.classList.remove("is-dragover");
       });
     });
-    dropzone.ondrop = (event) => {
+    dropzone.ondrop = async (event) => {
       event.preventDefault();
-      captureFiles(event.dataTransfer?.files);
+      captureFileItems(await droppedFileItems(event.dataTransfer));
     };
   }
 

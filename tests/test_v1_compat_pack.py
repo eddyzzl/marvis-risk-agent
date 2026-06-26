@@ -84,6 +84,39 @@ def test_scan_materials_tool_runner_scans_without_file_contents(tmp_path):
     assert repo.get_task(task.id).status == TaskStatus.SCANNED
 
 
+def test_scan_materials_respects_explicit_task_material_paths_when_duplicates_exist(tmp_path):
+    runner, _plugin_repo = _runner(tmp_path)
+    repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
+    source_dir = tmp_path / "materials"
+    _write_materials(source_dir)
+    (source_dir / "other.pmml").write_text("<PMML>wrong</PMML>", encoding="utf-8")
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(source_dir),
+            notebook_path="model.ipynb",
+            sample_path="sample.csv",
+            pmml_path="model.pmml",
+            dictionary_path="dictionary.csv",
+        )
+    )
+
+    result = runner.invoke(
+        ToolRef("v1_compat", "scan_materials"),
+        {"task_id": task.id},
+        task_id=task.id,
+    )
+
+    checks = {check["name"]: check for check in result.output["checks"]}
+    assert result.ok is True
+    assert result.output["status"] == "scanned"
+    assert checks["model_pmml"]["status"] == "ok"
+    assert checks["model_pmml"]["selected"] == "model.pmml"
+    assert repo.get_task(task.id).status == TaskStatus.SCANNED
+
+
 def test_scan_materials_marks_task_failed_when_required_material_is_missing(tmp_path):
     runner, _plugin_repo = _runner(tmp_path)
     repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")

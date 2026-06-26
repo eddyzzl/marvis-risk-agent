@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from marvis.api import router
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, TaskRepository, init_db
+from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.settings import build_settings
 
@@ -120,6 +120,38 @@ def test_dataset_preview_returns_column_profiles_and_masked_samples(tmp_path):
     assert "13800138000" not in json.dumps(payload, ensure_ascii=False)
 
 
+def test_dataset_preview_masks_names_and_long_card_values(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    csv_bytes = (
+        "customer_name,bank_card,bad_flag\n"
+        "张三丰,6222020202020202020,0\n"
+        "李四,6222020202020202021,1\n"
+    ).encode()
+
+    upload = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", csv_bytes, "text/csv")},
+    )
+    dataset = upload.json()["datasets"][0]
+
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+
+    assert preview.status_code == 200
+    payload = preview.json()
+    dumped = json.dumps(payload, ensure_ascii=False)
+    profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
+    assert profiles["customer_name"]["semantic_role"] == "categorical"
+    assert profiles["customer_name"]["sample_values"][0].startswith("value:")
+    assert payload["rows"][0]["customer_name"].startswith("value:")
+    assert payload["rows"][0]["bank_card"].startswith("6222")
+    assert "*" in payload["rows"][0]["bank_card"]
+    assert "张三丰" not in dumped
+    assert "李四" not in dumped
+    assert "6222020202020202020" not in dumped
+
+
 def test_dataset_upload_dispatches_dataset_registered_hook(tmp_path):
     client, settings = _client(tmp_path)
     dispatcher = FakeHookDispatcher()
@@ -228,6 +260,13 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert execute.json()["anchor_rows"] == 2
     assert execute.json()["joined_rows"] == 2
     assert repeat.status_code == 409
+    audits = PluginRepository(settings.db_path).list_audit()
+    audit_kinds = [audit["kind"] for audit in audits]
+    assert "join.confirmed" in audit_kinds
+    assert "join.executed" in audit_kinds
+    executed_audit = next(audit for audit in audits if audit["kind"] == "join.executed")
+    assert executed_audit["target_ref"] == plan["join_plan_id"]
+    assert executed_audit["detail"]["result_dataset_id"] == execute.json()["result_dataset_id"]
 
 
 def test_join_confirm_dispatches_join_confirmed_hook(tmp_path):

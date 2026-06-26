@@ -5,6 +5,7 @@ from scipy.stats import rankdata
 
 from marvis.feature.binning import assign_bins, equal_frequency_edges
 from marvis.feature.contracts import FeatureMetrics
+from marvis.feature.correlation import safe_correlation
 from marvis.feature.errors import FeatureError
 from marvis.feature.iv import compute_woe_iv
 
@@ -53,6 +54,45 @@ def feature_lift(scores: np.ndarray, target: np.ndarray, *, bins: int = 10) -> l
         else:
             lifts.append(float(np.mean(target_arr[mask] == 1) / base_rate))
     return lifts
+
+
+def head_tail_lift(
+    values: np.ndarray,
+    target: np.ndarray,
+    *,
+    fractions: tuple[float, ...] = (0.05, 0.10),
+    min_rows: int = 20,
+) -> dict[str, float | None]:
+    """Risk-direction-aware lift at the head (highest-risk) and tail (lowest-risk)
+    extremes of a feature, at the given row fractions (spec §2 头尾 lift).
+
+    The head is the slice of rows at the feature's high-bad-rate end and the tail the
+    low-bad-rate end. Which end is which is set by the SIGN of the feature↔target
+    correlation, so a positively- and a negatively-associated feature both report
+    head = high-risk-end. ``lift`` = bad rate within the slice ÷ overall bad rate.
+
+    Deterministic: stable mergesort + exact integer row counts, no RNG and no model,
+    so it preserves the deterministic-metric invariant. Returns ``None`` for every key
+    when there are too few labelled rows (< ``min_rows``) or the overall bad rate is 0.
+    """
+    keys = [f"lift_{end}_{int(round(frac * 100))}" for frac in fractions for end in ("head", "tail")]
+    scores_arr, target_arr = _finite_binary_pairs(values, target)
+    n = scores_arr.size
+    base_rate = float(np.mean(target_arr == 1)) if n else 0.0
+    if n < min_rows or base_rate <= 0:
+        return {key: None for key in keys}
+    # risk_sign: +1 → larger feature value = higher risk; -1 → inverted. A flat or
+    # U-shaped feature yields corr≈0 → deterministic fallback to +1 (its slices land
+    # at lift≈1, so the head/tail labelling is moot).
+    risk_sign = float(np.sign(safe_correlation(scores_arr, target_arr.astype(float)))) or 1.0
+    order = np.argsort(risk_sign * scores_arr, kind="mergesort")  # ascending risk
+    result: dict[str, float | None] = {}
+    for frac in fractions:
+        count = max(1, int(np.floor(frac * n)))
+        pct = int(round(frac * 100))
+        result[f"lift_head_{pct}"] = float(np.mean(target_arr[order[-count:]] == 1) / base_rate)
+        result[f"lift_tail_{pct}"] = float(np.mean(target_arr[order[:count]] == 1) / base_rate)
+    return result
 
 
 def compute_psi(
@@ -141,4 +181,5 @@ __all__ = [
     "feature_lift",
     "feature_metrics",
     "feature_psi",
+    "head_tail_lift",
 ]

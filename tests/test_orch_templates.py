@@ -117,6 +117,162 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     assert report_step.needs_confirmation is True
 
 
+def test_modeling_template_phases_gates_and_refs(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("modeling"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "long_y",
+            "feature_cols": ["sig1", "sig2", "sig3"],
+            "split_col": "model_flag",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "seed": 23,
+            "holdout_values": ["oot"],
+            "business_columns": {"loan_month_col": "loan_month"},
+            "feature_dictionary_id": "dict-1",
+            "project_meta": {"项目名称": "通用A卡"},
+        },
+        task_id="task-1",
+    )
+
+    # valid against the real modeling pack tool catalog
+    assert PlanValidator(tool_registry).validate(plan) == []
+    # step order mirrors the prototype: screen -> tune -> train -> compare -> report
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("modeling", "screen_features"),
+        ToolRef("modeling", "tune_hyperparameters"),
+        ToolRef("modeling", "train_models"),
+        ToolRef("modeling", "compare_experiments"),
+        ToolRef("modeling", "generate_model_report"),
+    ]
+    # phase tags for right-rail big-step grouping
+    assert [step.phase for step in plan.steps] == ["特征", "建模", "建模", "建模", "报告"]
+    # exactly two human gates: confirm-features (before tune) and confirm-model (before report)
+    assert [step.needs_confirmation for step in plan.steps] == [False, True, False, False, True]
+    assert not any(step.decision_point for step in plan.steps)
+
+    screen, tune, train, compare, report = plan.steps
+    # tune + train consume the screened feature set; train consumes tuned params
+    assert tune.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert train.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert train.inputs["params"] == f"$ref:{tune.id}.output.best_params"
+    assert train.inputs["recipes"] == ["lgb"]
+    assert compare.inputs == {"experiment_ids": f"$ref:{train.id}.output.experiment_ids"}
+    assert report.inputs["experiment_id"] == f"$ref:{train.id}.output.best_experiment_id"
+    assert report.inputs["dataset_id"] == "dataset-1"
+    assert "modeling" in builtin_template_ids()
+
+
+def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
+    """Driver may not always have holdout_values / report business metadata; the
+    optional slots must drop cleanly without breaking tool input-schema validation."""
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("modeling"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "long_y",
+            "feature_cols": ["sig1", "sig2"],
+            "split_col": "model_flag",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "seed": 23,
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    screen = plan.steps[0]
+    assert "holdout_values" not in screen.inputs  # omitted optional dropped, not None
+    report = plan.steps[-1]
+    assert "business_columns" not in report.inputs
+
+
+def test_modeling_template_does_not_shadow_standard_modeling_goal_routing(tmp_path):
+    """The new template must keep narrow goal patterns so common modeling goals
+    still route to the legacy standard_modeling template (pinned by intent tests)."""
+    load_builtin_templates()
+    modeling = get_template("modeling")
+    standard = get_template("standard_modeling")
+    assert set(modeling.goal_patterns).isdisjoint(set(standard.goal_patterns))
+
+
+def test_data_join_template_phases_gate_and_refs(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("data_join"),
+        {
+            "anchor_id": "ds-anchor",
+            "feature_ids": ["ds-f1", "ds-f2"],
+            "dedup_strategies": {"ds-f1": "first"},
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("data_ops", "propose_join"),
+        ToolRef("data_ops", "confirm_join"),
+        ToolRef("data_ops", "execute_join"),
+    ]
+    # single phase; the forced-confirm human gate sits on execute_join (INV-3)
+    assert [step.phase for step in plan.steps] == ["数据准备", "数据准备", "数据准备"]
+    assert [step.needs_confirmation for step in plan.steps] == [False, False, True]
+    assert not any(step.decision_point for step in plan.steps)
+
+    propose, confirm, execute = plan.steps
+    # confirm + execute both operate on the join plan id produced by propose
+    assert confirm.inputs["join_plan_id"] == f"$ref:{propose.id}.output.join_plan_id"
+    assert execute.inputs["join_plan_id"] == f"$ref:{propose.id}.output.join_plan_id"
+    assert confirm.inputs["dedup_strategies"] == {"ds-f1": "first"}
+    # execute_join must directly depend on propose (it refs its output) and on confirm (ordering)
+    assert set(execute.depends_on) == {propose.id, confirm.id}
+    assert "data_join" in builtin_template_ids()
+
+
+def test_from_template_step_ids_globally_unique_across_plans(tmp_path):
+    """Regression: instantiating the same template twice must yield disjoint step
+    ids (plan_steps.id is a primary key) and both must persist to one repo.
+    Previously every plan reused step-1/step-2/... so the second insert hit a
+    UNIQUE constraint failure — only ever exercised in fresh-workspace tests."""
+    from marvis.db import PlanRepository, init_db as _init_db
+
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+    slots = {"anchor_id": "a", "feature_ids": ["f1"]}
+
+    plan1 = planner.from_template(get_template("data_join"), slots, task_id="t1")
+    plan2 = planner.from_template(get_template("data_join"), slots, task_id="t2")
+
+    ids1 = {step.id for step in plan1.steps}
+    ids2 = {step.id for step in plan2.steps}
+    assert ids1.isdisjoint(ids2)
+    assert all(step.id.startswith(plan1.id) for step in plan1.steps)
+
+    # both plans persist to the same repo without a primary-key collision
+    db_path = tmp_path / "plans.sqlite"
+    _init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(plan1)
+    repo.create_plan(plan2)
+    assert {p.id for p in repo.list_plans_for_task("t1")} == {plan1.id}
+    assert {p.id for p in repo.list_plans_for_task("t2")} == {plan2.id}
+
+
 def test_feature_derivation_template_marks_adaptive_decision_point(tmp_path):
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)

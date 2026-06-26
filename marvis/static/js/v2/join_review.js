@@ -52,10 +52,10 @@ function datasetId(dataset) {
 }
 
 function datasetLabel(dataset) {
-  const source = String(dataset?.source_name || dataset?.name || datasetId(dataset) || "dataset");
-  const role = String(dataset?.role || "dataset");
+  const source = String(dataset?.source_name || dataset?.name || datasetId(dataset) || "数据集");
+  const role = String(dataset?.role || "数据集");
   const rowCount = Number(dataset?.row_count);
-  const rows = Number.isFinite(rowCount) ? `${rowCount} rows` : "rows unknown";
+  const rows = Number.isFinite(rowCount) ? `${rowCount} 行` : "行数未知";
   return `${source} - ${role} | ${rows}`;
 }
 
@@ -132,14 +132,14 @@ function normalizeAttachArgs(taskId, deps) {
 function keyPairsHtml(spec) {
   const pairs = spec?.key_pairs || [];
   if (!pairs.length) {
-    return '<span class="join-key-empty">No key pairs proposed</span>';
+    return '<span class="join-key-empty">暂无建议关联键</span>';
   }
   return pairs.map((pair) => (
     `<span class="join-key-pair">
       <span class="anchor-key">${escapeHtml(pair.anchor_col)}</span>
       <span class="join-arrow">&harr;</span>
       <span class="feature-key">${escapeHtml(pair.feature_col)}</span>
-      <span class="match-method">${escapeHtml(pair.match_method || "match")}</span>
+      <span class="match-method">${escapeHtml(pair.match_method || "匹配")}</span>
       <span class="match-rate">${pct(pair.match_rate)}</span>
     </span>`
   )).join("");
@@ -149,10 +149,10 @@ function warningHtml(spec) {
   const d = diagnostics(spec);
   const warnings = [];
   if (d.fan_out_detected) {
-    warnings.push(`<div class="join-warning fan-out">fan-out risk: joined ${escapeHtml(d.joined_rows_preview)} rows &gt; anchor ${escapeHtml(d.anchor_rows)} rows</div>`);
+    warnings.push(`<div class="join-warning fan-out">fan-out 风险：拼接后 ${escapeHtml(d.joined_rows_preview)} 行 &gt; 主表 ${escapeHtml(d.anchor_rows)} 行</div>`);
   }
   if (d.shrink_detected) {
-    warnings.push(`<div class="join-warning shrink">low match rate: ${pct(d.match_rate)}</div>`);
+    warnings.push(`<div class="join-warning shrink">匹配率偏低：${pct(d.match_rate)}</div>`);
   }
   return warnings.join("");
 }
@@ -160,16 +160,16 @@ function warningHtml(spec) {
 function dedupHtml(spec) {
   const d = diagnostics(spec);
   if (d.feature_key_unique) {
-    return '<span class="join-key-unique">Feature key unique</span>';
+    return '<span class="join-key-unique">特征表键唯一</span>';
   }
   const featureId = escapeHtml(featureDatasetId(spec));
-  return `<select data-dedup="${featureId}" aria-label="Dedup strategy">
-    <option value="">dedup required</option>
-    <option value="first">first</option>
-    <option value="last">last</option>
-    <option value="agg_mean">agg_mean</option>
-    <option value="agg_max">agg_max</option>
-    <option value="abort">abort</option>
+  return `<select data-dedup="${featureId}" aria-label="去重策略">
+    <option value="">需要选择去重策略</option>
+    <option value="first">保留首条</option>
+    <option value="last">保留末条</option>
+    <option value="agg_mean">数值取均值</option>
+    <option value="agg_max">数值取最大</option>
+    <option value="abort">终止拼接</option>
   </select>`;
 }
 
@@ -180,32 +180,32 @@ export function joinSpecCardHtml(spec) {
   const featureId = featureDatasetId(spec);
   return `<section class="join-card${warned ? " has-warn" : ""}${confirmed ? " join-confirmed" : ""}" data-feature-dataset="${escapeHtml(featureId)}">
     <header class="join-card-header">
-      <strong class="join-feature">${escapeHtml(featureId || "feature dataset")}</strong>
-      ${confirmed ? '<span class="join-confirmed">Confirmed</span>' : ""}
+      <strong class="join-feature">${escapeHtml(featureId || "特征数据集")}</strong>
+      ${confirmed ? '<span class="join-confirmed">已确认</span>' : ""}
     </header>
     <div class="join-keys">${keyPairsHtml(spec)}</div>
     <div class="join-diagnostics">
-      matched ${escapeHtml(d.matched_rows)} / ${escapeHtml(d.anchor_rows)} (${pct(d.match_rate)})
-      | new columns ${escapeHtml(d.new_columns)} | null rate ${pct(d.new_columns_null_rate)}
+      匹配 ${escapeHtml(d.matched_rows)} / ${escapeHtml(d.anchor_rows)} (${pct(d.match_rate)})
+      | 新增字段 ${escapeHtml(d.new_columns)} | 空值率 ${pct(d.new_columns_null_rate)}
     </div>
     ${warningHtml(spec)}
     ${dedupHtml(spec)}
-    ${confirmed ? "" : `<button type="button" data-confirm-join="${escapeHtml(featureId)}">Confirm table</button>`}
+    ${confirmed ? "" : `<button type="button" data-confirm-join="${escapeHtml(featureId)}">确认该表</button>`}
   </section>`;
 }
 
 export function joinReviewHtml(joinPlan) {
   if (!joinPlan) {
-    return '<div class="v2-empty" data-v2-empty="join">No join plan selected</div>';
+    return '<div class="v2-empty" data-v2-empty="join">暂无选中的拼接计划</div>';
   }
   const joins = joinPlan.joins || [];
   const canExecute = joins.length > 0 && joins.every((spec) => spec.confirmed);
   const cards = joins.map(joinSpecCardHtml).join("");
   const planId = joinPlanId(joinPlan);
   return `<section class="join-review" data-join-id="${escapeHtml(planId)}">
-    <div class="join-anchor">Anchor: ${escapeHtml(anchorDatasetId(joinPlan))}</div>
+    <div class="join-anchor">主表：${escapeHtml(anchorDatasetId(joinPlan))}</div>
     ${cards}
-    <button type="button" data-exec-join="${escapeHtml(planId)}"${canExecute ? "" : " disabled"}>Execute join</button>
+    <button type="button" data-exec-join="${escapeHtml(planId)}"${canExecute ? "" : " disabled"}>执行拼接</button>
   </section>`;
 }
 
@@ -214,19 +214,19 @@ export function joinProposalHtml(datasets = getDatasets()) {
   const options = datasetOptionsHtml(items);
   return `<section class="join-proposal" data-join-proposal>
     <div class="join-proposal-toolbar">
-      <button type="button" data-refresh-datasets>Refresh datasets</button>
+      <button type="button" data-refresh-datasets>刷新数据集</button>
     </div>
     ${items.length
     ? `<label>
-        Anchor dataset
+        主数据集
         <select data-join-anchor>${options}</select>
       </label>
       <label>
-        Feature datasets
+        特征数据集
         <select data-join-features multiple>${options}</select>
       </label>
-      <button type="button" data-propose-join>Propose join</button>`
-    : '<div class="v2-empty" data-v2-empty="datasets">No datasets loaded</div>'}
+      <button type="button" data-propose-join>生成拼接建议</button>`
+    : '<div class="v2-empty" data-v2-empty="datasets">暂无已加载数据集</div>'}
     <div data-join-problems></div>
   </section>`;
 }
@@ -299,7 +299,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
       event.preventDefault?.();
       const resolvedTaskId = resolveTaskId(normalized.taskId);
       if (!resolvedTaskId) {
-        showJoinProblem(root, actions, "select or create a task before loading V2 datasets");
+        showJoinProblem(root, actions, "请先选择或创建任务，再加载 V2 数据集。");
         return;
       }
       try {
@@ -308,7 +308,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
         actions.setDatasets(datasets);
         clearJoinProblems(root);
       } catch (error) {
-        showJoinProblem(root, actions, error?.message || "load datasets failed");
+        showJoinProblem(root, actions, error?.message || "数据集加载失败");
       }
       return;
     }
@@ -318,14 +318,14 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
       event.preventDefault?.();
       const resolvedTaskId = resolveTaskId(normalized.taskId);
       if (!resolvedTaskId) {
-        showJoinProblem(root, actions, "select or create a task before proposing a join");
+        showJoinProblem(root, actions, "请先选择或创建任务，再生成拼接建议。");
         return;
       }
       const anchorId = controlValue(root, "[data-join-anchor]");
       const featureIds = uniqueValues(selectedValues(root, "[data-join-features]"))
         .filter((featureId) => featureId !== anchorId);
       if (!anchorId || !featureIds.length) {
-        showJoinProblem(root, actions, "select one anchor dataset and at least one feature dataset");
+        showJoinProblem(root, actions, "请选择一个主数据集和至少一个特征数据集。");
         return;
       }
       try {
@@ -339,7 +339,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
         }
         clearJoinProblems(root);
       } catch (error) {
-        showJoinProblem(root, actions, error?.message || "propose join failed");
+        showJoinProblem(root, actions, error?.message || "拼接建议生成失败");
       }
       return;
     }
@@ -356,7 +356,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
       const dedupSelect = root.querySelector?.(`[data-dedup="${cssEscape(featureDatasetId)}"]`);
       const dedupStrategy = dedupSelect ? dedupSelect.value : null;
       if (dedupSelect && !dedupStrategy) {
-        actions.showError("dedup strategy is required before confirming this join");
+        actions.showError("确认该拼接前必须选择去重策略。");
         return;
       }
       try {
@@ -367,7 +367,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
         });
         await actions.refreshJoin(joinId);
       } catch (error) {
-        actions.showError(error?.message || "confirm join failed");
+        actions.showError(error?.message || "拼接确认失败");
       }
       return;
     }
@@ -378,12 +378,12 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
       try {
         const result = await actions.executeJoin(executeButton.dataset.execJoin);
         if (result?.fan_out) {
-          actions.showError("fan-out detected; join execution was stopped");
+          actions.showError("检测到 fan-out 风险，已停止执行拼接。");
           return;
         }
         actions.showResult(result);
       } catch (error) {
-        actions.showError(error?.message || "execute join failed");
+        actions.showError(error?.message || "拼接执行失败");
       }
     }
   };

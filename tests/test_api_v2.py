@@ -2056,13 +2056,13 @@ def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
 
 def test_normalize_task_type_whitelists_known_types():
     from marvis.db import _normalize_task_type
-    from marvis.domain import TASK_TYPE_VALIDATION
+    from marvis.domain import TASK_TYPE_VALIDATION, VALID_TASK_TYPES
 
     assert _normalize_task_type(None) == TASK_TYPE_VALIDATION
     assert _normalize_task_type("") == TASK_TYPE_VALIDATION
-    assert _normalize_task_type("validation") == TASK_TYPE_VALIDATION
+    for task_type in VALID_TASK_TYPES:
+        assert _normalize_task_type(task_type) == task_type
     # Unknown / arbitrary strings must not persist as-is.
-    assert _normalize_task_type("modeling") == TASK_TYPE_VALIDATION
     assert _normalize_task_type("'; DROP TABLE tasks;--") == TASK_TYPE_VALIDATION
 
 

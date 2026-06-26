@@ -5,7 +5,7 @@ import pytest
 
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
-from marvis.data.contracts import Dataset
+from marvis.data.contracts import Dataset, KeyPair
 from marvis.data.errors import DedupRequiredError, FanOutError, JoinNotConfirmedError
 from marvis.data.join_engine import JoinEngine
 from marvis.data.schema_infer import infer_dataset_schema
@@ -49,6 +49,7 @@ class FakeRegistry:
 class FakeJoinRepo:
     def __init__(self):
         self.plans = {}
+        self.audits = []
 
     def create_join_plan(self, plan):
         self.plans[plan.id] = plan
@@ -67,6 +68,9 @@ class FakeJoinRepo:
         plan = self.plans[plan_id]
         plan.status = "executed"
         plan.result_dataset_id = result_dataset_id
+
+    def write_audit(self, **kwargs):
+        self.audits.append(kwargs)
 
 
 def _dataset(dataset_id: str, frame: pd.DataFrame, source_path: str) -> Dataset:
@@ -140,6 +144,66 @@ def test_join_engine_proposes_confirms_and_executes_unique_hash_join(tmp_path):
     assert repo.load_join_plan(plan.id).status == "executed"
     joined = pd.read_parquet(registry.resolve_path(result.id))
     assert joined["credit_limit"].tolist() == [1000, 2000]
+    assert [audit["kind"] for audit in repo.audits] == ["join.confirmed", "join.executed"]
+    assert repo.audits[0]["target_ref"] == plan.id
+    assert repo.audits[1]["detail"]["result_dataset_id"] == result.id
+
+
+def test_join_engine_diagnoses_composite_keys_with_per_pair_match_methods(tmp_path):
+    engine, registry, _repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry,
+        tmp_path,
+        "anchor",
+        pd.DataFrame({
+            "mobile": ["13800138000", "13900139000"],
+            "apply_date": ["20260101", "20260102"],
+        }),
+    )
+    feature = _write_dataset(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [
+                hashlib.md5(value.encode()).hexdigest()
+                for value in ["13800138000", "13900139000"]
+            ],
+            "biz_date": ["2026-01-01", "2026-01-02"],
+            "limit": [1000, 2000],
+        }),
+    )
+    key_pairs = [
+        KeyPair(
+            anchor_col="mobile",
+            feature_col="phone_md5",
+            match_method="hash:md5",
+            transform_side="anchor",
+            match_rate=1.0,
+            resolved_by="test",
+        ),
+        KeyPair(
+            anchor_col="apply_date",
+            feature_col="biz_date",
+            match_method="date",
+            transform_side="both",
+            match_rate=1.0,
+            resolved_by="test",
+        ),
+    ]
+
+    diagnostics = engine.diagnose_join(
+        anchor,
+        registry.resolve_path(anchor.id),
+        feature,
+        registry.resolve_path(feature.id),
+        key_pairs,
+        seed=0,
+    )
+
+    assert diagnostics.matched_rows == 2
+    assert diagnostics.match_rate == 1.0
+    assert diagnostics.shrink_detected is False
 
 
 def test_join_engine_blocks_unconfirmed_and_requires_dedup_for_duplicate_keys(tmp_path):
@@ -162,6 +226,13 @@ def test_join_engine_blocks_unconfirmed_and_requires_dedup_for_duplicate_keys(tm
 
     assert spec.diagnostics.feature_key_unique is False
     assert spec.diagnostics.fan_out_detected is True
+    # G1b: diagnose attaches a two-level dedup breakdown — A1 has disagreeing balance
+    # (10 vs 11), a same-key value CONFLICT (not a safe duplicate).
+    report = spec.diagnostics.conflict_report
+    assert report is not None
+    assert report.n_conflict_keys == 1
+    assert "balance" in report.conflict_columns
+    assert report.safe_dropped == 0
     with pytest.raises(JoinNotConfirmedError):
         engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
     with pytest.raises(DedupRequiredError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from marvis.data.labels import require_labels_confirmed
 from marvis.feature.correlation import correlation_matrix, find_collinear_pairs, vif
 from marvis.feature.metrics import feature_metrics
 
@@ -12,6 +13,7 @@ class SelectionResult:
     selected: tuple[str, ...]
     dropped: tuple[tuple[str, str], ...]
     scores: dict[str, dict[str, float]]
+    nan_labels_dropped: int = 0
 
 
 def select_features(
@@ -25,11 +27,16 @@ def select_features(
     vif_max: float = 10.0,
     top_k: int | None = None,
     seed: int = 0,
+    drop_nan_labels: bool = False,
 ) -> SelectionResult:
     del seed  # Selection is deterministic; seed is reserved for API symmetry.
     columns = _unique([*features, target_col])
     frame = backend.read_frame(dataset_path, columns=columns)
-    target = frame[target_col].to_numpy(dtype=int)
+    nan_labels_dropped = require_labels_confirmed(
+        frame, target_col, drop_nan_labels=drop_nan_labels,
+    )
+    # Pass float so feature_metrics' isfinite guard drops NaN targets (never coerced to 0).
+    target = frame[target_col].to_numpy(dtype=float)
 
     kept: list[str] = []
     dropped: list[tuple[str, str]] = []
@@ -73,7 +80,7 @@ def select_features(
             dropped.append((feature, f"outside top_k {top_k}"))
         kept = selected
 
-    return SelectionResult(tuple(kept), tuple(dropped), scores)
+    return SelectionResult(tuple(kept), tuple(dropped), scores, nan_labels_dropped)
 
 
 def _unique(values: list[str]) -> list[str]:

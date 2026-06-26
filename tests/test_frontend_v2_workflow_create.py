@@ -218,7 +218,7 @@ def test_goal_handlers_require_task_before_create_plan():
 
         assert.equal(createCalls, 0);
         assert.equal(problemsSlot.dataset.v2PlanProblems, "true");
-        assert.ok(problemsSlot.innerHTML.includes("select or create a task"));
+        assert.ok(problemsSlot.innerHTML.includes("请先选择或创建任务"));
         """
     )
 

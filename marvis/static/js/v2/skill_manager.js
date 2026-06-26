@@ -18,13 +18,21 @@ function rejectedEntries(report) {
   });
 }
 
+function statusLabel(status) {
+  return {
+    active: "启用",
+    disabled: "停用",
+    rejected: "已拒绝",
+  }[status] || String(status || "未知");
+}
+
 export function skillRowHtml(id, status, problems = []) {
   const problemList = problems.length
     ? `<ul class="skill-problems">${problems.map((problem) => `<li>${escapeHtml(problem)}</li>`).join("")}</ul>`
     : "";
   return `<section class="skill skill-${escapeHtml(status)}">
     <strong>${escapeHtml(id)}</strong>
-    <span class="skill-badge ${escapeHtml(status)}">${escapeHtml(status)}</span>
+    <span class="skill-badge ${escapeHtml(status)}">${escapeHtml(statusLabel(status))}</span>
     ${problemList}
   </section>`;
 }
@@ -32,7 +40,7 @@ export function skillRowHtml(id, status, problems = []) {
 export function skillValidationResultHtml(result = {}) {
   const problems = result.problems || [];
   if (!problems.length) {
-    return '<div class="skill-validation valid">Valid skill</div>';
+    return '<div class="skill-validation valid">模板有效</div>';
   }
   const items = problems
     .map((problem) => `<li>${escapeHtml(problem)}</li>`)
@@ -47,14 +55,14 @@ export function skillManagerHtml(report = {}) {
     .map(([id, problems]) => skillRowHtml(id, "rejected", problems))
     .join("");
   return `<section class="skill-manager">
-    <button id="reloadSkills" type="button" data-reload-skills>Reload skills</button>
+    <button id="reloadSkills" type="button" data-reload-skills>重新加载模板</button>
     <div class="skill-list">
       ${active}
       ${disabled}
       ${rejected}
     </div>
     <label class="skill-validator">
-      <textarea data-validate-skill spellcheck="false"></textarea>
+      <textarea data-validate-skill spellcheck="false" placeholder="粘贴 Workflow 模板 JSON 进行校验"></textarea>
     </label>
     <div data-skill-validation-result></div>
   </section>`;
@@ -97,7 +105,7 @@ function defaultShowError(message) {
 
 function skillActionErrorMessage(error, fallback) {
   if (error?.status === 403) {
-    return "Skill template management is available from the local workspace only.";
+    return "Workflow 模板管理仅支持在本地工作区使用。";
   }
   return error?.message || fallback;
 }
@@ -149,7 +157,7 @@ export function attachSkillHandlers(root, deps = {}) {
     } catch (error) {
       if (version === validationVersion && slot) {
         slot.innerHTML = skillValidationResultHtml({
-          problems: [skillActionErrorMessage(error, "skill validation failed")],
+          problems: [skillActionErrorMessage(error, "模板校验失败")],
         });
       }
     }
@@ -166,7 +174,7 @@ export function attachSkillHandlers(root, deps = {}) {
       await actions.reloadSkills();
       await actions.refreshSkills();
     } catch (error) {
-      actions.showError(skillActionErrorMessage(error, "skill reload failed"));
+        actions.showError(skillActionErrorMessage(error, "模板重新加载失败"));
     }
   };
 
@@ -184,7 +192,7 @@ export function attachSkillHandlers(root, deps = {}) {
       skill = JSON.parse(input.value || "{}");
     } catch (_error) {
       if (slot) {
-        slot.innerHTML = '<div class="skill-validation invalid">Invalid JSON</div>';
+        slot.innerHTML = '<div class="skill-validation invalid">JSON 格式无效</div>';
       }
       return;
     }

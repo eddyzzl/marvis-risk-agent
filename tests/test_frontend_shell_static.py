@@ -18,13 +18,15 @@ def _css_rule(css: str, selector: str) -> str:
 def test_browser_chrome_uses_public_default_branding():
     index_html = _read_static("index.html")
 
-    assert "<title>MARVIS-Agent</title>" in index_html
+    assert "<title>MARVIS-全能风控智能体</title>" in index_html
     assert '<link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png' in index_html
     assert 'id="brandLogo"' in index_html
     assert 'class="brand-mark"' in index_html
     assert 'src="static/brand/marvis-logo.png' in index_html
+    assert 'id="workspaceBrandLogo"' in index_html
+    assert 'src="static/brand/marvis-workspace-logo.png' in index_html
     assert 'id="platformName"' in index_html
-    assert "MARVIS-Agent" in index_html
+    assert "MARVIS-全能风控智能体" in index_html
     assert "private-logo.svg" not in index_html
     assert 'href="data:,"' not in index_html
 
@@ -45,7 +47,7 @@ def test_runtime_branding_hooks_exist():
     assert '$("platformName").textContent = branding.platformName' in branding_js
     assert '$("brandLogo").src = branding.logoUrl' in branding_js
     assert '$("brandLogo").alt = `${branding.platformName} logo`' in branding_js
-    assert '$("workspaceBrandLogo").src = branding.logoUrl' in branding_js
+    assert '$("workspaceBrandLogo").src = branding.workspaceLogoUrl || branding.logoUrl' in branding_js
     assert '$("workspaceBrandLogo").alt = `${branding.platformName} logo`' in branding_js
     assert 'favicon.href = branding.faviconUrl' in branding_js
     assert 'document.documentElement.style.setProperty("--brand-primary", branding.primaryColor)' in branding_js
@@ -94,7 +96,9 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert 'id="workspaceGreetingCursor"' not in index_html
     assert 'class="workspace-greeting-cursor"' not in index_html
     assert 'class="workspace-greeting-nowrap"' in index_html
-    assert "早上好，开启活力一天" in index_html
+    # Greeting is a short time-of-day word ("早上好") + the fixed professional suffix,
+    # not a long cutesy wellness line.
+    assert ">早上好</span>" in index_html
     assert "我来帮您完成信贷风控工作" in index_html
     assert "我来帮您完成模型验证工作" not in index_html
     assert "欢迎，我来帮您完成信贷风控工作" not in index_html
@@ -102,20 +106,64 @@ def test_unselected_workspace_shows_centered_welcome_only():
     welcome_end = index_html.index('<div class="workspace-body">', welcome_start)
     welcome_markup = index_html[welcome_start:welcome_end]
     assert "创建任务或从左侧选择已有任务" not in welcome_markup
+    assert "选择一个任务类型，补充材料和目标后进入 Agent 工作流。" not in welcome_markup
+    assert 'class="workspace-welcome-copy"' not in welcome_markup
     assert 'id="welcomeTaskCards"' in welcome_markup
+    assert 'id="welcomeDataJoinCard"' in welcome_markup
+    assert 'id="welcomeVintageAnalysisCard"' in welcome_markup
     assert 'id="welcomeModelDevelopmentCard"' in welcome_markup
     assert 'id="welcomeModelValidationCard"' in welcome_markup
     assert 'id="welcomeStrategyDevelopmentCard"' in welcome_markup
+    assert "自动识别主键，关联各种XY数据，诊断数据情况" in welcome_markup
+    assert "上传多表、识别主键、诊断膨胀和确认 join" not in welcome_markup
     assert "模型开发" in welcome_markup
+    vintage_card_start = welcome_markup.index('id="welcomeVintageAnalysisCard"')
+    vintage_card_end = welcome_markup.index("</button>", vintage_card_start)
+    vintage_card_markup = welcome_markup[vintage_card_start:vintage_card_end]
+    assert "vintage-calendar-binding" in vintage_card_markup
+    assert 'class="ln vintage-calendar-binding"' in vintage_card_markup
+    assert "M7.2 4.8v2.8M16.8 4.8v2.8" in vintage_card_markup
+    assert "cut-line" not in vintage_card_markup
+    model_card_start = welcome_markup.index('id="welcomeModelDevelopmentCard"')
+    model_card_end = welcome_markup.index("</button>", model_card_start)
+    model_card_markup = welcome_markup[model_card_start:model_card_end]
+    assert "model-code-mark" in model_card_markup
+    assert "model-code-slash" in model_card_markup
+    assert "M12 2.4 19.9 6.95v10.1L12 21.6 4.1 17.05V6.95Z" in model_card_markup
+    assert "M8.85 9.4 6.65 12l2.2 2.6" in model_card_markup
+    assert "M15.15 9.4 17.35 12l-2.2 2.6" in model_card_markup
+    assert "M12.7 8.9 11.3 15.1" in model_card_markup
+    assert "model-training-curve" not in model_card_markup
+    assert 'class="back"' not in model_card_markup
+    assert 'class="welcome-task-sheen"' in model_card_markup
+    assert 'clip-path="url(#welcomeModelingIconClip)"' in model_card_markup
+    assert '<use href="#welcomeModelingIconGlyph">' not in model_card_markup
+    assert "L6.5 12" not in model_card_markup
+    assert "L17.5 12" not in model_card_markup
     assert "模型验证" in welcome_markup
-    assert "一致性、稳定性、效果验证，压力测试和编写报告" in welcome_markup
+    assert "可复现性、稳定性、效果验证，压力测试" in welcome_markup
+    assert "压力测试和编写报告" not in welcome_markup
+    assert "一致性、稳定性、效果验证，压力测试和编写报告" not in welcome_markup
     assert "材料扫描、Notebook 复现与验证报告生成" not in welcome_markup
     assert "策略开发" in welcome_markup
-    assert 'data-task-kind="model_validation"' in welcome_markup
-    assert 'disabled aria-disabled="true"' in welcome_markup
-    assert "暂未开放" in welcome_markup
+    assert "数据处理" in welcome_markup
+    assert "数据拼接" not in welcome_markup
+    assert "风险分析" in welcome_markup
+    assert "资产Vintage&滚动率分析、FPD、入催回收率分析" in welcome_markup
+    assert "Vintage、FPD、营利性测算" not in welcome_markup
+    assert "Vintage分析" not in welcome_markup
+    assert "Vintage 分析" not in welcome_markup
+    expected_card_titles = ["数据处理", "特征分析", "风险分析", "模型开发", "模型验证", "策略开发"]
+    title_offsets = [welcome_markup.index(f"<strong>{title}</strong>") for title in expected_card_titles]
+    assert title_offsets == sorted(title_offsets)
+    assert 'data-task-kind="validation"' in welcome_markup
+    assert 'data-task-kind="modeling"' in welcome_markup
+    assert 'data-task-kind="strategy"' in welcome_markup
+    assert 'disabled aria-disabled="true"' not in welcome_markup
+    assert "暂未开放" not in welcome_markup
     assert "validationWorkspace" in app_js
-    assert 'classList.toggle("is-empty", !selectedTask)' in app_js
+    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in app_js
+    assert 'classList.toggle("is-empty", !hasTaskContext)' in app_js
     assert "function openTaskTypeWelcome" in app_js
     welcome_entry_start = app_js.index("function openTaskTypeWelcome")
     welcome_entry_end = app_js.index("function closeTaskDialog", welcome_entry_start)
@@ -124,7 +172,7 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "rememberSelectedTaskId(null);" in welcome_entry
     assert "showModal" not in welcome_entry
     assert '$("createTaskOpenButton").onclick = openTaskTypeWelcome;' in app_js
-    assert '$("welcomeModelValidationCard").onclick = openTaskDialog;' in app_js
+    assert '$("welcomeTaskCards").onclick = openTaskDialogFromCard;' in app_js
     assert '$("createTaskOpenButton").onclick = openTaskDialog;' not in app_js
     assert 'class="validation-workspace region is-empty"' in index_html
 
@@ -157,16 +205,68 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "display: grid" in welcome_css
     assert ".validation-workspace.is-empty .workspace-head" in styles_css
     assert ".validation-workspace.is-empty .workspace-body" in styles_css
+    root_rule = _css_rule(styles_css, ":root")
+    assert "--radius: 16px" in root_rule
+    assert "--radius-sm: 16px" in root_rule
+    assert "--radius-md: 16px" in root_rule
+    assert "--radius-lg: 16px" in root_rule
+    assert "--radius-control: 10px" in root_rule
     cards_rule = _css_rule(welcome_css, ".welcome-task-cards")
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in cards_rule
-    assert "max-width: 760px" in cards_rule
+    assert "max-width: 1040px" in cards_rule
     assert "margin-top: clamp(24px, 4vh, 36px)" in cards_rule
     card_rule = _css_rule(welcome_css, ".welcome-task-card")
     assert "border-radius: var(--radius)" in card_rule
     assert "text-align: left" in card_rule
+    icon_rule = _css_rule(welcome_css, ".welcome-task-icon")
+    assert "overflow: hidden" not in icon_rule
+    assert "border-radius: 10px" not in icon_rule
+    legacy_icon_sheen_rule = _css_rule(welcome_css, ".welcome-task-icon svg .icon-sheen")
+    assert "display: none" in legacy_icon_sheen_rule
+    icon_sheen_rule = _css_rule(welcome_css, ".welcome-task-sheen")
+    assert "-webkit-mask-image: var(--welcome-icon-mask-image)" in icon_sheen_rule
+    assert "mask-image: var(--welcome-icon-mask-image)" in icon_sheen_rule
+    icon_sheen_beam_rule = _css_rule(welcome_css, ".welcome-task-sheen::before")
+    assert "left: -18px" in icon_sheen_beam_rule
+    assert "transform: translateX(0) skewX(-18deg)" in icon_sheen_beam_rule
+    assert "will-change: transform, opacity" in icon_sheen_beam_rule
+    assert "rgba(255, 255, 255, 0.98)" in icon_sheen_beam_rule
+    assert "welcome-icon-sheen 560ms ease-out" in welcome_css
+    assert "background-position: 140% 0" not in welcome_css
+    expected_icon_sizes = {
+        "feature_analysis": "41px",
+        "data_join": "40px",
+        "modeling": "36px",
+        "validation": "39px",
+        "strategy": "43px",
+        "vintage": "41px",
+    }
+    for task_kind, size in expected_icon_sizes.items():
+        icon_svg_rule = _css_rule(welcome_css, f'.welcome-task-card[data-task-kind="{task_kind}"] .welcome-task-icon svg')
+        assert f"width: {size}" in icon_svg_rule
+        assert f"height: {size}" in icon_svg_rule
+        icon_mask_rule = _css_rule(welcome_css, f'.welcome-task-card[data-task-kind="{task_kind}"] .welcome-task-icon')
+        assert f"--welcome-icon-mask-size: {size} {size}" in icon_mask_rule
+    model_icon_rule = _css_rule(welcome_css, '.welcome-task-card[data-task-kind="modeling"] .welcome-task-icon')
+    assert "--welcome-icon-mask-image" in model_icon_rule
+    assert "M12%202.4%2019.9%206.95v10.1L12%2021.6%204.1%2017.05V6.95Z" in model_icon_rule
+    vintage_icon_rule = _css_rule(welcome_css, '.welcome-task-card[data-task-kind="vintage"] .welcome-task-icon')
+    assert "M7.2%204.8v2.8M16.8%204.8v2.8" in vintage_icon_rule
+    assert ".welcome-task-icon svg .vintage-calendar-binding" in welcome_css
+    assert ".welcome-task-icon svg .cut-line" not in welcome_css
+    assert ".welcome-task-icon svg .model-code-mark" in welcome_css
+    assert ".welcome-task-icon svg .model-training-curve" not in welcome_css
+    model_mark_rule = _css_rule(welcome_css, ".welcome-task-icon svg .model-code-mark")
+    assert "stroke-width: 2.2" in model_mark_rule
+    model_slash_rule = _css_rule(welcome_css, ".welcome-task-icon svg .model-code-slash")
+    assert "stroke-width: 1.85" in model_slash_rule
+    assert "mix-blend-mode" not in welcome_css
+    assert "body[data-theme=\"dark\"] .welcome-task-icon" not in welcome_css
+    assert "body[data-theme=\"dark\"] .welcome-task-card.available:hover" not in welcome_css
 
 
 def test_empty_workspace_greeting_changes_by_local_time():
+    index_html = _read_static("index.html")
     app_js = _read_static("app.js")
 
     assert "function workspaceGreetingForHour(hour)" in app_js
@@ -177,10 +277,14 @@ def test_empty_workspace_greeting_changes_by_local_time():
     assert "我来帮您完成模型验证工作" not in app_js
     assert "updateWorkspaceGreeting();" in app_js
 
-    assert "早上好，开启活力一天" in app_js
-    assert "上午好，记得多补充水份" in app_js
-    assert "下午好，记得起来活动一下" in app_js
-    assert "晚上好，工作辛苦了" in app_js
+    assert 'return "早上好"' in app_js
+    assert 'return "上午好"' in app_js
+    assert 'return "下午好"' in app_js
+    assert 'return "晚上好"' in app_js
+    assert 'document.getElementById("workspaceGreetingText")' in index_html
+    assert 'new Date().getHours()' in index_html
+    assert index_html.index('id="workspaceGreetingText"') < index_html.index('new Date().getHours()')
+    assert index_html.index('new Date().getHours()') < index_html.index('id="welcomeTaskCards"')
 
     greeting_start = app_js.index("function workspaceGreetingForHour(hour)")
     greeting_end = app_js.index("function updateWorkspaceGreeting", greeting_start)
@@ -188,7 +292,7 @@ def test_empty_workspace_greeting_changes_by_local_time():
     assert "hour >= 5 && hour < 9" in greeting_logic
     assert "hour >= 9 && hour < 12" in greeting_logic
     assert "hour >= 12 && hour < 18" in greeting_logic
-    assert "return \"晚上好，工作辛苦了\"" in greeting_logic
+    assert 'return "晚上好"' in greeting_logic
 
 
 def test_workspace_greeting_logic_runs_under_node():
@@ -212,4 +316,4 @@ def test_workspace_greeting_logic_runs_under_node():
         capture_output=True,
         text=True,
     )
-    assert result.stdout.strip() == "早上好，开启活力一天|上午好，记得多补充水份|下午好，记得起来活动一下|晚上好，工作辛苦了"
+    assert result.stdout.strip() == "早上好|上午好|下午好|晚上好"

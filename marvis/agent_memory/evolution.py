@@ -18,7 +18,10 @@ class EvolutionManager:
         return self._store.update_distillation_support(existing.id, candidate.support_count)
 
     def rollback(self, distillation_id: str) -> None:
-        self._store.get_distillation(distillation_id)
+        target = self._store.get_distillation(distillation_id)
+        active = self._store.get_active_distillation(target.scope_key)
+        if active is None or active.id != target.id:
+            raise ValueError("only the active head distillation can be rolled back")
         predecessor = self._store.find_superseded_by(distillation_id)
         if predecessor is not None:
             self._store.clear_superseded(predecessor.id)

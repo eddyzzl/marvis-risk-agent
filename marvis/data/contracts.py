@@ -76,6 +76,25 @@ class KeyPair:
     resolved_by: str
 
 
+@dataclass(frozen=True)
+class ConflictReport:
+    """Result of a two-level dedup (spec §6). Level-1 removes whole-row duplicates
+    (key + ALL values identical) losslessly. Level-2 detects rows that share a key but
+    DISAGREE on some value (同人同天特征不一致) — a data-quality red flag that is
+    REPORTED, never silently dropped."""
+
+    key_columns: tuple[str, ...]
+    conflict_columns: tuple[str, ...]   # non-key columns whose values disagree within a key
+    n_conflict_keys: int
+    n_conflict_rows: int
+    safe_dropped: int                   # level-1 whole-row duplicates removed (lossless)
+    sample_keys: tuple[tuple, ...]      # capped sample of conflicting key-value tuples
+
+    @property
+    def has_conflicts(self) -> bool:
+        return self.n_conflict_keys > 0
+
+
 @dataclass
 class JoinDiagnostics:
     anchor_rows: int
@@ -88,6 +107,9 @@ class JoinDiagnostics:
     shrink_detected: bool
     new_columns: int
     new_columns_null_rate: float
+    # Two-level dedup breakdown (spec §6), present when the feature key is not unique:
+    # how many duplicates are safe (whole-row identical) vs genuine same-key conflicts.
+    conflict_report: "ConflictReport | None" = None
 
 
 @dataclass
@@ -119,6 +141,7 @@ __all__ = [
     "SMALL_SAMPLE_N",
     "ColumnFingerprint",
     "ColumnProfile",
+    "ConflictReport",
     "Dataset",
     "JoinDiagnostics",
     "JoinPlan",

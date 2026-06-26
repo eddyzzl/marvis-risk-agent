@@ -6,6 +6,7 @@ from pathlib import Path
 
 import lightgbm as lgb
 
+from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import compute_regression_metrics, split_modeling_frame
@@ -14,6 +15,9 @@ from marvis.packs.modeling.recipes.common import compute_regression_metrics, spl
 def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
     params = {
         **get_recipe("lgb_regressor").default_params,
         **config.params,
@@ -47,6 +51,7 @@ def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: 
         test,
         oot,
         config,
+        oot_has_labels=oot_has_labels,
     )
     artifact = _save_lgb_regressor_model(
         model,
@@ -59,6 +64,7 @@ def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: 
         metrics=metrics,
         feature_importance=_lgb_importance(model, config.features),
         experiment_id="",
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 

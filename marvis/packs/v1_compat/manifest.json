@@ -44,7 +44,8 @@
               "properties": {
                 "name": {"type": "string"},
                 "status": {"type": "string"},
-                "detail": {"type": "string"}
+                "detail": {"type": "string"},
+                "selected": {"type": "string"}
               },
               "required": ["name", "status", "detail"],
               "additionalProperties": false

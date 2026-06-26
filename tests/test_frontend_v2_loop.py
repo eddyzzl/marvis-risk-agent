@@ -86,8 +86,8 @@ def test_render_loop_events_updates_from_plan_loop_events():
             { type: "no_progress", reason: "failure", at: "2026-06-20T00:03:00Z" },
           ],
         });
-        assert.ok(container.innerHTML.includes("Explore segment: explore"));
-        assert.ok(container.innerHTML.includes("No progress: failure"));
+        assert.ok(container.innerHTML.includes("探索分支：explore"));
+        assert.ok(container.innerHTML.includes("暂无进展：failure"));
         assert.equal(container.innerHTML.includes("stale state"), false);
 
         setPlan({ id: "plan-2", loop_events: [] });

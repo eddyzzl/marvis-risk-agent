@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from marvis.api_schemas import (
     ExecutionEnvironmentRequest,
     LLMSettingsRequest,
+    MemoryPolicyRequest,
     model_payload,
 )
 from marvis.execution_environment import (
@@ -18,6 +19,11 @@ from marvis.llm_settings import (
     LLMSettingsError,
     load_llm_settings,
     save_llm_settings,
+)
+from marvis.memory_policy import (
+    MemoryPolicySettings,
+    load_memory_policy,
+    save_memory_policy,
 )
 
 
@@ -82,3 +88,26 @@ def update_llm_settings(payload: LLMSettingsRequest, request: Request) -> dict:
         )
     except LLMSettingsError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/settings/memory-policy")
+def get_memory_policy_settings(request: Request) -> dict:
+    # Create-on-read safe: if no settings file exists, this returns defaults
+    # (both flags on) without writing anything to disk.
+    settings = load_memory_policy(request.app.state.settings.workspace)
+    return {"settings": asdict(settings)}
+
+
+@router.put("/settings/memory-policy")
+def update_memory_policy_settings(
+    payload: MemoryPolicyRequest,
+    request: Request,
+) -> dict:
+    settings = MemoryPolicySettings(
+        reference_cross_task=payload.reference_cross_task,
+        auto_distill=payload.auto_distill,
+    )
+    saved = save_memory_policy(request.app.state.settings.workspace, settings)
+    # Unlike execution-environment (which returns {settings, validation}),
+    # memory-policy returns only {settings} -- there is nothing to validate.
+    return {"settings": asdict(saved)}

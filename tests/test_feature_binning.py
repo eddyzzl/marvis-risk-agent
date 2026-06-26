@@ -21,6 +21,14 @@ def test_equal_frequency_edges_filter_nan_inf_and_dedupe_quantiles():
     assert len(edges) <= 5
 
 
+def test_equal_frequency_edges_preserves_imbalanced_binary_split():
+    values = np.array([0] * 95 + [1] * 5, dtype=float)
+
+    edges = equal_frequency_edges(values, 10)
+
+    assert edges.tolist() == [float("-inf"), 0.5, float("inf")]
+
+
 def test_equal_width_edges_handle_empty_and_single_value_columns():
     empty = equal_width_edges(np.array([np.nan, np.inf]), 5)
     single = equal_width_edges(np.array([7, 7, np.nan]), 5)

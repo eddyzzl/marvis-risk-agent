@@ -13,14 +13,24 @@ function classToken(value, fallback = "unknown") {
 
 function toolLabel(ref) {
   if (!ref?.plugin || !ref?.tool) {
-    return "tool pending";
+    return "工具待定";
   }
   return `${ref.plugin}.${ref.tool}`;
 }
 
+function subAgentStatusLabel(status) {
+  return {
+    pending: "待执行",
+    running: "运行中",
+    done: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  }[status] || String(status || "未知");
+}
+
 export function subAgentStatusBadge(status) {
   const normalized = classToken(status);
-  return `<span class="subagent-status subagent-status-${normalized}">${escapeHtml(status || "unknown")}</span>`;
+  return `<span class="subagent-status subagent-status-${normalized}">${escapeHtml(subAgentStatusLabel(status))}</span>`;
 }
 
 export function subAgentRowHtml(subAgent) {
@@ -28,10 +38,10 @@ export function subAgentRowHtml(subAgent) {
     .map((ref) => escapeHtml(toolLabel(ref)))
     .join(", ");
   const resultRef = subAgent?.result_ref
-    ? `<button type="button" data-artifact="${escapeHtml(subAgent.result_ref)}">Open result</button>`
+    ? `<button type="button" data-artifact="${escapeHtml(subAgent.result_ref)}">查看结果</button>`
     : "";
   return `<section class="subagent-row subagent-${classToken(subAgent?.status)}">
-    <span class="subagent-scope">${escapeHtml(subAgent?.scope || "sub agent")}</span>
+    <span class="subagent-scope">${escapeHtml(subAgent?.scope || "子 Agent")}</span>
     ${subAgentStatusBadge(subAgent?.status)}
     <span class="subagent-grants">${tools}</span>
     ${resultRef}
@@ -41,7 +51,7 @@ export function subAgentRowHtml(subAgent) {
 export function subAgentListHtml(plan) {
   const subAgents = plan?.sub_agents || [];
   if (!subAgents.length) {
-    return '<div class="v2-empty" data-v2-empty="subagents">No sub agents</div>';
+    return '<div class="v2-empty" data-v2-empty="subagents">暂无子 Agent</div>';
   }
   return `<section class="subagent-list">${subAgents.map(subAgentRowHtml).join("")}</section>`;
 }

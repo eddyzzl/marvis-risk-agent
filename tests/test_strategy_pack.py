@@ -190,3 +190,37 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert tradeoff.ok is True, tradeoff.error
     assert [point["cutoff"] for point in tradeoff.output["points"]] == [600.0, 700.0]
     assert tradeoff.output["recommended"]["cutoff"] in {600.0, 700.0}
+
+
+def _register_strategy_sample_with_nan_label(registry, tmp_path, task_id: str):
+    frame = pd.DataFrame({
+        "bad": [1.0, 0.0, float("nan"), 0.0, 1.0, 0.0],
+        "score": [580, 620, 730, 760, 590, 800],
+    })
+    path = tmp_path / "strategy_nan_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return registry.register_existing(path, task_id=task_id, role="strategy_sample")
+
+
+def test_tradeoff_view_gates_nan_label(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    dataset = _register_strategy_sample_with_nan_label(registry, tmp_path, task.id)
+    base_inputs = {
+        "dataset_id": dataset.id,
+        "score_col": "score",
+        "target_col": "bad",
+        "cutoffs": [600, 700],
+    }
+
+    blocked = runner.invoke(ToolRef("strategy", "tradeoff_view"), dict(base_inputs), task_id=task.id)
+    assert blocked.ok is False
+    assert blocked.error_kind == "nan_label_not_confirmed"
+    assert blocked.error_detail["n_nan"] == 1
+
+    confirmed = runner.invoke(
+        ToolRef("strategy", "tradeoff_view"),
+        {**base_inputs, "drop_nan_labels": True},
+        task_id=task.id,
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["nan_labels_dropped"] == 1

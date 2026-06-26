@@ -18,7 +18,7 @@ from marvis.packs.modeling.report_compute import (
     resolve_report_sections,
     stress_low_pricing,
 )
-from marvis.packs.modeling.contracts import ModelArtifact
+from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -122,7 +122,7 @@ def test_compute_vintage_report_aligns_headers_to_sorted_mob_axis(tmp_path):
     )
 
     assert vintage["headers"] == ["mob1", "mob3"]
-    assert vintage["curves"]["2026-01"] == pytest.approx([0.5, 0.75])
+    assert vintage["curves"]["2026-01"] == pytest.approx([0.5, 1.0])
 
 
 def test_amount_bin_table_computes_credit_utilization_by_bin(tmp_path):
@@ -177,6 +177,61 @@ def test_amount_bin_table_computes_amount_weighted_cumulative_and_lift(tmp_path)
     assert by_bin[2]["金额逾期率"] == pytest.approx(0.25)
     assert by_bin[2]["累计金额逾期率"] == pytest.approx(1 / 3)
     assert by_bin[2]["金额lift"] == pytest.approx(0.75)
+
+
+def test_report_bin_table_uses_only_oot_split(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.10, 0.20, 0.30, 0.40, 0.90, 0.95],
+        "y": [0, 0, 0, 1, 1, 1],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+    })
+    path = tmp_path / "oot_bins.parquet"
+    frame.to_parquet(path, index=False)
+    runtime = type("Runtime", (), {"backend": DataBackend(tmp_path)})()
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=1,
+        early_stopping_rounds=None,
+    )
+
+    rows = modeling_tools._report_bin_table(
+        runtime,
+        path,
+        score_col="score",
+        target_col="y",
+        config=config,
+        business=BusinessColumns(),
+    )
+
+    assert sum(row["sample_count"] for row in rows) == 2
+    assert sum(row["bad_count"] for row in rows) == 2
+
+
+def test_amount_bin_table_excludes_unscored_rows_from_business_amounts(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.1, float("nan"), 0.8],
+        "y": [0, 1, 1],
+        "amount": [100.0, 1000.0, 300.0],
+    })
+    path = tmp_path / "amount_bins_with_nan.parquet"
+    frame.to_parquet(path, index=False)
+
+    rows = compute_amount_bin_table(
+        DataBackend(tmp_path),
+        path,
+        score_col="score",
+        target_col="y",
+        edges=[0.0, 0.5, 1.0],
+        business=BusinessColumns(loan_amount_col="amount"),
+    )
+
+    assert sum(row["sample_count"] for row in rows) == 2
+    assert rows[-1]["累计金额逾期率"] == pytest.approx(300 / 400)
 
 
 def test_stress_low_pricing_exposes_cumulative_bin_curves_by_ratio(tmp_path):

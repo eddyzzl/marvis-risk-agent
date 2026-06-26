@@ -10,6 +10,10 @@ def equal_frequency_edges(values: np.ndarray, bin_count: int) -> np.ndarray:
     arr = _finite_values(values)
     if arr.size == 0:
         return np.array([-np.inf, np.inf], dtype=float)
+    unique_values = np.unique(arr)
+    if unique_values.size == 2:
+        midpoint = float((unique_values[0] + unique_values[1]) / 2)
+        return np.array([-np.inf, midpoint, np.inf], dtype=float)
     quantiles = np.linspace(0, 1, int(bin_count) + 1)
     edges = np.unique(np.quantile(arr, quantiles))
     if edges.size <= 1:

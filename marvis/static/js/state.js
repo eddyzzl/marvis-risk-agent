@@ -2,17 +2,19 @@ export const defaultPetPreference = "naitang";
 export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";
 export const agentComposerPreferenceStorageKey = "marvis_agent_composer_preferences";
 export const selectedTaskStorageKey = "marvis_selected_task_id";
+export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";
 // Per-task composer overrides: `{ [taskId]: { model_id, effort, acceptance_mode } }`.
 // Each task remembers its own mode/model/effort. The global preferences above
 // are only the seed value applied when a task has no override yet.
 export const agentTaskComposerStorageKey = "marvis_agent_task_composer_preferences";
 
 export const defaultBranding = {
-  platformName: "MARVIS-Agent",
-  browserTitle: "MARVIS-Agent",
-  primaryColor: "#000000",
-  logoUrl: "static/brand/marvis-logo.png",
-  faviconUrl: "static/brand/marvis-favicon.png",
+  platformName: "MARVIS-全能风控智能体",
+  browserTitle: "MARVIS-全能风控智能体",
+  primaryColor: "#303034",
+  logoUrl: "static/brand/marvis-logo.png?v=20260624-gauge",
+  workspaceLogoUrl: "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+  faviconUrl: "static/brand/marvis-favicon.png?v=20260624-gauge",
   // Real validator name -> display alias, supplied per-workspace by brand.json.
   validatorAliases: {},
 };

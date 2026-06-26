@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import nbformat
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
@@ -142,6 +143,11 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert (material_dir / "model.pmml").exists()
     assert (material_dir / "dictionary.csv").exists()
     precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
+    notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
+    source = notebook.cells[0].source
+    assert "Path('model.joblib')" in source or 'Path("model.joblib")' in source
+    assert "Path('\\\"model.joblib\\\"')" not in source
+    assert 'Path(\'"model.joblib"\')' not in source
     assert persisted_artifact.pmml_path == f"{artifact.id}.pmml"
     assert store.get(artifact.experiment_id).status == "handed_off"
 

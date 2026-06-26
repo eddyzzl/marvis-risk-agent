@@ -64,7 +64,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
         await actions.runPlan(planId);
         actions.startPlanPolling(planId);
       } catch (error) {
-        actions.showError(error?.message || "confirm plan failed");
+        actions.showError(error?.message || "计划确认失败");
       }
       return;
     }
@@ -80,7 +80,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
         await actions.confirmStep(plan.id, stepButton.dataset.confirmStep);
         actions.startPlanPolling(plan.id);
       } catch (error) {
-        actions.showError(error?.message || "confirm step failed");
+        actions.showError(error?.message || "步骤确认失败");
       }
       return;
     }
@@ -93,7 +93,7 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
         syncPlanFromPayload(await actions.cancelPlan(planId));
         actions.stopPlanPolling(planId);
       } catch (error) {
-        actions.showError(error?.message || "cancel plan failed");
+        actions.showError(error?.message || "计划取消失败");
       }
     }
   };
@@ -110,7 +110,7 @@ export function renderPlanValidationProblems(container, problems = []) {
     container.dataset.v2PlanProblems = "true";
   }
   if (!problems.length) {
-    container.innerHTML = '<div class="v2-empty" data-v2-empty="plan-problems">No plan validation problems</div>';
+    container.innerHTML = '<div class="v2-empty" data-v2-empty="plan-problems">暂无计划校验问题</div>';
     return;
   }
   const items = problems

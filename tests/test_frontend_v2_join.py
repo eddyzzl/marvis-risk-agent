@@ -144,7 +144,7 @@ def test_join_review_accepts_backend_join_plan_payload_shape():
         assert.ok(html.includes('data-feature-dataset="feature-backend"'));
         assert.ok(html.includes('data-confirm-join="feature-backend"'));
         assert.ok(html.includes('data-exec-join="join-backend-1" disabled'));
-        assert.ok(html.includes("Anchor: anchor-backend"));
+        assert.ok(html.includes("主表：anchor-backend"));
         assert.ok(html.includes("feature-backend"));
         """
     )
@@ -201,8 +201,8 @@ def test_join_proposal_renders_dataset_controls():
         assert.ok(html.includes("multiple"));
         assert.ok(html.includes('value="anchor-1"'));
         assert.ok(html.includes('value="feature-1"'));
-        assert.ok(html.includes("sample | 100 rows"));
-        assert.ok(html.includes("feature | 50 rows"));
+        assert.ok(html.includes("sample | 100 行"));
+        assert.ok(html.includes("feature | 50 行"));
         assert.ok(html.includes('data-propose-join'));
         """
     )
@@ -320,7 +320,7 @@ def test_join_handlers_require_task_before_dataset_actions():
         await listeners.click({ target: refreshTarget, preventDefault() {} });
 
         assert.deepEqual(calls, []);
-        assert.ok(problemSlot.innerHTML.includes("select or create a task"));
+        assert.ok(problemSlot.innerHTML.includes("请先选择或创建任务"));
         """
     )
 
@@ -367,7 +367,7 @@ def test_join_handlers_require_dedup_before_confirming_and_surface_execute_error
         };
         await listeners.click({ target: confirmTarget, preventDefault() {} });
         assert.deepEqual(calls, []);
-        assert.ok(messages.at(-1).includes("dedup"));
+        assert.ok(messages.at(-1).includes("去重策略"));
 
         dedupControl.value = "first";
         await listeners.click({ target: confirmTarget, preventDefault() {} });

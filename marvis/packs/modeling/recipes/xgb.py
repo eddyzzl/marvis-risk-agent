@@ -6,6 +6,7 @@ from pathlib import Path
 
 import xgboost as xgb
 
+from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
@@ -14,6 +15,9 @@ from marvis.packs.modeling.recipes.common import compute_model_metrics, split_mo
 def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
     params = {
         **get_recipe("xgb").default_params,
         **config.params,
@@ -37,6 +41,7 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         test,
         oot,
         config,
+        oot_has_labels=oot_has_labels,
     )
     artifact = _save_xgb_model(model, config, out_dir, {**params, "num_boost_round": num_boost_round})
     return TrainResult(
@@ -44,13 +49,16 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         metrics=metrics,
         feature_importance=_xgb_importance(model, config.features),
         experiment_id="",
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 
 def _dmatrix(frame, config: TrainConfig) -> xgb.DMatrix:
+    # Float labels: train/test are label-resolved upstream; OOT may be scoring-only, where
+    # the label is unused by predict() and must never be coerced into a class.
     return xgb.DMatrix(
         frame[list(config.features)],
-        label=frame[config.target_col].to_numpy(dtype=int),
+        label=frame[config.target_col].to_numpy(dtype=float),
         feature_names=list(config.features),
     )
 

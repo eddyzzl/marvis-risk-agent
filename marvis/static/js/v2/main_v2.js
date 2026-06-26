@@ -13,17 +13,17 @@ import { renderSubAgentView } from "./subagent_view.js";
 import { attachGoalHandlers, renderGoalComposer } from "./workflow_create.js";
 
 const panelDefinitions = [
-  { id: "goalPanel", className: "v2-goal-panel", label: "V2 goal composer" },
-  { id: "planPanel", className: "v2-plan-panel", label: "V2 plan" },
-  { id: "joinPanel", className: "v2-join-panel", label: "V2 join review" },
-  { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 sub agents" },
-  { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 plugins" },
-  { id: "skillPanel", className: "v2-skill-panel", label: "V2 workflow templates" },
-  { id: "draftPanel", className: "v2-draft-panel", label: "V2 draft tools" },
-  { id: "capabilityPanel", className: "v2-capability-panel", label: "V2 capability tiers" },
-  { id: "memoryPanel", className: "v2-memory-panel", label: "V2 memory audit" },
-  { id: "loopPanel", className: "v2-loop-panel", label: "V2 loop progress" },
-  { id: "artifactPanel", className: "v2-artifact-panel", label: "V2 artifacts" },
+  { id: "goalPanel", className: "v2-goal-panel", label: "V2 目标编排", title: "计划生成", description: "对当前任务生成可校验的 Workflow 计划。" },
+  { id: "planPanel", className: "v2-plan-panel", label: "V2 执行计划", title: "执行计划", description: "查看步骤、确认门、状态和输出引用。" },
+  { id: "joinPanel", className: "v2-join-panel", label: "V2 数据处理复核", title: "数据处理", description: "选择主表和特征表，复核键匹配与去重策略。" },
+  { id: "subAgentPanel", className: "v2-subagent-panel", label: "V2 子 Agent", title: "子 Agent", description: "查看并行执行分支和授权工具。" },
+  { id: "pluginPanel", className: "v2-plugin-panel", label: "V2 插件", title: "插件", description: "管理可调用工具包。" },
+  { id: "skillPanel", className: "v2-skill-panel", label: "V2 Workflow 模板", title: "Workflow 模板", description: "加载和校验用户可编写模板。" },
+  { id: "draftPanel", className: "v2-draft-panel", label: "V2 草稿工具", title: "草稿工具", description: "从学习材料生成、试运行并晋升工具草稿。" },
+  { id: "capabilityPanel", className: "v2-capability-panel", label: "V2 能力档位", title: "能力档位", description: "控制自治程度，不改变证据和安全护栏。" },
+  { id: "memoryPanel", className: "v2-memory-panel", label: "V2 记忆审计", title: "记忆审计", description: "查看沉淀、来源记忆和回滚记录。" },
+  { id: "loopPanel", className: "v2-loop-panel", label: "V2 循环进展", title: "循环进展", description: "跟踪重规划、探索分支和无进展事件。" },
+  { id: "artifactPanel", className: "v2-artifact-panel", label: "V2 工件", title: "工件预览", description: "查看步骤输出、数据集预览和报告工件。" },
 ];
 
 const mountStateKey = "__marvisV2MountState";
@@ -47,6 +47,8 @@ function ensurePanel(root, definition) {
   panel.id = definition.id;
   panel.className = `v2-panel ${definition.className}`;
   panel.dataset.v2Panel = definition.id;
+  panel.dataset.panelTitle = definition.title || definition.label;
+  panel.dataset.panelDescription = definition.description || "";
   panel.setAttribute("aria-label", definition.label);
   panel.setAttribute("aria-live", "polite");
   root.appendChild(panel);

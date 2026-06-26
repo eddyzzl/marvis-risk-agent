@@ -7,20 +7,52 @@ import {
 
 export const selectedTierStorageKey = "marvis_v2_selected_tier";
 
+const tierLabels = {
+  deterministic_only: "仅确定性",
+  guarded: "受控 Agent",
+  conservative: "稳健",
+  balanced: "均衡",
+  explorer: "探索",
+  autonomous: "自治",
+};
+
+const tierLimitLabels = {
+  name: "名称",
+  summary: "说明",
+  max_steps: "最大步骤",
+  max_replans: "最大重规划",
+  allow_parallel: "允许并行",
+  allow_network: "允许联网",
+};
+
 function closest(target, selector) {
   return typeof target?.closest === "function" ? target.closest(selector) : null;
 }
 
+function tierDisplayName(tier = {}) {
+  return tierLabels[tier.name] || tier.name || "未命名档位";
+}
+
+function tierSummary(tier = {}) {
+  const raw = String(tier.summary || "");
+  return {
+    "Guarded execution": "保守执行，适合高风险材料和首次试跑。",
+    "Default autonomy": "默认自治，适合常规分析和建模任务。",
+    "Higher autonomy": "更高自治，适合探索性任务和多步计划。",
+  }[raw] || raw;
+}
+
 function tierOptionHtml(tier, defaultTier) {
   const selected = tier.name === defaultTier ? " selected" : "";
-  return `<option value="${escapeHtml(tier.name)}"${selected}>${escapeHtml(tier.name)} - ${escapeHtml(tier.summary || "")}</option>`;
+  const summary = tierSummary(tier);
+  return `<option value="${escapeHtml(tier.name)}"${selected}>${escapeHtml(tierDisplayName(tier))}${summary ? ` - ${escapeHtml(summary)}` : ""}</option>`;
 }
 
 export function capabilitySelectHtmlFromData(data = {}) {
   const tiers = data.tiers || [];
   const options = tiers.map((tier) => tierOptionHtml(tier, data.default)).join("");
   return `<label>
-    Capability tier
+    能力档位
     <select id="tierSelect">${options}</select>
   </label>`;
 }
@@ -37,22 +69,22 @@ export async function capabilitySelectHtml(deps = {}) {
 function tierLimitsHtml(tier) {
   const entries = Object.entries(tier)
     .filter(([key]) => !["name", "summary"].includes(key))
-    .map(([key, value]) => `<span class="tier-limit"><b>${escapeHtml(key)}</b>: ${escapeHtml(value)}</span>`)
+    .map(([key, value]) => `<span class="tier-limit"><b>${escapeHtml(tierLimitLabels[key] || key)}</b>: ${escapeHtml(value)}</span>`)
     .join("");
-  return entries || '<span class="tier-limit">no limits published</span>';
+  return entries || '<span class="tier-limit">暂无公开限制</span>';
 }
 
 export function tierSettingsHtml(data = {}) {
   const tiers = data.tiers || [];
   const rows = tiers.map((tier) => (
     `<section class="tier-row${tier.name === data.default ? " default-tier" : ""}">
-      <h4>${escapeHtml(tier.name)}</h4>
-      <p>${escapeHtml(tier.summary || "")}</p>
+      <h4>${escapeHtml(tierDisplayName(tier))}</h4>
+      <p>${escapeHtml(tierSummary(tier))}</p>
       <div class="tier-limits">${tierLimitsHtml(tier)}</div>
     </section>`
   )).join("");
   return `<section class="tier-settings">
-    <p class="tier-guardrail-note">Guardrails remain constant across capability tiers.</p>
+    <p class="tier-guardrail-note">能力档位只影响自治程度；证据、确认门和安全护栏保持一致。</p>
     ${rows}
   </section>`;
 }

@@ -66,9 +66,6 @@ def compute_vintage_curve(
 
     points: list[VintagePoint] = []
     for cohort, cohort_frame in frame.groupby("_cohort", sort=True):
-        cumulative_bad = 0.0
-        cumulative_denominator = 0.0
-        previous_cum_rate = 0.0
         for mob, group in cohort_frame.groupby("_mob", sort=True):
             target = group["_target"].to_numpy(dtype=int)
             sample_count = int(len(group))
@@ -87,10 +84,6 @@ def compute_vintage_curve(
                 denominator_value = float(sample_count)
 
             bad_rate = _ratio(bad_numerator, denominator_value)
-            cumulative_bad += bad_numerator
-            cumulative_denominator += denominator_value
-            cum_bad_rate = max(previous_cum_rate, _ratio(cumulative_bad, cumulative_denominator))
-            previous_cum_rate = cum_bad_rate
             points.append(
                 VintagePoint(
                     cohort=str(cohort),
@@ -98,7 +91,7 @@ def compute_vintage_curve(
                     sample_count=sample_count,
                     bad_count=bad_count,
                     bad_rate=bad_rate,
-                    cum_bad_rate=cum_bad_rate,
+                    cum_bad_rate=bad_rate,
                     balance_sum=balance_sum,
                     denominator=denominator,
                 )

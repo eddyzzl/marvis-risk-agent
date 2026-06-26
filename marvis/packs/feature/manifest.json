@@ -1,6 +1,6 @@
 {
   "name": "feature",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "display_name": "Feature Engineering Pack",
   "description": "Deterministic feature metrics, binning, encoding, transformation, and derivation tools.",
   "module": "marvis.packs.feature.tools",
@@ -16,7 +16,10 @@
           "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "target_col": {"type": "string", "minLength": 1},
           "bins": {"type": "integer", "minimum": 1},
-          "compare_dataset_id": {"type": "string", "minLength": 1}
+          "compare_dataset_id": {"type": "string", "minLength": 1},
+          "metrics": {"type": "array", "items": {"type": "string"}},
+          "corr_threshold": {"type": "number"},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -25,7 +28,9 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string"},
-          "metrics": {"type": "array", "items": {"type": "object"}}
+          "metrics": {"type": "array", "items": {"type": "object"}},
+          "collinear": {"type": "object"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
         "required": ["dataset_id", "metrics"],
         "additionalProperties": false
@@ -35,6 +40,36 @@
       "failure_policy": "fail",
       "entrypoint": "tool_compute_feature_metrics",
       "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "generate_feature_report",
+      "summary": "Write the per-feature metrics into a downloadable Excel feature-analysis report (form A).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "metrics": {"type": "array", "items": {"type": "object"}},
+          "collinear": {"type": ["object", "null"]}
+        },
+        "required": ["metrics"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "report_path": {"type": "string"},
+          "feature_count": {"type": "integer", "minimum": 0},
+          "metrics": {"type": "array", "items": {"type": "object"}},
+          "collinear": {"type": "object"}
+        },
+        "required": ["report_path", "feature_count"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_feature_report",
+      "side_effects": ["write:artifact"],
       "memory_limit_mb": 4096
     },
     {
@@ -50,7 +85,8 @@
           "max_bins": {"type": "integer", "minimum": 1},
           "bins": {"type": "integer", "minimum": 1},
           "breakpoints": {"type": "array", "items": {"type": "number"}},
-          "seed": {"type": "integer"}
+          "seed": {"type": "integer"},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "feature", "target_col", "method"],
         "additionalProperties": false
@@ -64,7 +100,8 @@
           "edges": {"type": "array", "items": {"type": "number"}},
           "total_iv": {"type": "number"},
           "monotonic": {"type": "boolean"},
-          "na_bin": {"type": ["object", "null"]}
+          "na_bin": {"type": ["object", "null"]},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
         "required": ["feature", "method", "bins", "edges", "total_iv", "monotonic", "na_bin"],
         "additionalProperties": false
@@ -155,7 +192,8 @@
           "method": {"type": "string", "enum": ["equal_frequency", "quantile", "equal_width", "manual", "chimerge", "tree"]},
           "max_bins": {"type": "integer", "minimum": 1},
           "breakpoints": {"type": "array", "items": {"type": "number"}},
-          "seed": {"type": "integer"}
+          "seed": {"type": "integer"},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -165,7 +203,8 @@
         "properties": {
           "result_dataset_id": {"type": "string"},
           "new_columns": {"type": "array", "items": {"type": "string"}},
-          "woe_maps": {"type": "object"}
+          "woe_maps": {"type": "object"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
         "required": ["result_dataset_id", "new_columns", "woe_maps"],
         "additionalProperties": false

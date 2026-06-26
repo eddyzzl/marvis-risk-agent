@@ -85,15 +85,15 @@ def _generated_plan(tool: dict | None = None) -> str:
     })
 
 
-def _replanned_steps(tool: dict | None = None) -> str:
+def _replanned_steps(tool: dict | None = None, ref_id: str = "step-1") -> str:
     return json.dumps({
         "steps": [
             {
                 "id": "step-3",
                 "title": "Revised Echo",
                 "tool": tool or {"plugin": "_sample", "tool": "echo"},
-                "inputs": {"message": "$ref:step-1.output.echoed"},
-                "depends_on": ["step-1"],
+                "inputs": {"message": f"$ref:{ref_id}.output.echoed"},
+                "depends_on": [ref_id],
                 "post_checks": [{"kind": "nonempty", "spec": {"field": "echoed"}}],
             }
         ],
@@ -116,7 +116,7 @@ def _multi_step_plan(count: int) -> str:
     })
 
 
-def _explore_response(*, done: bool = False) -> str:
+def _explore_response(*, done: bool = False, ref_id: str = "step-1") -> str:
     return json.dumps({
         "done": done,
         "steps": [] if done else [
@@ -124,8 +124,8 @@ def _explore_response(*, done: bool = False) -> str:
                 "id": "step-3",
                 "title": "Explore Echo",
                 "tool": {"plugin": "_sample", "tool": "echo"},
-                "inputs": {"message": "$ref:step-1.output.echoed"},
-                "depends_on": ["step-1"],
+                "inputs": {"message": f"$ref:{ref_id}.output.echoed"},
+                "depends_on": [ref_id],
                 "post_checks": [{"kind": "nonempty", "spec": {"field": "echoed"}}],
             }
         ],
@@ -246,19 +246,21 @@ def test_planner_generate_conservative_reverts_explore_to_plan_ahead(tmp_path):
 
 
 def test_planner_replan_replaces_remaining_steps_and_preserves_done(tmp_path):
-    llm = FakeLLM([_replanned_steps()])
+    llm = FakeLLM([])
     planner = _planner(tmp_path, llm)
     plan = planner.from_template(
         _template(),
         {"message": "hello"},
         task_id="task-1",
     )
+    done_id = plan.steps[0].id
     plan.steps[0].status = StepStatus.DONE
-    plan.steps[0].output_ref = "metrics:step-1"
+    plan.steps[0].output_ref = f"metrics:{done_id}"
+    llm.responses = [_replanned_steps(ref_id=done_id)]
 
     replanned = planner.replan(
         plan,
-        completed_summaries={"step-1": {"echoed": "hello"}},
+        completed_summaries={done_id: {"echoed": "hello"}},
         observation={"echoed": "hello"},
         reason="decision_point",
         tier=resolve_tier("balanced"),
@@ -270,29 +272,31 @@ def test_planner_replan_replaces_remaining_steps_and_preserves_done(tmp_path):
     assert replanned.tier == "balanced"
     assert [step.title for step in replanned.steps] == ["First Echo", "Revised Echo"]
     assert replanned.steps[0].status == StepStatus.DONE
-    assert replanned.steps[1].depends_on == ["step-1"]
-    assert replanned.steps[1].inputs == {"message": "$ref:step-1.output.echoed"}
+    assert replanned.steps[1].depends_on == [done_id]
+    assert replanned.steps[1].inputs == {"message": f"$ref:{done_id}.output.echoed"}
     assert llm.calls[0]["response_format"] == {"type": "json_object"}
     assert "Two Step Echo" in llm.calls[0]["user_prompt"]
     assert "decision_point" in llm.calls[0]["user_prompt"]
 
 
 def test_planner_replan_retries_after_validator_failure(tmp_path):
-    llm = FakeLLM([
-        _replanned_steps({"plugin": "missing", "tool": "echo"}),
-        _replanned_steps(),
-    ])
+    llm = FakeLLM([])
     planner = _planner(tmp_path, llm)
     plan = planner.from_template(
         _template(),
         {"message": "hello"},
         task_id="task-1",
     )
+    done_id = plan.steps[0].id
     plan.steps[0].status = StepStatus.DONE
+    llm.responses = [
+        _replanned_steps({"plugin": "missing", "tool": "echo"}, ref_id=done_id),
+        _replanned_steps(ref_id=done_id),
+    ]
 
     replanned = planner.replan(
         plan,
-        completed_summaries={"step-1": {"echoed": "hello"}},
+        completed_summaries={done_id: {"echoed": "hello"}},
         observation={"error_kind": "execution"},
         reason="failure",
         tier=resolve_tier("balanced"),
@@ -327,19 +331,21 @@ def test_planner_replan_rejects_exhausted_budget_without_llm_call(tmp_path):
 
 def test_planner_next_explore_segment_returns_valid_segment(tmp_path):
     tier = resolve_tier("balanced")
-    llm = FakeLLM([_explore_response()])
+    llm = FakeLLM([])
     planner = _planner(tmp_path, llm)
     plan = planner.from_template(
         _template(),
         {"message": "hello"},
         task_id="task-1",
     )
+    done_id = plan.steps[0].id
     plan.novel_mode = "explore"
     plan.steps[0].status = StepStatus.DONE
+    llm.responses = [_explore_response(ref_id=done_id)]
 
     segment, done = planner.next_explore_segment(
         plan,
-        completed_summaries={"step-1": {"echoed": "hello"}},
+        completed_summaries={done_id: {"echoed": "hello"}},
         tier=tier,
     )
 
@@ -347,7 +353,7 @@ def test_planner_next_explore_segment_returns_valid_segment(tmp_path):
     assert done is False
     assert len(segment) == 1
     assert segment[0].index == 2
-    assert segment[0].depends_on == ["step-1"]
+    assert segment[0].depends_on == [done_id]
     assert "Two Step Echo" in llm.calls[0]["user_prompt"]
 
 

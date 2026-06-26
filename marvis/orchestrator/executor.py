@@ -354,6 +354,44 @@ class PlanExecutor:
         except (KeyError, ReplanError):
             return False
 
+    def replan_from_instruction(self, plan_id: str, instruction: str) -> bool:
+        """User-driven structural replan (driver §3 提指令→重规划): regenerate the
+        remaining steps to satisfy a free-text instruction, then persist. Returns True on
+        success, False when no planner, the replan budget is exhausted, or the LLM cannot
+        produce a valid revised plan (the caller then keeps the current plan)."""
+        if self._planner is None:
+            return False
+        plan = self._repo.load_plan(plan_id)
+        tier = resolve_tier(plan.tier)
+        if plan.replan_count >= tier.max_replan_iterations:
+            return False
+        pending = [s for s in plan.steps if s.status not in {StepStatus.DONE, StepStatus.SKIPPED}]
+        trigger = pending[0] if pending else (plan.steps[-1] if plan.steps else None)
+        if trigger is None:
+            return False
+        try:
+            new_plan = self._planner.replan(
+                plan,
+                completed_summaries=self._summaries(plan),
+                observation={"reason": "user_instruction", "instruction": instruction},
+                reason="user_instruction",
+                tier=tier,
+                instruction=instruction,
+            )
+            self._repo.replace_remaining_steps(
+                plan.id,
+                new_plan,
+                loop_event={"type": "replan", "reason": "user_instruction", "instruction": instruction},
+            )
+            self._dispatch(
+                "plan.replanned",
+                {"plan_id": plan.id, "reason": "user_instruction", "trigger_step_id": trigger.id},
+                task_id=plan.task_id,
+            )
+            return True
+        except (KeyError, ReplanError):
+            return False
+
     def _try_append_explore_segment(self, plan: Plan, tier: CapabilityTier) -> bool:
         if self._planner is None:
             return False

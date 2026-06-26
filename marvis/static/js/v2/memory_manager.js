@@ -15,6 +15,15 @@ const memoryCategories = [
   "model_experience",
 ];
 
+const memoryCategoryLabels = {
+  "": "全部类别",
+  user_preference: "用户偏好",
+  field_convention: "字段口径",
+  validation_pitfall: "验证坑点",
+  task_experience: "任务经验",
+  model_experience: "模型经验",
+};
+
 function closest(target, selector) {
   return typeof target?.closest === "function" ? target.closest(selector) : null;
 }
@@ -22,22 +31,22 @@ function closest(target, selector) {
 function categoryOptionsHtml(selected = "") {
   return memoryCategories.map((category) => {
     const value = String(category);
-    const label = value || "all categories";
+    const label = memoryCategoryLabels[value] || value || "全部类别";
     return `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(label)}</option>`;
   }).join("");
 }
 
 function distillationTitle(item = {}) {
-  return item.summary || item.distilled_summary || item.scope_key || item.id || "Untitled distillation";
+  return item.summary || item.distilled_summary || item.scope_key || item.id || "未命名沉淀";
 }
 
 function distillationMeta(item = {}) {
   return [
-    item.category || item.memory_type || "",
-    item.confidence ? `confidence ${item.confidence}` : "",
-    item.support_count !== undefined ? `support ${item.support_count}` : "",
+    memoryCategoryLabels[item.category || item.memory_type] || item.category || item.memory_type || "",
+    item.confidence ? `置信度 ${item.confidence}` : "",
+    item.support_count !== undefined ? `支持证据 ${item.support_count}` : "",
     item.status || "",
-    item.superseded_by ? `superseded by ${item.superseded_by}` : "",
+    item.superseded_by ? `被 ${item.superseded_by} 替代` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -49,7 +58,7 @@ function distillationRowHtml(item = {}) {
       <strong>${escapeHtml(distillationTitle(item))}</strong>
       ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
     </button>
-    <button type="button" data-rollback-memory-distillation="${escapeHtml(id)}">Rollback</button>
+    <button type="button" data-rollback-memory-distillation="${escapeHtml(id)}">回滚</button>
   </article>`;
 }
 
@@ -58,14 +67,14 @@ export function memoryDistillationsHtml(data = {}, options = {}) {
   const items = data.items || data.distillations || [];
   const rows = items.length
     ? items.map(distillationRowHtml).join("")
-    : '<div class="v2-empty" data-v2-empty="memory-distillations">No memory distillations</div>';
+    : '<div class="v2-empty" data-v2-empty="memory-distillations">暂无记忆沉淀</div>';
   return `<section class="memory-manager">
     <header class="memory-manager-toolbar">
       <label>
-        Category
+        类别
         <select data-memory-category>${categoryOptionsHtml(selectedCategory)}</select>
       </label>
-      <button type="button" data-consolidate-memory>Consolidate</button>
+      <button type="button" data-consolidate-memory>合并沉淀</button>
     </header>
     <div class="memory-distillation-list">${rows}</div>
     <section data-memory-detail class="memory-distillation-detail"></section>
@@ -75,8 +84,8 @@ export function memoryDistillationsHtml(data = {}, options = {}) {
 function sourceMemoryHtml(memory = {}) {
   const label = [
     memory.id || "",
-    memory.memory_type || "",
-    memory.source_task_id ? `task ${memory.source_task_id}` : "",
+    memoryCategoryLabels[memory.memory_type] || memory.memory_type || "",
+    memory.source_task_id ? `任务 ${memory.source_task_id}` : "",
   ].filter(Boolean).join(" · ");
   return `<li>
     <strong>${escapeHtml(label)}</strong>
@@ -94,7 +103,7 @@ function eventHtml(event = {}) {
 export function memoryDistillationDetailHtml(payload = {}) {
   const distillation = payload.distillation || payload.memory || {};
   if (!distillation.id) {
-    return '<div class="v2-empty" data-v2-empty="memory-detail">Select a memory distillation</div>';
+    return '<div class="v2-empty" data-v2-empty="memory-detail">请选择一个记忆沉淀</div>';
   }
   const meta = distillationMeta(distillation);
   const sources = payload.source_memories || [];
@@ -105,18 +114,18 @@ export function memoryDistillationDetailHtml(payload = {}) {
       <h4>${escapeHtml(distillationTitle(distillation))}</h4>
       ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
     </header>
-    ${predecessor ? `<p>Restored predecessor ${escapeHtml(predecessor.id || "")}: ${escapeHtml(distillationTitle(predecessor))}</p>` : ""}
+    ${predecessor ? `<p>已恢复前序版本 ${escapeHtml(predecessor.id || "")}: ${escapeHtml(distillationTitle(predecessor))}</p>` : ""}
     <section>
-      <strong>Source memories</strong>
+      <strong>来源记忆</strong>
       ${sources.length
         ? `<ul>${sources.map(sourceMemoryHtml).join("")}</ul>`
-        : '<div class="v2-empty" data-v2-empty="memory-sources">No source memories</div>'}
+        : '<div class="v2-empty" data-v2-empty="memory-sources">暂无来源记忆</div>'}
     </section>
     <section>
-      <strong>Audit events</strong>
+      <strong>审计事件</strong>
       ${events.length
         ? `<ol>${events.map(eventHtml).join("")}</ol>`
-        : '<div class="v2-empty" data-v2-empty="memory-events">No audit events</div>'}
+        : '<div class="v2-empty" data-v2-empty="memory-events">暂无审计事件</div>'}
     </section>
   </article>`;
 }
@@ -198,7 +207,7 @@ export function attachMemoryHandlers(root, deps = {}) {
         await actions.rollbackMemoryDistillation(rollbackButton.dataset.rollbackMemoryDistillation);
         await actions.refreshMemories(refreshQuery());
       } catch (error) {
-        actions.showError(error?.message || "memory rollback failed");
+        actions.showError(error?.message || "记忆回滚失败");
       }
       return;
     }
@@ -209,7 +218,7 @@ export function attachMemoryHandlers(root, deps = {}) {
       try {
         renderDetail(await actions.getMemoryDistillation(detailButton.dataset.memoryDistillationId));
       } catch (error) {
-        actions.showError(error?.message || "memory detail failed");
+        actions.showError(error?.message || "记忆详情读取失败");
       }
       return;
     }
@@ -225,9 +234,9 @@ export function attachMemoryHandlers(root, deps = {}) {
           (total, value) => total + Number(value || 0),
           0,
         );
-        actions.showMessage(`Consolidated ${count} memory distillations.`);
+        actions.showMessage(`已合并 ${count} 条记忆沉淀。`);
       } catch (error) {
-        actions.showError(error?.message || "memory consolidation failed");
+        actions.showError(error?.message || "记忆沉淀合并失败");
       }
     }
   };
@@ -240,7 +249,7 @@ export function attachMemoryHandlers(root, deps = {}) {
     try {
       await actions.refreshMemories(refreshQuery());
     } catch (error) {
-      actions.showError(error?.message || "memory refresh failed");
+      actions.showError(error?.message || "记忆列表刷新失败");
     }
   };
 

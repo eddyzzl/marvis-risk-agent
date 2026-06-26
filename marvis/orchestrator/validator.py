@@ -12,7 +12,20 @@ from marvis.plugins.errors import (
 from marvis.plugins.schema_validation import validate_against_schema
 
 
-METRIC_FIELDS = frozenset({"ks", "auc", "psi", "iv", "lift", "gini"})
+METRIC_FIELDS = frozenset({
+    "ks",
+    "auc",
+    "psi",
+    "iv",
+    "total_iv",
+    "lift",
+    "gini",
+    "bad_rate",
+    "approval_rate",
+    "approved_bad_rate",
+    "rejected_bad_rate",
+    "expected_profit",
+})
 POST_CHECK_KINDS = frozenset({
     "schema",
     "range",
@@ -234,12 +247,38 @@ def _schema_fields(schema: dict) -> set[str]:
 
 
 def _metric_fields_in(schema: dict) -> set[str]:
-    return _schema_fields(schema) & METRIC_FIELDS
+    return _metric_fields_in_schema(schema)
+
+
+def _metric_fields_in_schema(schema: dict, *, prefix: str = "") -> set[str]:
+    if not isinstance(schema, dict):
+        return set()
+    fields: set[str] = set()
+    schema_type = schema.get("type")
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for name, child in properties.items():
+            path = f"{prefix}.{name}" if prefix else str(name)
+            if str(name) in METRIC_FIELDS:
+                fields.add(path)
+            fields.update(_metric_fields_in_schema(child, prefix=path))
+    if schema_type == "array" or "items" in schema:
+        item_schema = schema.get("items")
+        item_prefix = f"{prefix}.0" if prefix else "0"
+        fields.update(_metric_fields_in_schema(item_schema, prefix=item_prefix))
+    for combinator in ("oneOf", "anyOf", "allOf"):
+        variants = schema.get(combinator)
+        if isinstance(variants, list):
+            for variant in variants:
+                fields.update(_metric_fields_in_schema(variant, prefix=prefix))
+    return fields
 
 
 def _is_safety_step(step: PlanStep) -> bool:
     if step.tool_ref.tool == "execute_join" or _is_draft_run_step(step):
         return True
+    if step.tool_ref.plugin == "strategy" and step.tool_ref.tool == "backtest_strategy":
+        return False
     return any(check.kind == "range" for check in step.post_checks)
 
 
