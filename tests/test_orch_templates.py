@@ -143,8 +143,9 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
 
     # valid against the real modeling pack tool catalog
     assert PlanValidator(tool_registry).validate(plan) == []
-    # step order mirrors the prototype: screen -> tune -> train -> compare -> report
+    # step order: G1 make_split -> screen -> tune -> train -> compare -> report
     assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("modeling", "make_split"),
         ToolRef("modeling", "screen_features"),
         ToolRef("modeling", "tune_hyperparameters"),
         ToolRef("modeling", "train_models"),
@@ -152,12 +153,18 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
         ToolRef("modeling", "generate_model_report"),
     ]
     # phase tags for right-rail big-step grouping
-    assert [step.phase for step in plan.steps] == ["特征", "建模", "建模", "建模", "报告"]
-    # exactly two human gates: confirm-features (before tune) and confirm-model (before report)
-    assert [step.needs_confirmation for step in plan.steps] == [False, True, False, False, True]
+    assert [step.phase for step in plan.steps] == ["特征", "特征", "建模", "建模", "建模", "报告"]
+    # three human gates: confirm-split (G1, before screen), confirm-features (before tune),
+    # and confirm-model (before report)
+    assert [step.needs_confirmation for step in plan.steps] == [False, True, True, False, False, True]
     assert not any(step.decision_point for step in plan.steps)
 
-    screen, tune, train, compare, report = plan.steps
+    make_split, screen, tune, train, compare, report = plan.steps
+    # screen/tune/train run on the split frame produced by the G1 gate
+    split_ref = f"$ref:{make_split.id}.output.result_dataset_id"
+    assert screen.inputs["dataset_id"] == split_ref
+    assert tune.inputs["dataset_id"] == split_ref
+    assert train.inputs["dataset_id"] == split_ref
     # tune + train consume the screened feature set; train consumes tuned params
     assert tune.inputs["features"] == f"$ref:{screen.id}.output.selected"
     assert train.inputs["features"] == f"$ref:{screen.id}.output.selected"
@@ -231,7 +238,9 @@ def test_data_join_template_phases_gate_and_refs(tmp_path):
     # single phase; the forced-confirm human gate sits on execute_join (INV-3)
     assert [step.phase for step in plan.steps] == ["数据准备", "数据准备", "数据准备"]
     assert [step.needs_confirmation for step in plan.steps] == [False, False, True]
-    assert not any(step.decision_point for step in plan.steps)
+    # propose_join is a decision point (spec §2/§10): agent mode may adapt from diagnostics.
+    # The execute_join INV-3 gate + engine backstop keep the 1:1 invariant regardless.
+    assert [step.decision_point for step in plan.steps] == [True, False, False]
 
     propose, confirm, execute = plan.steps
     # confirm + execute both operate on the join plan id produced by propose
@@ -294,7 +303,9 @@ def test_feature_derivation_template_marks_adaptive_decision_point(tmp_path):
         ToolRef("feature", "compute_feature_metrics"),
         ToolRef("feature", "cross_features"),
         ToolRef("feature", "compute_feature_metrics"),
+        ToolRef("feature", "screen_features"),  # FEAT-3: derivation now ends in a screening step
     ]
+    assert plan.steps[-1].title == "特征筛选"
     assert [step.title for step in plan.steps if step.decision_point] == ["衍生特征"]
     assert not get_template("model_validation").steps[-1].decision_point
     assert not any(step.decision_point for step in get_template("standard_modeling").steps)

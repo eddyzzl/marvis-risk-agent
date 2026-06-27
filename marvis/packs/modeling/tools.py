@@ -31,10 +31,12 @@ from marvis.packs.modeling.report_compute import (
     stress_low_pricing,
 )
 from marvis.packs.modeling.readiness import check_data_quality, modeling_readiness
-from marvis.packs.modeling.prepare import prepare_modeling_frame
+from marvis.packs.modeling.prepare import SPLIT_COLUMN, prepare_modeling_frame
 from marvis.packs.modeling.recipes.lgb import train_lgb
+from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
+from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features
@@ -98,6 +100,73 @@ def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     return {"result_dataset_id": result.id, "split_counts": counts}
 
 
+def tool_make_split(inputs: dict, ctx) -> dict:
+    """MODELING G1 split gate: build a derived modeling frame from an arbitrary
+    rule set (e.g. channel A → train, channel B before a cutoff → test) plus the
+    existing random/time fallback, then return per-split counts and, when month or
+    channel columns are present, a per-split × per-group distribution table for the
+    confirmation gate UI."""
+    runtime = _runtime(ctx)
+    # split_col present → pass the EXISTING split through unchanged (the gate just surfaces
+    # it for review); absent → generate from split_config (rules / time-OOT / grouped-random
+    # fallback). prepare_modeling_frame keeps the passed-through column's name, and names a
+    # generated column SPLIT_COLUMN, so the effective name is one or the other.
+    split_col = str(inputs["split_col"]) if inputs.get("split_col") else None
+    result = prepare_modeling_frame(
+        runtime.registry,
+        runtime.backend,
+        str(inputs["dataset_id"]),
+        target_col=str(inputs["target_col"]),
+        feature_cols=[str(item) for item in inputs["feature_cols"]],
+        split_col=split_col,
+        split_config=inputs.get("split_config") or {},
+        seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
+    )
+    effective_split_col = split_col or SPLIT_COLUMN
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    source_frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
+    split_frame = runtime.backend.read_frame(
+        runtime.registry.resolve_path(result.id), columns=[effective_split_col]
+    )
+    sample_analysis = _split_sample_analysis(split_frame[effective_split_col], source_frame)
+    return {
+        "result_dataset_id": result.id,
+        "split_col": effective_split_col,
+        "sample_analysis": _json_safe(sample_analysis),
+    }
+
+
+_GROUP_COLUMN_HINTS = ("month", "channel", "渠道", "月", "split_month")
+
+
+def _split_sample_analysis(split_series: pd.Series, source_frame: pd.DataFrame) -> dict:
+    """Row counts per split plus, for each detected month/channel-like column, a
+    per-split × per-group count table. The split frame and the source frame share row
+    order (prepare_modeling_frame preserves it), so we align by position."""
+    splits = [str(value) for value in split_series.tolist()]
+    counts: dict[str, int] = {}
+    for split in splits:
+        counts[split] = counts.get(split, 0) + 1
+    group_tables: dict[str, dict] = {}
+    for column in _detect_group_columns(source_frame.columns):
+        values = source_frame[column].astype("object").where(source_frame[column].notna(), None)
+        table: dict[str, dict[str, int]] = {}
+        for split, value in zip(splits, values.tolist()):
+            key = "(missing)" if value is None else str(value)
+            row = table.setdefault(split, {})
+            row[key] = row.get(key, 0) + 1
+        group_tables[str(column)] = {split: dict(sorted(row.items())) for split, row in table.items()}
+    return {
+        "split_counts": dict(sorted(counts.items())),
+        "total_rows": len(splits),
+        "group_distributions": group_tables,
+    }
+
+
+def _detect_group_columns(columns) -> list[str]:
+    return [str(column) for column in columns if any(hint in str(column) for hint in _GROUP_COLUMN_HINTS)]
+
+
 def tool_select_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
@@ -122,6 +191,10 @@ def tool_select_features(inputs: dict, ctx) -> dict:
 
 
 def tool_screen_features(inputs: dict, ctx) -> dict:
+    # feature_ks is a binary-only statistic; a continuous target would miscompute/crash
+    # it, so for a non-binary target skip the leakage screen and keep every candidate.
+    if str(inputs.get("target_type", "binary")) != "binary":
+        return _screen_features_non_binary(inputs, ctx)
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     holdout = inputs.get("holdout_values")
@@ -145,6 +218,38 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+    }
+
+
+def _screen_features_non_binary(inputs: dict, ctx) -> dict:
+    """Non-binary (continuous) screen: skip the binary-only leakage KS screen, keep every
+    candidate as selected with ks=None, reporting only missing_rate / unique_count."""
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    features = [str(item) for item in inputs["features"]]
+    target_col = str(inputs["target_col"])
+    feats = [feature for feature in dict.fromkeys(features) if feature != target_col]
+    frame = (
+        runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=feats)
+        if feats
+        else None
+    )
+    scores: dict[str, dict] = {}
+    for feature in feats:
+        values = pd.to_numeric(frame[feature], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(values)
+        missing_rate = float(1.0 - finite.mean()) if values.size else 1.0
+        unique = int(np.unique(values[finite]).size)
+        scores[feature] = {"ks": None, "missing_rate": missing_rate, "unique_count": unique}
+    return {
+        "selected": list(feats),
+        "ranked": [[feature, None] for feature in feats],
+        "leakage": [],
+        "suspected": [],
+        "unusable": [],
+        "scores": _jsonable(scores),
+        "n_screened": len(feats),
+        "note": "非二分类目标：跳过泄漏KS筛选，保留全部候选特征",
     }
 
 
@@ -242,6 +347,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     split_values = dict(inputs["split_values"])
     seed = int(inputs["seed"])
     drop_nan = bool(inputs.get("drop_nan_labels"))
+    target_type = str(inputs.get("target_type", "binary"))
 
     experiments: list[dict] = []
     for recipe in recipes:
@@ -256,6 +362,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             seed=seed,
             early_stopping_rounds=None,
             recipe_id=recipe,
+            target_type=target_type,
             drop_nan_labels=drop_nan,
         )
         experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
@@ -331,6 +438,61 @@ def tool_handoff_to_validation(inputs: dict, ctx) -> dict:
 def tool_generate_model_report(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
+    return _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
+
+
+def tool_generate_model_reports(inputs: dict, ctx) -> dict:
+    """MODELING §5 multi-version fan-out: render one report per requested experiment
+    using version-specific output paths. Each report reuses the single-report pipeline.
+    report_path mirrors the first report so the existing download endpoint stays
+    compatible."""
+    runtime = _runtime(ctx)
+    experiment_ids = [str(item) for item in inputs.get("experiment_ids") or []]
+    if not experiment_ids:
+        raise ModelingError("experiment_ids must not be empty")
+    outputs_dir = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs"
+    reports: list[dict] = []
+    for experiment_id in experiment_ids:
+        experiment = runtime.experiments.get(experiment_id)
+        recipe = str(experiment.recipe_id)
+        report_path = outputs_dir / _report_filename(recipe, experiment_id)
+        generated = _generate_model_report_for(runtime, ctx, experiment, inputs, report_path)
+        reports.append({
+            "experiment_id": experiment_id,
+            "recipe": recipe,
+            "report_path": generated["report_path"],
+        })
+    return {
+        "reports": reports,
+        "report_path": reports[0]["report_path"] if reports else "",
+    }
+
+
+_REPORT_FILENAME_UNSAFE_RE = re.compile(r"[^0-9A-Za-z_-]+")
+
+
+def _report_filename(recipe: str, experiment_id: str) -> str:
+    safe_recipe = _REPORT_FILENAME_UNSAFE_RE.sub("_", recipe).strip("_") or "model"
+    safe_id = _REPORT_FILENAME_UNSAFE_RE.sub("_", experiment_id)[:8]
+    return f"model_report_{safe_recipe}_{safe_id}.xlsx"
+
+
+def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict, report_path: Path) -> dict:
+    # The full report is binary-credit-specific (bad-rate / Vintage / OOT bins / stress).
+    # For a non-binary target (regression / multiclass) write a compact metrics report so
+    # the flow finishes with a downloadable artifact instead of crashing on binary-only math.
+    if getattr(experiment.config, "target_type", "binary") != "binary":
+        from marvis.output.model_report_minimal import render_minimal_model_report
+
+        render_minimal_model_report(experiment, report_path)
+        return {
+            "report_path": str(report_path),
+            "section_status": [
+                {"section": "汇总", "status": "ok"},
+                {"section": "模型指标", "status": "ok"},
+            ],
+        }
     artifact = _artifact(runtime, experiment.artifact_id) if experiment.artifact_id else None
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     dataset_path = runtime.registry.resolve_path(dataset.id)
@@ -418,7 +580,6 @@ def tool_generate_model_report(inputs: dict, ctx) -> dict:
         ),
         structured_summary,
     )
-    report_path = Path(runtime.settings.tasks_dir) / ctx.task_id / "outputs" / "model_report.xlsx"
     render_model_report(
         ModelReportPayload(
             project_meta=structured_summary["project_meta"],
@@ -469,12 +630,16 @@ def _train_recipe(
         return train_lgb(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "lgb_regressor":
         return train_lgb_regressor(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "lgb_multiclass":
+        return train_lgb_multiclass(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "xgb":
         return train_xgb(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "lr":
         return train_lr(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "scorecard":
         return train_scorecard(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "mlp":
+        return train_mlp(backend, dataset_path, config, out_dir=out_dir)
     raise ModelingError(f"unsupported modeling recipe: {recipe}")
 
 
@@ -1006,12 +1171,31 @@ def _jsonable(value: Any):
     return value
 
 
+def _json_safe(value: Any):
+    """Like _jsonable, but additionally maps NaN/inf to None so the payload is strict
+    JSON (no NaN/Infinity tokens) for the make_split sample analysis."""
+    cleaned = _jsonable(value)
+    return _strip_non_finite(cleaned)
+
+
+def _strip_non_finite(value: Any):
+    if isinstance(value, dict):
+        return {key: _strip_non_finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_non_finite(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
 __all__ = [
     "tool_check_data_quality",
     "tool_compare_experiments",
     "tool_export_pmml",
     "tool_handoff_to_validation",
     "tool_generate_model_report",
+    "tool_generate_model_reports",
+    "tool_make_split",
     "tool_modeling_readiness",
     "tool_prepare_modeling_frame",
     "tool_select_features",

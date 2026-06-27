@@ -76,13 +76,16 @@ function tierLimitsHtml(tier) {
 
 export function tierSettingsHtml(data = {}) {
   const tiers = data.tiers || [];
-  const rows = tiers.map((tier) => (
-    `<section class="tier-row${tier.name === data.default ? " default-tier" : ""}">
+  const selected = data.selected || data.default || "";
+  const rows = tiers.map((tier) => {
+    const isSelected = tier.name === selected;
+    return `<label class="tier-row${isSelected ? " is-selected" : ""}">
+      <input class="tier-row-radio" type="radio" name="capabilityTier" value="${escapeHtml(tier.name)}"${isSelected ? " checked" : ""} />
       <h4>${escapeHtml(tierDisplayName(tier))}</h4>
       <p>${escapeHtml(tierSummary(tier))}</p>
       <div class="tier-limits">${tierLimitsHtml(tier)}</div>
-    </section>`
-  )).join("");
+    </label>`;
+  }).join("");
   return `<section class="tier-settings">
     <p class="tier-guardrail-note">能力档位只影响自治程度；证据、确认门和安全护栏保持一致。</p>
     ${rows}
@@ -119,7 +122,7 @@ export async function renderTierSettings(container, deps = {}) {
   const selectedTier = tierNames.has(persistedTier) ? persistedTier : data.default || "";
   setCapabilityTiers(data.tiers || []);
   setSelectedTier(selectedTier);
-  container.innerHTML = tierSettingsHtml(data);
+  container.innerHTML = tierSettingsHtml({ ...data, selected: selectedTier });
   return data;
 }
 
@@ -130,11 +133,12 @@ export function attachCapabilityHandlers(root, deps = {}) {
   const storage = deps.storage
     || (typeof localStorage !== "undefined" ? localStorage : null);
   const handler = async (event) => {
-    const select = closest(event.target, "#tierSelect");
-    if (!select) {
+    const source = closest(event.target, "#tierSelect")
+      || closest(event.target, 'input[name="capabilityTier"]');
+    if (!source) {
       return;
     }
-    const tier = String(select.value || "");
+    const tier = String(source.value || "");
     setSelectedTier(tier);
     storage?.setItem?.(selectedTierStorageKey, tier);
   };

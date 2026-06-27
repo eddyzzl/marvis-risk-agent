@@ -33,6 +33,22 @@ def _join_dir(root: Path, n: int = 50) -> Path:
     return src
 
 
+def _join_dir_with_conflicts(root: Path, n: int = 50) -> Path:
+    """Like _join_dir but the feature table repeats the first 5 keys with a DIFFERENT
+    value — a same-key conflict that makes the join key non-unique, so confirm_join
+    leaves the feature awaiting a dedup strategy (the §4 dedup picker scenario)."""
+    src = root / "join_conflict"
+    src.mkdir(parents=True, exist_ok=True)
+    phones = [f"138{i:08d}" for i in range(n)]
+    pd.DataFrame({"mobile": phones, "bad_flag": [i % 2 for i in range(n)]}).to_parquet(src / "sample.parquet")
+    md5s = [hashlib.md5(p.encode()).hexdigest() for p in phones]
+    pd.DataFrame({
+        "phone_md5": md5s + md5s[:5],          # 5 duplicate keys
+        "balance": list(range(n)) + [999] * 5,  # ...with a conflicting value
+    }).to_parquet(src / "features.parquet")
+    return src
+
+
 def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
@@ -82,6 +98,76 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "拼接执行完成" in done["content"]
     assert "1:1 保持" in done["content"]
+
+
+def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path: Path):
+    """§4 join dedup picker: a non-unique feature key leaves confirm_join awaiting a
+    strategy; the C2 gate surfaces it via metadata.dedup; posting a per-feature
+    strategy re-confirms (resolving the conflict) and the join then completes 1:1."""
+    src = _join_dir_with_conflicts(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接去重", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    dedup = gate["metadata"].get("dedup")
+    assert dedup is not None, gate["metadata"]
+    assert dedup["needs_dedup"], dedup
+    assert dedup["strategies"] == ["first", "last"]
+    feature_id = dedup["needs_dedup"][0]
+    # the picker shows the conflict count from the propose-step diagnostics
+    assert dedup["features"][0]["conflict_keys"] >= 1
+
+    # pick a strategy -> re-confirm; conflict resolved, re-pause at the now-clear gate
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "dedup_strategies": {feature_id: "first"}},
+    )
+    assert resp.status_code == 202, resp.text
+    gate2 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert gate2["metadata"].get("kind") == "gate"
+    assert not gate2["metadata"].get("dedup")  # no strategy still needed
+
+    # confirm execute -> 1:1 anchored join completes
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接执行完成" in done["content"]
+    assert "1:1 保持" in done["content"]
+
+
+def test_data_join_dedup_text_instruction_resolves_conflicts(client: TestClient, tmp_path: Path):
+    """Manual-mode TEXT resolution of a same-key conflict when no §4 picker is wired: the C2
+    gate surfaces the conflict + the 「去重 first/last」 hint, and replying with that text
+    applies the strategy to every needs_dedup feature so the join completes 1:1. Without this
+    a pure-text manual user dead-ends at 'all joins must be confirmed before execute'."""
+    src = _join_dir_with_conflicts(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接去重文字", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    # the gate surfaces the conflict + the text-resolution hint, naming the feature by its
+    # friendly file name (.parquet), not a raw ds_<hash> id
+    assert "同键冲突" in gate["content"] and "去重 first" in gate["content"]
+    assert ".parquet" in gate["content"] and "`ds_" not in gate["content"]
+
+    # plain-text dedup choice resolves every conflicting feature, re-pause at the clear gate
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "去重 first"})
+    assert resp.status_code == 202, resp.text
+    gate2 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not gate2["metadata"].get("dedup")  # no strategy still needed
+
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接执行完成" in done["content"] and "1:1 保持" in done["content"]
 
 
 def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_path: Path):

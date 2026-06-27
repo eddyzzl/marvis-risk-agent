@@ -1,6 +1,6 @@
 {
   "name": "modeling",
-  "version": "0.4.0",
+  "version": "0.4.5",
   "display_name": "Modeling Pack",
   "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, PMML export, and V1 validation handoff tools.",
   "module": "marvis.packs.modeling.tools",
@@ -181,6 +181,94 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "make_split",
+      "summary": "MODELING G1 split gate: build a derived modeling frame from an arbitrary condition rule set plus the existing random/time fallback, and return per-split counts with a per-split x month/channel distribution table for confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "split_config": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "feature_cols"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "sample_analysis": {
+            "type": "object",
+            "properties": {
+              "split_counts": {
+                "type": "object"
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "group_distributions": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "split_counts",
+              "total_rows",
+              "group_distributions"
+            ],
+            "additionalProperties": false
+          },
+          "split_col": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "split_col",
+          "sample_analysis"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_make_split",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "screen_features",
       "summary": "Leakage-aware univariate KS/IV screen over a wide candidate set; flags suspected target leakage (very high single-feature KS) and model-output/score columns, and proposes a clean candidate set for user confirmation.",
       "input_schema": {
@@ -201,6 +289,9 @@
           "target_col": {
             "type": "string",
             "minLength": 1
+          },
+          "target_type": {
+            "type": "string"
           },
           "split_col": {
             "type": "string",
@@ -273,6 +364,9 @@
           "n_screened": {
             "type": "integer",
             "minimum": 0
+          },
+          "note": {
+            "type": "string"
           }
         },
         "required": [
@@ -493,7 +587,8 @@
               "xgb",
               "lr",
               "scorecard",
-              "lgb_regressor"
+              "lgb_regressor",
+              "lgb_multiclass"
             ]
           },
           "features": {
@@ -606,7 +701,8 @@
                 "xgb",
                 "lr",
                 "scorecard",
-                "lgb_regressor"
+                "lgb_regressor",
+                "lgb_multiclass"
               ]
             },
             "minItems": 1
@@ -635,6 +731,9 @@
           },
           "seed": {
             "type": "integer"
+          },
+          "target_type": {
+            "type": "string"
           },
           "drop_nan_labels": {
             "type": "boolean"
@@ -882,6 +981,96 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_generate_model_report",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:report",
+        "llm"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "generate_model_reports",
+      "summary": "Fan out one model development report per experiment version, writing a version-specific xlsx for each requested experiment.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "business_columns": {
+            "type": "object"
+          },
+          "feature_dictionary_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "project_meta": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "experiment_ids",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "reports": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "experiment_id": {
+                  "type": "string"
+                },
+                "recipe": {
+                  "type": "string"
+                },
+                "report_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "experiment_id",
+                "recipe",
+                "report_path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "report_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reports",
+          "report_path"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_model_reports",
       "side_effects": [
         "read:model",
         "read:dataset",

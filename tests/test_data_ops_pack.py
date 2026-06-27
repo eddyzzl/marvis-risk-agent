@@ -249,3 +249,43 @@ def test_data_ops_confirm_join_enables_execute(tmp_path):
     executed = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
     assert executed.ok is True
     assert executed.output["anchor_rows"] == executed.output["joined_rows"] == 2
+
+
+def test_data_ops_confirm_join_reports_needs_dedup_without_hard_failing(tmp_path):
+    """A non-unique feature key no longer hard-fails confirm_join (JOIN-G2 dead-end): it
+    reports needs_dedup so the flow can reach the C2 gate; execute stays blocked until a
+    strategy is supplied (spec §6 — nothing silently joined)."""
+    runner, registry, repo = _runtime(tmp_path)
+    phones = ["13800138000", "13900139000"]
+    anchor = _register_csv(registry, tmp_path, "anchor", pd.DataFrame({"mobile": phones}), role="sample")
+    feature = _register_csv(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({"phone": ["13800138000", "13800138000", "13900139000"], "balance": [10, 11, 20]}),
+        role="feature",
+    )
+    plan_id = runner.invoke(
+        ToolRef("data_ops", "propose_join"),
+        {"anchor_id": anchor.id, "feature_ids": [feature.id]},
+        task_id="task-1",
+    ).output["join_plan_id"]
+
+    # No strategy → needs_dedup (NOT an exception); execute remains blocked.
+    needs = runner.invoke(ToolRef("data_ops", "confirm_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert needs.ok is True
+    assert needs.output["status"] == "needs_dedup"
+    assert feature.id in needs.output["needs_dedup"]
+    blocked = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert blocked.ok is False  # the engine still refuses an unconfirmed spec
+
+    # Supplying a strategy confirms it; execute then runs 1:1.
+    confirmed = runner.invoke(
+        ToolRef("data_ops", "confirm_join"),
+        {"join_plan_id": plan_id, "dedup_strategies": {feature.id: "first"}},
+        task_id="task-1",
+    )
+    assert confirmed.output["status"] == "confirmed"
+    executed = runner.invoke(ToolRef("data_ops", "execute_join"), {"join_plan_id": plan_id}, task_id="task-1")
+    assert executed.ok is True
+    assert executed.output["anchor_rows"] == executed.output["joined_rows"] == 2

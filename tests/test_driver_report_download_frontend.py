@@ -19,8 +19,9 @@ def _read(name: str) -> str:
 def test_plan_rail_has_report_download_button_and_handler():
     app_js = _read("app.js")
 
-    # the rail shows a 下载报告 button once a report-producing step has completed
+    # a 下载报告 button sits inline on the producing report step row once it completes
     assert 'data-driver-report-download="1"' in app_js
+    assert "plan-step-download" in app_js  # inline on the step row, not a floating rail button
     assert "下载报告" in app_js
     assert "generate_model_report" in app_js
     assert "generate_feature_report" in app_js

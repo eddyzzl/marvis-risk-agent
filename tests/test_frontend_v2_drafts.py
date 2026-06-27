@@ -456,7 +456,7 @@ def test_draft_handlers_require_secondary_confirmation_before_promotion():
         };
 
         attachDraftHandlers(root, {
-          confirmPromote: (id, testCases) => {
+          confirmPromote: async (id, testCases) => {
             calls.push(["confirmPromote", id, testCases]);
             return false;
           },

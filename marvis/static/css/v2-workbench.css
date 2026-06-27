@@ -137,7 +137,7 @@
   display: grid;
   grid-template-columns: 1fr;
   grid-template-areas: none;
-  gap: 12px;
+  gap: 0;
   min-height: 0;
 }
 
@@ -145,6 +145,11 @@
   display: none;
   grid-area: auto;
   max-height: none;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 /* The governance dialog already shows the per-view title + description in its own
@@ -177,8 +182,12 @@
 }
 
 .v2-empty {
+  padding: 18px 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
   color: var(--text-muted);
   font-size: 13px;
+  text-align: center;
 }
 
 .plan-steps,
@@ -252,6 +261,52 @@
   gap: 10px;
 }
 
+/* Capability tiers: each row is a selectable radio card. */
+.tier-row {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding-right: 38px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.tier-row > h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.tier-row > p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.tier-row-radio {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.tier-row:hover {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.tier-row:has(.tier-row-radio:checked) {
+  border-color: var(--option-selected);
+  background: var(--option-selected);
+  box-shadow: none;
+}
+
 .loop-evt.attention,
 .join-card.has-warn {
   border-color: var(--danger);
@@ -270,6 +325,13 @@
 .skill-validator {
   display: grid;
   gap: 6px;
+}
+
+.tier-guardrail-note {
+  margin: 0 2px 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .plugin-upload input,
@@ -371,12 +433,14 @@
 }
 
 .plugin-action {
+  min-height: 28px;
   padding: 4px 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text-secondary);
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
@@ -469,6 +533,253 @@
   width: 100%;
   min-height: 88px;
   resize: vertical;
+}
+
+.governance-settings-dialog .tier-settings,
+.governance-settings-dialog .plugin-manager,
+.governance-settings-dialog .skill-manager,
+.governance-settings-dialog .memory-manager {
+  gap: 10px;
+}
+
+.governance-settings-dialog .tier-row,
+.governance-settings-dialog .plugin-row,
+.governance-settings-dialog .skill,
+.governance-settings-dialog .memory-distillation-row,
+.governance-settings-dialog .memory-distillation-detail-inner {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+
+.governance-settings-dialog .plugin-row,
+.governance-settings-dialog .skill,
+.governance-settings-dialog .memory-distillation-row {
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.governance-settings-dialog .plugin-row:hover,
+.governance-settings-dialog .skill:hover,
+.governance-settings-dialog .memory-distillation-row:hover {
+  border-color: var(--option-hover);
+  background: var(--option-hover);
+}
+
+.governance-settings-dialog .memory-manager-toolbar {
+  align-items: end;
+  padding: 0 2px 2px;
+}
+
+.governance-settings-dialog .memory-manager-toolbar label {
+  display: grid;
+  gap: 5px;
+  min-width: 180px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.governance-settings-dialog .memory-manager-toolbar select {
+  min-height: 34px;
+  padding: 5px 34px 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background-color: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog .memory-manager-toolbar button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--brand-primary);
+  border-radius: var(--radius-control);
+  color: #ffffff;
+  background: var(--brand-primary);
+  box-shadow: var(--button-solid-shadow);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .memory-manager-toolbar button:hover,
+.governance-settings-dialog .memory-manager-toolbar button:focus-visible {
+  border-color: var(--brand-primary-hover);
+  background: var(--brand-primary-hover);
+  box-shadow: var(--button-solid-shadow-hover);
+}
+
+.governance-settings-dialog .memory-distillation-list {
+  display: grid;
+  gap: 8px;
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child strong {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.governance-settings-dialog .memory-distillation-row button:first-child span {
+  display: block;
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+.governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation] {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--danger);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation]:hover {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: var(--danger-soft);
+}
+
+.governance-settings-dialog .plugin-upload {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  padding: 0 2px 2px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .plugin-upload::after {
+  content: "选择文件";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px dashed var(--brand-primary);
+  border-radius: var(--radius-control);
+  color: var(--brand-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog .plugin-upload:hover::after {
+  color: var(--brand-primary-hover);
+  border-color: var(--brand-primary-hover);
+  background: color-mix(in srgb, var(--brand-primary) 7%, transparent);
+}
+
+.governance-settings-dialog .plugin-upload input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .skill-manager > button {
+  justify-self: start;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--brand-primary);
+  border-radius: var(--radius-control);
+  color: #ffffff;
+  background: var(--brand-primary);
+  box-shadow: var(--button-solid-shadow);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.governance-settings-dialog .skill-manager > button:hover,
+.governance-settings-dialog .skill-manager > button:focus-visible {
+  border-color: var(--brand-primary-hover);
+  background: var(--brand-primary-hover);
+  box-shadow: var(--button-solid-shadow-hover);
+}
+
+.governance-settings-dialog .skill-validator {
+  gap: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.governance-settings-dialog .skill-validator textarea {
+  min-height: 104px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-list {
+  gap: 8px;
+}
+
+.governance-settings-dialog .skill-badge {
+  justify-self: start;
+  width: max-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-weight: 650;
+}
+
+.governance-settings-dialog .skill-problems {
+  margin: 2px 0 0;
+  padding-left: 1.2em;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-validation {
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.governance-settings-dialog .skill-validation.valid {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.governance-settings-dialog .skill-validation.problems,
+.governance-settings-dialog .skill-validation.invalid {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .tier-limits {
@@ -570,6 +881,14 @@
   padding: 3px 9px;
   font-size: 12px;
 }
+/* Inline report download on the producing substep row (replaces the floating button). */
+.plan-rail-substeps .plan-step-download {
+  align-self: center;
+  margin-left: auto;
+  min-height: 26px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
 .plan-step-await {
   align-self: center;
   font-size: 11px;
@@ -596,13 +915,24 @@
    section is a single stacked block instead, so heading / hint / choices don't get
    split across columns. */
 #createTaskAlgorithmField,
-#createTaskMetricField {
+#createTaskMetricField,
+#createTaskTierField {
   grid-template-columns: 1fr;
   gap: 6px;
 }
 #createTaskAlgorithmField .dialog-subtitle,
-#createTaskMetricField .dialog-subtitle {
+#createTaskMetricField .dialog-subtitle,
+#createTaskTierField .dialog-subtitle {
   margin: 0 0 4px;
+}
+#createTaskTierField .tier-select {
+  width: 100%;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color, var(--border, #d7dbe0));
+  background: var(--surface, #fff);
+  color: var(--text, inherit);
 }
 .algorithm-choices {
   display: grid;
@@ -747,4 +1077,141 @@
   margin-top: 10px;
   display: flex;
   justify-content: flex-end;
+}
+
+/* §4 interactive feature-screening selection table (manual mode). */
+.screen-table-wrap {
+  margin-top: 10px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.screen-table-scroll {
+  max-height: 360px;
+  overflow: auto;
+}
+.screen-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.screen-table th,
+.screen-table td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+  white-space: nowrap;
+}
+.screen-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-subtle, #f6f8fb);
+  font-weight: 600;
+  z-index: 1;
+}
+.screen-table .screen-feat {
+  font-weight: 600;
+}
+.screen-table .screen-pick-cell {
+  width: 1%;
+  text-align: center;
+}
+.screen-table .screen-pick {
+  accent-color: var(--brand-primary, #000);
+}
+/* hard-cut coloring: leakage / suspected / unusable rows stand out from the keep set */
+.screen-row.screen-leakage {
+  background: var(--danger-subtle, rgba(220, 38, 38, 0.07));
+}
+.screen-row.screen-suspected {
+  background: var(--warning-subtle, rgba(217, 119, 6, 0.08));
+}
+.screen-row.screen-unusable {
+  color: var(--text-muted, #9aa1ab);
+}
+.screen-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.screen-badge.keep {
+  background: var(--success-subtle, rgba(5, 150, 105, 0.12));
+  color: var(--success, #047857);
+}
+.screen-badge.leak {
+  background: var(--danger-subtle, rgba(220, 38, 38, 0.12));
+  color: var(--danger, #b91c1c);
+}
+.screen-badge.susp {
+  background: var(--warning-subtle, rgba(217, 119, 6, 0.14));
+  color: var(--warning, #b45309);
+}
+.screen-badge.unusable {
+  background: var(--surface-subtle, #eef0f2);
+  color: var(--text-muted, #6b7280);
+}
+.screen-table-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--surface-subtle, #f9fafb);
+}
+.screen-table-foot .screen-note {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+.screen-table-foot .screen-confirm {
+  margin-left: auto;
+}
+
+/* §4 join dedup picker (manual mode): per-feature first/last strategy selection. */
+.dedup-picker {
+  margin-top: 10px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.dedup-picker .dedup-note {
+  margin: 0;
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  background: var(--warning-subtle, rgba(217, 119, 6, 0.08));
+}
+.dedup-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.dedup-table th,
+.dedup-table td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+  white-space: nowrap;
+}
+.dedup-table thead th {
+  background: var(--surface-subtle, #f6f8fb);
+  font-weight: 600;
+}
+.dedup-table .dedup-feat {
+  font-weight: 600;
+}
+.dedup-table select.dedup-strategy {
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-color, var(--border, #d7dbe0));
+  background: var(--surface, #fff);
+}
+.dedup-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px;
+  background: var(--surface-subtle, #f9fafb);
 }

@@ -19,10 +19,18 @@ def test_browser_chrome_uses_public_default_branding():
     index_html = _read_static("index.html")
 
     assert "<title>MARVIS-全能风控智能体</title>" in index_html
-    assert '<link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png' in index_html
+    assert '<meta name="color-scheme" content="light dark" />' in index_html
+    assert '<meta id="appThemeColor" name="theme-color" content="#ffffff" />' in index_html
+    assert '<meta name="apple-mobile-web-app-capable" content="yes" />' in index_html
+    assert '<meta name="apple-mobile-web-app-title" content="MARVIS" />' in index_html
+    assert '<link id="brandFavicon" rel="icon" type="image/png" media="(prefers-color-scheme: light)" href="static/brand/marvis-favicon.png' in index_html
+    assert '<link id="brandFaviconDark" rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href="static/brand/marvis-favicon-dark.png' in index_html
+    assert '<link id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="static/brand/marvis-apple-touch-icon.png' in index_html
+    assert '<link id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="static/brand/marvis-apple-touch-icon-dark.png' in index_html
+    assert '<link rel="manifest" href="static/manifest.webmanifest" />' in index_html
     assert 'id="brandLogo"' in index_html
     assert 'class="brand-mark"' in index_html
-    assert 'src="static/brand/marvis-logo.png' in index_html
+    assert 'src="static/brand/marvis-workspace-logo.png' in index_html
     assert 'id="workspaceBrandLogo"' in index_html
     assert 'src="static/brand/marvis-workspace-logo.png' in index_html
     assert 'id="platformName"' in index_html
@@ -50,6 +58,9 @@ def test_runtime_branding_hooks_exist():
     assert '$("workspaceBrandLogo").src = branding.workspaceLogoUrl || branding.logoUrl' in branding_js
     assert '$("workspaceBrandLogo").alt = `${branding.platformName} logo`' in branding_js
     assert 'favicon.href = branding.faviconUrl' in branding_js
+    assert 'const darkFavicon = $("brandFaviconDark")' in branding_js
+    assert 'const appleTouchIcon = $("brandAppleTouchIcon")' in branding_js
+    assert 'const darkAppleTouchIcon = $("brandAppleTouchIconDark")' in branding_js
     assert 'document.documentElement.style.setProperty("--brand-primary", branding.primaryColor)' in branding_js
     assert 'document.documentElement.style.setProperty("--brand-primary-hover"' in branding_js
     assert "loadBranding();" in app_js
@@ -127,12 +138,15 @@ def test_unselected_workspace_shows_centered_welcome_only():
     model_card_start = welcome_markup.index('id="welcomeModelDevelopmentCard"')
     model_card_end = welcome_markup.index("</button>", model_card_start)
     model_card_markup = welcome_markup[model_card_start:model_card_end]
-    assert "model-code-mark" in model_card_markup
-    assert "model-code-slash" in model_card_markup
-    assert "M12 2.4 19.9 6.95v10.1L12 21.6 4.1 17.05V6.95Z" in model_card_markup
-    assert "M8.85 9.4 6.65 12l2.2 2.6" in model_card_markup
-    assert "M15.15 9.4 17.35 12l-2.2 2.6" in model_card_markup
-    assert "M12.7 8.9 11.3 15.1" in model_card_markup
+    # modeling icon is now a layered terminal window (T1): window body + a
+    # light title bar with three dots + a centered ">_" prompt.
+    assert "model-code-mark" not in model_card_markup
+    assert "model-code-slash" not in model_card_markup
+    assert "M12 2.4 19.9 6.95v10.1L12 21.6 4.1 17.05V6.95Z" not in model_card_markup
+    assert 'width="18.8" height="14.8"' in model_card_markup
+    assert "M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z" in model_card_markup
+    assert "M8.2 11.2 11 13.8 8.2 16.4" in model_card_markup
+    assert 'class="mid"' in model_card_markup
     assert "model-training-curve" not in model_card_markup
     assert 'class="back"' not in model_card_markup
     assert 'class="welcome-task-sheen"' in model_card_markup
@@ -249,17 +263,18 @@ def test_unselected_workspace_shows_centered_welcome_only():
         assert f"--welcome-icon-mask-size: {size} {size}" in icon_mask_rule
     model_icon_rule = _css_rule(welcome_css, '.welcome-task-card[data-task-kind="modeling"] .welcome-task-icon')
     assert "--welcome-icon-mask-image" in model_icon_rule
-    assert "M12%202.4%2019.9%206.95v10.1L12%2021.6%204.1%2017.05V6.95Z" in model_icon_rule
+    assert "width%3D%2718.8%27%20height%3D%2714.8%27" in model_icon_rule
     vintage_icon_rule = _css_rule(welcome_css, '.welcome-task-card[data-task-kind="vintage"] .welcome-task-icon')
     assert "M7.2%204.8v2.8M16.8%204.8v2.8" in vintage_icon_rule
     assert ".welcome-task-icon svg .vintage-calendar-binding" in welcome_css
     assert ".welcome-task-icon svg .cut-line" not in welcome_css
-    assert ".welcome-task-icon svg .model-code-mark" in welcome_css
+    assert ".welcome-task-icon svg .model-code-mark" not in welcome_css
+    assert ".welcome-task-icon svg .model-code-slash" not in welcome_css
     assert ".welcome-task-icon svg .model-training-curve" not in welcome_css
-    model_mark_rule = _css_rule(welcome_css, ".welcome-task-icon svg .model-code-mark")
-    assert "stroke-width: 2.2" in model_mark_rule
-    model_slash_rule = _css_rule(welcome_css, ".welcome-task-icon svg .model-code-slash")
-    assert "stroke-width: 1.85" in model_slash_rule
+    # the validation seal check uses a thinner carved stroke
+    assert ".welcome-task-icon svg .cst" in welcome_css
+    cst_rule = _css_rule(welcome_css, ".welcome-task-icon svg .cst")
+    assert "stroke-width: 1.6" in cst_rule
     assert "mix-blend-mode" not in welcome_css
     assert "body[data-theme=\"dark\"] .welcome-task-icon" not in welcome_css
     assert "body[data-theme=\"dark\"] .welcome-task-card.available:hover" not in welcome_css

@@ -46,6 +46,20 @@ KEY_DICTIONARY = {
         "dt",
         "create_date",
     ],
+    # Person-name identity element (§4/§5): a COMPOSABLE key (phone+name, id_no+name+date),
+    # never a sole key — names collide across people, so a name-only join fans out and is
+    # caught by the 1:1 anchor assertion. Conservative compound keywords (no bare "name").
+    # Chinese 姓名 columns are matched via their semantic_role == "name" (set by schema_infer),
+    # NOT a keyword here — _normalized strips non-ASCII so a "姓名" keyword would match everything.
+    "name": [
+        "cust_name",
+        "customer_name",
+        "real_name",
+        "full_name",
+        "fullname",
+        "applicant_name",
+        "true_name",
+    ],
 }
 
 
@@ -63,7 +77,7 @@ class ColumnAligner:
         seed: int = 0,
     ) -> list[KeyPair]:
         pairs = []
-        for family in ("phone", "idcard", "date"):
+        for family in ("phone", "idcard", "date", "name"):
             anchor_columns = self._family_columns(anchor.columns, family)
             feature_columns = self._family_columns(feature.columns, family)
             for anchor_column in anchor_columns:

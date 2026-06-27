@@ -72,6 +72,30 @@ def _register_builtin_recipes() -> None:
             param_space={},
             requires_woe=False,
         ),
+        ModelRecipe(
+            id="mlp",
+            algorithm="mlp",
+            default_params={
+                "hidden_layer_sizes": [32, 16],
+                "max_iter": 300,
+                "alpha": 1e-4,
+                "early_stopping": False,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
+            id="lgb_multiclass",
+            algorithm="lgb_multiclass",
+            default_params={
+                "num_boost_round": 50,
+                "learning_rate": 0.1,
+                "num_leaves": 15,
+                "verbosity": -1,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
     ):
         register_recipe(recipe)
 

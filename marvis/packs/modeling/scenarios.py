@@ -164,14 +164,21 @@ def apply_scenario(config: TrainConfig, scenario_id: str) -> TrainConfig:
 
 def _assert_recipe_matches_target(recipe_id: str, target_type: str) -> None:
     is_regression_recipe = recipe_id.endswith("_regressor")
+    is_multiclass_recipe = "multiclass" in recipe_id
     if target_type == "continuous":
         if not is_regression_recipe:
             raise ModelingError(
                 f"continuous scenario requires a regression recipe, got: {recipe_id}"
             )
         return
+    if target_type == "multiclass":
+        if not is_multiclass_recipe:
+            raise ModelingError(
+                f"multiclass scenario requires a multiclass recipe, got: {recipe_id}"
+            )
+        return
     if target_type == "binary":
-        if is_regression_recipe:
+        if is_regression_recipe or is_multiclass_recipe:
             raise ModelingError(
                 f"binary scenario requires a classification recipe, got: {recipe_id}"
             )

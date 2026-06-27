@@ -77,6 +77,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "check_data_quality",
         "modeling_readiness",
         "prepare_modeling_frame",
+        "make_split",
         "screen_features",
         "select_features",
         "tune_hyperparameters",
@@ -86,6 +87,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "export_pmml",
         "handoff_to_validation",
         "generate_model_report",
+        "generate_model_reports",
     }
     assert "reject_inference" not in tool_names
     assert train_tool.determinism == "stochastic"
@@ -400,3 +402,113 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert len(out["experiment_ids"]) == 2
     assert out["best_experiment_id"] in out["experiment_ids"]
     assert out["best_recipe"] in {"lgb", "lr"}
+
+
+def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):
+    """MODELING G1: make_split applies a channel/time rule set and returns a derived
+    dataset plus a JSON-safe sample analysis (per-split counts + per-split x channel/month
+    distribution table)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    rows = 240
+    channels = ["A", "B", "C"]
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "channel": [channels[i % 3] for i in range(rows)],
+        "apply_month": [f"2026-{(i % 6) + 1:02d}" for i in range(rows)],
+    })
+    path = tmp_path / "make_split_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    result = runner.invoke(
+        ToolRef("modeling", "make_split"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_config": {
+                "rules": [
+                    {"when": [{"col": "channel", "op": "eq", "val": "A"}], "assign": "train"},
+                    {"when": [{"col": "channel", "op": "eq", "val": "C"}], "assign": "oot"},
+                ],
+                "test_size": 0.3,
+            },
+            "seed": 7,
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    out = result.output
+    assert out["result_dataset_id"]
+    analysis = out["sample_analysis"]
+    assert analysis["total_rows"] == rows
+    assert sum(analysis["split_counts"].values()) == rows
+    assert set(analysis["split_counts"]) <= {"train", "test", "oot"}
+    # channel + apply_month are both detected as group columns
+    distributions = analysis["group_distributions"]
+    assert set(distributions) == {"channel", "apply_month"}
+    # channel A is wholly train, channel C is wholly oot (frozen by the rules)
+    assert set(distributions["channel"].get("train", {})) == {"A"} or "A" in distributions["channel"].get("train", {})
+    channel_train = distributions["channel"].get("train", {})
+    channel_oot = distributions["channel"].get("oot", {})
+    assert channel_train.get("A", 0) > 0 and "C" not in channel_train
+    assert channel_oot.get("C", 0) > 0 and "A" not in channel_oot
+    # JSON-safe: payload serializes under strict JSON (no NaN/Infinity tokens)
+    import json
+
+    json.dumps(analysis, allow_nan=False)
+
+
+def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
+    """End-to-end regression unblock: a continuous screen (target_type='continuous')
+    does NOT crash and keeps every candidate, and train_models with lgb_regressor +
+    target_type='continuous' yields RMSE/MAE/R2 (no KS/AUC)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    screened = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "income",
+            "split_col": "split",
+            "target_type": "continuous",
+        },
+        task_id=task.id,
+    )
+    assert screened.ok is True, screened.error
+    assert set(screened.output["selected"]) == {"x1", "x2"}
+    assert screened.output["leakage"] == []
+    assert screened.output["note"] == "非二分类目标：跳过泄漏KS筛选，保留全部候选特征"
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": ["lgb_regressor"],
+            "features": screened.output["selected"],
+            "target_col": "income",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {},
+            "seed": 23,
+            "target_type": "continuous",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    out = trained.output
+    assert out["best_recipe"] == "lgb_regressor"
+    best = next(
+        exp for exp in out["experiments"] if exp["experiment_id"] == out["best_experiment_id"]
+    )
+    metrics = best["metrics"]
+    assert metrics["test_rmse"] is not None
+    assert metrics["test_rmse"] > 0
+    assert metrics["test_mae"] is not None
+    assert metrics["test_ks"] is None
+    assert metrics["test_auc"] is None

@@ -1233,6 +1233,10 @@ def test_shell_has_collapsible_compact_sidebar():
     assert "expandSidebarFromBrand" in app_js
     assert "handleSidebarBrandKeydown" in app_js
     assert "restoreSidebarCollapsed" in app_js
+    assert "ensurePetWithinViewport({ persist: true });" in app_js
+    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in app_js
+    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in app_js
+    assert "window.setTimeout(() => {" in app_js
     assert '$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;' in app_js
     assert 'localStorage.setItem("sidebarCollapsed"' in app_js
     assert 'localStorage.getItem("marvis_layout")' in index_html
@@ -1583,7 +1587,8 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
     toolbar_start = styles_css.index(".list-toolbar {")
     toolbar_end = styles_css.index("}", toolbar_start)
     toolbar_rule = styles_css[toolbar_start:toolbar_end]
-    assert "padding: 2px 10px 10px" in toolbar_rule
+    assert "flex-shrink: 0" in toolbar_rule
+    assert "padding: 2px 10px 16px" in toolbar_rule
 
     create_start = styles_css.index(".nav-action {")
     create_end = styles_css.index("}", create_start)
@@ -1749,8 +1754,13 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     styles_css = _read_static("styles.css")
 
     assert ".validation-workspace {" in styles_css
-    assert "--workspace-main-gutter: 99px" in styles_css
-    assert "--workspace-rail-gap: 99px" in styles_css
+    assert "--workspace-main-gutter: 106px" in styles_css
+    assert "--workspace-collapsed-main-gutter: 180px" in styles_css
+    assert "--workspace-rail-gap: 70px" in styles_css
+    assert "--workspace-collapsed-rail-gap: 78px" in styles_css
+    assert "--pet-default-workspace-offset: -2px" in styles_css
+    assert "--pet-min-workspace-offset: -2px" in styles_css
+    assert "--pet-collapsed-workspace-offset: 72px" in styles_css
     assert "--progress-width: 314px" in styles_css
     assert "grid-template-columns: minmax(0, 1fr) var(--workspace-rail-gap) var(--progress-width)" in styles_css
     assert "grid-template-columns: minmax(340px, 1fr) var(--workspace-rail-gap) min(var(--progress-width), 340px)" in styles_css
@@ -1758,6 +1768,12 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     workspace_end = styles_css.index("}", workspace_start)
     workspace_rule = styles_css[workspace_start:workspace_end]
     assert "background: var(--surface)" in workspace_rule
+    collapsed_shell_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed")
+    assert "--sidebar-width: 0px" in collapsed_shell_rule
+    assert "--workspace-main-gutter: var(--workspace-collapsed-main-gutter)" in collapsed_shell_rule
+    assert "--workspace-rail-gap: var(--workspace-collapsed-rail-gap)" in collapsed_shell_rule
+    assert "--pet-default-workspace-offset: var(--pet-collapsed-workspace-offset)" in collapsed_shell_rule
+    assert "--pet-min-workspace-offset: var(--pet-collapsed-workspace-offset)" in collapsed_shell_rule
     assert ".workspace-body {" in styles_css
     assert "display: contents" in styles_css
     assert ".progress-rail {" in styles_css
@@ -2106,6 +2122,7 @@ def test_primary_step_action_hover_keeps_button_text_readable():
 
 
 def test_brand_primary_token_drives_create_environment_and_model_buttons():
+    index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
     # The execution-environment panel auto-saves on row click (radiogroup), so
@@ -2137,6 +2154,11 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     send_rule = styles_css[send_start:send_end]
     assert "background: var(--brand-primary)" in send_rule
 
+    assert 'id="refreshExecutionEnvironmentOptionsButton" class="button primary"' in index_html
+    assert 'id="addLLMModelButton" class="button primary"' in index_html
+    assert 'id="refreshExecutionEnvironmentOptionsButton" class="button secondary"' not in index_html
+    assert 'id="addLLMModelButton" class="button secondary"' not in index_html
+
     llm_add_rule = _css_rule(styles_css, ".llm-engine-add")
     assert "color: var(--brand-primary)" in llm_add_rule
     assert "border: 1px dashed var(--brand-primary)" in llm_add_rule
@@ -2147,17 +2169,25 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in llm_add_hover_rule
 
     settings_action_width_start = styles_css.index(
-        "#refreshExecutionEnvironmentOptionsButton.button.secondary,"
+        "#refreshExecutionEnvironmentOptionsButton.button.primary,"
     )
     settings_action_width_end = styles_css.index("}", settings_action_width_start)
     settings_action_width_rule = styles_css[settings_action_width_start:settings_action_width_end]
-    assert "#addLLMModelButton.button.secondary" in settings_action_width_rule
+    assert "#addLLMModelButton.button.primary" in settings_action_width_rule
     assert "width: 84px" in settings_action_width_rule
+    assert "min-height: 34px" in settings_action_width_rule
+    assert "padding: 6px 12px" in settings_action_width_rule
+    assert "font-size: 13px" in settings_action_width_rule
+    assert "font-weight: 600" in settings_action_width_rule
 
     assert "#refreshExecutionEnvironmentOptionsButton.button.secondary {\n" not in styles_css
+    assert "#addLLMModelButton.button.secondary {\n" not in styles_css
     assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled)" not in styles_css
+    assert "#addLLMModelButton.button.secondary:hover:not(:disabled)" not in styles_css
     assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)" not in styles_css
+    assert "#addLLMModelButton.button.secondary:focus-visible:not(:disabled)" not in styles_css
     assert 'body[data-theme="dark"] #refreshExecutionEnvironmentOptionsButton.button.secondary' not in styles_css
+    assert 'body[data-theme="dark"] #addLLMModelButton.button.secondary' not in styles_css
     assert "border: 1px dashed var(--brand-primary)" not in settings_action_width_rule
 
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
@@ -2334,6 +2364,11 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     assert "验证人员" not in snapshot_renderer
     assert "执行模式" in snapshot_renderer
     assert "材料目录" in snapshot_renderer
+    assert 'snapshotItem("folder", "材料目录", selectedTask.source_dir, null, { copy: selectedTask.source_dir })' in snapshot_renderer
+    assert 'class="task-snapshot-copy"' in snapshot_renderer
+    assert 'data-copy="${escapeHtml(options.copy)}"' in snapshot_renderer
+    assert 'aria-label="复制${escapeHtml(label)}路径"' in snapshot_renderer
+    assert "copyText(copyButton.dataset.copy)" in app_js
 
 
 def test_header_task_meta_values_stay_on_one_line():
@@ -2383,6 +2418,18 @@ def test_header_task_meta_values_stay_on_one_line():
     assert "overflow: hidden" in value_rule
     assert "text-overflow: ellipsis" in value_rule
     assert "white-space: nowrap" in value_rule
+
+    copy_rule = _css_rule(styles_css, ".task-snapshot-copy")
+    assert "display: inline-flex" in copy_rule
+    assert "max-width: 360px" in copy_rule
+    assert "background: transparent" in copy_rule
+    assert "cursor: copy" in copy_rule
+    assert "appearance: none" in copy_rule
+
+    copy_value_rule = _css_rule(styles_css, ".task-snapshot-copy strong")
+    assert "max-width: inherit" in copy_value_rule
+    last_copy_rule = _css_rule(styles_css, ".workspace-task-meta .task-snapshot-item:last-child .task-snapshot-copy")
+    assert "max-width: 460px" in last_copy_rule
 
 
 def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
@@ -2700,12 +2747,42 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'id="createTaskAlgorithmField"' in index_html
     assert 'id="modelAlgorithmChoices"' in index_html
     assert 'name="modelAlgorithm"' in index_html
-    for recipe in ('value="lgb"', 'value="xgb"', 'value="lr"', 'value="scorecard"'):
+    for recipe in ('value="lgb"', 'value="xgb"', 'value="lr"', 'value="scorecard"', 'value="mlp"'):
         assert recipe in index_html
+    # regression + multiclass target types are exposed too (backend derives target_type from
+    # the recipe), so the UI can drive §8.2/§8.3 tasks, not only binary
+    assert 'value="lgb_regressor"' in index_html
+    assert 'value="lgb_multiclass"' in index_html
     assert "algorithmField: true" in app_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
     assert "请至少选择一个建模算法。" in app_js
     assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
+
+
+def test_coming_soon_task_types_are_disabled_with_notice():
+    """风险分析(vintage) + 策略开发(strategy) are temporarily disabled: their welcome cards
+    carry data-coming-soon, and a click surfaces a coming-soon toast instead of opening the
+    create dialog. Re-enable by removing data-coming-soon from the cards."""
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
+        start = index_html.index(f'id="{card_id}"')
+        tag_end = index_html.index(">", start)
+        assert "data-coming-soon" in index_html[start:tag_end], card_id
+    # the card-click handler short-circuits coming-soon cards to the toast (no dialog)
+    assert "card.dataset.comingSoon" in app_js
+    assert "function showComingSoonToast" in app_js
+    assert "新功能开发中，敬请期待" in app_js
+
+
+def test_acceptance_chip_relabels_auto_accept_per_task_type():
+    """The auto-accept chip label tracks the task type (自动拼接/分析/建模), not always
+    自动审查 (ACCEPT-RELABEL)."""
+    app_js = _read_static("app.js")
+    assert "function autoAcceptLabel" in app_js
+    for label in ("自动拼接", "自动分析", "自动建模", "自动审查"):
+        assert label in app_js
+    assert "autoOption.textContent = autoAcceptLabel(selectedTask?.task_type)" in app_js
 
 
 def test_feature_create_dialog_has_optional_metric_selector():
@@ -3012,10 +3089,14 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "color: var(--text-secondary)" in close_button_rule
     assert "font-size: 18px" in close_button_rule
 
-    close_button_hover_rule = _css_rule(styles_css, ".button.dialog-close-button:hover:not(:disabled),\n.button.dialog-close-button:focus-visible:not(:disabled)")
+    close_button_hover_rule = _css_rule(
+        styles_css,
+        ".button.dialog-close-button:hover:not(:disabled),\n.button.dialog-close-button:focus-visible:not(:disabled),\n.button.dialog-close-button:active:not(:disabled)",
+    )
     assert "outline: none" in close_button_hover_rule
     assert "border-color: transparent" in close_button_hover_rule
     assert "background: var(--option-hover)" in close_button_hover_rule
+    assert "box-shadow: none" in close_button_hover_rule
     assert "#f8fbff" not in close_button_hover_rule
     assert "#9fbfe4" not in close_button_hover_rule
 
@@ -3025,9 +3106,10 @@ def test_dialog_close_buttons_render_as_x_controls():
 
     dark_close_button_hover_rule = _css_rule(
         styles_css,
-        'body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled)',
+        'body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:active:not(:disabled)',
     )
     assert "background: var(--option-hover)" in dark_close_button_hover_rule
+    assert "box-shadow: none" in dark_close_button_hover_rule
 
     assert 'id="governanceRefreshButton" class="governance-icon-button is-unavailable"' in index_html
     assert 'aria-hidden="true" disabled' in index_html
@@ -3057,13 +3139,14 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "min-height: 30px" in shared_rule
     assert "border: 0" in shared_rule
     assert "background: transparent" in shared_rule
+    assert "box-shadow: none" in shared_rule
     assert ".governance-head-actions .dialog-close-button {" not in styles_css
     unavailable_rule = _css_rule(styles_css, ".governance-icon-button.is-unavailable")
     assert "visibility: hidden" in unavailable_rule
     assert "pointer-events: none" in unavailable_rule
 
     shared_hover_start = styles_css.index(
-        ".governance-head-actions .governance-icon-button:hover,"
+        ".governance-head-actions .governance-icon-button:hover:not(:disabled),"
     )
     shared_hover_end = styles_css.index("}", shared_hover_start)
     shared_hover_rule = styles_css[shared_hover_start:shared_hover_end]
@@ -3071,6 +3154,8 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "outline: none" in shared_hover_rule
     assert "border-color: transparent" in shared_hover_rule
     assert "background: var(--option-hover)" in shared_hover_rule
+    assert "box-shadow: none" in shared_hover_rule
+    assert ".governance-head-actions .governance-icon-button:active:not(:disabled)" in shared_hover_rule
     assert "#f8fbff" not in shared_hover_rule
     assert "#9fbfe4" not in shared_hover_rule
 
@@ -3081,12 +3166,19 @@ def test_dialog_close_buttons_render_as_x_controls():
     assert "background: transparent" in dark_shared_rule
 
     dark_hover_start = styles_css.index(
-        'body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover,'
+        'body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover:not(:disabled),'
     )
     dark_hover_end = styles_css.index("}", dark_hover_start)
     dark_hover_rule = styles_css[dark_hover_start:dark_hover_end]
     assert 'body[data-theme="dark"] .governance-head-actions .dialog-close-button' not in dark_hover_rule
     assert "background: var(--option-hover)" in dark_hover_rule
+    assert "box-shadow: none" in dark_hover_rule
+    assert 'body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:not(:disabled)' in dark_hover_rule
+
+    refresh_icon_rule = _css_rule(styles_css, ".governance-icon-button svg")
+    assert "width: 15px" in refresh_icon_rule
+    assert "height: 15px" in refresh_icon_rule
+    assert "stroke-width: 2.25" in refresh_icon_rule
 
 
 def test_initial_load_restores_task_evidence_for_selected_task():
@@ -3215,6 +3307,7 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     menu_rule = styles_css[menu_start:menu_end]
     assert "left: 0" in menu_rule
     assert "right: 0" in menu_rule
+    assert "gap: 12px" in menu_rule
     assert "width: auto" in menu_rule
     assert "max-width: 100%" in menu_rule
     assert "padding: 14px 16px 16px" in menu_rule
@@ -3313,11 +3406,20 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
     assert 'let themePreference = "light"' in app_js
     assert "function systemTheme" in app_js
     assert "function watchSystemTheme" in app_js
+    assert "function syncBrowserChromeTheme" in app_js
+    assert 'const browserChromeThemeColors = {' in app_js
+    assert 'light: "#ffffff"' in app_js
+    assert 'dark: "#181818"' in app_js
+    assert '$("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");' in app_js
     assert 'themePreference === "system"' in app_js
     assert 'localStorage.setItem("marvis_theme", themePreference)' in app_js
     assert 'id="settingsThemeSelect"' in index_html
     assert 'value="system"' in index_html
     assert "跟随系统" in index_html
+    assert 'id="appThemeColor"' in index_html
+    assert 'id="brandFaviconDark"' in index_html
+    assert 'id="brandAppleTouchIconDark"' in index_html
+    assert 'const syncBrowserChrome = (resolvedTheme) => {' in index_html
     appearance_start = index_html.index('data-settings-row="appearance"')
     appearance_start = index_html.rfind('<div class="settings-row"', 0, appearance_start)
     appearance_end = index_html.index("</div>", index_html.index("</select>", appearance_start))
@@ -3327,6 +3429,8 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
     assert '<path d="m7.15 16.85-1.55 1.55"></path>' in appearance_markup
     assert 'localStorage.getItem("marvis_theme") || "light"' in index_html
     assert 'document.body.dataset.theme = resolvedTheme;' in index_html
+    assert '<meta id="appThemeColor" name="theme-color" content="#ffffff" />' in index_html
+    assert 'document.getElementById("appThemeColor")?.setAttribute("content", isDark ? "#181818" : "#ffffff");' in index_html
     assert index_html.index('<body class="app-booting" data-theme="light">') < index_html.index('localStorage.getItem("marvis_theme")')
     assert index_html.index('localStorage.getItem("marvis_theme")') < index_html.index('id="taskDialog"')
 
@@ -3362,6 +3466,7 @@ def test_sidebar_settings_closes_on_outside_click_only():
 
 def test_system_settings_exposes_execution_environment_panel():
     index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
@@ -3386,8 +3491,37 @@ def test_system_settings_exposes_execution_environment_panel():
     assert 'id="executionEnvironmentSelect"' not in index_html
     assert 'id="saveExecutionEnvironmentButton"' not in index_html
 
+    env_settings_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group'
+    )
+    assert "border: 0" in env_settings_group_rule
+    assert "background: transparent" in env_settings_group_rule
+    assert "overflow: visible" in env_settings_group_rule
+    env_settings_row_rule = _css_rule(
+        styles_css,
+        '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row',
+    )
+    assert "padding: 0 2px 2px" in env_settings_row_rule
 
-def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
+    env_list_rule = _css_rule(styles_css, ".exec-env-list")
+    assert "display: flex" in env_list_rule
+    assert "gap: 8px" in env_list_rule
+    assert "border: 0" in env_list_rule
+    assert "background: transparent" in env_list_rule
+    env_row_rule = _css_rule(styles_css, ".exec-env-row")
+    llm_card_rule = _css_rule(styles_css, ".llm-engine-item")
+    assert "background: var(--surface-soft)" in env_row_rule
+    assert "background: var(--surface-soft)" in llm_card_rule
+    assert "border: 1px solid var(--border)" in env_row_rule
+    assert "border: 1px solid var(--border)" in llm_card_rule
+    assert "border-radius: var(--radius-control)" in env_row_rule
+    assert "border-radius: var(--radius-control)" in llm_card_rule
+    env_row_hover_rule = _css_rule(styles_css, ".exec-env-row:hover")
+    assert "border-color: var(--option-hover)" in env_row_hover_rule
+    assert "background: var(--option-hover)" in env_row_hover_rule
+
+
+def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
@@ -3401,6 +3535,22 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '<option value="none">不显示</option>' in settings_markup
     assert '<option value="naitang">蛋黄</option>' in settings_markup
     assert '<option value="xiaojiu">小九</option>' in settings_markup
+    expected_auditbot_pets = {
+        "auditbot": ("MARVIS", "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机"),
+        "auditbot-pro": ("MARVIS Pro", "专业风格 3D 审计机器人"),
+        "auditbot-poly": ("MARVIS Poly", "低多边形硬表面审计机器人"),
+        "auditbot-ink": ("MARVIS Ink", "技术线稿风格审计机器人"),
+        "auditbot-clay": ("MARVIS Clay", "黏土与乙烯基质感审计机器人"),
+        "auditbot-comic": ("MARVIS Comic", "漫画描边风格审计机器人"),
+        "auditbot-pixel": ("MARVIS Pixel", "像素风审计机器人"),
+    }
+    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
+        assert f'<option value="{pet_id}">{display_name}</option>' in settings_markup
+        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
+        assert key in index_html
+        assert f'name: "{display_name}"' in index_html
+        assert f'label: "{pet_label}"' in index_html
+        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in index_html
     pet_row_start = settings_markup.index('data-settings-row="pet"')
     pet_row_start = settings_markup.rfind('<div class="settings-row"', 0, pet_row_start)
     pet_row_end = settings_markup.index("</div>", settings_markup.index("</select>", pet_row_start))
@@ -3412,15 +3562,18 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '<circle cx="7.2" cy="9.2" r="1.65"></circle>' not in pet_row_markup
     assert 'id="petCompanion"' in index_html
     assert 'class="pet-companion"' in index_html
-    assert 'data-pet-id="naitang"' in index_html
+    assert 'data-pet-id="auditbot"' in index_html
     assert 'id="petSticker"' in index_html
     assert 'class="pet-sprite"' in index_html
-    assert 'background-image: url("static/pets/naitang/spritesheet.webp")' in index_html
+    assert 'background-image: url("static/pets/auditbot/spritesheet.webp")' in index_html
     assert 'localStorage.getItem("marvis_pet")' in index_html
     assert 'localStorage.getItem("marvis_pet_none_explicit") === "1"' in index_html
     assert 'localStorage.getItem("marvis_pet_position")' in index_html
     assert 'pet.classList.add("hidden");' in index_html
-    assert 'pet.style.left = `${Math.round(left)}px`;' in index_html
+    assert 'Number.isFinite(storedPosition.workspaceOffsetLeft)' in index_html
+    assert 'const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);' in index_html
+    assert 'pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);' in index_html
+    assert 'pet.style.left = "";' in index_html
     assert 'id="petCompanionLabel"' not in index_html
     assert 'class="pet-companion-label"' not in index_html
     assert 'aria-live="polite"' in index_html
@@ -3456,7 +3609,7 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     ]:
         assert removed_asset not in app_js
 
-    assert 'export const defaultPetPreference = "naitang";' in state_js
+    assert 'export const defaultPetPreference = "auditbot";' in state_js
     assert "let petPreference = defaultPetPreference" in app_js
     assert 'naitang: {' in app_js
     assert 'name: "蛋黄"' in app_js
@@ -3465,6 +3618,12 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert 'xiaojiu: {' in app_js
     assert 'name: "小九"' in app_js
     assert 'asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f"' in app_js
+    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
+        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
+        assert key in app_js
+        assert f'name: "{display_name}"' in app_js
+        assert f'label: "{pet_label}"' in app_js
+        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in app_js
     assert 'pet-sprite' in app_js
     assert "sprite.style.backgroundImage" in app_js
     assert "petCompanionLabel" not in app_js
@@ -3482,6 +3641,21 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '$("settingsPetSelect").value = petPreference' in app_js
 
     assert ".pet-companion {" in styles_css
+    pet_rule = _css_rule(styles_css, ".pet-companion")
+    assert "left: calc(var(--sidebar-width) + var(--pet-offset-left, var(--pet-default-workspace-offset)))" in pet_rule
+    assert "right: auto" in pet_rule
+    assert "bottom: 28px" in pet_rule
+    pet_follow_rule = _css_rule(styles_css, "body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging)")
+    assert "transition: left 300ms cubic-bezier(0.4, 0, 0.2, 1)" in pet_follow_rule
+    pet_dragging_rule = _css_rule(styles_css, ".pet-companion.dragging")
+    assert "transition: none" in pet_dragging_rule
+    mobile_start = styles_css.index("@media (max-width: 860px)")
+    mobile_pet_start = styles_css.index(".pet-companion {", mobile_start)
+    mobile_pet_end = styles_css.index("}", mobile_pet_start)
+    mobile_pet_rule = styles_css[mobile_pet_start:mobile_pet_end]
+    assert "left: 16px" in mobile_pet_rule
+    assert "right: auto" in mobile_pet_rule
+    assert "bottom: 16px" in mobile_pet_rule
     assert ".pet-image" in styles_css
     assert ".pet-sprite" in styles_css
     assert "--pet-sheet-y" in styles_css
@@ -3519,7 +3693,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
     normalize_end = app_js.index("function persistPetPreference", normalize_start)
     script = "\n".join(
         [
-            'const defaultPetPreference = "naitang";',
+            'const defaultPetPreference = "auditbot";',
             app_js[preference_start:preference_end],
             app_js[normalize_start:normalize_end],
             "const values = ['danhuang', 'buou', 'ragdoll-cat', 'unknown', 'none'].map(normalizePetPreference);",
@@ -3532,7 +3706,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "naitang", "none"]
+    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "auditbot", "none"]
 
     restore_start = app_js.index("function restorePetPreference")
     restore_end = app_js.index("function applyPetPosition", restore_start)
@@ -3546,7 +3720,7 @@ def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
-    assert 'export const defaultPetPreference = "naitang";' in state_js
+    assert 'export const defaultPetPreference = "auditbot";' in state_js
     assert 'export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";' in state_js
     assert "function persistPetPreference" in app_js
     assert 'if (value === "none" && explicitNone) {' in app_js
@@ -3574,13 +3748,51 @@ def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
     assert "function clampPetPosition" in app_js
     assert "function ensurePetWithinViewport" in app_js
     assert "ensurePetWithinViewport({ persist });" in app_js
+    assert "function petCssPx" in app_js
+    assert "function petIsPinnedToWorkspaceLeftEdge" in app_js
+    assert "function pinPetToWorkspaceLeftEdge" in app_js
+    sidebar_renderer = _slice_function(app_js, "function applySidebarCollapsed")
+    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in sidebar_renderer
+    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in sidebar_renderer
 
     restore_start = app_js.index("function restorePetPosition")
     restore_end = app_js.index("function petDragBounds", restore_start)
     restore_renderer = app_js[restore_start:restore_end]
-    assert "const next = clampPetPosition(stored.left, stored.top);" in restore_renderer
+    assert "Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
+    assert "workspace.left + stored.workspaceOffsetLeft" in restore_renderer
+    assert "const next = clampPetPosition(storedLeft, stored.top);" in restore_renderer
     assert "applyPetPosition(next.left, next.top);" in restore_renderer
+    assert "!Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
     assert "savePetPosition(next.left, next.top);" in restore_renderer
+
+    apply_start = app_js.index("function applyPetPosition")
+    apply_end = app_js.index("function savePetPosition", apply_start)
+    apply_renderer = app_js[apply_start:apply_end]
+    assert 'pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);' in apply_renderer
+    assert 'pet.style.left = "";' in apply_renderer
+
+    save_start = app_js.index("function savePetPosition")
+    save_end = app_js.index("function restorePetPosition", save_start)
+    save_renderer = app_js[save_start:save_end]
+    assert "payload.workspaceOffsetLeft = left - workspace.left;" in save_renderer
+
+    bounds_start = app_js.index("function petDragBounds")
+    bounds_end = app_js.index("function clampPetPosition", bounds_start)
+    bounds_renderer = app_js[bounds_start:bounds_end]
+    assert 'petCssPx("--pet-min-workspace-offset", padding)' in bounds_renderer
+    assert "workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset" in bounds_renderer
+
+    pinned_start = app_js.index("function petIsPinnedToWorkspaceLeftEdge")
+    pinned_end = app_js.index("function pinPetToWorkspaceLeftEdge", pinned_start)
+    pinned_renderer = app_js[pinned_start:pinned_end]
+    assert "Math.abs(offset - minWorkspaceOffset) <= 2" in pinned_renderer
+
+    pin_start = app_js.index("function pinPetToWorkspaceLeftEdge")
+    pin_end = app_js.index("function clampPetPosition", pin_start)
+    pin_renderer = app_js[pin_start:pin_end]
+    assert "workspace.left + minWorkspaceOffset" in pin_renderer
+    assert "applyPetPosition(next.left, next.top);" in pin_renderer
+    assert "if (persist) savePetPosition(next.left, next.top);" in pin_renderer
 
     drag_start = app_js.index("function startPetDrag")
     drag_end = app_js.index("function renderSettingsState", drag_start)
@@ -3591,20 +3803,27 @@ def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
 
 def test_only_selected_pet_assets_are_bundled():
     pets_dir = STATIC_DIR / "pets"
-    assert (pets_dir / "naitang" / "pet.json").exists()
-    assert (pets_dir / "naitang" / "spritesheet.webp").exists()
-    assert '"displayName": "蛋黄"' in (pets_dir / "naitang" / "pet.json").read_text(encoding="utf-8")
-    assert (pets_dir / "xiaojiu" / "pet.json").exists()
-    assert (pets_dir / "xiaojiu" / "spritesheet.webp").exists()
-    assert '"displayName": "小九"' in (pets_dir / "xiaojiu" / "pet.json").read_text(encoding="utf-8")
+    expected_pets = {
+        "naitang": "蛋黄",
+        "xiaojiu": "小九",
+        "auditbot": "MARVIS",
+        "auditbot-pro": "MARVIS Pro",
+        "auditbot-poly": "MARVIS Poly",
+        "auditbot-ink": "MARVIS Ink",
+        "auditbot-clay": "MARVIS Clay",
+        "auditbot-comic": "MARVIS Comic",
+        "auditbot-pixel": "MARVIS Pixel",
+    }
+    for pet_id, display_name in expected_pets.items():
+        assert (pets_dir / pet_id / "pet.json").exists()
+        assert (pets_dir / pet_id / "spritesheet.webp").exists()
+        assert f'"displayName": "{display_name}"' in (pets_dir / pet_id / "pet.json").read_text(encoding="utf-8")
     assert not (pets_dir / "ragdoll-cat").exists()
     bundled_files = sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file())
-    assert bundled_files == [
-        "naitang/pet.json",
-        "naitang/spritesheet.webp",
-        "xiaojiu/pet.json",
-        "xiaojiu/spritesheet.webp",
-    ]
+    assert bundled_files == sorted(
+        [f"{pet_id}/pet.json" for pet_id in expected_pets]
+        + [f"{pet_id}/spritesheet.webp" for pet_id in expected_pets]
+    )
 
 
 def test_naitang_uses_pet_atlas_rows_and_drag_directions():
@@ -3614,6 +3833,16 @@ def test_naitang_uses_pet_atlas_rows_and_drag_directions():
 
     assert 'static/pets/naitang/*' in pyproject
     assert 'static/pets/xiaojiu/*' in pyproject
+    for pet_id in [
+        "auditbot",
+        "auditbot-pro",
+        "auditbot-poly",
+        "auditbot-ink",
+        "auditbot-clay",
+        "auditbot-comic",
+        "auditbot-pixel",
+    ]:
+        assert f"static/pets/{pet_id}/*" in pyproject
     assert 'static/pets/ragdoll-cat/*' not in pyproject
 
     assert 'return "success";' in app_js
@@ -4796,13 +5025,30 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert ".llm-engine-item" in styles_css
     assert ".checkbox-field" in styles_css
 
+    llm_settings_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group'
+    )
+    assert "border: 0" in llm_settings_group_rule
+    assert "background: transparent" in llm_settings_group_rule
+    assert "overflow: visible" in llm_settings_group_rule
+    llm_settings_row_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group > .settings-row'
+    )
+    assert "padding: 0 2px 2px" in llm_settings_row_rule
+    llm_settings_head_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] .settings-row-head'
+    )
+    assert "align-items: center" in llm_settings_head_rule
+
     llm_edit_actions_rule = _css_rule(styles_css, ".llm-engine-edit-actions")
     assert "justify-content: flex-end" in llm_edit_actions_rule
 
     llm_edit_button_rule = _css_rule(styles_css, ".llm-engine-edit-actions .button")
-    assert "min-width: 84px" in llm_edit_button_rule
-    assert "min-height: 38px" in llm_edit_button_rule
-    assert "padding: 8px 18px" in llm_edit_button_rule
+    assert "min-width: 76px" in llm_edit_button_rule
+    assert "min-height: 34px" in llm_edit_button_rule
+    assert "padding: 6px 15px" in llm_edit_button_rule
+    assert "font-size: 13px" in llm_edit_button_rule
+    assert "font-weight: 600" in llm_edit_button_rule
 
     assert ".llm-engine-edit-actions .button.secondary" not in styles_css
     assert ".llm-engine-edit-actions .button.secondary:hover" not in styles_css
@@ -4978,6 +5224,19 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in app_js
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in app_js
     assert '"X-MARVIS-Plugin-Admin": "local-dev"' in app_js
+    assert "function v2RuntimePlatformActions" in app_js
+    assert "pluginActions:" in app_js
+    assert "skillActions:" in app_js
+    assert "draftActions:" in app_js
+    assert "memoryActions:" in app_js
+    assert 'title: "移除插件"' in app_js
+    assert 'title: "转正草稿工具"' in app_js
+    assert "showError: showV2Error" in app_js
+    assert "showMessage: showV2Message" in app_js
+    assert "confirmRemove: (name) => showPlatformConfirm({" in app_js
+    assert "confirmPromote: (id) => showPlatformConfirm({" in app_js
+    assert "await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions)" in app_js
+    assert "await renderSkillManager(mounted.panels.skillPanel, actions.skillActions)" in app_js
     assert "请填写转正测试用例。" in app_js
     assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in app_js
 
@@ -5053,6 +5312,55 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert '.governance-settings-dialog .plugin-row input[type="checkbox"]' in v2_css
     assert '.governance-settings-dialog[data-v2-view="plugins"] .v2-plugin-panel' in v2_css
     assert '.governance-settings-dialog[data-v2-view="capabilities"] .v2-capability-panel' in v2_css
+    runtime_panel_rule = _css_rule(v2_css, ".governance-settings-dialog .v2-panel")
+    assert "padding: 0" in runtime_panel_rule
+    assert "border: 0" in runtime_panel_rule
+    assert "background: transparent" in runtime_panel_rule
+    plugin_upload_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload")
+    assert "grid-template-columns: minmax(0, 1fr) auto" in plugin_upload_rule
+    plugin_upload_action_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload::after")
+    assert 'content: "选择文件"' in plugin_upload_action_rule
+    assert "border: 1px dashed var(--brand-primary)" in plugin_upload_action_rule
+    skill_reload_rule = _css_rule(v2_css, ".governance-settings-dialog .skill-manager > button")
+    assert "background: var(--brand-primary)" in skill_reload_rule
+    assert "box-shadow: var(--button-solid-shadow)" in skill_reload_rule
+    memory_toolbar_rule = _css_rule(v2_css, ".governance-settings-dialog .memory-manager-toolbar")
+    assert "padding: 0 2px 2px" in memory_toolbar_rule
+    memory_row_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog .tier-row,\n"
+        ".governance-settings-dialog .plugin-row,\n"
+        ".governance-settings-dialog .skill,\n"
+        ".governance-settings-dialog .memory-distillation-row,\n"
+        ".governance-settings-dialog .memory-distillation-detail-inner",
+    )
+    assert "border: 1px solid var(--border)" in memory_row_rule
+    assert "border-radius: var(--radius-control)" in memory_row_rule
+    memory_rollback_rule = _css_rule(
+        v2_css, ".governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation]"
+    )
+    assert "color: var(--danger)" in memory_rollback_rule
+
+    memory_policy_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group'
+    )
+    assert "border: 0" in memory_policy_group_rule
+    assert "background: transparent" in memory_policy_group_rule
+    memory_policy_row_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row'
+    )
+    assert "border-radius: var(--radius-control)" in memory_policy_row_rule
+    assert "background: var(--surface-soft)" in memory_policy_row_rule
+    memory_policy_row_gap_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row'
+    )
+    assert "border-top: 0" in memory_policy_row_gap_rule
+    memory_manage_rule = _css_rule(styles_css, ".memory-manage")
+    assert "border: 0" in memory_manage_rule
+    assert "background: transparent" in memory_manage_rule
+    memory_manage_summary_rule = _css_rule(styles_css, ".memory-manage-summary")
+    assert "border-radius: var(--radius-control)" in memory_manage_summary_rule
+    assert "background: var(--surface-soft)" in memory_manage_summary_rule
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():

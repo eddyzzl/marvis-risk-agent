@@ -118,22 +118,33 @@ def tune_hyperparameters(
             callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
         )
         rounds = int(booster.best_iteration or max_boost_round)
+        train_preds = booster.predict(train[feats])
         test_preds = booster.predict(test[feats])
-        train_ks = feature_ks(booster.predict(train[feats]), ytr)
+        train_ks = feature_ks(train_preds, ytr)
         test_ks = feature_ks(test_preds, yte)
+        train_auc = feature_auc(train_preds, ytr)
         test_auc = feature_auc(test_preds, yte)
-        # head/tail lift of the model SCORE on the test split (spec leaderboard columns).
+        # head/tail lift of the model SCORE on the test split, at 5% AND 10% (spec §5
+        # leaderboard columns 头部/尾部 lift5%/10%).
         lift = head_tail_lift(test_preds, yte)
-        oot_ks = (
-            None if oot is None
-            else feature_ks(booster.predict(oot[feats]), oot[target_col].to_numpy(dtype=float))
-        )
+        if oot is None:
+            oot_ks = oot_auc = None
+        else:
+            yoot = oot[target_col].to_numpy(dtype=float)
+            oot_preds = booster.predict(oot[feats])
+            oot_ks = feature_ks(oot_preds, yoot)
+            oot_auc = feature_auc(oot_preds, yoot)
         score = test_ks - overfit_penalty * max(0.0, train_ks - test_ks)
+        # Overfit gaps: train-test always; train-oot when an OOT split exists.
+        gap_tt = train_ks - test_ks
+        gap_to = (train_ks - oot_ks) if oot_ks is not None else None
         record = {
             "params": {**params, "num_boost_round": rounds},
             "train_ks": train_ks, "test_ks": test_ks, "oot_ks": oot_ks, "score": score,
-            "test_auc": test_auc,
+            "train_auc": train_auc, "test_auc": test_auc, "oot_auc": oot_auc,
+            "lift_head_5": lift.get("lift_head_5"), "lift_tail_5": lift.get("lift_tail_5"),
             "lift_head_10": lift.get("lift_head_10"), "lift_tail_10": lift.get("lift_tail_10"),
+            "overfit_gap_tt": gap_tt, "overfit_gap_to": gap_to,
         }
         trials.append(record)
         if best is None or score > best["score"]:
@@ -144,8 +155,11 @@ def tune_hyperparameters(
         best_params=best["params"],
         best_metrics={
             "train_ks": best["train_ks"], "test_ks": best["test_ks"],
-            "oot_ks": best["oot_ks"], "overfit_gap": best["train_ks"] - best["test_ks"],
-            "test_auc": best.get("test_auc"),
+            "oot_ks": best["oot_ks"],
+            "overfit_gap": best["overfit_gap_tt"],
+            "overfit_gap_oot": best["overfit_gap_to"],
+            "train_auc": best.get("train_auc"), "test_auc": best.get("test_auc"),
+            "oot_auc": best.get("oot_auc"),
         },
         trials=tuple(trials),
         n_trials=len(trials),

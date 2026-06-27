@@ -135,6 +135,203 @@ def compute_regression_metrics(
     )
 
 
+def compute_multiclass_model_metrics(
+    proba_fn: Callable[[pd.DataFrame], np.ndarray],
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    config: TrainConfig,
+    classes: tuple,
+    *,
+    oot_has_labels: bool = True,
+) -> tuple[ModelMetrics, dict]:
+    """Multiclass metrics for a K-class probability model.
+
+    Mirrors ``compute_model_metrics``/``compute_regression_metrics`` but fills the
+    multiclass scalar fields (macro_auc/logloss/accuracy) and returns a per-split
+    ``per_class`` detail map alongside the ModelMetrics (the binary KS/AUC and the
+    regression RMSE/MAE fields stay None). OOT label-dependent metrics are skipped
+    when OOT carries no labels — its NaN target is never coerced into a class."""
+    train_proba = _proba_2d(proba_fn, train, classes)
+    test_proba = _proba_2d(proba_fn, test, classes)
+    oot_proba = None if oot is None else _proba_2d(proba_fn, oot, classes)
+    train_target = train[config.target_col].to_numpy()
+    test_target = test[config.target_col].to_numpy()
+    oot_target = (
+        None
+        if oot is None or not oot_has_labels
+        else oot[config.target_col].to_numpy()
+    )
+
+    train_m = compute_multiclass_metrics(train_proba, train_target, classes)
+    test_m = compute_multiclass_metrics(test_proba, test_target, classes)
+    oot_m = (
+        None
+        if oot_proba is None or oot_target is None
+        else compute_multiclass_metrics(oot_proba, oot_target, classes)
+    )
+
+    metrics = ModelMetrics(
+        train_ks=None,
+        test_ks=None,
+        oot_ks=None,
+        train_auc=None,
+        test_auc=None,
+        oot_auc=None,
+        psi_test_vs_train=None,
+        psi_oot_vs_train=None,
+        overfit_train_test_gap=_gap(train_m["macro_auc"], test_m["macro_auc"]),
+        overfit_train_oot_gap=None if oot_m is None else _gap(train_m["macro_auc"], oot_m["macro_auc"]),
+        overfit_flag=False,
+        train_macro_auc=train_m["macro_auc"],
+        test_macro_auc=test_m["macro_auc"],
+        oot_macro_auc=None if oot_m is None else oot_m["macro_auc"],
+        train_logloss=train_m["logloss"],
+        test_logloss=test_m["logloss"],
+        oot_logloss=None if oot_m is None else oot_m["logloss"],
+        train_accuracy=train_m["accuracy"],
+        test_accuracy=test_m["accuracy"],
+        oot_accuracy=None if oot_m is None else oot_m["accuracy"],
+    )
+    per_class = {
+        "train": train_m["per_class"],
+        "test": test_m["per_class"],
+        "oot": None if oot_m is None else oot_m["per_class"],
+    }
+    return metrics, per_class
+
+
+def compute_multiclass_metrics(proba_2d, y_true, classes) -> dict:
+    """Deterministic, JSON-safe multiclass metrics for an N×K probability matrix.
+
+    ``classes`` is the ordered class list matching the probability columns. Returns a
+    dict with macro_auc (one-vs-rest macro), weighted_auc, logloss, accuracy,
+    macro_recall, and a per-class {recall, precision, support} map. Any value that is
+    undefined or non-finite (single observed class, degenerate input) becomes None so
+    the payload is strict JSON (no NaN/inf)."""
+    from sklearn.metrics import accuracy_score, log_loss
+
+    classes = tuple(classes)
+    proba = np.asarray(proba_2d, dtype=float)
+    labels = np.asarray(list(y_true))
+    n_rows = labels.shape[0]
+    if proba.ndim != 2 or proba.shape[0] != n_rows or proba.shape[1] != len(classes):
+        raise ModelingError(
+            f"multiclass proba shape {proba.shape} does not match rows {n_rows} / classes {len(classes)}"
+        )
+
+    class_array = np.asarray(classes)
+    pred_idx = np.argmax(proba, axis=1) if n_rows else np.empty(0, dtype=int)
+    # Index the class array (not a Python list comprehension) so predictions keep the
+    # class dtype and sklearn sees a consistent target type with the labels.
+    predictions = class_array[pred_idx] if n_rows else class_array[:0]
+    accuracy = _safe_float(accuracy_score(labels, predictions)) if n_rows else None
+
+    macro_auc = _macro_auc(proba, labels, classes, average="macro")
+    weighted_auc = _macro_auc(proba, labels, classes, average="weighted")
+
+    try:
+        logloss = _safe_float(log_loss(labels, proba, labels=list(classes))) if n_rows else None
+    except ValueError:
+        logloss = None
+
+    per_class = _per_class_metrics(labels, predictions, classes)
+    recalls = [row["recall"] for row in per_class.values() if row["recall"] is not None]
+    macro_recall = _safe_float(float(np.mean(recalls))) if recalls else None
+
+    return {
+        "macro_auc": macro_auc,
+        "weighted_auc": weighted_auc,
+        "logloss": logloss,
+        "accuracy": accuracy,
+        "macro_recall": macro_recall,
+        "per_class": per_class,
+    }
+
+
+def _macro_auc(proba: np.ndarray, labels: np.ndarray, classes: tuple, *, average: str) -> float | None:
+    """One-vs-rest AUC, averaged. Returns None when fewer than two classes are present
+    in the labels (AUC is undefined) or sklearn rejects the input."""
+    from sklearn.metrics import roc_auc_score
+
+    if labels.shape[0] == 0:
+        return None
+    present = set(labels.tolist())
+    if len(present) < 2:
+        return None
+    try:
+        value = roc_auc_score(
+            labels,
+            proba,
+            multi_class="ovr",
+            average=average,
+            labels=list(classes),
+        )
+    except ValueError:
+        return None
+    return _safe_float(value)
+
+
+def _per_class_metrics(labels: np.ndarray, predictions: np.ndarray, classes: tuple) -> dict:
+    from sklearn.metrics import precision_score, recall_score
+
+    per_class: dict = {}
+    has_rows = labels.shape[0] > 0
+    for cls in classes:
+        support = int(np.sum(labels == cls)) if has_rows else 0
+        if has_rows:
+            recall = _safe_float(
+                recall_score(labels, predictions, labels=[cls], average="micro", zero_division=0)
+            ) if support else None
+            precision = _safe_float(
+                precision_score(labels, predictions, labels=[cls], average="micro", zero_division=0)
+            ) if int(np.sum(predictions == cls)) else None
+        else:
+            recall = None
+            precision = None
+        per_class[_class_key(cls)] = {
+            "recall": recall,
+            "precision": precision,
+            "support": support,
+        }
+    return per_class
+
+
+def _class_key(value) -> str:
+    if isinstance(value, (np.integer,)):
+        return str(int(value))
+    if isinstance(value, (np.floating,)):
+        return str(float(value))
+    return str(value)
+
+
+def _gap(train_value: float | None, other_value: float | None) -> float:
+    if train_value is None or other_value is None:
+        return 0.0
+    return float(train_value - other_value)
+
+
+def _safe_float(value) -> float | None:
+    """Map a metric to a finite float or None (NaN/inf → None) for strict JSON."""
+    if value is None:
+        return None
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else None
+
+
+def _proba_2d(
+    proba_fn: Callable[[pd.DataFrame], np.ndarray],
+    frame: pd.DataFrame,
+    classes: tuple,
+) -> np.ndarray:
+    proba = np.asarray(proba_fn(frame), dtype=float)
+    if proba.ndim != 2 or proba.shape[0] != len(frame) or proba.shape[1] != len(classes):
+        raise ModelingError(
+            f"proba shape {proba.shape} does not match rows {len(frame)} / classes {len(classes)}"
+        )
+    return proba
+
+
 def _scores(score_fn: Callable[[pd.DataFrame], np.ndarray], frame: pd.DataFrame) -> np.ndarray:
     scores = np.asarray(score_fn(frame), dtype=float)
     if scores.shape[0] != len(frame):
@@ -154,4 +351,10 @@ def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, flo
     return rmse, mae, r2
 
 
-__all__ = ["compute_model_metrics", "compute_regression_metrics", "split_modeling_frame"]
+__all__ = [
+    "compute_model_metrics",
+    "compute_multiclass_metrics",
+    "compute_multiclass_model_metrics",
+    "compute_regression_metrics",
+    "split_modeling_frame",
+]

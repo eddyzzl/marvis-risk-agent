@@ -1,0 +1,6 @@
+{
+  "id": "auditbot",
+  "displayName": "MARVIS",
+  "description": "A compact high-resolution 3D toy robot auditor with cyan visor eyes, copper headphones, a navy vest and tie, and optional audit tools only when the state needs them.",
+  "spritesheetPath": "spritesheet.webp"
+}

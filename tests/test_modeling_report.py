@@ -697,3 +697,117 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert by_item["baseline"]["sample_count"] == 40
     assert by_item["征信评分"]["status"] == "completed"
     assert by_item["征信评分"]["dropped_features"] == "x1"
+
+
+def _report_runner(tmp_path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    plugin_repo = PluginRepository(settings.db_path)
+    plugin_registry = PluginRegistry(plugin_repo)
+    load_builtin_packs(plugin_registry, Path(__file__).parents[1] / "marvis" / "packs")
+    runner = ToolRunner(
+        ToolRegistry(plugin_registry),
+        plugin_repo,
+        python_executable=sys.executable,
+        datasets_root=settings.datasets_dir,
+        workspace=settings.workspace,
+    )
+    task = TaskRepository(settings.db_path).create_task(
+        TaskCreate(
+            model_name="多版本报告样例",
+            model_version="dev",
+            validator="qa",
+            source_dir=str(tmp_path / "source"),
+            algorithm="lr",
+            run_mode="agent",
+            target_col="y",
+            split_col="split",
+            feature_columns=["x1", "x2"],
+        )
+    )
+    frame = pd.concat([_business_frame().assign(split="train", x1=[0.1, 0.2, 0.3, 0.4], x2=[0.4, 0.3, 0.2, 0.1])] * 40, ignore_index=True)
+    frame = frame.drop(columns=["score"])
+    frame.loc[80:119, "split"] = "test"
+    frame.loc[120:, "split"] = "oot"
+    path = tmp_path / "report_sample.parquet"
+    frame.to_parquet(path, index=False)
+    registry = DatasetRegistry(
+        DatasetRepository(settings.db_path),
+        DataBackend(settings.datasets_dir),
+        settings.datasets_dir,
+    )
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    return runner, settings, task, dataset
+
+
+def _train_report_experiment(runner, task, dataset, recipe, params):
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": recipe,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": params,
+            "seed": 7,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    return trained.output["experiment_id"]
+
+
+def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    lr_experiment = _train_report_experiment(runner, task, dataset, "lr", {"max_iter": 200})
+    lgb_experiment = _train_report_experiment(
+        runner, task, dataset, "lgb", {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4}
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_reports"),
+        {
+            "experiment_ids": [lr_experiment, lgb_experiment],
+            "dataset_id": dataset.id,
+            "project_meta": {"项目名称": "多版本报告样例"},
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    reports = result.output["reports"]
+    assert len(reports) == 2
+    assert [report["experiment_id"] for report in reports] == [lr_experiment, lgb_experiment]
+    assert {report["recipe"] for report in reports} == {"lr", "lgb"}
+    # report_path mirrors the first report for download-endpoint compatibility
+    assert result.output["report_path"] == reports[0]["report_path"]
+
+    paths = [report["report_path"] for report in reports]
+    assert paths[0] != paths[1]
+    for path_str in paths:
+        report_path = Path(path_str)
+        assert report_path.suffix == ".xlsx"
+        assert report_path.exists()
+        # a real xlsx is a ZIP (PK magic) and opens cleanly under openpyxl
+        assert report_path.read_bytes()[:2] == b"PK"
+        load_workbook(report_path)
+
+    # JSON-safe payload (no NaN/Infinity tokens)
+    import json
+
+    json.dumps(result.output, allow_nan=False)
+
+
+def test_generate_model_reports_rejects_empty_experiment_ids(tmp_path):
+    runner, _settings, task, dataset = _report_runner(tmp_path)
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_reports"),
+        {"experiment_ids": [], "dataset_id": dataset.id},
+        task_id=task.id,
+    )
+
+    assert result.ok is False
+    assert "experiment_ids" in str(result.error)

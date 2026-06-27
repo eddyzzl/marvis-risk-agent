@@ -95,6 +95,19 @@ class ConflictReport:
         return self.n_conflict_keys > 0
 
 
+@dataclass(frozen=True)
+class KeyAlternative:
+    """A relaxed join-key candidate (spec §4/§5 动态择键): drop one identity element to
+    raise the match rate. SURFACED as a proposal only — the engine never silently swaps the
+    key; the user confirms a relaxation at C2, and fan-out is re-checked for the reduced key."""
+
+    key_pairs: tuple[tuple[str, str], ...]   # (anchor_col, feature_col) of the reduced key
+    dropped: str                             # the anchor_col element removed vs the full key
+    match_rate: float
+    feature_key_unique: bool
+    fan_out_detected: bool
+
+
 @dataclass
 class JoinDiagnostics:
     anchor_rows: int
@@ -110,6 +123,9 @@ class JoinDiagnostics:
     # Two-level dedup breakdown (spec §6), present when the feature key is not unique:
     # how many duplicates are safe (whole-row identical) vs genuine same-key conflicts.
     conflict_report: "ConflictReport | None" = None
+    # Relaxed-key proposals (spec §4/§5), present when the full key matches poorly: each
+    # drops one identity element to raise the match rate (with its re-checked fan-out).
+    key_alternatives: tuple["KeyAlternative", ...] = ()
 
 
 @dataclass
@@ -146,5 +162,6 @@ __all__ = [
     "JoinDiagnostics",
     "JoinPlan",
     "JoinSpec",
+    "KeyAlternative",
     "KeyPair",
 ]

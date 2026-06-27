@@ -29,6 +29,18 @@ _TARGET_PRIORITY = (
 _SPLIT_TRAIN = {"train", "training", "dev", "develop", "development", "build"}
 _SPLIT_TEST = {"test", "testing", "valid", "validation", "val", "holdout"}
 _SPLIT_OOT = {"oot", "ootest", "out_of_time", "oos", "time_oot"}
+# Preferred continuous-target name tokens, most-specific first (case-insensitive).
+_CONTINUOUS_TARGET_TOKENS = (
+    "income", "amount", "amt", "balance", "limit",
+    "loan_amount", "gmv", "revenue", "price", "salary",
+)
+# Preferred multiclass-target name tokens (case-insensitive).
+_MULTICLASS_TARGET_TOKENS = (
+    "risk_grade", "grade", "rating", "class", "level", "等级", "评级", "类别",
+)
+# A multiclass target must have between this many distinct classes (inclusive).
+_MULTICLASS_MIN_CLASSES = 3
+_MULTICLASS_MAX_CLASSES = 20
 
 
 @dataclass
@@ -54,28 +66,46 @@ def detect_setup(
     configured_target: str = "",
     configured_split: str = "",
     sample_rows: int = 4000,
+    target_type: str = "binary",
 ) -> SetupProposal:
-    """Propose target column, split column/values and numeric candidate features."""
+    """Propose target column, split column/values and numeric candidate features.
+
+    ``target_type`` defaults to ``"binary"`` (the existing 0/1 detection — the
+    feature_analysis flow never passes it, so its behaviour is unchanged). When
+    ``"continuous"`` the target column is resolved as a numeric column (for a
+    regression task) and ``bad_rate`` is left ``None``.
+    """
     columns = backend.column_names(path)
     # Random sample (NOT a head slice) — samples are often ordered by split, so a
     # head read would miss whole splits and skew dtype/binary detection.
     probe = backend.sample_rows(path, sample_rows, seed=0)
     notes: list[str] = []
+    continuous = target_type == "continuous"
+    multiclass = target_type == "multiclass"
 
     # -- target ---------------------------------------------------------------
     target = ""
-    if configured_target and configured_target in probe.columns and _is_binary(probe[configured_target]):
-        target = configured_target
-    if not target:
-        binary_cols = [c for c in probe.columns if _is_binary(probe[c])]
-        ranked = sorted(
-            binary_cols,
-            key=lambda c: next((i for i, tok in enumerate(_TARGET_PRIORITY) if tok in c.lower()), len(_TARGET_PRIORITY)),
-        )
-        prioritised = [c for c in ranked if any(tok in c.lower() for tok in _TARGET_PRIORITY)]
-        target = (prioritised or ranked or [""])[0]
-    if not target:
-        notes.append("未能自动识别 0/1 目标列，请直接告诉我目标列名。")
+    if continuous:
+        target = _detect_continuous_target(probe, configured_target)
+        if not target:
+            notes.append("回归任务请指定连续型目标列。")
+    elif multiclass:
+        target = _detect_multiclass_target(probe, configured_target)
+        if not target:
+            notes.append("多分类任务请指定 3-20 类的目标列。")
+    else:
+        if configured_target and configured_target in probe.columns and _is_binary(probe[configured_target]):
+            target = configured_target
+        if not target:
+            binary_cols = [c for c in probe.columns if _is_binary(probe[c])]
+            ranked = sorted(
+                binary_cols,
+                key=lambda c: next((i for i, tok in enumerate(_TARGET_PRIORITY) if tok in c.lower()), len(_TARGET_PRIORITY)),
+            )
+            prioritised = [c for c in ranked if any(tok in c.lower() for tok in _TARGET_PRIORITY)]
+            target = (prioritised or ranked or [""])[0]
+        if not target:
+            notes.append("未能自动识别 0/1 目标列，请直接告诉我目标列名。")
 
     # -- split ----------------------------------------------------------------
     split_col = ""
@@ -102,7 +132,9 @@ def detect_setup(
     key_cols = [c for c in {target, split_col} if c]
     if key_cols:
         keys = backend.read_frame(path, columns=key_cols)
-        if target and target in keys:
+        # bad_rate is a binary-only notion (mean of a 0/1 label); regression and
+        # multiclass targets have no bad_rate, so leave it None for those tasks.
+        if target and target in keys and not continuous and not multiclass:
             bad_rate = float(keys[target].mean())
         if split_col and split_col in keys:
             counts = {
@@ -110,6 +142,56 @@ def detect_setup(
                 for role, val in split_values.items()
             }
     return SetupProposal(target, split_col or None, split_values, candidates, counts, bad_rate, notes)
+
+
+def _detect_continuous_target(probe, configured_target: str) -> str:
+    """Resolve the continuous (regression) target column from a row sample.
+
+    Prefer ``configured_target`` when it is present and numeric; otherwise pick the
+    first numeric column whose name matches a known continuous-target token (income,
+    amount, …). Returns "" when no numeric candidate is found (caller adds a note)."""
+    numeric_cols = list(probe.select_dtypes("number").columns)
+    if (
+        configured_target
+        and configured_target in probe.columns
+        and configured_target in numeric_cols
+    ):
+        return configured_target
+    for token in _CONTINUOUS_TARGET_TOKENS:
+        for col in numeric_cols:
+            if token in str(col).lower():
+                return col
+    return ""
+
+
+def _detect_multiclass_target(probe, configured_target: str) -> str:
+    """Resolve the multiclass (3-20 class) target column from a row sample.
+
+    Prefer ``configured_target`` when it has a distinct-class count in [3, 20]. Else
+    pick the first column whose name matches a known grade/rating token and whose
+    distinct-class count is in [3, 20]. Returns "" when nothing qualifies (caller adds
+    a note). The split column is never a candidate."""
+    if (
+        configured_target
+        and configured_target in probe.columns
+        and _class_count_in_range(probe[configured_target])
+    ):
+        return configured_target
+    for col in probe.columns:
+        low = str(col).lower()
+        name = str(col)
+        if not any(tok in low or tok in name for tok in _MULTICLASS_TARGET_TOKENS):
+            continue
+        if _looks_like_split_name(name):
+            continue
+        if _class_count_in_range(probe[col]):
+            return name
+    return ""
+
+
+def _class_count_in_range(series) -> bool:
+    distinct = int(series.dropna().nunique())
+    return _MULTICLASS_MIN_CLASSES <= distinct <= _MULTICLASS_MAX_CLASSES
 
 
 def _looks_like_split_name(name: str) -> bool:

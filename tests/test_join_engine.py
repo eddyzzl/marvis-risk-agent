@@ -147,6 +147,11 @@ def test_join_engine_proposes_confirms_and_executes_unique_hash_join(tmp_path):
     assert [audit["kind"] for audit in repo.audits] == ["join.confirmed", "join.executed"]
     assert repo.audits[0]["target_ref"] == plan.id
     assert repo.audits[1]["detail"]["result_dataset_id"] == result.id
+    # G4 provenance: the executed-join audit records which feature each column came from
+    # (the key column is excluded; only contributed columns are traced).
+    assert repo.audits[1]["detail"]["provenance"] == [
+        {"feature_dataset_id": feature.id, "columns": ["credit_limit"]}
+    ]
 
 
 def test_join_engine_diagnoses_composite_keys_with_per_pair_match_methods(tmp_path):
@@ -204,6 +209,44 @@ def test_join_engine_diagnoses_composite_keys_with_per_pair_match_methods(tmp_pa
     assert diagnostics.matched_rows == 2
     assert diagnostics.match_rate == 1.0
     assert diagnostics.shrink_detected is False
+
+
+def test_diagnose_join_proposes_key_relaxation_when_full_key_matches_poorly(tmp_path):
+    """Spec §4/§5 动态择键: a composite phone+name key that matches poorly (names differ)
+    yields a 'drop 姓名 → phone-only' alternative with the reduced key's re-checked
+    match/uniqueness/fan-out. Proposal only — diagnose never swaps the key."""
+    engine, registry, _repo = _engine(tmp_path)
+    phones = [f"138{i:08d}" for i in range(30)]
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"mobile": phones, "姓名": [f"anchor{i}" for i in range(30)]}),
+    )
+    feature = _write_dataset(
+        registry, tmp_path, "feature",
+        # same phones (phone-only matches 100%) but DIFFERENT names → composite matches 0%
+        pd.DataFrame({"mobile": phones, "姓名": [f"other{i}" for i in range(30)], "val": list(range(30))}),
+    )
+    key_pairs = [
+        KeyPair("mobile", "mobile", "exact", "both", match_rate=1.0, resolved_by="test"),
+        KeyPair("姓名", "姓名", "exact", "both", match_rate=0.0, resolved_by="test"),
+    ]
+
+    diagnostics = engine.diagnose_join(
+        anchor, registry.resolve_path(anchor.id),
+        feature, registry.resolve_path(feature.id),
+        key_pairs, seed=0,
+    )
+
+    assert diagnostics.match_rate < 0.5          # full phone+name key matches poorly
+    assert diagnostics.key_alternatives          # a relaxation was proposed
+    best = diagnostics.key_alternatives[0]
+    assert best.dropped == "姓名"
+    assert best.key_pairs == (("mobile", "mobile"),)
+    assert best.match_rate > diagnostics.match_rate   # relaxation improves the match
+    assert best.feature_key_unique is True
+    assert best.fan_out_detected is False
+    # the full key is NOT silently changed — diagnose still reports the original key
+    assert [p.feature_col for p in key_pairs] == ["mobile", "姓名"]
 
 
 def test_join_engine_blocks_unconfirmed_and_requires_dedup_for_duplicate_keys(tmp_path):

@@ -95,6 +95,85 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     return result
 
 
+def tool_screen_features(inputs: dict, ctx) -> dict:
+    """Leakage-aware feature screening (spec form B §4 backend; shared screen with
+    MODELING via marvis.feature.screen). Flags hard leakage (KS>=leakage_ks), model-output
+    names, and unusable (constant/sparse) columns, and ranks the rest — yielding a selected
+    feature set for the downstream model.
+
+    For a non-binary target (``target_type != "binary"``, e.g. a regression task) the
+    leakage KS screen is skipped: ``feature_ks`` is a binary-only statistic and would
+    miscompute or crash on a continuous target. In that case every candidate is kept as
+    ``selected`` (ks=None) and only missing_rate / unique_count are reported."""
+    target_type = str(inputs.get("target_type", "binary"))
+    if target_type != "binary":
+        return _screen_features_non_binary(inputs, ctx)
+
+    from marvis.feature.screen import screen_features
+
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    holdout = inputs.get("holdout_values")
+    split_col = inputs.get("split_col")
+    top_k = inputs.get("top_k")
+    result = screen_features(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        features=[str(item) for item in inputs["features"]],
+        target_col=str(inputs["target_col"]),
+        split_col=str(split_col) if split_col else None,
+        holdout_values=tuple(str(value) for value in holdout) if holdout else ("oot",),
+        leakage_ks=float(inputs.get("leakage_ks", 0.40)),
+        max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
+        top_k=int(top_k) if top_k is not None else None,
+        batch_size=int(inputs.get("batch_size", 500)),
+    )
+    return {
+        "selected": list(result.selected),
+        "ranked": [[feature, ks] for feature, ks in result.ranked],
+        "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
+        "suspected": [[feature, ks, reason] for feature, ks, reason in result.suspected],
+        "unusable": [[feature, reason] for feature, reason in result.unusable],
+        "scores": _jsonable(result.scores),
+        "n_screened": result.n_screened,
+    }
+
+
+def _screen_features_non_binary(inputs: dict, ctx) -> dict:
+    """Screen path for a non-binary (continuous) target: skip the binary-only leakage KS
+    screen, keep every candidate as selected with ks=None, and report per-feature
+    missing_rate / unique_count only (no ks/iv)."""
+    runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    features = [str(item) for item in inputs["features"]]
+    target_col = str(inputs["target_col"])
+    feats = [feature for feature in dict.fromkeys(features) if feature != target_col]
+    frame = runtime.backend.read_frame(
+        runtime.registry.resolve_path(dataset.id), columns=feats
+    ) if feats else None
+    scores: dict[str, dict] = {}
+    for feature in feats:
+        values = pd.to_numeric(frame[feature], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(values)
+        missing_rate = float(1.0 - finite.mean()) if values.size else 1.0
+        unique = int(np.unique(values[finite]).size)
+        scores[feature] = {
+            "ks": None,
+            "missing_rate": missing_rate,
+            "unique_count": unique,
+        }
+    return {
+        "selected": list(feats),
+        "ranked": [[feature, None] for feature in feats],
+        "leakage": [],
+        "suspected": [],
+        "unusable": [],
+        "scores": _jsonable(scores),
+        "n_screened": len(feats),
+        "note": "非二分类目标：跳过泄漏KS筛选，保留全部候选特征",
+    }
+
+
 def tool_generate_feature_report(inputs: dict, ctx) -> dict:
     """Write the per-feature metrics into a downloadable Excel report (FEATURE form A)."""
     from marvis.output.feature_report import render_feature_report

@@ -1,17 +1,30 @@
+import json
+
+import numpy as np
 import pandas as pd
 import pytest
 
+from marvis.agent.modeling_setup import build_modeling_proposal
 from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
+from marvis.db import DatasetRepository, init_db
 from marvis.feature.metrics import feature_auc, feature_ks
 from marvis.packs.modeling import ModelingError
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
-from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.common import (
+    compute_model_metrics,
+    compute_multiclass_metrics,
+    split_modeling_frame,
+)
 from marvis.packs.modeling.recipes.lgb import train_lgb
+from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
+from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
+from marvis.settings import build_settings
 
 
 def _config() -> TrainConfig:
@@ -30,9 +43,13 @@ def _config() -> TrainConfig:
 def test_recipe_registry_exposes_builtin_classification_and_regression_recipes():
     recipes = list_recipes()
 
-    assert [recipe.id for recipe in recipes] == ["lgb", "xgb", "lr", "scorecard", "lgb_regressor"]
+    assert [recipe.id for recipe in recipes] == [
+        "lgb", "xgb", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass",
+    ]
     assert get_recipe("scorecard").requires_woe is True
     assert get_recipe("lgb_regressor").algorithm == "lgb_regressor"
+    assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
+    assert get_recipe("lgb_multiclass").requires_woe is False
     assert get_recipe("lr").algorithm == "lr"
     with pytest.raises(KeyError):
         get_recipe("unknown")
@@ -108,6 +125,38 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     assert [item[1] for item in first.feature_importance] == pytest.approx(
         [item[1] for item in second.feature_importance],
     )
+
+
+def test_train_mlp_writes_artifact_and_is_seed_reproducible(tmp_path):
+    rows = 180
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "mlp_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"hidden_layer_sizes": [8], "max_iter": 60},  # small/fast for the test
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    backend = DataBackend(tmp_path)
+    first = train_mlp(backend, path, config, out_dir=tmp_path / "mlp_a")
+    second = train_mlp(backend, path, config, out_dir=tmp_path / "mlp_b")
+
+    assert (tmp_path / "mlp_a" / first.artifact.model_path).exists()
+    assert first.artifact.algorithm == "mlp"
+    assert first.artifact.feature_list == ("x1", "x2")
+    assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)  # seed-reproducible
+    assert first.feature_importance == ()  # MLP exposes no native per-feature importance
 
 
 def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
@@ -234,3 +283,180 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
     assert -1.0 <= first.metrics.test_r2 <= 1.0
     assert first.metrics.test_rmse == pytest.approx(second.metrics.test_rmse)
     assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
+
+
+def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tmp_path):
+    rows = 300
+    grade = [0 if ((i * 37) % 101) < 33 else (1 if ((i * 37) % 101) < 67 else 2) for i in range(rows)]
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "grade": grade,
+        "split": ["train"] * 180 + ["test"] * 70 + ["oot"] * 50,
+    })
+    path = tmp_path / "grade_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="grade",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 10, "learning_rate": 0.2, "num_leaves": 8},
+        seed=47,
+        early_stopping_rounds=None,
+        recipe_id="lgb_multiclass",
+        target_type="multiclass",
+    )
+    backend = DataBackend(tmp_path)
+
+    first = train_lgb_multiclass(backend, path, config, out_dir=tmp_path / "grade_a")
+    second = train_lgb_multiclass(backend, path, config, out_dir=tmp_path / "grade_b")
+
+    assert (tmp_path / "grade_a" / first.artifact.model_path).exists()
+    assert first.artifact.algorithm == "lgb_multiclass"
+    assert first.artifact.params["classes"] == [0, 1, 2]
+    # multiclass metrics are populated; binary / regression fields stay None
+    assert first.metrics.test_macro_auc is not None
+    assert 0.0 <= first.metrics.test_accuracy <= 1.0
+    assert first.metrics.test_logloss is not None
+    assert first.metrics.test_ks is None
+    assert first.metrics.test_auc is None
+    assert first.metrics.test_rmse is None
+    assert first.metrics.oot_macro_auc is not None
+    # seed reproducible (bit-identical macro_auc across two runs)
+    assert first.metrics.test_macro_auc == second.metrics.test_macro_auc
+    assert first.metrics.test_logloss == pytest.approx(second.metrics.test_logloss)
+    assert [item[0] for item in first.feature_importance] == ["x1", "x2"]
+    # artifact params (including per_class detail) are strict-JSON serialisable
+    json.dumps(first.artifact.params, allow_nan=False)
+    assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
+
+
+def test_compute_multiclass_metrics_is_reasonable_and_json_safe():
+    classes = (0, 1, 2)
+    y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2])
+    proba = np.array([
+        [0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8],
+        [0.7, 0.2, 0.1], [0.2, 0.7, 0.1], [0.1, 0.2, 0.7],
+        [0.6, 0.3, 0.1], [0.3, 0.6, 0.1], [0.2, 0.2, 0.6],
+    ])
+
+    metrics = compute_multiclass_metrics(proba, y_true, classes)
+
+    assert metrics["macro_auc"] == pytest.approx(1.0)
+    assert metrics["weighted_auc"] == pytest.approx(1.0)
+    assert metrics["accuracy"] == pytest.approx(1.0)
+    assert metrics["logloss"] is not None and metrics["logloss"] > 0
+    assert metrics["macro_recall"] == pytest.approx(1.0)
+    assert set(metrics["per_class"]) == {"0", "1", "2"}
+    assert metrics["per_class"]["1"]["support"] == 3
+    # strict JSON (no NaN/inf tokens)
+    json.dumps(metrics, allow_nan=False)
+
+
+def test_compute_multiclass_metrics_degenerates_safely_for_single_class():
+    classes = (0, 1, 2)
+    y_true = np.array([1, 1, 1])
+    proba = np.array([[0.2, 0.6, 0.2], [0.1, 0.8, 0.1], [0.3, 0.5, 0.2]])
+
+    metrics = compute_multiclass_metrics(proba, y_true, classes)
+
+    # AUC is undefined with a single observed class -> None (not NaN)
+    assert metrics["macro_auc"] is None
+    assert metrics["weighted_auc"] is None
+    # logloss/accuracy are still defined and finite
+    assert metrics["logloss"] is not None
+    assert 0.0 <= metrics["accuracy"] <= 1.0
+    # classes 0 and 2 have no support -> recall None, support 0
+    assert metrics["per_class"]["0"]["support"] == 0
+    assert metrics["per_class"]["0"]["recall"] is None
+    json.dumps(metrics, allow_nan=False)
+
+
+def _proposal_runtime(tmp_path):
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = DatasetRepository(settings.db_path)
+    backend = DataBackend(settings.datasets_dir)
+    registry = DatasetRegistry(repo, backend, settings.datasets_dir)
+    return backend, registry
+
+
+def test_build_modeling_proposal_derives_continuous_target_type_from_regressor(tmp_path):
+    """A lgb_regressor recipe ⇒ target_type 'continuous'; the numeric `income` column is
+    picked as the target, bad_rate is None, and the primary recipe is lgb_regressor."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "income": [3500 + (((i * 37) % 101) * 38) for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "income_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-reg", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry, backend, "task-reg", tmp_path, recipes=["lgb_regressor"]
+    )
+
+    assert proposal.target_type == "continuous"
+    assert proposal.recipe == "lgb_regressor"
+    assert proposal.recipes == ["lgb_regressor"]
+    assert proposal.target_col == "income"
+    assert proposal.bad_rate is None
+    assert "income" not in proposal.feature_cols
+    assert proposal.template_slots()["target_type"] == "continuous"
+
+
+def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_path):
+    """A classification recipe leaves target_type 'binary' (default) and resolves the 0/1
+    label — the existing binary behaviour is unchanged."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "binary_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-bin", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-bin", tmp_path, recipes=["lgb"])
+
+    assert proposal.target_type == "binary"
+    assert proposal.target_col == "y"
+    assert proposal.bad_rate is not None
+    assert proposal.template_slots()["target_type"] == "binary"
+
+
+def test_build_modeling_proposal_derives_multiclass_target_type_from_recipe(tmp_path):
+    """A lgb_multiclass recipe ⇒ target_type 'multiclass'; the 3-class `grade` column is
+    picked as the target, bad_rate is None, and the primary recipe is lgb_multiclass."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 150
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "risk_grade": ["A" if i % 3 == 0 else ("B" if i % 3 == 1 else "C") for i in range(rows)],
+        "split": ["train"] * 90 + ["test"] * 40 + ["oot"] * 20,
+    })
+    path = tmp_path / "grade_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-mc", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry, backend, "task-mc", tmp_path, recipes=["lgb_multiclass"]
+    )
+
+    assert proposal.target_type == "multiclass"
+    assert proposal.recipe == "lgb_multiclass"
+    assert proposal.recipes == ["lgb_multiclass"]
+    assert proposal.target_col == "risk_grade"
+    assert proposal.bad_rate is None
+    assert "risk_grade" not in proposal.feature_cols
+    assert proposal.template_slots()["target_type"] == "multiclass"

@@ -67,6 +67,10 @@ class TaskCreate:
     # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
     # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
     metrics: list[str] = field(default_factory=list)
+    # Per-task capability tier (conservative/balanced/aggressive) — controls only the
+    # autonomy budget (max_replan_iterations), never effect/determinism/gates/safety.
+    # Empty → the driver falls back to the global settings default.
+    capability_tier: str = ""
     notebook_path: str | None = None
     sample_path: str | None = None
     pmml_path: str | None = None
@@ -101,6 +105,7 @@ class TaskRecord:
     task_type: str = TASK_TYPE_VALIDATION
     recipes: list[str] = field(default_factory=list)
     metrics: list[str] = field(default_factory=list)
+    capability_tier: str = ""
 
 
 @dataclass(frozen=True)

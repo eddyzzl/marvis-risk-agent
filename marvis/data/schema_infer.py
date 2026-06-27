@@ -62,6 +62,19 @@ TARGET_NAMES = (
 )
 SCORE_NAMES = ("score", "prob", "pd", "p_bad", "model_score")
 AMOUNT_NAMES = ("amount", "amt", "loan_amount", "balance", "limit", "income")
+# Person-name identity element (join key §4/§5/§11). Conservative compound keywords only —
+# bare "name" is deliberately excluded (it substring-matches model_name/file_name/feature_name).
+# NOTE: Chinese "姓名" is matched separately via a RAW substring check (see detect_semantic_role)
+# because _normalize_name strips non-ASCII chars → "姓名" would normalize to "" and match everything.
+NAME_NAMES = (
+    "cust_name",
+    "customer_name",
+    "real_name",
+    "full_name",
+    "fullname",
+    "applicant_name",
+    "true_name",
+)
 
 
 def infer_column_profile(
@@ -106,6 +119,8 @@ def detect_semantic_role(name: str, fingerprint: ColumnFingerprint) -> str:
         return "score"
     if _name_matches(name, AMOUNT_NAMES):
         return "amount"
+    if "姓名" in name or _name_matches(name, NAME_NAMES):
+        return "name"
     return "numeric" if fingerprint.value_kind == "numeric" else "categorical"
 
 
@@ -154,7 +169,9 @@ def _desensitize(value: Any, role: str) -> object:
         return _mask_text(value, keep_start=4, keep_end=2)
     if role == "id":
         return _mask_text(value, keep_start=4, keep_end=4)
-    if role == "categorical":
+    if role in {"categorical", "name"}:
+        # Person names are PII — anonymize to an opaque token (same as categorical), never
+        # surface the raw 姓名 in previews/profiles.
         return _token_text(value)
     if role not in {"amount", "date", "score", "target"} and _looks_like_sensitive_identifier(value):
         return _mask_text(value, keep_start=4, keep_end=4)

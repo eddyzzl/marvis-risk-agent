@@ -112,7 +112,7 @@ def test_plugin_handlers_upload_toggle_remove_and_show_tools():
             return { tools: [{ name: "tool", description: "desc", input_schema: {}, output_schema: {} }] };
           },
           refreshPlugins: async () => calls.push(["refreshPlugins"]),
-          confirmRemove: () => true,
+          confirmRemove: async () => true,
           showError: (message) => messages.push(message),
         });
 

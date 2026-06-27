@@ -36,6 +36,22 @@ def is_confirm(text: str) -> bool:
     return bool(_CONFIRM.search(text or ""))
 
 
+def _parse_dedup_instruction(text: str) -> str | None:
+    """Parse a manual-mode dedup reply at a join gate → "first"/"last"/None.
+
+    Recognised only when the text actually mentions de-duplication (去重/dedup/策略/保留)
+    so an unrelated instruction isn't misread as a strategy. first = keep the first row per
+    key, last = keep the last (spec §6 conflict resolution)."""
+    low = (text or "").lower()
+    if not any(token in low for token in ("去重", "dedup", "策略", "保留", "重复")):
+        return None
+    if "first" in low or "首" in text or "第一" in text or "前" in text:
+        return "first"
+    if "last" in low or "末" in text or "最后" in text or "最新" in text or "后" in text:
+        return "last"
+    return None
+
+
 @dataclass
 class DriverMessage:
     """One append-only assistant message. ``metadata`` carries the locator
@@ -81,9 +97,20 @@ class PlanDriver:
         )
         return DriverTurn(plan.id, plan.status.value, [self._plan_overview_message(plan)])
 
-    def resume(self, *, plan_id, user_text, run_seq=0) -> DriverTurn:
+    def resume(self, *, plan_id, user_text, run_seq=0, selection=None, dedup_strategies=None) -> DriverTurn:
         """Advance the plan given a user reply. Two gate kinds are handled: the
-        plan-level overview gate (plan not yet started) and per-step gates."""
+        plan-level overview gate (plan not yet started) and per-step gates.
+
+        ``selection`` (optional): the user's edited feature set from the §4 interactive
+        screening table. When confirming a gate that depends on a ``screen_features``
+        step, it overrides that step's proposed ``selected`` so downstream steps
+        (``$ref:...output.selected``) train on exactly the features the user chose.
+
+        ``dedup_strategies`` (optional): the user's per-feature dedup strategy map from
+        the §4 join dedup picker. At a join gate it re-confirms the ``confirm_join``
+        dependency with those strategies (resolving non-unique-key conflicts) and
+        re-pauses at the gate, now clear, for the final execute confirm.
+        """
         plan = self._repo.load_plan(plan_id)
         # Plan-level overview gate: nothing has run yet → 「开始」 begins execution.
         if plan.status == PlanStatus.VALIDATED:
@@ -93,11 +120,92 @@ class PlanDriver:
             return self._handle_instruction(plan, None, user_text, run_seq)
         # Per-step needs_confirmation gate.
         gate = self._awaiting_step(plan)
+        # Join dedup picker: re-confirm with the chosen strategies, then re-pause at the
+        # (now conflict-free) gate — do NOT confirm-execute yet; the user confirms after.
+        if dedup_strategies and gate is not None:
+            self._apply_dedup_strategies(plan, gate, dedup_strategies)
+            return self._run_and_handle(plan_id, run_seq=run_seq)
         if is_confirm(user_text):
             if gate is not None:
+                if selection is not None:
+                    self._apply_screen_selection(plan, gate, selection)
                 self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        # Manual-mode TEXT resolution of a same-key dedup conflict (no §4 picker available):
+        # the user replies e.g. 「去重 first」/「用 last 去重」 → apply that strategy to every
+        # feature confirm_join flagged as needs_dedup, then re-pause at the cleared gate.
+        if gate is not None:
+            strategy = _parse_dedup_instruction(user_text)
+            if strategy:
+                pending = self._needs_dedup_features(plan, gate)
+                if pending:
+                    self._apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
+                    return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
+
+    def _needs_dedup_features(self, plan, gate) -> list[str]:
+        """Feature ids the gate's confirm_join dependency flagged as needing a dedup
+        strategy (same-key conflict). Empty when there is nothing to resolve."""
+        if gate is None:
+            return []
+        for dep_id in gate.depends_on or []:
+            dep = _find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "confirm_join":
+                continue
+            output = self._repo.load_step_output(dep.id) or {}
+            pending = output.get("needs_dedup") or []
+            return [str(f) for f in pending]
+        return []
+
+    def _apply_dedup_strategies(self, plan, gate, dedup_strategies) -> None:
+        """Re-confirm the gate's ``confirm_join`` dependency with the user's per-feature
+        dedup strategy map (§4 dedup picker). Only the confirm step and the gate are
+        reset (the propose step's diagnostics + join plan are kept), so confirm_join
+        re-runs against the same join plan with strategies applied — resolving same-key
+        conflicts — and the executor re-pauses at the (now clear) execute gate. A
+        structured manual-mode override that doesn't need the LLM adjust router."""
+        if gate is None or not isinstance(dedup_strategies, dict) or not dedup_strategies:
+            return
+        clean = {str(k): str(v) for k, v in dedup_strategies.items() if str(v).strip()}
+        if not clean:
+            return
+        reset_any = False
+        for dep_id in gate.depends_on or []:
+            dep = _find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "confirm_join":
+                continue
+            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), "dedup_strategies": clean})
+            reset_any = True
+        if reset_any:
+            self._repo.reset_step(gate.id)
+
+    def _apply_screen_selection(self, plan, gate, selection) -> None:
+        """Override a screening gate's proposed ``selected`` with the user's edited set.
+
+        The chosen features are constrained to what the screen actually saw (any
+        scored/bucketed column — including leakage/suspected ones the user may
+        deliberately *force-select*), so an edited selection can narrow or re-pick
+        among real screened features but can never smuggle in a column the screen
+        never validated. A selection that resolves to nothing is ignored (keep the
+        proposed set) rather than training on zero features.
+        """
+        if gate is None:
+            return
+        sel = [str(f) for f in (selection or []) if str(f).strip()]
+        if not sel:
+            return
+        for dep_id in gate.depends_on or []:
+            dep = _find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "screen_features":
+                continue
+            output = self._safe_output(dep_id)
+            if not isinstance(output, dict):
+                continue
+            known = _screen_known_features(output)
+            chosen = [f for f in dict.fromkeys(sel) if not known or f in known]
+            if not chosen:
+                continue
+            self._repo.store_step_output(dep_id, {**output, "selected": chosen})
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
@@ -263,6 +371,9 @@ class PlanDriver:
     def _compose_gate_message(self, plan: Plan, gate: PlanStep | None, *, run_seq) -> DriverMessage:
         parts: list[str] = []
         tables: list[dict] = []
+        screen: dict | None = None
+        confirm_join_o: dict | None = None
+        propose_join_o: dict | None = None
         for dep_id in gate.depends_on if gate else []:
             dep = _find_step(plan, dep_id)
             if dep is None:
@@ -274,6 +385,16 @@ class PlanDriver:
             if text:
                 parts.append(text)
             tables.extend(dep_tables)
+            # Surface the structured screening result so the frontend can render the
+            # §4 interactive selection table (rows=features, metric cols, checkboxes).
+            # Pass-through of the tool output + the screen step id (so an edited
+            # selection can be confirmed back against it) + the gating thresholds.
+            if dep.tool_ref.tool == "screen_features":
+                screen = _screen_payload(output, dep)
+            elif dep.tool_ref.tool == "confirm_join":
+                confirm_join_o = output
+            elif dep.tool_ref.tool == "propose_join":
+                propose_join_o = output
         if not parts:
             parts.append("上一步已完成。")
         parts.append("确认请回复「确认」继续;要调整可直接说明。")
@@ -284,6 +405,14 @@ class PlanDriver:
             "tables": tables,
             "kind": "gate",  # marks a needs-confirmation gate (manual-mode confirm control)
         }
+        if screen is not None:
+            meta["screen"] = screen
+        # §4 join dedup picker: when confirm_join left features awaiting a dedup strategy
+        # (non-unique keys), surface them + their conflict counts so the frontend can
+        # render per-feature first/last pickers the user resolves before executing.
+        dedup = _dedup_payload(confirm_join_o, propose_join_o)
+        if dedup is not None:
+            meta["dedup"] = dedup
         return DriverMessage("gate", "\n\n".join(parts), meta)
 
     def _compose_done_message(self, plan: Plan, *, run_seq) -> DriverMessage:
@@ -351,20 +480,150 @@ def _names(items) -> list[str]:
     return [str(x) for x in out]
 
 
+def _pct(value):
+    """Missing-rate as a percentage string; ``None`` → n/a."""
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _triple(item):
+    """A (feature, ks, reason) row from a leakage/suspected entry, tolerant of shape."""
+    if isinstance(item, (list, tuple)):
+        feat = str(item[0]) if len(item) > 0 else ""
+        ks = item[1] if len(item) > 1 else None
+        reason = str(item[2]) if len(item) > 2 else ""
+        return feat, ks, reason
+    return str(item), None, ""
+
+
 def _render_screen(o: dict):
     selected = o.get("selected") or []
-    leak = _names(o.get("leakage"))
-    susp = _names(o.get("suspected"))
+    leak = o.get("leakage") or []
+    susp = o.get("suspected") or []
+    unusable = o.get("unusable") or []
+    scores = o.get("scores") if isinstance(o.get("scores"), dict) else {}
+    leak_names = _names(leak)
+    susp_names = _names(susp)
     n = o.get("n_screened") or o.get("n") or (len(selected) + len(leak) + len(susp))
     text = (
         f"**特征筛选完成**:从 {n} 个候选中提议保留 **{len(selected)}** 个特征。\n"
-        f"- 剔除疑似**泄漏** {len(leak)} 个" + (f"(如 {leak[:3]})" if leak else "") + "\n"
-        f"- 疑似**模型输出/评分**列 {len(susp)} 个" + (f"(如 {susp[:5]})" if susp else "")
+        f"- 剔除疑似**泄漏** {len(leak_names)} 个" + (f"(如 {leak_names[:3]})" if leak_names else "") + "\n"
+        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"(如 {susp_names[:5]})" if susp_names else "") + "\n"
+        f"- 剔除**不可用**(常量/稀疏) {len(unusable)} 个"
     )
     tables = []
     if selected:
-        tables.append({"title": "入选特征(前20)", "columns": ["特征"], "rows": [[s] for s in selected[:20]]})
+        rows = []
+        for feat in selected[:20]:
+            s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
+            rows.append([feat, _num(s.get("ks")), _num(s.get("iv")), _pct(s.get("missing_rate"))])
+        tables.append({"title": "入选特征(前20)", "columns": ["特征", "KS", "IV", "缺失率"], "rows": rows})
+    if leak:
+        tables.append({
+            "title": f"疑似泄漏(KS≥阈值,共{len(leak)})",
+            "columns": ["特征", "KS", "原因"],
+            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])],
+        })
+    if susp:
+        tables.append({
+            "title": f"疑似模型输出/评分列(共{len(susp)})",
+            "columns": ["特征", "KS", "原因"],
+            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])],
+        })
+    if unusable:
+        rows = []
+        for item in unusable[:20]:
+            if isinstance(item, (list, tuple)):
+                rows.append([str(item[0]) if item else "", str(item[1]) if len(item) > 1 else ""])
+            else:
+                rows.append([str(item), ""])
+        tables.append({"title": f"剔除·不可用(常量/稀疏,共{len(unusable)})", "columns": ["特征", "原因"], "rows": rows})
     return text, tables
+
+
+def _dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict | None:
+    """Per-feature dedup picker payload for a join gate (§4). Returns None unless
+    ``confirm_join`` left features awaiting a dedup strategy. For each such feature,
+    attach the conflict-key count + conflicting columns from the propose-step
+    diagnostics so the picker shows *why* a strategy is needed."""
+    confirm = confirm_o if isinstance(confirm_o, dict) else {}
+    needs = [str(f) for f in (confirm.get("needs_dedup") or [])]
+    if not needs:
+        return None
+    info: dict[str, dict] = {}
+    propose = propose_o if isinstance(propose_o, dict) else {}
+    for join in propose.get("joins") or []:
+        if not isinstance(join, dict):
+            continue
+        fid = str(join.get("feature_id"))
+        diag = join.get("diagnostics") if isinstance(join.get("diagnostics"), dict) else {}
+        report = diag.get("conflict_report") if isinstance(diag.get("conflict_report"), dict) else {}
+        info[fid] = {
+            "conflict_keys": int(report.get("n_conflict_keys") or 0),
+            "conflict_columns": [str(c) for c in (report.get("conflict_columns") or [])],
+        }
+    features = [
+        {"feature_id": fid, **info.get(fid, {"conflict_keys": 0, "conflict_columns": []})}
+        for fid in needs
+    ]
+    return {"needs_dedup": needs, "features": features, "strategies": ["first", "last"]}
+
+
+def _screen_known_features(output: dict) -> set:
+    """Every feature the screen actually saw — scored, ranked, or bucketed into
+    leakage/suspected/unusable. Used to constrain an edited selection so it can only
+    re-pick among validated columns (force-selecting a flagged one is allowed)."""
+    known: set = set()
+    o = output if isinstance(output, dict) else {}
+    scores = o.get("scores")
+    if isinstance(scores, dict):
+        known.update(str(k) for k in scores)
+    for key in ("ranked", "leakage", "suspected", "unusable"):
+        for item in o.get(key) or []:
+            if isinstance(item, (list, tuple)) and item:
+                known.add(str(item[0]))
+            elif isinstance(item, str):
+                known.add(item)
+    known.update(str(f) for f in (o.get("selected") or []))
+    return known
+
+
+def _screen_payload(output: dict, dep) -> dict:
+    """Structured screening result for the frontend §4 interactive selection table.
+
+    A pass-through of the screen tool output (ranked KS, per-feature scores, the
+    leakage/suspected/unusable buckets with reasons) plus (a) the screen step id —
+    so an edited selection can be confirmed back against that exact step — and (b)
+    the gating thresholds the screen used, so the table's sliders default to them.
+    """
+    o = output if isinstance(output, dict) else {}
+    inputs = getattr(dep, "inputs", None) or {}
+
+    def _flt(key, default):
+        try:
+            return float(inputs.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "step_id": getattr(dep, "id", None),
+        "step_title": getattr(dep, "title", None),
+        "selected": list(o.get("selected") or []),
+        "ranked": o.get("ranked") or [],
+        "leakage": o.get("leakage") or [],
+        "suspected": o.get("suspected") or [],
+        "unusable": o.get("unusable") or [],
+        "scores": o.get("scores") if isinstance(o.get("scores"), dict) else {},
+        "n_screened": o.get("n_screened") or 0,
+        "thresholds": {
+            "leakage_ks": _flt("leakage_ks", 0.40),
+            "max_missing_rate": _flt("max_missing_rate", 0.95),
+        },
+    }
 
 
 def _render_tune(o: dict):
@@ -384,14 +643,24 @@ def _render_tune(o: dict):
         rows = []
         for rank, trial in enumerate(ranked[:15], start=1):
             train_ks, test_ks = trial.get("train_ks"), trial.get("test_ks")
-            gap = (train_ks - test_ks) if isinstance(train_ks, (int, float)) and isinstance(test_ks, (int, float)) else None
+            # overfit gaps: prefer stored values, fall back to deriving train-test.
+            gap_tt = trial.get("overfit_gap_tt")
+            if gap_tt is None and isinstance(train_ks, (int, float)) and isinstance(test_ks, (int, float)):
+                gap_tt = train_ks - test_ks
             rows.append([
                 str(rank), _num(train_ks), _num(test_ks), _num(trial.get("oot_ks")),
-                _num(trial.get("test_auc")), _num(trial.get("lift_head_10")), _num(gap),
+                _num(trial.get("test_auc")), _num(trial.get("oot_auc")),
+                _num(trial.get("lift_head_5")), _num(trial.get("lift_head_10")),
+                _num(trial.get("lift_tail_5")), _num(trial.get("lift_tail_10")),
+                _num(gap_tt), _num(trial.get("overfit_gap_to")),
             ])
         tables.append({
             "title": "trials 排行(按 in-time 选优;前15)",
-            "columns": ["#", "train_ks", "test_ks", "oot_ks", "AUC", "头部lift10%", "过拟合gap"],
+            "columns": [
+                "#", "train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc",
+                "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
+                "过拟合gap(tt)", "过拟合gap(to)",
+            ],
             "rows": rows,
         })
     if best_metrics:
@@ -542,14 +811,40 @@ def _render_feature_report(o: dict):
 def _render_propose_join(o: dict):
     joins = o.get("joins") or []
     rows = []
+    relax_rows = []
     any_conflict = False
+    any_fp_mismatch = False
     for j in joins:
         diag = j.get("diagnostics") or {}
         match_rate = diag.get("match_rate")
         unique = diag.get("feature_key_unique")
         fan_out = diag.get("fan_out_detected", diag.get("fan_out"))
+        # Prefer the friendly file name (features.parquet) over the raw ds_<hash> id.
+        fname = str(j.get("feature_name") or j.get("feature_id", "?"))
         key_pairs = j.get("key_pairs") or []
         keys = ", ".join(f"{p.get('anchor_col')}={p.get('feature_col')}" for p in key_pairs) or "?"
+        # Dynamic key relaxation proposals (spec §4/§5): low-match keys may match better with
+        # one element dropped — surface as suggestions (the user confirms; never auto-applied).
+        for alt in (diag.get("key_alternatives") or []):
+            if not isinstance(alt, dict):
+                continue
+            alt_keys = ", ".join(f"{a}={f}" for a, f in (alt.get("key_pairs") or []))
+            relax_rows.append([
+                fname,
+                _fmt(match_rate) if match_rate is not None else "n/a",
+                f"减「{alt.get('dropped', '?')}」→ {alt_keys}",
+                _fmt(alt.get("match_rate")) if alt.get("match_rate") is not None else "n/a",
+                "是" if alt.get("feature_key_unique") else "否",
+                "⚠️是" if alt.get("fan_out_detected") else "否",
+            ])
+        # Fingerprint consistency (spec §5 C2 "指纹 raw=md5? ✓/✗"): transform_side == "both"
+        # means anchor and feature key share format (both raw or both md5); anything else
+        # means one side is raw and the other md5 (键格式不一致), joinable only via a hash
+        # transform — surfaced so the user can sanity-check the key before执行.
+        fp_consistent = all((p.get("transform_side") or "both") == "both" for p in key_pairs) if key_pairs else True
+        if not fp_consistent:
+            any_fp_mismatch = True
+        fp_cell = "✓" if fp_consistent else "✗ raw≠md5"
         # Two-level dedup breakdown (spec §6): safe whole-row dups vs same-key conflicts.
         report = diag.get("conflict_report") or {}
         conflict_keys = int(report.get("n_conflict_keys") or 0)
@@ -558,8 +853,9 @@ def _render_propose_join(o: dict):
             any_conflict = True
         dedup_cell = "-" if unique else f"安全{safe_dropped}/⚠️冲突{conflict_keys}"
         rows.append([
-            str(j.get("feature_id", "?")),
+            fname,
             keys,
+            fp_cell,
             _fmt(match_rate) if match_rate is not None else "n/a",
             "是" if unique else "否",
             "⚠️是" if fan_out else "否",
@@ -574,12 +870,28 @@ def _render_propose_join(o: dict):
             "\n\n⚠️ 检测到**同键值冲突**(同一键多行但特征值不一致):这类**不会自动删除**,"
             "请先确认去重策略或清洗数据后再拼接。"
         )
+    if any_fp_mismatch:
+        text += (
+            "\n\n⚠️ 检测到**键指纹不一致**(`✗ raw≠md5`:锚/特征侧一为原文、一为 md5):"
+            "系统会自动对齐哈希后再连接,但请确认这是同一标识(避免误配)。"
+        )
+    if relax_rows:
+        text += (
+            "\n\n💡 部分特征表命中率偏低,**减一个识别要素**可提高命中(见下「择键建议」):"
+            "系统只提议、不会自动改键;若减后**膨胀**需配合去重策略。请确认后再选用。"
+        )
     tables = []
     if rows:
         tables.append({
             "title": "拼接诊断(逐特征表)",
-            "columns": ["特征表", "匹配键", "命中率", "键唯一", "膨胀", "去重(安全/冲突键)"],
+            "columns": ["特征表", "匹配键", "指纹(raw=md5?)", "命中率", "键唯一", "膨胀", "去重(安全/冲突键)"],
             "rows": rows,
+        })
+    if relax_rows:
+        tables.append({
+            "title": "择键建议(减要素换更高命中)",
+            "columns": ["特征表", "当前命中率", "建议键", "减后命中率", "减后唯一", "减后膨胀"],
+            "rows": relax_rows,
         })
     return text, tables
 
@@ -587,7 +899,18 @@ def _render_propose_join(o: dict):
 def _render_confirm_join(o: dict):
     # Internal plumbing step (marks engine specs confirmed). It is a dependency of
     # the execute_join gate, but its summary would show "已确认…" before the human
-    # actually confirms, which is confusing — so render nothing at the gate.
+    # actually confirms, which is confusing — so render nothing at the gate…
+    needs = o.get("needs_dedup") or []
+    if needs:
+        # …UNLESS a feature has a same-key conflict (spec §6): surface it so the user knows
+        # the join can't execute until they pick a dedup strategy (or exclude the feature).
+        labels = o.get("needs_dedup_labels") or {}
+        listed = "、".join(f"`{labels.get(f, f)}`" for f in needs)
+        return (
+            f"⚠️ 特征 {listed} 存在**同键冲突**(同一键多行、特征值不一致),"
+            "需先定去重策略才能拼接。回复「去重 first」(保留首条)或「去重 last」(保留末条)解决;"
+            "或排除这些特征后重试。"
+        ), []
     return "", []
 
 
@@ -624,7 +947,47 @@ def _render_execute_join(o: dict):
     return text, tables
 
 
+def _render_make_split(o: dict):
+    """G1 split gate: surface the train/test/oot counts + per month/channel distribution so
+    the user can sanity-check the split (proportions, OOT-by-time, no cross-group leakage)
+    before spending compute on screening/training."""
+    analysis = o.get("sample_analysis") or {}
+    counts = analysis.get("split_counts") or {}
+    total = analysis.get("total_rows")
+    rows = [
+        [str(split), int(n), _fmt(n / total) if total else "n/a"]
+        for split, n in counts.items()
+    ]
+    text = (
+        f"**样本切分完成**:共 {total} 行。请核对 train/test/oot 划分"
+        "(占比是否合理、OOT 是否按时间、分组是否防泄漏)后再继续。"
+    )
+    tables = []
+    if rows:
+        tables.append({
+            "title": "切分计数(train/test/oot)",
+            "columns": ["划分", "行数", "占比"],
+            "rows": rows,
+        })
+    for group_col, dist in (analysis.get("group_distributions") or {}).items():
+        if not isinstance(dist, dict):
+            continue
+        group_values = sorted({gv for per in dist.values() if isinstance(per, dict) for gv in per})
+        grows = [
+            [str(split)] + [int(per.get(gv, 0)) for gv in group_values]
+            for split, per in dist.items() if isinstance(per, dict)
+        ]
+        if grows:
+            tables.append({
+                "title": f"按「{group_col}」分布(逐划分)",
+                "columns": ["划分", *[str(gv) for gv in group_values]],
+                "rows": grows,
+            })
+    return text, tables
+
+
 _RENDERERS = {
+    "make_split": _render_make_split,
     "screen_features": _render_screen,
     "tune_hyperparameters": _render_tune,
     "train_model": _render_train,

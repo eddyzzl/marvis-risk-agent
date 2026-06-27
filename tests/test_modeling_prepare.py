@@ -145,6 +145,77 @@ def test_make_split_blocks_empty_split():
         _make_split(frame, {"test_size": 1.0, "group_cols": ["grp"]}, seed=1)
 
 
+def test_make_split_rules_assign_by_channel_and_time_deterministically():
+    """Rule set DSL (spec §2): channel A → all train, channel B before a cutoff → test
+    and at/after the cutoff → oot, channel C → all oot. Pure condition logic, so two
+    runs are identical."""
+    rows = []
+    for channel in ("A", "B", "C"):
+        for date in range(1, 13):  # months 1..12
+            rows.append({"channel": channel, "date": date, "y": (date + ord(channel)) % 2})
+    frame = pd.DataFrame(rows)
+    cutoff = 10
+    rules = [
+        {"when": [{"col": "channel", "op": "eq", "val": "A"}], "assign": "train"},
+        {"when": [{"col": "channel", "op": "eq", "val": "B"}, {"col": "date", "op": "lt", "val": cutoff}], "assign": "test"},
+        {"when": [{"col": "channel", "op": "eq", "val": "B"}, {"col": "date", "op": "ge", "val": cutoff}], "assign": "oot"},
+        {"when": [{"col": "channel", "op": "eq", "val": "C"}], "assign": "oot"},
+    ]
+    # rules alone (test_size 0 so no random draw fires)
+    out = _make_split(frame, {"rules": rules, "test_size": 0.0}, seed=3)
+
+    assert (out[out["channel"] == "A"]["split"] == "train").all()
+    assert (out[(out["channel"] == "B") & (out["date"] < cutoff)]["split"] == "test").all()
+    assert (out[(out["channel"] == "B") & (out["date"] >= cutoff)]["split"] == "oot").all()
+    assert (out[out["channel"] == "C"]["split"] == "oot").all()
+
+    again = _make_split(frame, {"rules": rules, "test_size": 0.0}, seed=3)
+    assert out["split"].tolist() == again["split"].tolist()
+
+
+def test_make_split_rules_combine_with_random_test_on_remainder():
+    """Rules freeze the rows they claim; the remaining (unmatched) rows still flow
+    through the legacy random test_size draw and only those rows can become test."""
+    rows = []
+    for channel in ("A", "B"):
+        for i in range(50):
+            rows.append({"channel": channel, "row_id": len(rows), "y": i % 2})
+    frame = pd.DataFrame(rows)
+    rules = [{"when": [{"col": "channel", "op": "eq", "val": "A"}], "assign": "train"}]
+
+    out = _make_split(frame, {"rules": rules, "test_size": 0.4}, seed=9)
+
+    # channel A was frozen to train by the rule → no A row may be drawn as test
+    assert (out[out["channel"] == "A"]["split"] == "train").all()
+    # all test rows come from channel B (the rule-free remainder)
+    assert (out[out["split"] == "test"]["channel"] == "B").all()
+    assert (out["split"] == "test").sum() > 0
+    # deterministic
+    again = _make_split(frame, {"rules": rules, "test_size": 0.4}, seed=9)
+    assert out["split"].tolist() == again["split"].tolist()
+
+
+def test_make_split_rules_validation_errors():
+    frame = pd.DataFrame({"channel": ["A", "B"], "y": [0, 1]})
+
+    with pytest.raises(ModelingError, match="unknown op"):
+        _make_split(frame, {"rules": [{"when": [{"col": "channel", "op": "matches", "val": "A"}], "assign": "train"}]}, seed=0)
+
+    with pytest.raises(ModelingError, match="invalid assign"):
+        _make_split(frame, {"rules": [{"when": [{"col": "channel", "op": "eq", "val": "A"}], "assign": "holdout"}]}, seed=0)
+
+    with pytest.raises(ModelingError, match="missing columns: nope"):
+        _make_split(frame, {"rules": [{"when": [{"col": "nope", "op": "eq", "val": "A"}], "assign": "train"}]}, seed=0)
+
+
+def test_make_split_rules_can_leave_expected_set_empty_is_blocked():
+    """A rule set that assigns every row to oot leaves train empty → blocked clearly."""
+    frame = pd.DataFrame({"channel": ["A", "A", "A"], "y": [0, 1, 0]})
+    rules = [{"when": [{"col": "channel", "op": "eq", "val": "A"}], "assign": "oot"}]
+    with pytest.raises(ModelingError, match="为空"):
+        _make_split(frame, {"rules": rules, "test_size": 0.0}, seed=0)
+
+
 def test_prepare_modeling_frame_rejects_missing_columns(tmp_path):
     frame = pd.DataFrame({"x": [1, 2], "y": [0, 1]})
     backend, registry, dataset = _register_frame(tmp_path, frame)

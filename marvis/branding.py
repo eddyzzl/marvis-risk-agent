@@ -12,7 +12,7 @@ DEFAULT_BRANDING: dict[str, Any] = {
     "platformName": "MARVIS-全能风控智能体",
     "browserTitle": "MARVIS-全能风控智能体",
     "primaryColor": "#303034",
-    "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+    "logoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
     "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
     "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
     # Optional per-workspace map of real validator name -> display alias, used for
@@ -25,6 +25,9 @@ DEFAULT_BRANDING: dict[str, Any] = {
 BRANDING_DIR_NAME = "branding"
 BRANDING_CONFIG_NAME = "brand.json"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+DEFAULT_DARK_FAVICON_URL = "static/brand/marvis-favicon-dark.png"
+DEFAULT_APPLE_TOUCH_ICON_URL = "static/brand/marvis-apple-touch-icon.png"
+DEFAULT_DARK_APPLE_TOUCH_ICON_URL = "static/brand/marvis-apple-touch-icon-dark.png"
 
 
 def load_branding(workspace: str | Path) -> dict[str, Any]:
@@ -86,6 +89,20 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
     workspace_logo_url = escape(current["workspaceLogoUrl"], quote=True)
     favicon_url = escape(current["faviconUrl"], quote=True)
     favicon_type = escape(_image_mime_type(current["faviconUrl"]), quote=True)
+    uses_default_favicon = current["faviconUrl"] == DEFAULT_BRANDING["faviconUrl"]
+    dark_favicon_url = escape(
+        DEFAULT_DARK_FAVICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
+    dark_favicon_type = "image/png" if uses_default_favicon else favicon_type
+    apple_touch_icon_url = escape(
+        DEFAULT_APPLE_TOUCH_ICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
+    dark_apple_touch_icon_url = escape(
+        DEFAULT_DARK_APPLE_TOUCH_ICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
     primary_color = current["primaryColor"]
     primary_hover = _brand_hover_color(primary_color)
 
@@ -104,12 +121,32 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
     ):
         html = html.replace(title_placeholder, f"<title>{browser_title}</title>", 1)
     html = html.replace(
-        'type="image/png" href="static/brand/marvis-favicon.png"',
-        f'type="{favicon_type}" href="{favicon_url}"',
+        'id="brandFavicon" rel="icon" type="image/png" media="(prefers-color-scheme: light)" href="static/brand/marvis-favicon.png"',
+        f'id="brandFavicon" rel="icon" type="{favicon_type}" media="(prefers-color-scheme: light)" href="{favicon_url}"',
         1,
     )
     html = html.replace(
-        'id="brandLogo"\n              class="brand-mark"\n              src="static/brand/marvis-logo.png"',
+        'id="brandFaviconDark" rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href="static/brand/marvis-favicon-dark.png"',
+        f'id="brandFaviconDark" rel="icon" type="{dark_favicon_type}" media="(prefers-color-scheme: dark)" href="{dark_favicon_url}"',
+        1,
+    )
+    html = html.replace(
+        'id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="static/brand/marvis-apple-touch-icon.png"',
+        f'id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="{apple_touch_icon_url}"',
+        1,
+    )
+    html = html.replace(
+        'id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="static/brand/marvis-apple-touch-icon-dark.png"',
+        f'id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="{dark_apple_touch_icon_url}"',
+        1,
+    )
+    html = html.replace(
+        '<meta name="apple-mobile-web-app-title" content="MARVIS" />',
+        f'<meta name="apple-mobile-web-app-title" content="{platform_name}" />',
+        1,
+    )
+    html = html.replace(
+        'id="brandLogo"\n              class="brand-mark"\n              src="static/brand/marvis-workspace-logo.png"',
         f'id="brandLogo"\n              class="brand-mark"\n              src="{logo_url}"',
         1,
     )

@@ -1,6 +1,6 @@
 {
   "name": "feature",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "display_name": "Feature Engineering Pack",
   "description": "Deterministic feature metrics, binning, encoding, transformation, and derivation tools.",
   "module": "marvis.packs.feature.tools",
@@ -70,6 +70,48 @@
       "failure_policy": "fail",
       "entrypoint": "tool_generate_feature_report",
       "side_effects": ["write:artifact"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "screen_features",
+      "summary": "Leakage-aware feature screening (shared screen) — form B: select features, flag leakage/unusable.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "target_type": {"type": "string"},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "leakage_ks": {"type": "number"},
+          "max_missing_rate": {"type": "number"},
+          "top_k": {"type": "integer", "minimum": 1},
+          "batch_size": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "features", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected": {"type": "array", "items": {"type": "string"}},
+          "ranked": {"type": "array", "items": {"type": "array"}},
+          "leakage": {"type": "array", "items": {"type": "array"}},
+          "suspected": {"type": "array", "items": {"type": "array"}},
+          "unusable": {"type": "array", "items": {"type": "array"}},
+          "scores": {"type": "object"},
+          "n_screened": {"type": "integer", "minimum": 0},
+          "note": {"type": "string"}
+        },
+        "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_screen_features",
+      "side_effects": ["read:dataset"],
       "memory_limit_mb": 4096
     },
     {

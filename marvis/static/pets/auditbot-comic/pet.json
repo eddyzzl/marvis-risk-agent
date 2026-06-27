@@ -1,0 +1,6 @@
+{
+  "id": "auditbot-comic",
+  "displayName": "MARVIS Comic",
+  "description": "A cel-shaded comic audit robot mascot.",
+  "spritesheetPath": "spritesheet.webp"
+}

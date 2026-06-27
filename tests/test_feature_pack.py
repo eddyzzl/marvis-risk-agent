@@ -341,6 +341,78 @@ def test_feature_metrics_adds_importance_only_when_selected(tmp_path):
     assert "importance" in selected.output["metrics"][0]  # gating wired the key in
 
 
+def test_feature_pack_screen_features_via_runner(tmp_path):
+    """The feature pack exposes leakage-aware screening (form B §4), reusing the shared
+    screen_features so FEATURE and MODELING screen identically (spec §0/§7)."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2", "amount", "missing"], "target_col": "y"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    # the screen yields a selected feature set + the leakage/unusable buckets (form B)
+    for key in ("selected", "ranked", "leakage", "suspected", "unusable", "scores"):
+        assert key in result.output
+    assert isinstance(result.output["selected"], list)
+    assert result.output["n_screened"] >= 0
+
+
+def test_screen_features_continuous_skips_leakage_and_keeps_all(tmp_path):
+    """A non-binary (continuous) target skips the binary-only leakage KS screen: every
+    candidate is selected (ks None), no leakage/suspected flags, and a skip note is set."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2", "missing"],
+            "target_col": "amount",
+            "target_type": "continuous",
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert set(result.output["selected"]) == {"x1", "x2", "missing"}
+    assert result.output["leakage"] == []
+    assert result.output["suspected"] == []
+    assert result.output["note"] == "非二分类目标：跳过泄漏KS筛选，保留全部候选特征"
+    # Continuous screen reports missing_rate/unique_count only — KS is None (not computed).
+    assert result.output["scores"]["x1"]["ks"] is None
+    assert "missing_rate" in result.output["scores"]["x1"]
+
+
+def test_screen_features_binary_default_runs_leakage_screen_unchanged(tmp_path):
+    """Without target_type (or target_type='binary') the leakage screen runs as before:
+    no skip note, KS computed per feature."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    default = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y"},
+        task_id="task-feature",
+    )
+    binary = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y", "target_type": "binary"},
+        task_id="task-feature",
+    )
+
+    assert default.ok is True, default.error
+    assert binary.ok is True, binary.error
+    assert "note" not in default.output  # binary path carries no skip note
+    assert default.output["selected"] == binary.output["selected"]
+    # KS is computed for at least one scored feature on the binary path.
+    assert any(score.get("ks") is not None for score in default.output["scores"].values())
+
+
 def _assert_registered_frame(repo, registry, backend, dataset_id: str, expected_columns: list[str]) -> None:
     dataset = repo.get_dataset(dataset_id)
     assert dataset is not None

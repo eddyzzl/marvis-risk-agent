@@ -1,6 +1,9 @@
 import { defaultBranding } from "./state.js";
 import { $ } from "./ui-utils.js";
 
+const defaultDarkFaviconUrl = "static/brand/marvis-favicon-dark.png?v=20260627-browser-chrome";
+const defaultAppleTouchIconUrl = "static/brand/marvis-apple-touch-icon.png?v=20260627-browser-chrome";
+const defaultDarkAppleTouchIconUrl = "static/brand/marvis-apple-touch-icon-dark.png?v=20260627-browser-chrome";
 
 export function normalizeBranding(payload = {}) {
   const branding = { ...defaultBranding };
@@ -85,6 +88,20 @@ export function applyBranding(branding) {
   if (favicon) {
     favicon.href = branding.faviconUrl;
     favicon.type = imageMimeType(branding.faviconUrl);
+  }
+  const usesDefaultFavicon = branding.faviconUrl === defaultBranding.faviconUrl;
+  const darkFavicon = $("brandFaviconDark");
+  if (darkFavicon) {
+    darkFavicon.href = usesDefaultFavicon ? defaultDarkFaviconUrl : branding.faviconUrl;
+    darkFavicon.type = usesDefaultFavicon ? "image/png" : imageMimeType(branding.faviconUrl);
+  }
+  const appleTouchIcon = $("brandAppleTouchIcon");
+  if (appleTouchIcon) {
+    appleTouchIcon.href = usesDefaultFavicon ? defaultAppleTouchIconUrl : branding.faviconUrl;
+  }
+  const darkAppleTouchIcon = $("brandAppleTouchIconDark");
+  if (darkAppleTouchIcon) {
+    darkAppleTouchIcon.href = usesDefaultFavicon ? defaultDarkAppleTouchIconUrl : branding.faviconUrl;
   }
   document.documentElement.style.setProperty("--brand-primary", branding.primaryColor);
   document.documentElement.style.setProperty("--brand-primary-hover", brandHoverColor(branding.primaryColor));

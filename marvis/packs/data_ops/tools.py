@@ -84,7 +84,10 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
         ctx.task_id,
         seed=_seed(ctx),
     )
-    return _join_plan_payload(plan)
+    payload = _join_plan_payload(plan)
+    for join in payload.get("joins", []):
+        join["feature_name"] = _friendly_name(runtime.registry, join.get("feature_id"))
+    return payload
 
 
 def tool_confirm_join(inputs: dict, ctx) -> dict:
@@ -93,8 +96,12 @@ def tool_confirm_join(inputs: dict, ctx) -> dict:
     Confirmation is per-feature (the engine's forced-confirmation invariant): a
     feature whose join key is not unique requires a dedup strategy ("first"/"last")
     or the engine refuses. ``dedup_strategies`` maps feature_dataset_id -> strategy.
-    Features needing a strategy that wasn't supplied are surfaced as an actionable
-    error rather than silently joined.
+
+    A feature needing a strategy that wasn't supplied is reported in ``needs_dedup``
+    (status="needs_dedup") rather than HARD-FAILING the plan: the conversational flow
+    then reaches the C2 gate (which surfaces the conflicts), where the user supplies the
+    strategy and re-confirms. The mutating execute_join still refuses to run until every
+    spec is confirmed, so nothing is silently joined.
     """
     runtime = _runtime(ctx)
     join_plan_id = str(inputs["join_plan_id"])
@@ -112,12 +119,14 @@ def tool_confirm_join(inputs: dict, ctx) -> dict:
             confirmed.append(feature_id)
         except DedupRequiredError:
             needs_dedup.append(feature_id)
-    if needs_dedup:
-        raise DedupRequiredError(
-            "以下特征的拼接键不唯一,需先为其选择去重策略(first/last)再确认:"
-            + ", ".join(needs_dedup)
-        )
-    return {"join_plan_id": join_plan_id, "confirmed": confirmed, "status": "confirmed"}
+    return {
+        "join_plan_id": join_plan_id,
+        "confirmed": confirmed,
+        "needs_dedup": needs_dedup,
+        # friendly file names for the gate message (raw ids stay in needs_dedup for the picker)
+        "needs_dedup_labels": {fid: _friendly_name(runtime.registry, fid) for fid in needs_dedup},
+        "status": "needs_dedup" if needs_dedup else "confirmed",
+    }
 
 
 def tool_execute_join(inputs: dict, ctx) -> dict:
@@ -316,6 +325,17 @@ def _key_pair_payload(pair) -> dict:
 
 def _diagnostics_payload(diagnostics) -> dict:
     return asdict(diagnostics)
+
+
+def _friendly_name(registry, dataset_id) -> str:
+    """A human-readable file name for a dataset id (e.g. ``features.parquet``) so the
+    diagnostics / dedup gate show the source file rather than a raw ``ds_<hash>``."""
+    try:
+        dataset = registry.get(str(dataset_id))
+        source = getattr(dataset, "source_path", None)
+        return Path(source).name if source else str(dataset_id)
+    except Exception:
+        return str(dataset_id)
 
 
 def _join_plan_payload(plan) -> dict:

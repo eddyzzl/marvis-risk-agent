@@ -11,7 +11,8 @@ from marvis.orchestrator.contracts import (
     PlanStep,
     StepStatus,
 )
-from marvis.orchestrator.planner import ReplanError
+from marvis.llm_settings import LLMSettingsError
+from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.reviewer import FinalReview
 from marvis.plugins.runner import ToolResult
 
@@ -351,7 +352,11 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, ReplanError):
+        except (KeyError, PlanningError, LLMSettingsError):
+            # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
+            # planner cannot replan — that is NOT a flow error; swallow it and let the plan
+            # continue to its confirmation gate. PlanningError covers ReplanError + invalid
+            # replans; LLMSettingsError covers "no enabled model".
             return False
 
     def replan_from_instruction(self, plan_id: str, instruction: str) -> bool:
@@ -389,7 +394,11 @@ class PlanExecutor:
                 task_id=plan.task_id,
             )
             return True
-        except (KeyError, ReplanError):
+        except (KeyError, PlanningError, LLMSettingsError):
+            # Replan is a best-effort enhancement. In manual mode (no LLM configured) the
+            # planner cannot replan — that is NOT a flow error; swallow it and let the plan
+            # continue to its confirmation gate. PlanningError covers ReplanError + invalid
+            # replans; LLMSettingsError covers "no enabled model".
             return False
 
     def _try_append_explore_segment(self, plan: Plan, tier: CapabilityTier) -> bool:

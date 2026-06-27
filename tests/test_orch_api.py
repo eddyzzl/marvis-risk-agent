@@ -389,6 +389,7 @@ def test_create_app_can_create_feature_derivation_plan_from_goal(tmp_path):
         "compute_feature_metrics",
         "cross_features",
         "compute_feature_metrics",
+        "screen_features",  # FEAT-3: derivation ends in a leakage-aware screening step
     ]
     assert [step["title"] for step in plan["steps"] if step["decision_point"]] == ["衍生特征"]
 

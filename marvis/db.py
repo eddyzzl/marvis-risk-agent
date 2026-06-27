@@ -165,6 +165,12 @@ def init_db(db_path: Path) -> None:
         _ensure_column(
             conn,
             table="tasks",
+            column="capability_tier",
+            definition="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
             column="notebook_path",
             definition="TEXT",
         )
@@ -594,6 +600,7 @@ class TaskRepository:
             feature_columns=list(payload.feature_columns),
             recipes=list(payload.recipes),
             metrics=list(payload.metrics),
+            capability_tier=payload.capability_tier,
             notebook_path=payload.notebook_path,
             sample_path=payload.sample_path,
             pmml_path=payload.pmml_path,
@@ -612,12 +619,12 @@ class TaskRepository:
                 (
                     id, task_type, model_name, model_version, validator, source_dir,
                     algorithm, run_mode, target_col, score_col, split_col,
-                    time_col, feature_columns_json, recipes_json, metrics_json, notebook_path, sample_path,
+                    time_col, feature_columns_json, recipes_json, metrics_json, capability_tier, notebook_path, sample_path,
                     pmml_path, dictionary_path, report_values_json,
                     report_values_revision, status, status_message,
                     status_reason_code, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -635,6 +642,7 @@ class TaskRepository:
                     _dump_json_list(record.feature_columns),
                     _dump_json_list(record.recipes),
                     _dump_json_list(record.metrics),
+                    record.capability_tier,
                     record.notebook_path,
                     record.sample_path,
                     record.pmml_path,
@@ -2812,6 +2820,15 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         train_r2=_optional_float(payload.get("train_r2")),
         test_r2=_optional_float(payload.get("test_r2")),
         oot_r2=_optional_float(payload.get("oot_r2")),
+        train_macro_auc=_optional_float(payload.get("train_macro_auc")),
+        test_macro_auc=_optional_float(payload.get("test_macro_auc")),
+        oot_macro_auc=_optional_float(payload.get("oot_macro_auc")),
+        train_logloss=_optional_float(payload.get("train_logloss")),
+        test_logloss=_optional_float(payload.get("test_logloss")),
+        oot_logloss=_optional_float(payload.get("oot_logloss")),
+        train_accuracy=_optional_float(payload.get("train_accuracy")),
+        test_accuracy=_optional_float(payload.get("test_accuracy")),
+        oot_accuracy=_optional_float(payload.get("oot_accuracy")),
     )
 
 
@@ -2945,6 +2962,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         feature_columns=_load_json_list(row["feature_columns_json"]),
         recipes=_load_json_list(row["recipes_json"]),
         metrics=_load_json_list(row["metrics_json"]),
+        capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],
         sample_path=row["sample_path"],
         pmml_path=row["pmml_path"],

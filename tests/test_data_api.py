@@ -142,7 +142,9 @@ def test_dataset_preview_masks_names_and_long_card_values(tmp_path):
     payload = preview.json()
     dumped = json.dumps(payload, ensure_ascii=False)
     profiles = {profile["name"]: profile for profile in payload["column_profiles"]}
-    assert profiles["customer_name"]["semantic_role"] == "categorical"
+    # customer_name is now detected as the 'name' identity element (join key §4) — still
+    # masked as an opaque token (PII), never surfaced raw.
+    assert profiles["customer_name"]["semantic_role"] == "name"
     assert profiles["customer_name"]["sample_values"][0].startswith("value:")
     assert payload["rows"][0]["customer_name"].startswith("value:")
     assert payload["rows"][0]["bank_card"].startswith("6222")

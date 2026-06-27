@@ -58,6 +58,10 @@ let globalBusyAction = null;
 let actionStatusOverride = null;
 let themePreference = "light";
 let currentTheme = "light";
+const browserChromeThemeColors = {
+  light: "#ffffff",
+  dark: "#181818",
+};
 let taskSearchQuery = "";
 let taskSortMode = "created_desc";
 let taskGroupMode = "none";
@@ -136,6 +140,7 @@ const taskTypeDefinitions = {
     sourcePlaceholder: "/path/to/feature-data",
     reportFields: false,
     metricField: true,
+    tierField: true,
     defaultRunMode: "",
     manualEnabled: true,
     manualModeDescription: "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
@@ -153,6 +158,7 @@ const taskTypeDefinitions = {
     sourceLabel: "数据材料目录",
     sourcePlaceholder: "/path/to/join-data",
     reportFields: false,
+    tierField: true,
     defaultRunMode: "",
     manualEnabled: true,
     manualModeDescription: "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
@@ -171,6 +177,7 @@ const taskTypeDefinitions = {
     sourcePlaceholder: "/path/to/modeling-data",
     reportFields: false,
     algorithmField: true,
+    tierField: true,
     defaultRunMode: "",
     manualEnabled: true,
     manualModeDescription: "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
@@ -272,6 +279,48 @@ const petDefinitions = {
     label: "贪吃、呆萌、胆小的小猫",
     kind: "spritesheet",
     asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f",
+  },
+  auditbot: {
+    name: "MARVIS",
+    label: "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot/spritesheet.webp",
+  },
+  "auditbot-pro": {
+    name: "MARVIS Pro",
+    label: "专业风格 3D 审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-pro/spritesheet.webp",
+  },
+  "auditbot-poly": {
+    name: "MARVIS Poly",
+    label: "低多边形硬表面审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-poly/spritesheet.webp",
+  },
+  "auditbot-ink": {
+    name: "MARVIS Ink",
+    label: "技术线稿风格审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-ink/spritesheet.webp",
+  },
+  "auditbot-clay": {
+    name: "MARVIS Clay",
+    label: "黏土与乙烯基质感审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-clay/spritesheet.webp",
+  },
+  "auditbot-comic": {
+    name: "MARVIS Comic",
+    label: "漫画描边风格审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-comic/spritesheet.webp",
+  },
+  "auditbot-pixel": {
+    name: "MARVIS Pixel",
+    label: "像素风审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-pixel/spritesheet.webp",
   },
 };
 
@@ -481,6 +530,9 @@ function updateAlgorithmFieldVisibility() {
   const runMode = document.querySelector('input[name="runMode"]:checked')?.value;
   _toggleConditionalField("createTaskAlgorithmField", Boolean(definition.algorithmField) && runMode === "manual");
   _toggleConditionalField("createTaskMetricField", Boolean(definition.metricField) && runMode === "manual");
+  // The capability tier only governs agent-mode autonomy (replan budget / explore),
+  // so the picker shows in agent mode (manual mode never replans). (TIER-IA, spec §5.1)
+  _toggleConditionalField("createTaskTierField", Boolean(definition.tierField) && runMode === "agent");
 }
 
 function _toggleConditionalField(id, show) {
@@ -516,7 +568,30 @@ function openTaskDialog(taskType = defaultTaskType) {
 function openTaskDialogFromCard(event) {
   const card = event.target.closest("[data-task-kind]");
   if (!card) return;
+  // Temporarily disabled task types (data-coming-soon) show a notice instead of opening
+  // the create dialog. Re-enable by removing the data-coming-soon attribute in index.html.
+  if (card.dataset.comingSoon) {
+    showComingSoonToast("新功能开发中，敬请期待");
+    return;
+  }
   openTaskDialog(card.dataset.taskKind || defaultTaskType);
+}
+
+let comingSoonToastTimer = null;
+function showComingSoonToast(message) {
+  let toast = $("comingSoonToast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "comingSoonToast";
+    toast.className = "coming-soon-toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add("is-visible");
+  if (comingSoonToastTimer) clearTimeout(comingSoonToastTimer);
+  comingSoonToastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
 }
 
 function openTaskTypeWelcome() {
@@ -906,10 +981,22 @@ function systemTheme() {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+function syncBrowserChromeTheme(theme = currentTheme) {
+  const resolvedTheme = theme === "dark" ? "dark" : "light";
+  const isDark = resolvedTheme === "dark";
+  const themeColor = $("appThemeColor") || document.querySelector('meta[name="theme-color"]');
+  if (themeColor) themeColor.setAttribute("content", browserChromeThemeColors[resolvedTheme]);
+  $("brandFavicon")?.setAttribute("media", isDark ? "not all" : "all");
+  $("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");
+  $("brandAppleTouchIcon")?.setAttribute("media", isDark ? "not all" : "all");
+  $("brandAppleTouchIconDark")?.setAttribute("media", isDark ? "all" : "not all");
+}
+
 function applyTheme(theme) {
   themePreference = ["light", "dark", "system"].includes(theme) ? theme : "light";
   currentTheme = themePreference === "system" ? systemTheme() : themePreference;
   document.body.dataset.theme = currentTheme;
+  syncBrowserChromeTheme(currentTheme);
   $("themeModeLabel").textContent = "设置";
   try {
     localStorage.setItem("marvis_theme", themePreference);
@@ -1007,6 +1094,7 @@ function restoreLayoutWidths() {
 }
 
 function applySidebarCollapsed(collapsed) {
+  const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();
   sidebarCollapsed = Boolean(collapsed);
   const shell = $("appShell");
   // Keep expanded text laid out at the expanded width while the grid column slides away.
@@ -1019,6 +1107,22 @@ function applySidebarCollapsed(collapsed) {
     sidebarSlideTimer = setTimeout(() => document.body.classList.remove("sidebar-sliding"), 340);
   }
   shell.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  window.requestAnimationFrame(() => {
+    if (shouldKeepPetOnLeftEdge) {
+      pinPetToWorkspaceLeftEdge({ persist: true });
+    } else {
+      ensurePetWithinViewport({ persist: true });
+    }
+    if (document.body.classList.contains("anim-ready")) {
+      window.setTimeout(() => {
+        if (shouldKeepPetOnLeftEdge) {
+          pinPetToWorkspaceLeftEdge({ persist: true });
+        } else {
+          ensurePetWithinViewport({ persist: true });
+        }
+      }, 340);
+    }
+  });
   const button = $("sidebarCollapseButton");
   button.setAttribute("aria-expanded", String(!sidebarCollapsed));
   button.setAttribute("aria-label", sidebarCollapsed ? "展开侧栏" : "收起侧栏");
@@ -1269,7 +1373,10 @@ function restorePetPreference() {
 function applyPetPosition(left, top) {
   const pet = $("petCompanion");
   if (!pet) return;
-  pet.style.left = `${Math.round(left)}px`;
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  const offsetLeft = workspace ? left - workspace.left : left;
+  pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);
+  pet.style.left = "";
   pet.style.top = `${Math.round(top)}px`;
   pet.style.right = "auto";
   pet.style.bottom = "auto";
@@ -1277,7 +1384,10 @@ function applyPetPosition(left, top) {
 
 function savePetPosition(left, top) {
   try {
-    localStorage.setItem("marvis_pet_position", JSON.stringify({ left, top }));
+    const workspace = $("validationWorkspace")?.getBoundingClientRect();
+    const payload = { left, top };
+    if (workspace) payload.workspaceOffsetLeft = left - workspace.left;
+    localStorage.setItem("marvis_pet_position", JSON.stringify(payload));
   } catch (_) {
     // Drag position persistence is optional in restricted notebook browsers.
   }
@@ -1286,27 +1396,76 @@ function savePetPosition(left, top) {
 function restorePetPosition() {
   try {
     const stored = JSON.parse(localStorage.getItem("marvis_pet_position") || "{}");
-    if (Number.isFinite(stored.left) && Number.isFinite(stored.top)) {
-      const next = clampPetPosition(stored.left, stored.top);
+    const workspace = $("validationWorkspace")?.getBoundingClientRect();
+    const storedLeft =
+      workspace && Number.isFinite(stored.workspaceOffsetLeft)
+        ? workspace.left + stored.workspaceOffsetLeft
+        : stored.left;
+    if (Number.isFinite(storedLeft) && Number.isFinite(stored.top)) {
+      const next = clampPetPosition(storedLeft, stored.top);
       applyPetPosition(next.left, next.top);
-      if (next.left !== stored.left || next.top !== stored.top) {
+      if (
+        next.left !== stored.left ||
+        next.top !== stored.top ||
+        !Number.isFinite(stored.workspaceOffsetLeft)
+      ) {
         savePetPosition(next.left, next.top);
       }
     }
   } catch (_) {
-    // Keep the default fixed bottom-right position.
+    // Keep the default fixed bottom-left workspace position.
   }
+}
+
+function petCssPx(name, fallback) {
+  const pet = $("petCompanion");
+  const host = pet || $("appShell") || document.documentElement;
+  const value = getComputedStyle(host).getPropertyValue(name);
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function petDragBounds() {
   const pet = $("petCompanion");
   const workspace = $("validationWorkspace")?.getBoundingClientRect();
   const padding = 14;
-  const minLeft = Math.max(padding, workspace ? workspace.left + padding : padding);
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);
+  const minLeft = Math.max(
+    padding,
+    workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset,
+  );
   const minTop = Math.max(padding, workspace ? workspace.top + padding : padding);
   const maxLeft = Math.max(minLeft, window.innerWidth - (pet?.offsetWidth || 104) - padding);
   const maxTop = Math.max(minTop, window.innerHeight - (pet?.offsetHeight || 116) - padding);
   return { minLeft, minTop, maxLeft, maxTop };
+}
+
+function petWorkspaceOffset() {
+  const pet = $("petCompanion");
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  if (!pet || !workspace) return null;
+  return pet.getBoundingClientRect().left - workspace.left;
+}
+
+function petIsPinnedToWorkspaceLeftEdge() {
+  const pet = $("petCompanion");
+  if (!pet || pet.classList.contains("hidden")) return false;
+  const offset = petWorkspaceOffset();
+  if (!Number.isFinite(offset)) return false;
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
+  return Math.abs(offset - minWorkspaceOffset) <= 2;
+}
+
+function pinPetToWorkspaceLeftEdge(options = {}) {
+  const { persist = false } = options;
+  const pet = $("petCompanion");
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  if (!pet || !workspace || pet.classList.contains("hidden")) return;
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
+  const rect = pet.getBoundingClientRect();
+  const next = clampPetPosition(workspace.left + minWorkspaceOffset, rect.top);
+  applyPetPosition(next.left, next.top);
+  if (persist) savePetPosition(next.left, next.top);
 }
 
 function clampPetPosition(left, top) {
@@ -1909,32 +2068,73 @@ function setV2WorkspaceStatus(message = "", kind = "") {
   status.className = ["status", kind].filter(Boolean).join(" ");
 }
 
+function v2RuntimePlatformActions() {
+  const showV2Error = (message) => {
+    setV2WorkspaceStatus(message || "操作失败", "error");
+  };
+  const showV2Message = (message) => {
+    setV2WorkspaceStatus(message || "操作已完成。", "success");
+  };
+  return {
+    pluginActions: {
+      showError: showV2Error,
+      confirmRemove: (name) => showPlatformConfirm({
+        title: "移除插件",
+        message: `确定移除插件「${name}」？移除后该插件提供的工具将不可用。`,
+        confirmText: "移除",
+        cancelText: "取消",
+        tone: "danger",
+      }),
+    },
+    skillActions: {
+      showError: showV2Error,
+    },
+    draftActions: {
+      showError: showV2Error,
+      showMessage: showV2Message,
+      confirmPromote: (id) => showPlatformConfirm({
+        title: "转正草稿工具",
+        message: `确定将草稿「${id}」转正到可信工具注册表？`,
+        confirmText: "转正",
+        cancelText: "取消",
+      }),
+    },
+    memoryActions: {
+      showError: showV2Error,
+      showMessage: showV2Message,
+    },
+  };
+}
+
 function mountV2Runtime() {
   const root = $("v2RuntimeMount");
-  return root ? mountV2(root, { taskId: () => selectedTaskId }) : null;
+  return root ? mountV2(root, { taskId: () => selectedTaskId, ...v2RuntimePlatformActions() }) : null;
 }
 
 async function refreshV2Plugins() {
   const mounted = mountV2Runtime();
   if (!mounted) return;
+  const actions = v2RuntimePlatformActions();
   setV2WorkspaceStatus("正在读取插件...");
-  await renderPluginManager(mounted.panels.pluginPanel);
+  await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions);
   setV2WorkspaceStatus("插件已更新。", "success");
 }
 
 async function refreshV2Skills() {
   const mounted = mountV2Runtime();
   if (!mounted) return;
+  const actions = v2RuntimePlatformActions();
   setV2WorkspaceStatus("正在读取 Workflow 模板...");
-  await renderSkillManager(mounted.panels.skillPanel);
+  await renderSkillManager(mounted.panels.skillPanel, actions.skillActions);
   setV2WorkspaceStatus("Workflow 模板已更新。", "success");
 }
 
 async function refreshV2Capability() {
   const mounted = mountV2Runtime();
   if (!mounted) return;
+  const actions = v2RuntimePlatformActions();
   setV2WorkspaceStatus("正在读取能力档位...");
-  await renderTierSettings(mounted.panels.capabilityPanel);
+  await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions);
   setV2WorkspaceStatus("能力档位已更新。", "success");
 }
 
@@ -3916,6 +4116,13 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
           ? '<span class="plan-step-await">待确认</span>'
           : '<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">确认</button>')
         : "";
+      // Download sits inline on the producing report step (spec §9: like validation's
+      // step-action-button), not floating at the rail bottom.
+      const isReportDone = (ref.tool === "generate_model_report" || ref.tool === "generate_feature_report")
+        && status === "done";
+      const download = isReportDone
+        ? '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>'
+        : "";
       const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
       return [
         `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,
@@ -3926,6 +4133,7 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
         descriptionHtml,
         "</span>",
         awaiting,
+        download,
         "</div>",
       ].join("");
     }),
@@ -4024,16 +4232,9 @@ function planRailHtml(plan, { blocked = false } = {}) {
   const startControl = awaitingStart
     ? '<div class="plan-rail-start"><button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">开始执行</button></div>'
     : "";
-  // Download button once a report-producing step (model / feature report) has run.
-  const reportDone = steps.some((step) => {
-    const tool = (step.tool_ref || {}).tool;
-    return (tool === "generate_model_report" || tool === "generate_feature_report")
-      && (step.status || "") === "done";
-  });
-  const downloadControl = reportDone
-    ? '<div class="plan-rail-download"><button type="button" class="button compact secondary" data-driver-report-download="1">下载报告</button></div>'
-    : "";
-  return phasesHtml + startControl + downloadControl;
+  // The report download now lives inline on the producing step row (see
+  // planSubstepGroupHtml), not as a floating button at the rail bottom.
+  return phasesHtml + startControl;
 }
 
 function renderWorkflowStepper({ force = false } = {}) {
@@ -4178,6 +4379,31 @@ function applyTaskFilters(tasks = taskCache) {
     .sort(compareTasks);
 }
 
+// Layered, multi-tone glyphs for the six task kinds — one shared source used by
+// the sidebar rows and the task-hero snapshot. Mirrors the welcome-card icons
+// in index.html; classes (back/mid/cut/cs/cst/ln) are themed in styles.css.
+const TASK_KIND_GLYPHS = {
+  data_join:
+    '<rect class="back" x="3" y="8" width="10.5" height="10.5" rx="3"></rect><rect class="mid" x="6.75" y="6.75" width="10.5" height="10.5" rx="3"></rect><rect x="10.5" y="5.5" width="10.5" height="10.5" rx="3"></rect><rect class="cut" x="13" y="8.7" width="5.5" height="1.3" rx="0.65"></rect><rect class="cut" x="13" y="11.2" width="3.8" height="1.3" rx="0.65"></rect>',
+  feature_analysis:
+    '<rect class="back" x="4.4" y="16.6" width="17" height="3.4" rx="1.6"></rect><rect x="5" y="10.5" width="3.2" height="6.6" rx="1"></rect><rect x="9.2" y="7.5" width="3.2" height="9.6" rx="1"></rect><rect x="13.4" y="5" width="3.2" height="12.1" rx="1"></rect><rect x="17.6" y="9" width="3.2" height="8.1" rx="1"></rect>',
+  vintage:
+    '<rect class="back" x="3.5" y="6" width="17" height="12.5" rx="2"></rect><path class="ln vintage-calendar-binding" d="M7.2 4.8v2.8M16.8 4.8v2.8"></path><path class="ln" d="M6.3 15.5 9.6 12.7 13 14.1 17.8 10"></path>',
+  modeling:
+    '<rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect><path class="mid" d="M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z"></path><circle class="cut" cx="5.5" cy="6.2" r="0.82"></circle><circle class="cut" cx="7.7" cy="6.2" r="0.82"></circle><circle class="cut" cx="9.9" cy="6.2" r="0.82"></circle><path class="cs" d="M8.2 11.2 11 13.8 8.2 16.4"></path><rect class="cut" x="12" y="14.9" width="4" height="1.5" rx="0.75"></rect>',
+  validation:
+    '<rect class="back" x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect><rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect><rect class="mid" x="7.75" y="3.7" width="6" height="2.2" rx="1.1"></rect><rect class="cut" x="7.4" y="9" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="12" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="15" width="4.4" height="1.2" rx="0.6"></rect><circle class="cut" cx="16.6" cy="17.6" r="4.9"></circle><circle cx="16.6" cy="17.6" r="4"></circle><path class="cst" d="M14.8 17.7 16 18.9 18.4 16.4"></path>',
+  strategy:
+    '<rect class="back" x="4" y="13.8" width="16" height="4.6" rx="1.8"></rect><rect class="mid" x="4" y="9.6" width="16" height="4.6" rx="1.8"></rect><rect x="4" y="5" width="16" height="5.6" rx="1.8"></rect><rect class="cut" x="6.6" y="6.2" width="7.2" height="1.3" rx="0.65"></rect><rect class="cut" x="6.6" y="8.1" width="4.6" height="1.3" rx="0.65"></rect>',
+};
+
+function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
+  const kind = typeof taskOrType === "string" ? taskOrType : taskOrType?.task_type;
+  const safeKind = TASK_KIND_GLYPHS[kind] ? kind : defaultTaskType;
+  const cls = "task-kind-icon" + (extraClass ? ` ${extraClass}` : "");
+  return `<svg class="${cls}" data-kind="${escapeHtml(safeKind)}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${TASK_KIND_GLYPHS[safeKind] || ""}</svg>`;
+}
+
 function appendTaskRow(list, task) {
   const item = document.createElement("div");
   item.className = "task-row-shell";
@@ -4189,11 +4415,13 @@ function appendTaskRow(list, task) {
   row.setAttribute("aria-current", task.id === selectedTaskId ? "true" : "false");
   const tone = taskStatusTone(task);
   const validatorName = escapeHtml(task.validator || "-");
-  const typeLabel = escapeHtml(taskTypeLabel(task));
   row.innerHTML = [
     '<span class="task-row-top">',
+    '<span class="task-row-title">',
+    taskKindIconHtml(task),
     `<strong class="task-row-name">${escapeHtml(task.model_name)}</strong>`,
-    `<span class="task-row-badges"><span class="pill neutral">${typeLabel}</span><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
+    "</span>",
+    `<span class="task-row-badges"><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
     "</span>",
     '<span class="task-row-meta">',
     `<small class="task-row-validator" aria-label="验证人员：${validatorName}">`,
@@ -4251,9 +4479,9 @@ function renderTaskSnapshot() {
   snapshot.className = "workspace-task-meta";
   snapshot.innerHTML = [
     '<div class="task-snapshot-list">',
-    snapshotItem("type", "任务类型", taskTypeLabel(selectedTask)),
+    snapshotItem("type", "任务类型", taskTypeLabel(selectedTask), taskKindIconHtml(selectedTask, "meta-kind-ico")),
     snapshotItem("mode", "执行模式", runModeLabel(selectedTask.run_mode)),
-    snapshotItem("folder", "材料目录", selectedTask.source_dir),
+    snapshotItem("folder", "材料目录", selectedTask.source_dir, null, { copy: selectedTask.source_dir }),
     "</div>",
   ].join("");
 }
@@ -4268,13 +4496,20 @@ function metaIcon(name) {
   return `<svg class="meta-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
 }
 
-function snapshotItem(icon, label, value) {
+function snapshotItem(icon, label, value, iconHtml, options = {}) {
+  const valueHtml = options.copy
+    ? [
+        `<button class="task-snapshot-copy" type="button" data-copy="${escapeHtml(options.copy)}" aria-label="复制${escapeHtml(label)}路径" title="点击复制路径">`,
+        `<strong>${escapeHtml(value)}</strong>`,
+        "</button>",
+      ].join("")
+    : `<strong>${escapeHtml(value)}</strong>`;
   return [
     '<div class="task-snapshot-item task-meta-tile">',
-    metaIcon(icon),
+    iconHtml || metaIcon(icon),
     '<div class="task-snapshot-text">',
     `<span>${escapeHtml(label)}</span>`,
-    `<strong>${escapeHtml(value)}</strong>`,
+    valueHtml,
     "</div>",
     "</div>",
   ].join("");
@@ -5583,6 +5818,23 @@ function renderAgentAcceptanceModePreference() {
   if (select.value !== agentAcceptanceMode) select.value = agentAcceptanceMode;
   const chip = select.closest(".agent-composer-acceptance");
   if (chip) chip.dataset.acceptanceMode = agentAcceptanceMode;
+  // Relabel the auto-accept option per task type so the chip reads naturally for the
+  // current flow (自动拼接/分析/建模) instead of always "自动审查".
+  const autoOption = select.querySelector('option[value="auto_accept"]');
+  if (autoOption) autoOption.textContent = autoAcceptLabel(selectedTask?.task_type);
+}
+
+function autoAcceptLabel(taskType) {
+  switch (taskType) {
+    case "data_join":
+      return "自动拼接";
+    case "feature_analysis":
+      return "自动分析";
+    case "modeling":
+      return "自动建模";
+    default:
+      return "自动审查";
+  }
 }
 
 function requestAgentConversationScrollToLatest() {
@@ -6289,6 +6541,19 @@ function driverManualAnalysisHtml(messages) {
       sections.push(`<section class="driver-analysis-section">${intro}${agentMessageC1FormHtml(message)}</section>`);
       continue;
     }
+    if (meta.screen) {
+      // §4 interactive screening: render the editable selection table instead of the
+      // read-only metric tables, so the user can adjust the proposed feature set.
+      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageScreenTableHtml(message)}</section>`);
+      continue;
+    }
+    if (meta.dedup) {
+      // §4 join dedup gate: show the diagnostics tables AND the per-feature dedup picker
+      // (the user resolves non-unique-key conflicts before the join executes).
+      const diagTables = agentMessageTablesHtml(message);
+      sections.push(`<section class="driver-analysis-section">${intro}${diagTables}${agentMessageDedupPickerHtml(message)}</section>`);
+      continue;
+    }
     const tables = agentMessageTablesHtml(message);
     if (!String(message.content || "").trim() && !tables) continue;
     sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
@@ -6573,6 +6838,176 @@ function handleC1ConfirmClick(event) {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleC1ConfirmClick);
+}
+
+// §4 interactive feature-screening table (manual mode). Rendered from
+// message.metadata.screen: rows = screened features (proposed keep + leakage /
+// suspected / unusable buckets), metric columns (KS / IV / missing), a checkbox
+// per feature (pre-checked = the screen's proposed set), and a 确认所选特征 button
+// that posts {content:"确认", selection:[checked]} so the backend overrides the
+// screen step's `selected` and trains on exactly the user's chosen features.
+function screenNum(value) {
+  const n = Number(value);
+  return value === null || value === undefined || Number.isNaN(n) ? "n/a" : n.toFixed(4);
+}
+function screenPct(value) {
+  const n = Number(value);
+  return value === null || value === undefined || Number.isNaN(n) ? "n/a" : (n * 100).toFixed(1) + "%";
+}
+function agentMessageScreenTableHtml(message) {
+  const screen = message?.metadata?.screen;
+  if (!screen || typeof screen !== "object") return "";
+  const messageId = message?.id ? String(message.id) : "";
+  const scores = screen.scores && typeof screen.scores === "object" ? screen.scores : {};
+  const selectedSet = new Set((screen.selected || []).map((value) => String(value)));
+  const badges = {
+    keep: '<span class="screen-badge keep">入选</span>',
+    leakage: '<span class="screen-badge leak">泄漏</span>',
+    suspected: '<span class="screen-badge susp">疑似</span>',
+    unusable: '<span class="screen-badge unusable">不可用</span>',
+  };
+  const row = (feature, ks, category) => {
+    const name = String(feature);
+    const stats = scores[name] && typeof scores[name] === "object" ? scores[name] : {};
+    const ksValue = ks === undefined ? stats.ks : ks;
+    const checked = selectedSet.has(name);
+    const disabled = category === "unusable"; // constant/sparse — no signal to select
+    return `<tr class="screen-row screen-${category}">
+      <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" value="${escapeHtml(name)}"${checked ? " checked" : ""}${disabled ? " disabled" : ""} /></td>
+      <td class="screen-feat">${escapeHtml(name)}</td>
+      <td>${screenNum(ksValue)}</td>
+      <td>${screenNum(stats.iv)}</td>
+      <td>${screenPct(stats.missing_rate)}</td>
+      <td>${badges[category] || ""}</td>
+    </tr>`;
+  };
+  const tuple = (item) => (Array.isArray(item) ? item : [item]);
+  const rows = [];
+  for (const feature of screen.selected || []) rows.push(row(feature, undefined, "keep"));
+  for (const item of screen.leakage || []) rows.push(row(tuple(item)[0], tuple(item)[1], "leakage"));
+  for (const item of screen.suspected || []) rows.push(row(tuple(item)[0], tuple(item)[1], "suspected"));
+  for (const item of (screen.unusable || []).slice(0, 50)) rows.push(row(tuple(item)[0], null, "unusable"));
+  const thresholds = screen.thresholds && typeof screen.thresholds === "object" ? screen.thresholds : {};
+  const leakageKs = thresholds.leakage_ks ?? 0.4;
+  const note = `共筛 ${screen.n_screened ?? rows.length} 列;泄漏阈值 KS≥${leakageKs}。勾选=入选,可硬选泄漏/疑似列;确认后用所选特征训练。`;
+  return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}">
+    <div class="screen-table-scroll">
+      <table class="screen-table">
+        <thead><tr><th>选</th><th>特征</th><th>KS</th><th>IV</th><th>缺失率</th><th>类别</th></tr></thead>
+        <tbody>${rows.join("")}</tbody>
+      </table>
+    </div>
+    <div class="screen-table-foot">
+      <span class="screen-note">${escapeHtml(note)}</span>
+      <button type="button" class="button compact primary screen-confirm" data-screen-confirm="${escapeHtml(messageId)}">确认所选特征</button>
+    </div>
+  </div>`;
+}
+
+async function submitScreenSelection(button) {
+  const wrap = button.closest(".screen-table-wrap");
+  const taskId = selectedTaskId;
+  if (!wrap || !taskId) return;
+  const selection = [];
+  for (const box of wrap.querySelectorAll(".screen-pick:checked")) {
+    if (!box.disabled) selection.push(box.value);
+  }
+  if (!selection.length) {
+    setActionStatus("请至少勾选一个特征。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "确认", selection, acceptance_mode: agentAcceptanceModeValue() }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "确认所选特征失败", "error");
+  }
+}
+
+function handleScreenConfirmClick(event) {
+  const button = event.target?.closest?.("[data-screen-confirm]");
+  if (!button) return;
+  event.preventDefault();
+  void submitScreenSelection(button);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleScreenConfirmClick);
+}
+
+// §4 join dedup picker (manual mode). Rendered from message.metadata.dedup at the
+// execute-join gate when a feature table's join key is non-unique: a first/last
+// <select> per conflicting feature + an 应用去重并确认 button that posts
+// {content:"确认", dedup_strategies:{feature_id:strategy}} so confirm_join re-runs,
+// resolves the same-key conflicts, and the gate clears for the final execute confirm.
+const DEDUP_STRATEGY_LABELS = { first: "保留首条 (first)", last: "保留末条 (last)" };
+function agentMessageDedupPickerHtml(message) {
+  const dedup = message?.metadata?.dedup;
+  if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
+  const messageId = message?.id ? String(message.id) : "";
+  const strategies = Array.isArray(dedup.strategies) && dedup.strategies.length ? dedup.strategies : ["first", "last"];
+  const rows = dedup.features
+    .map((feature) => {
+      const fid = String(feature.feature_id);
+      const conflicts = feature.conflict_keys ? `${feature.conflict_keys} 个同键冲突` : "拼接键不唯一";
+      const options = strategies
+        .map((s) => `<option value="${escapeHtml(String(s))}">${escapeHtml(DEDUP_STRATEGY_LABELS[s] || String(s))}</option>`)
+        .join("");
+      return `<tr>
+      <td class="dedup-feat">${escapeHtml(fid)}</td>
+      <td>${escapeHtml(conflicts)}</td>
+      <td><select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}">${options}</select></td>
+    </tr>`;
+    })
+    .join("");
+  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}">
+    <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
+    <table class="dedup-table">
+      <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="dedup-foot">
+      <button type="button" class="button compact primary dedup-confirm" data-dedup-confirm="${escapeHtml(messageId)}">应用去重并确认</button>
+    </div>
+  </div>`;
+}
+
+async function submitDedupStrategies(button) {
+  const form = button.closest(".dedup-picker");
+  const taskId = selectedTaskId;
+  if (!form || !taskId) return;
+  const dedup_strategies = {};
+  for (const select of form.querySelectorAll(".dedup-strategy")) {
+    const fid = select.getAttribute("data-dedup-feature");
+    if (fid) dedup_strategies[fid] = select.value;
+  }
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "确认", dedup_strategies, acceptance_mode: agentAcceptanceModeValue() }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "应用去重失败", "error");
+  }
+}
+
+function handleDedupConfirmClick(event) {
+  const button = event.target?.closest?.("[data-dedup-confirm]");
+  if (!button) return;
+  event.preventDefault();
+  void submitDedupStrategies(button);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDedupConfirmClick);
 }
 
 // In manual mode there is no free-text composer, so a needs-confirmation gate
@@ -6891,6 +7326,11 @@ async function createTask() {
   // per-feature metrics are always computed (spec §2: 选了才算).
   if (definition.metricField && selectedRunMode === "manual") {
     payload.metrics = [...document.querySelectorAll('input[name="featureMetric"]:checked')].map((box) => box.value);
+  }
+  // Agent-mode capability tier (TIER-IA): per-task autonomy budget; "" = global default.
+  if (definition.tierField && selectedRunMode === "agent") {
+    const tier = $("createTaskTier")?.value;
+    if (tier) payload.capability_tier = tier;
   }
   if (materialSourceController.mode() === "upload") {
     const files = materialSourceController.selectedFiles();
@@ -7662,7 +8102,10 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("click", (event) => {
   const copyButton = event.target.closest("[data-copy]");
-  if (copyButton) copyText(copyButton.dataset.copy);
+  if (copyButton) {
+    event.preventDefault();
+    copyText(copyButton.dataset.copy);
+  }
 });
 document.addEventListener("click", closeSidebarSettingsOnOutsideClick);
 

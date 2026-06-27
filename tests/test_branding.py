@@ -44,6 +44,26 @@ def test_default_marvis_logo_assets_are_transparent_squares():
         assert image.getchannel("A").getextrema()[1] == 255
 
 
+def test_default_browser_chrome_icons_have_mode_specific_backgrounds():
+    expected_sizes = {
+        "marvis/static/brand/marvis-favicon-dark.png": 128,
+        "marvis/static/brand/marvis-apple-touch-icon.png": 180,
+        "marvis/static/brand/marvis-apple-touch-icon-dark.png": 180,
+        "marvis/static/brand/marvis-app-icon-192.png": 192,
+        "marvis/static/brand/marvis-app-icon-512.png": 512,
+    }
+    for relative_path, size in expected_sizes.items():
+        image = Image.open(PROJECT_ROOT / relative_path).convert("RGBA")
+        assert image.size == (size, size)
+        assert image.getchannel("A").getextrema()[1] == 255
+
+    dark_icon = Image.open(PROJECT_ROOT / "marvis/static/brand/marvis-favicon-dark.png").convert("RGBA")
+    light_icon = Image.open(PROJECT_ROOT / "marvis/static/brand/marvis-apple-touch-icon.png").convert("RGBA")
+
+    assert dark_icon.getpixel((64, 4))[:3] == (24, 24, 24)
+    assert light_icon.getpixel((90, 4))[:3] == (245, 245, 247)
+
+
 def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
     client = _client(tmp_path)
 
@@ -54,7 +74,7 @@ def test_branding_defaults_to_public_marvis_without_config(tmp_path: Path):
         "platformName": "MARVIS-全能风控智能体",
         "browserTitle": "MARVIS-全能风控智能体",
         "primaryColor": "#303034",
-        "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+        "logoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
         "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
         "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},
@@ -170,6 +190,11 @@ def test_index_html_is_prebranded_from_workspace_config(tmp_path: Path):
     html = response.text
     assert "<title>本地智能模型验证平台</title>" in html
     assert f'href="{branding["faviconUrl"]}"' in html
+    assert 'id="brandFaviconDark"' in html
+    assert 'id="brandAppleTouchIconDark"' in html
+    assert "static/brand/marvis-favicon-dark.png" not in html
+    assert "static/brand/marvis-apple-touch-icon-dark.png" not in html
+    assert '<meta name="apple-mobile-web-app-title" content="本地风控模型验证平台" />' in html
     assert f'src="{branding["logoUrl"]}"' in html
     assert f'src="{branding["workspaceLogoUrl"]}"' in html
     assert 'alt="本地风控模型验证平台 logo"' in html
@@ -204,7 +229,7 @@ def test_branding_ignores_unsafe_asset_paths(tmp_path: Path):
         "platformName": "Private",
         "browserTitle": "Private",
         "primaryColor": "#303034",
-        "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+        "logoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
         "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
         "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
         "validatorAliases": {},

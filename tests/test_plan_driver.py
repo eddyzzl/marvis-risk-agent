@@ -168,6 +168,84 @@ def test_driver_plan_overview_gate_waits_for_kaishi(tmp_path):
     assert {s.id: s.status for s in repo.load_plan("plan-1").steps}["screen"] == StepStatus.DONE
 
 
+def test_screen_gate_carries_structured_screen_payload(tmp_path):
+    """The screening gate message carries a structured ``metadata.screen`` pass-through
+    (selected/buckets/scores + the screen step id + the gating thresholds) so the
+    frontend §4 interactive selection table is a thin consumer."""
+    driver, repo = _driver(tmp_path)
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    screen = turn.messages[0].metadata.get("screen")
+    assert screen is not None
+    assert screen["selected"] == ["sig1", "sig2"]
+    assert screen["step_id"] == "screen"  # an edited selection is confirmed against this step
+    assert [row[0] for row in screen["leakage"]] == ["leak_col"]
+    assert screen["thresholds"] == {"leakage_ks": 0.40, "max_missing_rate": 0.95}
+
+
+def test_render_screen_shows_metric_columns_and_buckets():
+    """Enriched screen render: per-feature KS/IV/missing columns + leakage/suspected/
+    unusable buckets with reasons (not just a list of feature names)."""
+    text, tables = render_tool_output("screen_features", {
+        "selected": ["sig1"],
+        "ranked": [["sig1", 0.21]],
+        "leakage": [["leak_col", 0.55, "univariate KS 0.550 >= 0.4 — suspected target leakage"]],
+        "suspected": [["score_x", 0.30, "name looks like a model output/score"]],
+        "unusable": [["const_col", "only 1 distinct non-null value(s)"]],
+        "scores": {"sig1": {"ks": 0.21, "iv": 0.18, "missing_rate": 0.03}},
+        "n_screened": 4,
+    })
+
+    assert "不可用" in text
+    selected_table = next(t for t in tables if t["title"].startswith("入选特征"))
+    assert selected_table["columns"] == ["特征", "KS", "IV", "缺失率"]
+    assert selected_table["rows"][0][0] == "sig1"
+    assert "3.0%" in selected_table["rows"][0]  # missing_rate rendered as a percentage
+    titles = " ".join(t["title"] for t in tables)
+    assert "疑似泄漏" in titles and "疑似模型输出" in titles and "不可用" in titles
+
+
+def test_resume_with_selection_overrides_screen_output(tmp_path):
+    """Confirming the screening gate with an edited selection overrides the screen
+    step's proposed ``selected`` so downstream ``$ref:...output.selected`` trains on
+    exactly the user's chosen features."""
+    driver, repo = _driver(tmp_path)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at tune gate; screen DONE with [sig1, sig2]
+
+    driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, selection=["sig1"])
+
+    assert repo.load_step_output("screen")["selected"] == ["sig1"]
+
+
+def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path):
+    """An edited selection may re-pick among screened features — including force-selecting
+    a flagged (leakage) column — but cannot inject a column the screen never saw."""
+    driver, repo = _driver(tmp_path)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    driver.resume(
+        plan_id="plan-1", user_text="确认", run_seq=1,
+        selection=["sig1", "leak_col", "never_screened"],  # force-select leakage; drop unknown
+    )
+
+    assert repo.load_step_output("screen")["selected"] == ["sig1", "leak_col"]
+
+
+def test_resume_empty_or_unknown_selection_keeps_proposed(tmp_path):
+    """A selection that resolves to nothing is ignored (keep the proposed set) rather
+    than training on zero features."""
+    driver, repo = _driver(tmp_path)
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, selection=["never_screened"])
+
+    assert repo.load_step_output("screen")["selected"] == ["sig1", "sig2"]
+
+
 class FakeRouterLLM:
     """Returns a fixed instruction-route JSON (agent-mode gate instruction)."""
 
@@ -291,16 +369,98 @@ def test_render_registry_has_modeling_renderers_and_generic_fallback():
     assert "已完成" in text2
 
 
-def test_render_tune_leaderboard_includes_auc_and_head_lift_columns():
-    """The tune leaderboard surfaces each trial's test AUC + 头部lift10% (spec columns),
-    not just KS."""
+def test_render_propose_join_surfaces_fingerprint_consistency_column():
+    """C2 shows a 指纹(raw=md5?) column per spec §5: ✓ when key formats match,
+    ✗ raw≠md5 when one side is raw and the other md5 (transform_side != 'both')."""
+    _text, tables = render_tool_output("propose_join", {
+        "joins": [
+            {
+                "feature_id": "feat_ok",
+                "key_pairs": [{"anchor_col": "mobile", "feature_col": "mobile", "transform_side": "both"}],
+                "diagnostics": {"match_rate": 0.99, "feature_key_unique": True, "fan_out_detected": False},
+            },
+            {
+                "feature_id": "feat_md5",
+                "key_pairs": [{"anchor_col": "mobile", "feature_col": "mobile_md5", "transform_side": "feature"}],
+                "diagnostics": {"match_rate": 0.95, "feature_key_unique": True, "fan_out_detected": False},
+            },
+        ],
+    })
+    table = next(t for t in tables if t["title"].startswith("拼接诊断"))
+    assert "指纹(raw=md5?)" in table["columns"]
+    fp_idx = table["columns"].index("指纹(raw=md5?)")
+    cells = {row[0]: row[fp_idx] for row in table["rows"]}
+    assert cells["feat_ok"] == "✓"
+    assert "✗" in cells["feat_md5"] and "raw≠md5" in cells["feat_md5"]
+    assert "键指纹不一致" in _text  # the mismatch warning fired
+
+
+def test_render_make_split_surfaces_split_counts_and_group_distribution():
+    """G1 split gate renders train/test/oot counts + a per month/channel distribution table
+    so the user can sanity-check the split before screening/training."""
+    _text, tables = render_tool_output("make_split", {
+        "result_dataset_id": "ds_split",
+        "split_col": "model_flag",
+        "sample_analysis": {
+            "split_counts": {"train": 300, "test": 120, "oot": 180},
+            "total_rows": 600,
+            "group_distributions": {
+                "渠道": {"train": {"A": 200, "B": 100}, "oot": {"A": 180}},
+            },
+        },
+    })
+    assert "样本切分完成" in _text
+    counts = next(t for t in tables if t["title"].startswith("切分计数"))
+    assert ["train", 300, "0.5000"] == [counts["rows"][0][0], counts["rows"][0][1], counts["rows"][0][2]]
+    dist = next(t for t in tables if "渠道" in t["title"])
+    assert "A" in dist["columns"] and "B" in dist["columns"]
+
+
+def test_render_propose_join_surfaces_key_relaxation_proposals():
+    """C2 shows a 择键建议 table (spec §4/§5) when a low-match key can be relaxed by dropping
+    an element — with the reduced key's match/uniqueness/fan-out, as a proposal only."""
+    _text, tables = render_tool_output("propose_join", {
+        "joins": [{
+            "feature_id": "feat_lowmatch",
+            "key_pairs": [
+                {"anchor_col": "mobile", "feature_col": "mobile", "transform_side": "both"},
+                {"anchor_col": "姓名", "feature_col": "姓名", "transform_side": "both"},
+            ],
+            "diagnostics": {
+                "match_rate": 0.10, "feature_key_unique": True, "fan_out_detected": False,
+                "key_alternatives": [
+                    {"key_pairs": [["mobile", "mobile"]], "dropped": "姓名",
+                     "match_rate": 0.98, "feature_key_unique": True, "fan_out_detected": False},
+                ],
+            },
+        }],
+    })
+    relax = next(t for t in tables if t["title"].startswith("择键建议"))
+    assert relax["rows"][0][0] == "feat_lowmatch"
+    assert "减「姓名」" in relax["rows"][0][2]
+    assert any("0.98" in str(c) for c in relax["rows"][0])
+    assert "择键建议" in _text  # the relaxation hint fired
+
+
+def test_render_tune_leaderboard_includes_full_per_trial_matrix():
+    """The tune leaderboard surfaces each trial's train/test/oot × {KS, AUC} +
+    head/tail lift at 5% AND 10% + overfit gaps (train-test, train-oot) — spec §5."""
     _text, tables = render_tool_output("tune_hyperparameters", {
         "n_trials": 2, "best_params": {}, "best_metrics": {"test_ks": 0.4, "test_auc": 0.72},
         "trials": [
-            {"train_ks": 0.45, "test_ks": 0.40, "oot_ks": 0.38, "score": 0.38, "test_auc": 0.72, "lift_head_10": 3.1},
-            {"train_ks": 0.50, "test_ks": 0.35, "oot_ks": 0.33, "score": 0.30, "test_auc": 0.69, "lift_head_10": 2.8},
+            {"train_ks": 0.45, "test_ks": 0.40, "oot_ks": 0.38, "score": 0.38,
+             "test_auc": 0.72, "oot_auc": 0.70,
+             "lift_head_5": 3.4, "lift_head_10": 3.1, "lift_tail_5": 0.2, "lift_tail_10": 0.3,
+             "overfit_gap_tt": 0.05, "overfit_gap_to": 0.07},
+            {"train_ks": 0.50, "test_ks": 0.35, "oot_ks": 0.33, "score": 0.30,
+             "test_auc": 0.69, "oot_auc": 0.67,
+             "lift_head_5": 3.0, "lift_head_10": 2.8, "lift_tail_5": 0.25, "lift_tail_10": 0.32,
+             "overfit_gap_tt": 0.15, "overfit_gap_to": 0.17},
         ],
     })
     board = next(table for table in tables if table["title"].startswith("trials 排行"))
-    assert "AUC" in board["columns"] and "头部lift10%" in board["columns"]
+    for col in ("test_auc", "oot_auc", "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
+                "过拟合gap(tt)", "过拟合gap(to)"):
+        assert col in board["columns"], col
     assert any("0.72" in str(cell) for cell in board["rows"][0])  # AUC reached the top row
+    assert any("0.07" in str(cell) for cell in board["rows"][0])  # train-oot gap surfaced

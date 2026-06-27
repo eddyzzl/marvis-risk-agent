@@ -469,7 +469,7 @@ export function attachDraftHandlers(root, deps = {}) {
         if (!Array.isArray(testCases) || !testCases.length) {
           throw new Error("晋升测试用例不能为空");
         }
-        if (!actions.confirmPromote(draftId, testCases)) {
+        if (!(await actions.confirmPromote(draftId, testCases))) {
           return;
         }
         await actions.promoteDraft(draftId, testCases);

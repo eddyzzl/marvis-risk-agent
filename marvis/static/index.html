@@ -3,8 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta id="appThemeColor" name="theme-color" content="#ffffff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="MARVIS" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>MARVIS-全能风控智能体</title>
-    <link id="brandFavicon" rel="icon" type="image/png" href="static/brand/marvis-favicon.png" />
+    <link id="brandFavicon" rel="icon" type="image/png" media="(prefers-color-scheme: light)" href="static/brand/marvis-favicon.png" />
+    <link id="brandFaviconDark" rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href="static/brand/marvis-favicon-dark.png" />
+    <link id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="static/brand/marvis-apple-touch-icon.png" />
+    <link id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="static/brand/marvis-apple-touch-icon-dark.png" />
+    <link rel="manifest" href="static/manifest.webmanifest" />
     <link rel="stylesheet" href="static/styles.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/welcome.css?v=__MARVIS_STATIC_VERSION__" />
     <link rel="stylesheet" href="static/css/v2-workbench.css?v=__MARVIS_STATIC_VERSION__" />
@@ -12,6 +21,14 @@
   <body class="app-booting" data-theme="light">
     <script>
       (() => {
+        const syncBrowserChrome = (resolvedTheme) => {
+          const isDark = resolvedTheme === "dark";
+          document.getElementById("appThemeColor")?.setAttribute("content", isDark ? "#181818" : "#ffffff");
+          document.getElementById("brandFavicon")?.setAttribute("media", isDark ? "not all" : "all");
+          document.getElementById("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");
+          document.getElementById("brandAppleTouchIcon")?.setAttribute("media", isDark ? "not all" : "all");
+          document.getElementById("brandAppleTouchIconDark")?.setAttribute("media", isDark ? "all" : "not all");
+        };
         try {
           const storedTheme = localStorage.getItem("marvis_theme") || "light";
           const themePreference = ["light", "dark", "system"].includes(storedTheme) ? storedTheme : "light";
@@ -22,8 +39,10 @@
                 ? "dark"
                 : "light";
           document.body.dataset.theme = resolvedTheme;
+          syncBrowserChrome(resolvedTheme);
         } catch (_) {
           document.body.dataset.theme = "light";
+          syncBrowserChrome("light");
         }
       })();
     </script>
@@ -209,6 +228,21 @@
                 <input type="checkbox" name="modelAlgorithm" value="scorecard" />
                 <span>评分卡 (scorecard)</span>
               </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="mlp" />
+                <span>神经网络 (MLP/DNN)</span>
+              </label>
+            </div>
+            <p class="dialog-subtitle">回归 / 多分类为独立目标类型(指标用 RMSE/MAE/R² 或 macro-AUC/logloss),请单选其一、勿与上面二分类算法混选。</p>
+            <div class="algorithm-choices" role="group" aria-label="其它目标类型">
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="lgb_regressor" />
+                <span>回归 (LightGBM)</span>
+              </label>
+              <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="lgb_multiclass" />
+                <span>多分类 (LightGBM)</span>
+              </label>
             </div>
           </section>
           <section id="createTaskMetricField" class="task-form-section" hidden>
@@ -228,6 +262,15 @@
                 <span>特征重要性（LGB）</span>
               </label>
             </div>
+          </section>
+          <section id="createTaskTierField" class="task-form-section" hidden>
+            <h3>能力档位</h3>
+            <p class="dialog-subtitle">仅影响 Agent 自治程度（最多重规划几次、能否探索），不影响模型效果 / 确定性 / 确认门。</p>
+            <select id="createTaskTier" class="tier-select">
+              <option value="conservative">稳健 · 最多重规划 2 次</option>
+              <option value="balanced" selected>均衡 · 最多重规划 4 次</option>
+              <option value="aggressive">自治 · 最多重规划 8 次</option>
+            </select>
           </section>
           <button id="createTaskButton" class="button primary full" type="button">
             创建任务
@@ -383,7 +426,7 @@
                     <span>重新检测本机已注册、可用的 Jupyter Kernel。</span>
                   </div>
                   <div class="settings-row-control">
-                    <button id="refreshExecutionEnvironmentOptionsButton" class="button secondary" type="button">扫描环境</button>
+                    <button id="refreshExecutionEnvironmentOptionsButton" class="button primary" type="button">扫描环境</button>
                   </div>
                 </div>
               </div>
@@ -403,7 +446,7 @@
                       <strong>模型连接</strong>
                       <span>配置本地会话可调用的大模型连接信息；具体用哪个仍在 Agent 输入框选择。这里只保存连接配置，密钥不会写入任务记录或报告。</span>
                     </div>
-                    <button id="addLLMModelButton" class="button secondary" type="button">添加模型</button>
+                    <button id="addLLMModelButton" class="button primary" type="button">添加模型</button>
                   </div>
                   <div id="llmModelProfiles" class="llm-model-profiles llm-engine-list"></div>
                 </div>
@@ -647,7 +690,7 @@
             <img
               id="brandLogo"
               class="brand-mark"
-              src="static/brand/marvis-logo.png"
+              src="static/brand/marvis-workspace-logo.png"
               alt="MARVIS-全能风控智能体 logo"
             />
             <h1 id="platformName">MARVIS-全能风控智能体</h1>
@@ -801,6 +844,13 @@
                     <option value="none">不显示</option>
                     <option value="naitang">蛋黄</option>
                     <option value="xiaojiu">小九</option>
+                    <option value="auditbot">MARVIS</option>
+                    <option value="auditbot-pro">MARVIS Pro</option>
+                    <option value="auditbot-poly">MARVIS Poly</option>
+                    <option value="auditbot-ink">MARVIS Ink</option>
+                    <option value="auditbot-clay">MARVIS Clay</option>
+                    <option value="auditbot-comic">MARVIS Comic</option>
+                    <option value="auditbot-pixel">MARVIS Pixel</option>
                   </select>
                 </div>
               </section>
@@ -937,6 +987,7 @@
                 class="welcome-task-card available"
                 type="button"
                 data-task-kind="vintage"
+                data-coming-soon="1"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
@@ -969,14 +1020,17 @@
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
                     <g id="welcomeModelingIconGlyph">
-                      <path d="M12 2.4 19.9 6.95v10.1L12 21.6 4.1 17.05V6.95Z"></path>
-                      <path class="cs model-code-mark" d="M8.85 9.4 6.65 12l2.2 2.6"></path>
-                      <path class="cs model-code-mark" d="M15.15 9.4 17.35 12l-2.2 2.6"></path>
-                      <path class="cs model-code-slash" d="M12.7 8.9 11.3 15.1"></path>
+                      <rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect>
+                      <path class="mid" d="M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z"></path>
+                      <circle class="cut" cx="5.5" cy="6.2" r="0.82"></circle>
+                      <circle class="cut" cx="7.7" cy="6.2" r="0.82"></circle>
+                      <circle class="cut" cx="9.9" cy="6.2" r="0.82"></circle>
+                      <path class="cs" d="M8.2 11.2 11 13.8 8.2 16.4"></path>
+                      <rect class="cut" x="12" y="14.9" width="4" height="1.5" rx="0.75"></rect>
                     </g>
                     <defs>
                       <clipPath id="welcomeModelingIconClip">
-                        <path d="M12 2.4 19.9 6.95v10.1L12 21.6 4.1 17.05V6.95Z"></path>
+                        <rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect>
                       </clipPath>
                     </defs>
                     <g class="icon-sheen" clip-path="url(#welcomeModelingIconClip)">
@@ -998,12 +1052,20 @@
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
                     <g id="welcomeValidationIconGlyph">
-                      <path d="M12 2.8 19.5 5.6v5.6c0 4.6-3.1 8-7.5 9.5-4.4-1.5-7.5-4.9-7.5-9.5V5.6Z"></path>
-                      <path class="cs" d="M8.6 12 11 14.4l4.6-4.9"></path>
+                      <rect class="back" x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect>
+                      <rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect>
+                      <rect class="mid" x="7.75" y="3.7" width="6" height="2.2" rx="1.1"></rect>
+                      <rect class="cut" x="7.4" y="9" width="6.6" height="1.2" rx="0.6"></rect>
+                      <rect class="cut" x="7.4" y="12" width="6.6" height="1.2" rx="0.6"></rect>
+                      <rect class="cut" x="7.4" y="15" width="4.4" height="1.2" rx="0.6"></rect>
+                      <circle class="cut" cx="16.6" cy="17.6" r="4.9"></circle>
+                      <circle cx="16.6" cy="17.6" r="4"></circle>
+                      <path class="cst" d="M14.8 17.7 16 18.9 18.4 16.4"></path>
                     </g>
                     <defs>
                       <clipPath id="welcomeValidationIconClip">
-                        <path d="M12 2.8 19.5 5.6v5.6c0 4.6-3.1 8-7.5 9.5-4.4-1.5-7.5-4.9-7.5-9.5V5.6Z"></path>
+                        <rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect>
+                        <rect x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect>
                       </clipPath>
                     </defs>
                     <g class="icon-sheen" clip-path="url(#welcomeValidationIconClip)">
@@ -1021,6 +1083,7 @@
                 class="welcome-task-card available"
                 type="button"
                 data-task-kind="strategy"
+                data-coming-soon="1"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
@@ -1199,17 +1262,17 @@
       <div
         id="petCompanion"
         class="pet-companion"
-        data-pet-id="naitang"
+        data-pet-id="auditbot"
         data-pet-mood="idle"
         role="img"
         aria-live="polite"
-        aria-label="蛋黄，奶油色长毛蓝眼猫，黑色领结，当前状态：idle"
+        aria-label="MARVIS，3D 玩具审计机器人，青色护目镜眼睛和铜色耳机，当前状态：idle"
         tabindex="0"
       >
-        <div id="petSticker" class="pet-sticker" data-pet-id="naitang" aria-hidden="true">
+        <div id="petSticker" class="pet-sticker" data-pet-id="auditbot" aria-hidden="true">
           <div
             class="pet-sprite"
-            style='background-image: url("static/pets/naitang/spritesheet.webp")'
+            style='background-image: url("static/pets/auditbot/spritesheet.webp")'
             aria-hidden="true"
           ></div>
         </div>
@@ -1232,6 +1295,41 @@
                 label: "贪吃、呆萌、胆小的小猫",
                 asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f",
               },
+              auditbot: {
+                name: "MARVIS",
+                label: "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机",
+                asset: "static/pets/auditbot/spritesheet.webp",
+              },
+              "auditbot-pro": {
+                name: "MARVIS Pro",
+                label: "专业风格 3D 审计机器人",
+                asset: "static/pets/auditbot-pro/spritesheet.webp",
+              },
+              "auditbot-poly": {
+                name: "MARVIS Poly",
+                label: "低多边形硬表面审计机器人",
+                asset: "static/pets/auditbot-poly/spritesheet.webp",
+              },
+              "auditbot-ink": {
+                name: "MARVIS Ink",
+                label: "技术线稿风格审计机器人",
+                asset: "static/pets/auditbot-ink/spritesheet.webp",
+              },
+              "auditbot-clay": {
+                name: "MARVIS Clay",
+                label: "黏土与乙烯基质感审计机器人",
+                asset: "static/pets/auditbot-clay/spritesheet.webp",
+              },
+              "auditbot-comic": {
+                name: "MARVIS Comic",
+                label: "漫画描边风格审计机器人",
+                asset: "static/pets/auditbot-comic/spritesheet.webp",
+              },
+              "auditbot-pixel": {
+                name: "MARVIS Pixel",
+                label: "像素风审计机器人",
+                asset: "static/pets/auditbot-pixel/spritesheet.webp",
+              },
             };
             const legacy = { danhuang: "naitang", buou: "xiaojiu", "ragdoll-cat": "xiaojiu" };
             const stored = localStorage.getItem("marvis_pet");
@@ -1241,7 +1339,7 @@
                 ? "none"
                 : pets[legacy[stored] || stored]
                   ? legacy[stored] || stored
-                  : "naitang";
+                  : "auditbot";
 
             if (normalized === "none") {
               pet.classList.add("hidden");
@@ -1268,13 +1366,28 @@
             if (Number.isFinite(storedPosition.left) && Number.isFinite(storedPosition.top)) {
               const workspace = document.getElementById("validationWorkspace")?.getBoundingClientRect();
               const padding = 14;
-              const minLeft = Math.max(padding, workspace ? workspace.left + padding : padding);
+              const petCssPx = (name, fallback) => {
+                const value = getComputedStyle(pet).getPropertyValue(name);
+                const parsed = parseFloat(value);
+                return Number.isFinite(parsed) ? parsed : fallback;
+              };
+              const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);
+              const minLeft = Math.max(
+                padding,
+                workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset,
+              );
               const minTop = Math.max(padding, workspace ? workspace.top + padding : padding);
               const maxLeft = Math.max(minLeft, window.innerWidth - 104 - padding);
               const maxTop = Math.max(minTop, window.innerHeight - 116 - padding);
-              const left = Math.min(Math.max(storedPosition.left, minLeft), maxLeft);
+              const storedLeft =
+                workspace && Number.isFinite(storedPosition.workspaceOffsetLeft)
+                  ? workspace.left + storedPosition.workspaceOffsetLeft
+                  : storedPosition.left;
+              const left = Math.min(Math.max(storedLeft, minLeft), maxLeft);
               const top = Math.min(Math.max(storedPosition.top, minTop), maxTop);
-              pet.style.left = `${Math.round(left)}px`;
+              const offsetLeft = workspace ? left - workspace.left : left;
+              pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);
+              pet.style.left = "";
               pet.style.top = `${Math.round(top)}px`;
               pet.style.right = "auto";
               pet.style.bottom = "auto";

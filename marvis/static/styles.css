@@ -66,8 +66,13 @@
   --collapsed-search-top: 79px;
   --collapsed-popover-left: calc(var(--collapsed-entry-gutter) + var(--collapsed-entry-size) + 10px);
   --progress-width: 314px;
-  --workspace-main-gutter: 99px;
-  --workspace-rail-gap: 99px;
+  --workspace-main-gutter: 106px;
+  --workspace-collapsed-main-gutter: 180px;
+  --workspace-rail-gap: 70px;
+  --workspace-collapsed-rail-gap: 78px;
+  --pet-default-workspace-offset: -2px;
+  --pet-min-workspace-offset: -2px;
+  --pet-collapsed-workspace-offset: 72px;
   --brand-primary: #303034;
   --brand-primary-hover: #3b3b42;
   --brand-icon-color: color-mix(in srgb, var(--brand-primary) 42%, var(--text));
@@ -228,6 +233,10 @@ body.sidebar-sliding .app-shell:not(.sidebar-collapsed) .task-sidebar > * {
 
 .app-shell.sidebar-collapsed {
   --sidebar-width: 0px;
+  --workspace-main-gutter: var(--workspace-collapsed-main-gutter);
+  --workspace-rail-gap: var(--workspace-collapsed-rail-gap);
+  --pet-default-workspace-offset: var(--pet-collapsed-workspace-offset);
+  --pet-min-workspace-offset: var(--pet-collapsed-workspace-offset);
 }
 
 .region {
@@ -372,9 +381,13 @@ body[data-theme="dark"] .button.secondary:focus-visible:not(:disabled) {
   box-shadow: var(--button-secondary-shadow-hover);
 }
 
-#refreshExecutionEnvironmentOptionsButton.button.secondary,
-#addLLMModelButton.button.secondary {
+#refreshExecutionEnvironmentOptionsButton.button.primary,
+#addLLMModelButton.button.primary {
   width: 84px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 body[data-theme="dark"] .button:disabled {
@@ -408,10 +421,12 @@ body[data-theme="dark"] .button:disabled {
 }
 
 .button.dialog-close-button:hover:not(:disabled),
-.button.dialog-close-button:focus-visible:not(:disabled) {
+.button.dialog-close-button:focus-visible:not(:disabled),
+.button.dialog-close-button:active:not(:disabled) {
   outline: none;
   border-color: transparent;
   background: var(--option-hover);
+  box-shadow: none;
   color: var(--text);
 }
 
@@ -426,8 +441,10 @@ body[data-theme="dark"] .button.dialog-close-button {
 }
 
 body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),
-body[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled) {
+body[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled),
+body[data-theme="dark"] .button.dialog-close-button:active:not(:disabled) {
   background: var(--option-hover);
+  box-shadow: none;
   color: var(--text);
 }
 
@@ -739,7 +756,12 @@ textarea {
 
 .list-toolbar {
   max-height: 80px;
-  padding: 2px 10px 10px;
+  /* Keep natural height: overflow:hidden (needed for the collapse anim) resets
+     this flex item's min-height:auto to 0, so without this the column shrinks
+     the toolbar below the button and clips it. */
+  flex-shrink: 0;
+  /* Bottom room so the "新建任务" button drop-shadow is not clipped into a hard line. */
+  padding: 2px 10px 16px;
   overflow: hidden;
   transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1),
     padding 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
@@ -1183,7 +1205,7 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
   bottom: calc(100% + 8px);
   display: grid;
   grid-template-columns: 1fr;
-  gap: 8px;
+  gap: 12px;
   width: auto;
   max-width: 100%;
   min-width: 0;
@@ -1315,7 +1337,8 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 
 .pet-companion {
   position: fixed;
-  right: 28px;
+  left: calc(var(--sidebar-width) + var(--pet-offset-left, var(--pet-default-workspace-offset)));
+  right: auto;
   bottom: 28px;
   z-index: 24;
   display: grid;
@@ -1328,12 +1351,17 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
   touch-action: none;
 }
 
+body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
+  transition: left 300ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 .pet-companion.hidden {
   display: none;
 }
 
 .pet-companion.dragging {
   cursor: grabbing;
+  transition: none;
 }
 
 .pet-sticker {
@@ -1983,6 +2011,7 @@ dialog.governance-settings-dialog,
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
+  box-shadow: none;
   color: var(--text-secondary);
   cursor: pointer;
   transition: background 0.14s ease, color 0.14s ease;
@@ -1993,11 +2022,13 @@ dialog.governance-settings-dialog,
   pointer-events: none;
 }
 
-.governance-head-actions .governance-icon-button:hover,
-.governance-head-actions .governance-icon-button:focus-visible {
+.governance-head-actions .governance-icon-button:hover:not(:disabled),
+.governance-head-actions .governance-icon-button:focus-visible:not(:disabled),
+.governance-head-actions .governance-icon-button:active:not(:disabled) {
   outline: none;
   border-color: transparent;
   background: var(--option-hover);
+  box-shadow: none;
   color: var(--text);
 }
 
@@ -2006,18 +2037,20 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button {
   background: transparent;
 }
 
-body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover,
-body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-visible {
+body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover:not(:disabled),
+body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-visible:not(:disabled),
+body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:not(:disabled) {
   background: var(--option-hover);
+  box-shadow: none;
   color: var(--text);
 }
 
 .governance-icon-button svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.8;
+  stroke-width: 2.25;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -2084,6 +2117,29 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
   overflow: hidden;
 }
 
+.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.governance-panel[data-governance-panel-content="llm"] > .settings-group {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
 .governance-panel .settings-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2092,8 +2148,27 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
   padding: 14px 16px;
 }
 
+.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row {
+  padding: 0 2px 2px;
+}
+
+.governance-panel[data-governance-panel-content="llm"] > .settings-group > .settings-row {
+  padding: 0 2px 2px;
+}
+
+.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+}
+
 .governance-panel .settings-row + .settings-row {
   border-top: 1px solid var(--border);
+}
+
+.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row {
+  border-top: 0;
 }
 
 .governance-panel .settings-row-text strong {
@@ -2126,7 +2201,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
 /* Apple Wi-Fi-style tappable environment list (execution-environment panel) */
 .exec-env-section {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .exec-env-section-label {
@@ -2137,10 +2212,13 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
 }
 
 .exec-env-list {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
 }
 
 .exec-env-list.is-saving {
@@ -2151,17 +2229,18 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
 .exec-env-row {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   align-items: center;
   width: 100%;
-  padding: 12px 16px;
-  border: 0;
-  background: transparent;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
   color: var(--text);
   text-align: left;
   font: inherit;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .exec-env-row + .exec-env-row {
@@ -2169,7 +2248,8 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
 }
 
 .exec-env-row:hover {
-  background: var(--surface-soft);
+  border-color: var(--option-hover);
+  background: var(--option-hover);
 }
 
 .exec-env-row:focus-visible {
@@ -2183,7 +2263,8 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
 }
 
 .exec-env-row:disabled:hover {
-  background: transparent;
+  border-color: var(--border);
+  background: var(--surface-soft);
 }
 
 .exec-env-check {
@@ -2267,6 +2348,10 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:focus-v
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
+}
+
+.governance-panel[data-governance-panel-content="llm"] .settings-row-head {
+  align-items: center;
 }
 
 .governance-panel .settings-row-block .llm-model-profiles {
@@ -2481,11 +2566,11 @@ dialog.agent-memory-dialog,
 
 /* "查看与管理记忆" drill-in inside the consolidated 记忆 settings page */
 .memory-manage {
-  margin-top: 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  overflow: hidden;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
 }
 
 .memory-manage-summary {
@@ -2493,9 +2578,13 @@ dialog.agent-memory-dialog,
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
   cursor: pointer;
   list-style: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .memory-manage-summary::-webkit-details-marker {
@@ -2503,14 +2592,16 @@ dialog.agent-memory-dialog,
 }
 
 .memory-manage-summary:hover {
-  background: var(--surface-soft);
+  border-color: var(--option-hover);
+  background: var(--option-hover);
 }
 
 /* The global summary:focus-visible outline (offset 2px) is clipped by the
    parent .memory-manage overflow:hidden; use an inset ring instead. */
 .memory-manage-summary:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px var(--accent);
+  outline: 3px solid var(--option-focus-ring);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .memory-manage-summary-text strong {
@@ -2542,9 +2633,9 @@ dialog.agent-memory-dialog,
 
 .memory-manage-body {
   display: grid;
-  gap: 12px;
-  padding: 12px 16px 16px;
-  border-top: 1px solid var(--border);
+  gap: 10px;
+  padding: 10px 0 0;
+  border-top: 0;
 }
 
 .agent-memory-toolbar {
@@ -2587,9 +2678,24 @@ dialog.agent-memory-dialog,
 .agent-memory-filter-card {
   display: grid;
   gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.governance-settings-dialog .agent-memory-toolbar {
+  padding: 0 2px 2px;
+}
+
+.governance-settings-dialog .agent-memory-list,
+.governance-settings-dialog .agent-memory-detail {
+  margin-top: 8px;
+}
+
+.governance-settings-dialog .agent-memory-item,
+.governance-settings-dialog .agent-memory-detail-inner {
+  border-radius: var(--radius-control);
   background: var(--surface-soft);
 }
 
@@ -2656,10 +2762,10 @@ dialog.agent-memory-dialog,
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-soft);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .agent-memory-list,
@@ -2688,10 +2794,10 @@ dialog.agent-memory-dialog,
   min-height: 140px;
   place-items: center;
   padding: 18px;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
   color: var(--text-muted);
-  background: var(--surface);
+  background: var(--surface-soft);
   font-size: 13px;
   text-align: center;
 }
@@ -2731,10 +2837,10 @@ dialog.agent-memory-dialog,
 .agent-memory-detail-inner {
   display: grid;
   gap: 7px;
-  padding: 12px;
+  padding: 11px 13px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
 }
 
 .agent-memory-detail-inner h3 {
@@ -3331,6 +3437,13 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   white-space: normal;
 }
 
+.task-row-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
 .task-row-name {
   display: block;
   min-width: 0;
@@ -3338,6 +3451,64 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   font-size: 16px;
   font-weight: 800;
   line-height: 1.25;
+}
+
+/* layered, multi-tone per-kind task icon — shared by sidebar rows and the
+   task-hero snapshot; mirrors the welcome-card glyphs. The carried `color` is
+   the per-kind tone; cut-outs use --surface so details knock out to the bg. */
+.task-kind-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  fill: currentColor;
+  color: var(--accent);
+}
+.task-kind-icon .back {
+  fill: color-mix(in srgb, currentColor 30%, var(--surface));
+}
+.task-kind-icon .mid {
+  fill: color-mix(in srgb, currentColor 62%, var(--surface));
+}
+.task-kind-icon .cut {
+  fill: var(--surface);
+}
+.task-kind-icon .cs {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.task-kind-icon .cst {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.task-kind-icon .ln {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.task-kind-icon[data-kind="feature_analysis"] { color: #3d6fd1; }
+.task-kind-icon[data-kind="data_join"] { color: #1aa595; }
+.task-kind-icon[data-kind="modeling"] { color: #745fd6; }
+.task-kind-icon[data-kind="validation"] { color: #2aa158; }
+.task-kind-icon[data-kind="strategy"] { color: #df9326; }
+.task-kind-icon[data-kind="vintage"] { color: #d35d87; }
+body[data-theme="dark"] .task-kind-icon[data-kind="feature_analysis"] { color: #6b93e6; }
+body[data-theme="dark"] .task-kind-icon[data-kind="data_join"] { color: #3fc7b4; }
+body[data-theme="dark"] .task-kind-icon[data-kind="modeling"] { color: #9c8bea; }
+body[data-theme="dark"] .task-kind-icon[data-kind="validation"] { color: #54c47e; }
+body[data-theme="dark"] .task-kind-icon[data-kind="strategy"] { color: #ecb24f; }
+body[data-theme="dark"] .task-kind-icon[data-kind="vintage"] { color: #e389aa; }
+
+.task-snapshot-item .task-kind-icon.meta-kind-ico {
+  width: 30px;
+  height: 30px;
 }
 
 .task-row small {
@@ -3649,6 +3820,9 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
+  /* Leave room below the last step so button drop-shadows are not
+     clipped into a hard line by this scroll container's bottom edge. */
+  padding-bottom: 16px;
 }
 
 /* Status checker before each step / sub-step. */
@@ -4033,7 +4207,43 @@ body[data-theme="dark"] .progress-rail {
   line-height: 1.25;
 }
 
+.task-snapshot-copy {
+  display: inline-flex;
+  align-items: center;
+  max-width: 360px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: copy;
+  appearance: none;
+}
+
+.task-snapshot-copy strong {
+  max-width: inherit;
+}
+
+.task-snapshot-copy:hover strong,
+.task-snapshot-copy:focus-visible strong {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.task-snapshot-copy:focus-visible {
+  outline: 2px solid var(--option-focus-ring);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
 .workspace-task-meta .task-snapshot-item:last-child strong {
+  max-width: 460px;
+}
+
+.workspace-task-meta .task-snapshot-item:last-child .task-snapshot-copy {
   max-width: 460px;
 }
 
@@ -4708,9 +4918,11 @@ body[data-theme="dark"] .progress-rail {
 }
 
 .llm-engine-edit-actions .button {
-  min-width: 84px;
-  min-height: 38px;
-  padding: 8px 18px;
+  min-width: 76px;
+  min-height: 34px;
+  padding: 6px 15px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 dialog.draft-tools-dialog,
@@ -5882,7 +6094,8 @@ body[data-theme="dark"] .agent-message.user .agent-message-content {
   }
 
   .pet-companion {
-    right: 16px;
+    left: 16px;
+    right: auto;
     bottom: 16px;
     width: 76px;
   }

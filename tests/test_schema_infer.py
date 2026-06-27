@@ -36,6 +36,33 @@ def test_infer_dataset_schema_roles_and_desensitized_samples():
     assert profiles["mobile"].cardinality == 2
 
 
+def test_person_name_is_an_identity_role_without_over_matching():
+    """姓名 / cust_name columns become the 'name' identity element (join key §4/§5),
+    but generic columns containing 'name' or 'key' must NOT (guards the 姓名→'' empty-string
+    universal-match trap, where _normalize_name strips non-ASCII)."""
+    frame = pd.DataFrame({
+        "姓名": ["张三", "李四", "王五"],
+        "客户姓名": ["张三", "李四", "王五"],
+        "cust_name": ["zhangsan", "lisi", "wangwu"],
+        "full_name": ["zhang san", "li si", "wang wu"],
+        "customer_key": ["A1", "B2", "C3"],   # generic key, NOT a person name
+        "model_name": ["lgb", "xgb", "lr"],   # generic, NOT a person name
+        "bad_flag": [0, 1, 0],
+    })
+    profiles = {p.name: p for p in infer_dataset_schema(frame)}
+    assert profiles["姓名"].semantic_role == "name"
+    assert profiles["客户姓名"].semantic_role == "name"
+    assert profiles["cust_name"].semantic_role == "name"
+    assert profiles["full_name"].semantic_role == "name"
+    # the over-match guards: a generic key / a non-person "name" column stay non-identity
+    assert profiles["customer_key"].semantic_role != "name"
+    assert profiles["model_name"].semantic_role != "name"
+    assert profiles["bad_flag"].semantic_role == "target"
+    # PII: a detected name must be masked to an opaque token, never surfaced raw
+    assert all(str(v).startswith("value:") for v in profiles["姓名"].sample_values)
+    assert "张三" not in profiles["姓名"].sample_values
+
+
 def test_hash_columns_use_column_name_to_resolve_semantic_role():
     phone_hash = pd.Series([
         hashlib.md5(value.encode()).hexdigest()

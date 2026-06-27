@@ -75,6 +75,20 @@ def test_apply_scenario_rejects_recipe_target_type_mismatch():
         apply_scenario(_config(recipe="lgb_regressor"), "loan_pre_a")
     with pytest.raises(ModelingError, match="continuous scenario requires a regression recipe"):
         apply_scenario(_config(recipe="lgb"), "income")
+    # a multiclass recipe is also not a binary classification recipe
+    with pytest.raises(ModelingError, match="binary scenario requires a classification recipe"):
+        apply_scenario(_config(recipe="lgb_multiclass"), "loan_pre_a")
+
+
+def test_assert_recipe_matches_target_handles_multiclass():
+    from marvis.packs.modeling.scenarios import _assert_recipe_matches_target
+
+    # multiclass target_type requires a multiclass recipe
+    _assert_recipe_matches_target("lgb_multiclass", "multiclass")
+    with pytest.raises(ModelingError, match="multiclass scenario requires a multiclass recipe"):
+        _assert_recipe_matches_target("lgb", "multiclass")
+    with pytest.raises(ModelingError, match="multiclass scenario requires a multiclass recipe"):
+        _assert_recipe_matches_target("lgb_regressor", "multiclass")
 
 
 def test_scenario_metadata_persists_with_experiment_config(tmp_path):

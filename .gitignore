@@ -32,3 +32,8 @@ generated-word-html-preview.png
 marvis-download-buttons-snapshot.md
 docs/assets/
 .scratch_mascot/
+
+# runtime / build artifacts (not source)
+.preview-workspace/
+marvis.egg-info/
+.playwright-cli/

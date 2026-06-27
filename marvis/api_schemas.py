@@ -18,6 +18,8 @@ class CreateTaskRequest(BaseModel):
     feature_columns: list[str] = Field(default_factory=list)
     recipes: list[str] = Field(default_factory=list)
     metrics: list[str] = Field(default_factory=list)
+    # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
+    capability_tier: str = ""
     notebook_path: str | None = None
     sample_path: str | None = None
     pmml_path: str | None = None
@@ -56,6 +58,12 @@ class AgentMessageRequest(BaseModel):
     model_id: str | None = None
     effort: str | None = None
     acceptance_mode: str | None = None
+    # Optional edited feature set from the §4 interactive screening table; when a
+    # screening gate is confirmed this overrides the screen's proposed `selected`.
+    selection: list[str] | None = None
+    # Optional per-feature dedup strategy map (feature_id -> first|last) from the §4
+    # join dedup picker; re-confirms confirm_join to resolve non-unique-key conflicts.
+    dedup_strategies: dict[str, str] | None = None
 
 
 class AgentModelRequest(BaseModel):

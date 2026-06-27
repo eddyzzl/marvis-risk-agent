@@ -52,6 +52,15 @@ class ModelMetrics:
     train_r2: float | None = None
     test_r2: float | None = None
     oot_r2: float | None = None
+    train_macro_auc: float | None = None
+    test_macro_auc: float | None = None
+    oot_macro_auc: float | None = None
+    train_logloss: float | None = None
+    test_logloss: float | None = None
+    oot_logloss: float | None = None
+    train_accuracy: float | None = None
+    test_accuracy: float | None = None
+    oot_accuracy: float | None = None
 
 
 @dataclass(frozen=True)

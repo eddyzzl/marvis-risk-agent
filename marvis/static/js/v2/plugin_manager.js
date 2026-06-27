@@ -194,7 +194,7 @@ export function attachPluginHandlers(root, deps = {}) {
     if (removeButton?.dataset?.removePlugin) {
       event.preventDefault?.();
       const name = removeButton.dataset.removePlugin;
-      if (!actions.confirmRemove(name)) {
+      if (!(await actions.confirmRemove(name))) {
         return;
       }
       try {

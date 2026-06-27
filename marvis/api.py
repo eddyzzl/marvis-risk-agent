@@ -351,7 +351,8 @@ def _mask_preview_value(value, semantic_role: str | None):
         return _mask_preview_text(value, keep_start=4, keep_end=2)
     if semantic_role == "id":
         return _mask_preview_text(value, keep_start=4, keep_end=4)
-    if semantic_role == "categorical":
+    if semantic_role in {"categorical", "name"}:
+        # Person names (姓名) are PII — anonymize to an opaque token, never surface raw.
         return _preview_token(value)
     if semantic_role not in {"amount", "date", "score", "target"} and _looks_like_sensitive_preview_identifier(value):
         return _mask_preview_text(value, keep_start=4, keep_end=4)
@@ -671,6 +672,30 @@ def list_tasks(request: Request) -> list[dict]:
     ]
 
 
+def _normalized_capability_tier(value: str | None) -> str:
+    """Validate a per-task capability tier name (conservative/balanced/aggressive);
+    unknown or empty → '' so the driver falls back to the global settings default.
+    Never raises — task creation stays lenient about this autonomy-only knob."""
+    from marvis.orchestrator.capability import TIERS
+
+    name = str(value or "").strip().lower()
+    return name if name in TIERS else ""
+
+
+def _task_tier(request, task) -> str:
+    """The capability tier name for a task's plan: the per-task pick if set, else the
+    global settings default (spec §5.1). Affects only the autonomy budget
+    (max_replan_iterations) — never gates/determinism/safety."""
+    from marvis.orchestrator.capability import tier_from_settings
+
+    if getattr(task, "capability_tier", ""):
+        return task.capability_tier
+    try:
+        return tier_from_settings(request.app.state.settings).name
+    except Exception:
+        return "balanced"
+
+
 @router.post("/tasks")
 def create_task(payload: CreateTaskRequest, request: Request) -> dict:
     _validate_model_identifier("model_name", payload.model_name)
@@ -702,6 +727,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             feature_columns=payload.feature_columns,
             recipes=payload.recipes,
             metrics=payload.metrics,
+            capability_tier=_normalized_capability_tier(payload.capability_tier),
             notebook_path=payload.notebook_path,
             sample_path=payload.sample_path,
             pmml_path=payload.pmml_path,
@@ -1171,7 +1197,8 @@ def post_agent_message(
         agent_client = _resolve_driver_agent_client(request, task, payload)
         return _dispatch_driver_turn(
             request, repo, task, user_text=content, agent_client=agent_client,
-            acceptance_mode=payload.acceptance_mode,
+            acceptance_mode=payload.acceptance_mode, selection=payload.selection,
+            dedup_strategies=payload.dedup_strategies,
         )
     conversation = repo.list_agent_messages(task_id)
     pending_report_draft = _latest_pending_agent_report_draft(conversation)
@@ -3002,7 +3029,7 @@ def _active_plan(plan_repo, task_id: str):
     return None
 
 
-def _run_join_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None) -> dict:
+def _run_join_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
     """Drive a data_join task through the generic PlanDriver, synchronously.
 
     The deterministic JOIN flow (propose -> confirm -> execute, with a forced
@@ -3031,7 +3058,7 @@ def _run_join_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, us
         active = _active_plan(plan_repo, task.id)
         if active is not None:
             # An in-flight plan exists → resume at the C2 diagnostics gate.
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "")
+            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
             _append_driver_messages(repo, task.id, turn)
             return _join_turn_response(repo, task.id)
         # No plan yet → C1 file-role assignment gate (spec §3).
@@ -3064,6 +3091,7 @@ def _run_join_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, us
         turn = driver.start(
             task_id=task.id, template_id="data_join",
             slots={"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
+            tier=_task_tier(request, task),
         )
         _append_driver_messages(repo, task.id, turn)
         return _join_turn_response(repo, task.id)
@@ -3188,7 +3216,7 @@ def _append_join_error(repo: TaskRepository, task_id: str, detail: str) -> dict:
     return {"task_id": task_id, "status": "error", "messages": repo.list_agent_messages(task_id)}
 
 
-def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None) -> dict:
+def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
     """Drive a feature_analysis task: compute the selected per-feature metrics and
     show the wide table (spec §1 form A — standalone analysis report, no screening
     gate). Runs synchronously on the wired plan engine; manual mode = the user reads
@@ -3207,7 +3235,7 @@ def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *,
     try:
         active = _active_plan(plan_repo, task.id)
         if active is not None:
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "")
+            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
             _append_driver_messages(repo, task.id, turn)
             return _join_turn_response(repo, task.id)
         backend, registry = _modeling_data_runtime(state.settings)
@@ -3230,6 +3258,7 @@ def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *,
                 "features": proposal.features,
                 "metrics": proposal.metrics,
             },
+            tier=_task_tier(request, task),
         )
         _append_driver_messages(repo, task.id, turn)
         return _join_turn_response(repo, task.id)
@@ -3253,7 +3282,7 @@ def _modeling_recipes(task: TaskRecord) -> list[str] | None:
     return recipes or None
 
 
-def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None) -> dict:
+def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
     """Drive a modeling task through the generic PlanDriver: leakage-aware screen ->
     [confirm features] -> tune+train -> [confirm model] -> model-development report.
     Replaces the bespoke ModelingSession prototype. Synchronous on the wired plan
@@ -3272,7 +3301,7 @@ def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *
     try:
         active = _active_plan(plan_repo, task.id)
         if active is not None:
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "")
+            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
             _append_driver_messages(repo, task.id, turn)
             return _join_turn_response(repo, task.id)
         backend, registry = _modeling_data_runtime(state.settings)
@@ -3293,7 +3322,7 @@ def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *
             ),
             metadata={"intent": "modeling"},
         )
-        turn = driver.start(task_id=task.id, template_id="modeling", slots=proposal.template_slots())
+        turn = driver.start(task_id=task.id, template_id="modeling", slots=proposal.template_slots(), tier=_task_tier(request, task))
         _append_driver_messages(repo, task.id, turn)
         return _join_turn_response(repo, task.id)
     except ModelingSetupError as exc:
@@ -3388,14 +3417,20 @@ def _agent_autodrive_turn(request, repo: TaskRepository, task: TaskRecord, *, cl
 
 def _dispatch_driver_turn(
     request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None,
-    agent_client, acceptance_mode: str | None = None,
+    agent_client, acceptance_mode: str | None = None, selection: list | None = None,
+    dedup_strategies: dict | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
     gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive ALL gates;
     NORMAL(默认权限) runs a single turn and STOPS at the first gate for the user to
     confirm — even with an LLM configured. Manual mode (agent_client None) always
-    stops at the gate for the control button."""
-    result = _DRIVER_TURN_FUNCS[task.task_type](request, repo, task, user_text=user_text)
+    stops at the gate for the control button. ``selection`` carries an edited feature
+    set from the §4 screening table; ``dedup_strategies`` carries the per-feature dedup
+    map from the §4 join dedup picker."""
+    result = _DRIVER_TURN_FUNCS[task.task_type](
+        request, repo, task, user_text=user_text, selection=selection,
+        dedup_strategies=dedup_strategies,
+    )
     if agent_client is not None and _agent_auto_accept(acceptance_mode):
         _agent_autodrive_turn(request, repo, task, client=agent_client)
         return _join_turn_response(repo, task.id)

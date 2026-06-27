@@ -72,7 +72,9 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "async function refreshV2Plugins" in app_response.text
     assert "async function refreshV2Skills" in app_response.text
     assert "async function refreshV2Capability" in app_response.text
-    assert "mountV2(root, { taskId: () => selectedTaskId })" in app_response.text
+    # mountV2 is called with a taskId getter (plus spread platform actions); assert the
+    # stable prefix so adding/removing spread args doesn't make this smoke check brittle.
+    assert "mountV2(root, { taskId: () => selectedTaskId" in app_response.text
     assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_response.text
     assert '$("openGovernanceSettingsButton").onclick' in app_response.text
     assert '$("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;' in app_response.text

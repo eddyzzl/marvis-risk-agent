@@ -234,6 +234,11 @@ DATA_JOIN = WorkflowTemplate(
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "join_plan_id"}),),
+            # spec §2/§10: propose_join is a decision point — in agent mode the executor may
+            # adapt the remaining plan from the diagnostics (match/fan-out/fingerprint). The
+            # execute_join INV-3 confirmation gate + engine JoinNotConfirmedError backstop keep
+            # the 1:1 anchor invariant regardless of any replan.
+            decision_point=True,
             phase="数据准备",
         ),
         StepTemplate(
@@ -244,7 +249,9 @@ DATA_JOIN = WorkflowTemplate(
                 "dedup_strategies": "{slot:dedup_strategies}",
             },
             depends_on_titles=("拼接诊断",),
-            post_checks=(PostCheck("one_of", {"field": "status", "values": ["confirmed"]}),),
+            # needs_dedup is a valid state (a non-unique key still awaiting a strategy): let
+            # the plan reach the C2 gate to surface it rather than hard-failing here.
+            post_checks=(PostCheck("one_of", {"field": "status", "values": ["confirmed", "needs_dedup"]}),),
             phase="数据准备",
         ),
         StepTemplate(
@@ -288,6 +295,8 @@ MODELING = WorkflowTemplate(
         SlotSpec("recipe", True, "task_context", "Primary recipe to tune (lgb if among recipes)"),
         SlotSpec("recipes", True, "task_context", "Recipe ids to train + compare (≥1)"),
         SlotSpec("seed", True, "task_context", "Reproducibility seed"),
+        SlotSpec("split_config", False, "task_context", "Split rules/config for the G1 make_split gate (passthrough when empty)"),
+        SlotSpec("target_type", False, "task_context", "Derived target type: binary (default) or continuous"),
         SlotSpec("holdout_values", False, "task_context", "OOT split value(s) held out of the leakage screen"),
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
@@ -295,24 +304,43 @@ MODELING = WorkflowTemplate(
     ),
     steps=(
         StepTemplate(
+            title="切分样本",
+            tool_ref=ToolRef("modeling", "make_split"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+                "feature_cols": "{slot:feature_cols}",
+                "split_col": "{slot:split_col}",
+                "split_config": "{slot:split_config}",
+                "seed": "{slot:seed}",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "result_dataset_id"}),),
+            phase="特征",
+        ),
+        StepTemplate(
             title="特征筛选",
             tool_ref=ToolRef("modeling", "screen_features"),
             inputs_template={
-                "dataset_id": "{slot:dataset_id}",
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "features": "{slot:feature_cols}",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "holdout_values": "{slot:holdout_values}",
+                "target_type": "{slot:target_type}",
             },
-            depends_on_titles=(),
+            depends_on_titles=("切分样本",),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+            # G1 门:确认切分(train/test/oot 计数、按月/渠道分布)后再筛特征
+            #(执行器暂停在本步前,驱动展示"切分样本"产出的样本分析)
+            needs_confirmation=True,
             phase="特征",
         ),
         StepTemplate(
             title="调参",
             tool_ref=ToolRef("modeling", "tune_hyperparameters"),
             inputs_template={
-                "dataset_id": "{slot:dataset_id}",
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
@@ -324,8 +352,15 @@ MODELING = WorkflowTemplate(
                 # recipes skip the search and train with their own defaults.
                 "n_trials": 12,
             },
-            depends_on_titles=("特征筛选",),
-            post_checks=(PostCheck("nonempty", {"field": "best_params"}),),
+            depends_on_titles=("切分样本", "特征筛选"),
+            # best_params must be present + a dict, but MAY be empty: only lgb runs the random
+            # search; every other recipe (lr/xgb/scorecard/mlp/regressor/multiclass) skips it
+            # and trains with its own defaults ({}), so "nonempty" would wrongly fail them.
+            post_checks=(PostCheck("schema", {
+                "type": "object",
+                "properties": {"best_params": {"type": "object"}},
+                "required": ["best_params"],
+            }),),
             # 门:确认筛选出的特征集后再花算力调参(执行器暂停在本步前,驱动展示"特征筛选"产出)
             needs_confirmation=True,
             phase="建模",
@@ -334,7 +369,7 @@ MODELING = WorkflowTemplate(
             title="训练模型",
             tool_ref=ToolRef("modeling", "train_models"),
             inputs_template={
-                "dataset_id": "{slot:dataset_id}",
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "recipes": "{slot:recipes}",
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
@@ -342,8 +377,9 @@ MODELING = WorkflowTemplate(
                 "split_values": "{slot:split_values}",
                 "params": "$ref:调参.output.best_params",
                 "seed": "{slot:seed}",
+                "target_type": "{slot:target_type}",
             },
-            depends_on_titles=("特征筛选", "调参"),
+            depends_on_titles=("切分样本", "特征筛选", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -473,6 +509,20 @@ FEATURE_DERIVATION = WorkflowTemplate(
             },
             depends_on_titles=("衍生特征",),
             post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
+        ),
+        StepTemplate(
+            # spec form B §4: leakage-aware screening yields the selected feature set the
+            # downstream model should use (the title's "筛选" was previously unimplemented).
+            title="特征筛选",
+            tool_ref=ToolRef("feature", "screen_features"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "features": "{slot:feature_cols}",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=("分析衍生特征",),
+            post_checks=(),
+            phase="特征分析",
         ),
     ),
     default_autonomy=1,
