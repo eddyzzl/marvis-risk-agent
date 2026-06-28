@@ -46,6 +46,8 @@ class ModelingProposal:
     template_id: str = "modeling"
     anchor_id: str | None = None
     join_feature_ids: list[str] = field(default_factory=list)
+    sample_weight_col: str = ""
+    sample_weight_candidates: list[str] = field(default_factory=list)
 
     def template_slots(self) -> dict:
         if self.template_id == "modeling_with_join":
@@ -63,6 +65,9 @@ class ModelingProposal:
                 "holdout_values": self.holdout_values,
                 "target_type": self.target_type,
                 "split_config": {},
+                "sample_weight_col": self.sample_weight_col,
+                "sample_weight_candidates": list(self.sample_weight_candidates),
+                "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
             }
         return {
             "dataset_id": self.dataset_id,
@@ -78,20 +83,25 @@ class ModelingProposal:
             # The G1 make_split gate passes the setup-decided split through unchanged
             # ({} = passthrough); re-splitting with rules/time/group config is an adjust.
             "split_config": {},
+            "sample_weight_col": self.sample_weight_col,
+            "sample_weight_candidates": list(self.sample_weight_candidates),
+            "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
         }
 
 
 # Recipes selectable for the binary credit-risk default; lgb is the recommended
 # starting algorithm. mlp = a sklearn DNN (impute→scale→MLP pipeline).
 # lgb_regressor = the continuous-target (regression) recipe.
-_SUPPORTED_RECIPES = ("lgb", "xgb", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass")
-_BINARY_RECIPES = frozenset({"lgb", "xgb", "lr", "scorecard", "mlp"})
+_SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass")
+_BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
+_WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
 
 
 def build_modeling_proposal(
     registry, backend, task_id: str, source_dir, *, seed: int = 23,
     recipe: str | None = None, recipes: list[str] | None = None,
     target_type: str | None = None,
+    sample_weight_col: str | None = None,
 ) -> ModelingProposal:
     datasets = _resolve_datasets(registry, task_id, source_dir)
     joined = len(datasets) > 1
@@ -132,6 +142,22 @@ def build_modeling_proposal(
     # it is among the chosen recipes, else the first one (tuning is skipped for it).
     primary_recipe = "lgb" if "lgb" in recipe_list else recipe_list[0]
     notes = list(setup.notes)
+    weight_candidates = _detect_sample_weight_candidates(
+        backend,
+        path,
+        target_col=setup.target_col,
+        split_col=setup.split_col,
+    )
+    selected_weight_col = _normalize_sample_weight_col(
+        sample_weight_col,
+        available_columns=backend.column_names(path),
+    )
+    if selected_weight_col:
+        notes.append(f"样本权重列:`{selected_weight_col}`(仅作为 sample_weight,不作为入模特征)。")
+        weight_candidates = _unique([selected_weight_col, *weight_candidates])
+    elif weight_candidates:
+        display = "/".join(f"`{col}`" for col in weight_candidates[:3])
+        notes.append(f"检测到样本权重候选列:{display};如需启用,请确认 sample_weight_col。")
     if target_type == "continuous":
         notes.append("回归任务（连续型目标）：指标用 RMSE/MAE/R2,不计算坏率/KS/AUC。")
     elif target_type == "multiclass":
@@ -180,6 +206,8 @@ def build_modeling_proposal(
         template_id="modeling_with_join" if joined else "modeling",
         anchor_id=dataset.id if joined else None,
         join_feature_ids=join_feature_ids,
+        sample_weight_col=selected_weight_col,
+        sample_weight_candidates=weight_candidates,
     )
 
 
@@ -224,6 +252,40 @@ def _default_recipe_for_target_type(target_type: str) -> str:
     return "lgb"
 
 
+def _detect_sample_weight_candidates(
+    backend,
+    path: Path,
+    *,
+    target_col: str,
+    split_col: str | None,
+    sample_rows: int = 4000,
+) -> list[str]:
+    probe = backend.sample_rows(path, sample_rows, seed=0)
+    excluded = {str(target_col), str(split_col or "")}
+    candidates: list[str] = []
+    for column in probe.select_dtypes("number").columns:
+        name = str(column)
+        low = name.lower()
+        if name in excluded or not any(hint in low or hint in name for hint in _WEIGHT_NAME_HINTS):
+            continue
+        values = probe[column].dropna()
+        if values.empty:
+            continue
+        if (values < 0).any() or float(values.sum()) <= 0:
+            continue
+        candidates.append(name)
+    return candidates
+
+
+def _normalize_sample_weight_col(value: str | None, *, available_columns: list[str]) -> str:
+    column = str(value or "").strip()
+    if not column:
+        return ""
+    if column not in set(available_columns):
+        raise ModelingSetupError(f"样本权重列 `{column}` 不存在;请检查列名。")
+    return column
+
+
 def _selection_metric_label(target_type: str) -> str:
     if target_type == "continuous":
         return "OOT RMSE"
@@ -243,6 +305,10 @@ def _detect_group_cols(dataset) -> list[str]:
         if any(token in low or token in name for token in _ID_TOKENS):
             return [name]
     return []
+
+
+def _unique(values: list[str]) -> list[str]:
+    return [value for value in dict.fromkeys(str(item).strip() for item in values) if value]
 
 
 def _generate_split(registry, backend, dataset, setup, seed):

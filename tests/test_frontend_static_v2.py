@@ -2747,8 +2747,9 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'id="createTaskAlgorithmField"' in index_html
     assert 'id="modelAlgorithmChoices"' in index_html
     assert 'name="modelAlgorithm"' in index_html
-    for recipe in ('value="lgb"', 'value="xgb"', 'value="lr"', 'value="scorecard"', 'value="mlp"'):
+    for recipe in ('value="lgb"', 'value="xgb"', 'value="catboost"', 'value="lr"', 'value="scorecard"', 'value="mlp"'):
         assert recipe in index_html
+    assert 'id="modelSampleWeightCol"' in index_html
     assert 'data-recipe-family="binary"' in index_html
     # regression + multiclass target types are exposed too, so the UI can drive
     # §8.2/§8.3 tasks, not only binary
@@ -2759,6 +2760,7 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert "algorithmField: true" in app_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
     assert 'payload.target_type = [...families][0] || "binary";' in app_js
+    assert "payload.sample_weight_col = sampleWeightCol;" in app_js
     assert "normalizeModelAlgorithmFamilies" in app_js
     assert "二分类、回归与多分类算法不能混选。" in app_js
     assert "请至少选择一个建模算法。" in app_js

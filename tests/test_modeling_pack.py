@@ -5,8 +5,9 @@ import pandas as pd
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
+from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -371,11 +372,11 @@ def test_train_model_allows_scoring_only_oot(tmp_path):
 
 def test_tune_skips_random_search_for_non_lgb_recipe():
     """The LightGBM random search only runs for the lgb recipe; other recipes
-    (lr/scorecard/xgb) train with their own defaults, so tuning returns empty
+    (lr/scorecard/xgb/catboost) train with their own defaults, so tuning returns empty
     params (G2 recipe-aware tune). The skip path runs before touching the runtime."""
     from marvis.packs.modeling.tools import tool_tune_hyperparameters
 
-    for recipe in ("lr", "scorecard", "xgb"):
+    for recipe in ("lr", "scorecard", "xgb", "catboost"):
         out = tool_tune_hyperparameters(
             {
                 "recipe": recipe,
@@ -426,6 +427,78 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["best_recipe"] in {"lgb", "lr"}
     assert out["target_type"] == "binary"
     assert out["selection_metric"] == "oot_ks"
+
+
+def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
+    runner, _pr, registry, backend, settings, task = _runtime(tmp_path)
+    rows = 180
+    frame = pd.DataFrame({
+        "x1": [((i * 19) % 97) / 100 for i in range(rows)],
+        "x2": [((i * 23) % 83) / 100 for i in range(rows)],
+        "weight": [2.0 if i % 5 == 0 else 1.0 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "weighted_modeling_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    prepared = runner.invoke(
+        ToolRef("modeling", "make_split"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["weight"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+    prepared_frame = backend.read_frame(registry.resolve_path(prepared.output["result_dataset_id"]))
+    assert "weight" in prepared_frame.columns
+    assert prepared.output["feature_cols"] == ["x1", "x2"]
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "catboost"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "sample_weight_col": "weight",
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    assert {exp["recipe"] for exp in trained.output["experiments"]} == {"lgb", "catboost"}
+
+    store = ExperimentStore(settings.db_path)
+    modeling_repo = ModelingRepository(settings.db_path)
+    artifacts = {}
+    for experiment_id in trained.output["experiment_ids"]:
+        experiment = store.get(experiment_id)
+        artifact = modeling_repo.get_model_artifact(experiment.artifact_id)
+        assert artifact is not None
+        artifacts[artifact.algorithm] = artifact
+        assert artifact.model_path.endswith(".pkl")
+        assert artifact.params["sample_weight_col"] == "weight"
+
+    assert set(artifacts) == {"lgb", "catboost"}
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": trained.output["experiment_ids"]},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    catboost_row = next(row for row in compared.output["experiments"] if row["recipe"] == "catboost")
+    assert catboost_row["capabilities"]["native_model_supported"] is True
+    assert catboost_row["capabilities"]["pmml_supported"] is False
+    assert "sklearn2pmml" in catboost_row["capabilities"]["reason"]
 
 
 def test_pick_best_experiment_is_target_type_aware():

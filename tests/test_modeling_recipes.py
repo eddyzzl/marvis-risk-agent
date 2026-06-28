@@ -44,8 +44,9 @@ def test_recipe_registry_exposes_builtin_classification_and_regression_recipes()
     recipes = list_recipes()
 
     assert [recipe.id for recipe in recipes] == [
-        "lgb", "xgb", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass",
+        "lgb", "xgb", "catboost", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass",
     ]
+    assert get_recipe("catboost").algorithm == "catboost"
     assert get_recipe("scorecard").requires_woe is True
     assert get_recipe("lgb_regressor").algorithm == "lgb_regressor"
     assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
@@ -455,6 +456,30 @@ def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_pat
     assert proposal.target_col == "y"
     assert proposal.bad_rate is not None
     assert proposal.template_slots()["target_type"] == "binary"
+
+
+def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature_leakage(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "sample_weight": [2.0 if i % 4 == 0 else 1.0 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "weighted_binary_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-weight", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-weight", tmp_path, recipes=["lgb"])
+
+    assert proposal.sample_weight_col == ""
+    assert proposal.sample_weight_candidates == ["sample_weight"]
+    assert "sample_weight" not in proposal.feature_cols
+    slots = proposal.template_slots()
+    assert slots["sample_weight_col"] == ""
+    assert slots["passthrough_cols"] == ["sample_weight"]
+    assert any("检测到样本权重候选列" in note for note in proposal.notes)
 
 
 def test_build_modeling_proposal_derives_multiclass_target_type_from_recipe(tmp_path):

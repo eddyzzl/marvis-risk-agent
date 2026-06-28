@@ -42,6 +42,19 @@ def _register_builtin_recipes() -> None:
             requires_woe=False,
         ),
         ModelRecipe(
+            id="catboost",
+            algorithm="catboost",
+            default_params={
+                "loss_function": "Logloss",
+                "eval_metric": "AUC",
+                "learning_rate": 0.05,
+                "depth": 4,
+                "verbose": False,
+            },
+            param_space={},
+            requires_woe=False,
+        ),
+        ModelRecipe(
             id="lr",
             algorithm="lr",
             default_params={

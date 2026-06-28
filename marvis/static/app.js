@@ -550,6 +550,8 @@ function resetModelAlgorithmChoices() {
   document.querySelectorAll('input[name="modelAlgorithm"], input[name="featureMetric"]').forEach((input) => {
     input.checked = false;
   });
+  const weightInput = $("modelSampleWeightCol");
+  if (weightInput) weightInput.value = "";
 }
 
 function modelRecipeFamily(recipe) {
@@ -7340,6 +7342,8 @@ async function createTask() {
       return null;
     }
     payload.target_type = [...families][0] || "binary";
+    const sampleWeightCol = $("modelSampleWeightCol")?.value.trim();
+    if (sampleWeightCol) payload.sample_weight_col = sampleWeightCol;
   }
   // Manual feature analysis: optional metrics (e.g. VIF). Empty is valid — base
   // per-feature metrics are always computed (spec §2: 选了才算).

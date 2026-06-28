@@ -14,9 +14,10 @@ from marvis.packs.modeling.errors import ModelingError
 
 
 _MODEL_SUFFIX = {
-    "lgb": ".joblib",
+    "lgb": ".pkl",
     "lgb_regressor": ".txt",
-    "xgb": ".joblib",
+    "xgb": ".pkl",
+    "catboost": ".pkl",
     "lr": ".joblib",
     "scorecard": ".joblib",
     "mlp": ".joblib",
@@ -40,7 +41,7 @@ def save_model(
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}{_MODEL_SUFFIX[algorithm]}"
     target = out_dir / model_path
-    if algorithm in {"lgb", "xgb"}:
+    if algorithm in {"lgb", "xgb", "catboost"}:
         joblib.dump(model, target)
     elif algorithm == "lgb_regressor":
         model.save_model(target)
@@ -74,7 +75,7 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
     if not path.exists():
         raise ModelingError(f"model file does not exist: {artifact.model_path}")
     if artifact.algorithm == "lgb":
-        if path.suffix == ".joblib":
+        if path.suffix in {".joblib", ".pkl"}:
             return joblib.load(path)
         import lightgbm as lgb
 
@@ -84,14 +85,14 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
 
         return lgb.Booster(model_file=path.as_posix())
     if artifact.algorithm == "xgb":
-        if path.suffix == ".joblib":
+        if path.suffix in {".joblib", ".pkl"}:
             return joblib.load(path)
         import xgboost as xgb
 
         model = xgb.Booster()
         model.load_model(path)
         return model
-    if artifact.algorithm in {"lr", "scorecard", "mlp"}:
+    if artifact.algorithm in {"catboost", "lr", "scorecard", "mlp"}:
         return joblib.load(path)
     raise ModelingError(f"unsupported model algorithm: {artifact.algorithm}")
 

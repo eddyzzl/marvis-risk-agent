@@ -221,6 +221,10 @@
                 <span>XGBoost (xgb)</span>
               </label>
               <label class="algorithm-choice">
+                <input type="checkbox" name="modelAlgorithm" value="catboost" data-recipe-family="binary" />
+                <span>CatBoost (catboost)</span>
+              </label>
+              <label class="algorithm-choice">
                 <input type="checkbox" name="modelAlgorithm" value="lr" data-recipe-family="binary" />
                 <span>逻辑回归 (lr)</span>
               </label>
@@ -244,6 +248,10 @@
                 <span>多分类 (LightGBM)</span>
               </label>
             </div>
+            <label class="wide-field">
+              <span>样本权重列（可选）</span>
+              <input id="modelSampleWeightCol" placeholder="例如：weight 或 sample_weight" autocomplete="off" />
+            </label>
           </section>
           <section id="createTaskMetricField" class="task-form-section" hidden>
             <h3>可选指标</h3>

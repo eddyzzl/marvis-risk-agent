@@ -49,6 +49,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
             split_col="sample_type",
             time_col="month",
             feature_columns=["x1", "x2"],
+            sample_weight_col="sample_weight",
             notebook_path="/tmp/source/model.ipynb",
             sample_path="/tmp/source/sample.csv",
             pmml_path="/tmp/source/model.pmml",
@@ -69,6 +70,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     assert loaded.split_col == "sample_type"
     assert loaded.time_col == "month"
     assert loaded.feature_columns == ["x1", "x2"]
+    assert loaded.sample_weight_col == "sample_weight"
     assert loaded.notebook_path == "/tmp/source/model.ipynb"
     assert loaded.sample_path == "/tmp/source/sample.csv"
     assert loaded.pmml_path == "/tmp/source/model.pmml"

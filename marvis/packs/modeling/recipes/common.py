@@ -11,6 +11,12 @@ from marvis.packs.modeling.contracts import ModelMetrics, TrainConfig
 from marvis.packs.modeling.errors import ModelingError
 from marvis.validation.overfitting import overfitting_check
 
+_SAMPLE_WEIGHT_PARAM_KEYS = frozenset({
+    "sample_weight_col",
+    "sample_weight_column",
+    "weight_col",
+})
+
 
 def split_modeling_frame(
     frame: pd.DataFrame,
@@ -33,6 +39,47 @@ def split_modeling_frame(
     if oot is not None and oot.empty:
         oot = None
     return train, test, oot
+
+
+def model_params(params: dict | None) -> dict:
+    """Drop platform-only controls before passing params into estimator constructors."""
+    return {
+        str(key): value
+        for key, value in dict(params or {}).items()
+        if str(key) not in _SAMPLE_WEIGHT_PARAM_KEYS
+    }
+
+
+def sample_weight_col(config: TrainConfig) -> str:
+    for key in _SAMPLE_WEIGHT_PARAM_KEYS:
+        value = config.params.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def artifact_params(params: dict, config: TrainConfig) -> dict:
+    out = dict(params)
+    column = sample_weight_col(config)
+    if column:
+        out["sample_weight_col"] = column
+    return out
+
+
+def sample_weight_values(frame: pd.DataFrame, config: TrainConfig) -> np.ndarray | None:
+    column = sample_weight_col(config)
+    if not column:
+        return None
+    if column not in frame.columns:
+        raise ModelingError(f"sample weight column not found in modeling frame: {column}")
+    weights = pd.to_numeric(frame[column], errors="coerce")
+    if weights.isna().any():
+        raise ModelingError(f"sample weight column `{column}` contains null or non-numeric values")
+    if (weights < 0).any():
+        raise ModelingError(f"sample weight column `{column}` contains negative values")
+    if float(weights.sum()) <= 0:
+        raise ModelingError(f"sample weight column `{column}` must have a positive total weight")
+    return weights.to_numpy(dtype=float)
 
 
 def compute_model_metrics(

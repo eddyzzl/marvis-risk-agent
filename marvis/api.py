@@ -501,6 +501,8 @@ def _task_hook_payload(task: TaskRecord) -> dict:
     }
     if getattr(task, "target_type", ""):
         payload["target_type"] = task.target_type
+    if getattr(task, "sample_weight_col", ""):
+        payload["sample_weight_col"] = task.sample_weight_col
     return payload
 
 
@@ -735,6 +737,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             feature_columns=payload.feature_columns,
             target_type=_normalized_target_type(payload.target_type),
             recipes=payload.recipes,
+            sample_weight_col=str(payload.sample_weight_col or "").strip(),
             metrics=payload.metrics,
             capability_tier=_normalized_capability_tier(payload.capability_tier),
             notebook_path=payload.notebook_path,
@@ -3318,6 +3321,7 @@ def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *
             registry, backend, task.id, task.source_dir,
             target_type=_modeling_target_type(task),
             recipes=_modeling_recipes(task),
+            sample_weight_col=getattr(task, "sample_weight_col", "") or None,
         )
         counts = proposal.counts
         bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""

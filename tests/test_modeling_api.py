@@ -207,6 +207,42 @@ def test_modeling_persists_explicit_target_type_and_defaults_recipe(client: Test
     assert train_step.inputs["recipes"] == ["lgb_regressor"]
 
 
+def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClient, tmp_path: Path):
+    src = _sample_dir(tmp_path, n=300)
+    sample_path = src / "sample.parquet"
+    frame = pd.read_parquet(sample_path)
+    frame["sample_weight"] = np.where(np.arange(len(frame)) % 5 == 0, 2.0, 1.0)
+    frame.to_parquet(sample_path, index=False)
+
+    resp = client.post("/api/tasks", json={
+        "model_name": "带权重建模",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+        "sample_weight_col": "sample_weight",
+    })
+    assert resp.status_code == 200, resp.text
+    task = resp.json()
+    assert task["sample_weight_col"] == "sample_weight"
+
+    task_id = task["id"]
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    opening = next(m for m in messages if m["role"] == "assistant")
+    assert "样本权重列:`sample_weight`" in opening["content"]
+
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    split_step = next(step for step in plans[0].steps if step.title == "切分样本")
+    tune_step = next(step for step in plans[0].steps if step.title == "调参")
+    train_step = next(step for step in plans[0].steps if step.title == "训练模型")
+    assert "sample_weight" in split_step.inputs["passthrough_cols"]
+    assert tune_step.inputs["sample_weight_col"] == "sample_weight"
+    assert train_step.inputs["sample_weight_col"] == "sample_weight"
+
+
 def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClient, tmp_path: Path):
     src = _sample_dir(tmp_path, n=200)
     pd.DataFrame({

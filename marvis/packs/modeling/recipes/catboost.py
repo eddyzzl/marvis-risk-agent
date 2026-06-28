@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
-import xgboost as xgb
+import numpy as np
+from catboost import CatBoostClassifier
 
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
@@ -19,59 +20,54 @@ from marvis.packs.modeling.recipes.common import (
 )
 
 
-def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
+def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
     )
     params = {
-        **get_recipe("xgb").default_params,
+        **get_recipe("catboost").default_params,
         **model_params(config.params),
-        "random_state": config.seed,
-        "n_jobs": 1,
+        "random_seed": config.seed,
+        "thread_count": 1,
+        "allow_writing_files": False,
     }
-    num_boost_round = int(params.pop("num_boost_round", 20))
-    if config.early_stopping_rounds:
-        params["early_stopping_rounds"] = int(config.early_stopping_rounds)
-    model = xgb.XGBClassifier(
-        **params,
-        n_estimators=num_boost_round,
-    )
-    test_weight = sample_weight_values(test, config)
+    iterations = int(params.pop("iterations", params.pop("num_boost_round", 50)))
+    model = CatBoostClassifier(**params, iterations=iterations)
+    features = list(config.features)
     model.fit(
-        train[list(config.features)],
+        train[features],
         train[config.target_col].to_numpy(dtype=int),
         sample_weight=sample_weight_values(train, config),
-        eval_set=[(test[list(config.features)], test[config.target_col].to_numpy(dtype=int))],
-        sample_weight_eval_set=[test_weight] if test_weight is not None else None,
+        eval_set=(test[features], test[config.target_col].to_numpy(dtype=int)),
         verbose=False,
     )
     metrics = compute_model_metrics(
-        lambda data: model.predict_proba(data[list(config.features)])[:, 1],
+        lambda data: model.predict_proba(data[features])[:, 1],
         train,
         test,
         oot,
         config,
         oot_has_labels=oot_has_labels,
     )
-    artifact = _save_xgb_model(
+    artifact = _save_catboost_model(
         model,
         config,
         out_dir,
-        artifact_params({**params, "num_boost_round": num_boost_round}, config),
+        artifact_params({**params, "iterations": iterations}, config),
     )
     return TrainResult(
         artifact=artifact,
         metrics=metrics,
-        feature_importance=_xgb_importance(model, config.features),
+        feature_importance=_catboost_importance(model, config.features),
         experiment_id="",
         nan_labels_dropped=audit["total_dropped"],
     )
 
 
-def _save_xgb_model(
-    model: xgb.XGBClassifier,
+def _save_catboost_model(
+    model: CatBoostClassifier,
     config: TrainConfig,
     out_dir: Path,
     params: dict,
@@ -83,7 +79,7 @@ def _save_xgb_model(
     return ModelArtifact(
         id=artifact_id,
         experiment_id="",
-        algorithm="xgb",
+        algorithm="catboost",
         model_path=model_path,
         pmml_path=None,
         feature_list=tuple(config.features),
@@ -93,12 +89,12 @@ def _save_xgb_model(
     )
 
 
-def _xgb_importance(
-    model: xgb.XGBClassifier,
+def _catboost_importance(
+    model: CatBoostClassifier,
     features: tuple[str, ...],
 ) -> tuple[tuple[str, float], ...]:
-    gains = model.get_booster().get_score(importance_type="gain")
-    return tuple((feature, float(gains.get(feature, 0.0))) for feature in features)
+    values = np.asarray(model.get_feature_importance(), dtype=float)
+    return tuple((feature, float(value)) for feature, value in zip(features, values, strict=True))
 
 
-__all__ = ["train_xgb"]
+__all__ = ["train_catboost"]

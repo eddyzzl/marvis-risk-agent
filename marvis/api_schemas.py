@@ -18,6 +18,7 @@ class CreateTaskRequest(BaseModel):
     feature_columns: list[str] = Field(default_factory=list)
     target_type: str = ""
     recipes: list[str] = Field(default_factory=list)
+    sample_weight_col: str = ""
     metrics: list[str] = Field(default_factory=list)
     # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
     capability_tier: str = ""

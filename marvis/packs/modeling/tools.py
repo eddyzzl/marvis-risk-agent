@@ -33,6 +33,7 @@ from marvis.packs.modeling.report_compute import (
 )
 from marvis.packs.modeling.readiness import check_data_quality, modeling_readiness
 from marvis.packs.modeling.prepare import SPLIT_COLUMN, prepare_modeling_frame
+from marvis.packs.modeling.recipes.catboost import train_catboost
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
@@ -100,6 +101,7 @@ def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
         feature_cols=feature_cols,
         split_col=split_col,
         split_config=inputs.get("split_config") or {},
+        passthrough_cols=[str(item) for item in inputs.get("passthrough_cols") or [] if str(item).strip()],
         seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
     )
     split_col = split_col or "split"
@@ -146,6 +148,7 @@ def tool_make_split(inputs: dict, ctx) -> dict:
         feature_cols=feature_cols,
         split_col=split_col,
         split_config=inputs.get("split_config") or {},
+        passthrough_cols=[str(item) for item in inputs.get("passthrough_cols") or [] if str(item).strip()],
         seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
     )
     effective_split_col = split_col or SPLIT_COLUMN
@@ -314,8 +317,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     # tuning is a later slice), so we skip tuning and let train_model use the
     # recipe's own defaults.
     recipe = str(inputs.get("recipe") or "lgb")
+    control_params = _training_control_params(inputs, dict(inputs.get("params") or {}))
     if recipe != "lgb":
-        return {"best_params": {}, "best_metrics": {}, "n_trials": 0, "trials": []}
+        return {"best_params": control_params, "best_metrics": {}, "n_trials": 0, "trials": []}
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     result = tune_hyperparameters(
@@ -330,9 +334,11 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         early_stopping_rounds=int(inputs.get("early_stopping_rounds", 100)),
         max_boost_round=int(inputs.get("max_boost_round", 3000)),
         overfit_penalty=float(inputs.get("overfit_penalty", 0.5)),
+        sample_weight_col=control_params.get("sample_weight_col", ""),
     )
+    best_params = {**control_params, **result.best_params}
     return {
-        "best_params": _jsonable(result.best_params),
+        "best_params": _jsonable(best_params),
         "best_metrics": _jsonable(result.best_metrics),
         "n_trials": result.n_trials,
         "trials": _jsonable(result.trials),
@@ -349,7 +355,7 @@ def tool_train_model(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         split_col=str(inputs["split_col"]),
         split_values=dict(inputs["split_values"]),
-        params=dict(inputs.get("params") or {}),
+        params=_training_params(inputs),
         seed=int(inputs["seed"]),
         early_stopping_rounds=_optional_int(inputs.get("early_stopping_rounds")),
         recipe_id=recipe,
@@ -396,6 +402,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     recipes = [str(item) for item in inputs["recipes"]]
     tuned_params = dict(inputs.get("params") or {})
+    control_params = _training_control_params(inputs, tuned_params)
     features = tuple(str(item) for item in inputs["features"])
     target_col = str(inputs["target_col"])
     split_col = str(inputs["split_col"])
@@ -413,7 +420,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             split_col=split_col,
             split_values=split_values,
             # only the lgb recipe consumes the tuned params; others use their defaults
-            params=dict(tuned_params) if recipe == "lgb" else {},
+            params={**tuned_params, **control_params} if recipe == "lgb" else dict(control_params),
             seed=seed,
             early_stopping_rounds=None,
             recipe_id=recipe,
@@ -756,6 +763,8 @@ def _train_recipe(
         return train_lgb_multiclass(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "xgb":
         return train_xgb(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "catboost":
+        return train_catboost(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "lr":
         return train_lr(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "scorecard":
@@ -774,10 +783,18 @@ def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
 
 def _artifact_capabilities(artifact: ModelArtifact) -> dict:
     pmml_supported = artifact.algorithm in PMML_SUPPORTED_ALGORITHMS
-    reason = None if pmml_supported else (
-        f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
-        f"{artifact.algorithm} 可保留原生模型文件和报告。"
-    )
+    if pmml_supported:
+        reason = None
+    elif artifact.algorithm == "catboost":
+        reason = (
+            "CatBoost 可保留原生 .pkl 模型和报告;当前 sklearn2pmml/JPMML "
+            "不支持 CatBoostClassifier 直接导出 PMML,因此验证移交需使用 lr/lgb/xgb/scorecard。"
+        )
+    else:
+        reason = (
+            f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
+            f"{artifact.algorithm} 可保留原生模型文件和报告。"
+        )
     return {
         "pmml_supported": pmml_supported,
         "handoff_supported": pmml_supported,
@@ -832,6 +849,20 @@ def _optional_int(value) -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _training_params(inputs: dict) -> dict:
+    params = dict(inputs.get("params") or {})
+    return {**params, **_training_control_params(inputs, params)}
+
+
+def _training_control_params(inputs: dict, params: dict | None = None) -> dict:
+    params = dict(params or {})
+    for key in ("sample_weight_col", "sample_weight_column", "weight_col"):
+        value = inputs.get(key, params.get(key))
+        if value not in (None, ""):
+            return {"sample_weight_col": str(value).strip()}
+    return {}
 
 
 def _business_columns(payload: dict) -> BusinessColumns:

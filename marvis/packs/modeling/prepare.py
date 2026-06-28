@@ -28,6 +28,7 @@ def prepare_modeling_frame(
     feature_cols: list[str],
     split_col: str | None,
     split_config: dict | None,
+    passthrough_cols: list[str] | None = None,
     seed: int = 0,
 ):
     dataset = registry.get(dataset_id)
@@ -50,15 +51,16 @@ def prepare_modeling_frame(
     if group_cols:
         group_cols = group_cols if isinstance(group_cols, list) else [group_cols]
         split_config["group_cols"] = [str(col) for col in group_cols if str(col) in existing_columns]
-    requested = _requested_columns(feature_cols, target_col, split_col, split_config)
+    passthrough = [str(col) for col in (passthrough_cols or []) if str(col).strip()]
+    requested = _requested_columns(feature_cols, target_col, split_col, split_config, passthrough)
     _assert_columns_exist(dataset, requested)
 
     frame = backend.read_frame(dataset_path, columns=requested)
     if split_col:
-        prepared = frame[_unique([*feature_cols, target_col, split_col])].copy()
+        prepared = frame[_unique([*feature_cols, *passthrough, target_col, split_col])].copy()
     else:
         prepared = _make_split(frame, split_config, seed=seed)
-        prepared = prepared[_unique([*feature_cols, target_col, SPLIT_COLUMN])].copy()
+        prepared = prepared[_unique([*feature_cols, *passthrough, target_col, SPLIT_COLUMN])].copy()
 
     out_path = _output_path(registry, dataset)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -253,8 +255,9 @@ def _requested_columns(
     target_col: str,
     split_col: str | None,
     split_config: dict,
+    passthrough_cols: list[str] | None = None,
 ) -> list[str]:
-    columns = [*feature_cols, target_col]
+    columns = [*feature_cols, *(passthrough_cols or []), target_col]
     if split_col:
         columns.append(split_col)
     time_col = split_config.get("oot_by_time")

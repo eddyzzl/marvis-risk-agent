@@ -166,6 +166,12 @@ def init_db(db_path: Path) -> None:
         _ensure_column(
             conn,
             table="tasks",
+            column="sample_weight_col",
+            definition="TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
             column="metrics_json",
             definition="TEXT NOT NULL DEFAULT '[]'",
         )
@@ -607,6 +613,7 @@ class TaskRepository:
             feature_columns=list(payload.feature_columns),
             target_type=payload.target_type,
             recipes=list(payload.recipes),
+            sample_weight_col=payload.sample_weight_col,
             metrics=list(payload.metrics),
             capability_tier=payload.capability_tier,
             notebook_path=payload.notebook_path,
@@ -627,12 +634,12 @@ class TaskRepository:
                 (
                     id, task_type, model_name, model_version, validator, source_dir,
                     algorithm, run_mode, target_col, score_col, split_col,
-                    time_col, feature_columns_json, target_type, recipes_json, metrics_json, capability_tier, notebook_path, sample_path,
+                    time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, metrics_json, capability_tier, notebook_path, sample_path,
                     pmml_path, dictionary_path, report_values_json,
                     report_values_revision, status, status_message,
                     status_reason_code, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -650,6 +657,7 @@ class TaskRepository:
                     _dump_json_list(record.feature_columns),
                     record.target_type,
                     _dump_json_list(record.recipes),
+                    record.sample_weight_col,
                     _dump_json_list(record.metrics),
                     record.capability_tier,
                     record.notebook_path,
@@ -2971,6 +2979,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         feature_columns=_load_json_list(row["feature_columns_json"]),
         target_type=(row["target_type"] if "target_type" in row.keys() else "") or "",
         recipes=_load_json_list(row["recipes_json"]),
+        sample_weight_col=(row["sample_weight_col"] if "sample_weight_col" in row.keys() else "") or "",
         metrics=_load_json_list(row["metrics_json"]),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],

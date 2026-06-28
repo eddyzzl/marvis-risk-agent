@@ -16,7 +16,12 @@ from marvis.feature.encode import woe_encode
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
-from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.common import (
+    artifact_params,
+    compute_model_metrics,
+    sample_weight_values,
+    split_modeling_frame,
+)
 
 
 def train_scorecard(
@@ -39,7 +44,11 @@ def train_scorecard(
     train_woe = _encode_with_woe(train, config, woe_maps)
     lr_params = {**_lr_params(config), "random_state": config.seed}
     model = LogisticRegression(**lr_params)
-    model.fit(train_woe, train[config.target_col].to_numpy(dtype=int))
+    model.fit(
+        train_woe,
+        train[config.target_col].to_numpy(dtype=int),
+        sample_weight=sample_weight_values(train, config),
+    )
 
     metrics = compute_model_metrics(
         lambda data: model.predict_proba(_encode_with_woe(data, config, woe_maps))[:, 1],
@@ -56,7 +65,7 @@ def train_scorecard(
         config,
         out_dir,
         woe_maps,
-        params={
+        params=artifact_params({
             **lr_params,
             "base_score": base_score,
             "pdo": pdo,
@@ -64,7 +73,7 @@ def train_scorecard(
             "factor": float(factor),
             "offset": float(offset),
             "scorecard_max_bins": max_bins,
-        },
+        }, config),
     )
     return TrainResult(
         artifact=artifact,

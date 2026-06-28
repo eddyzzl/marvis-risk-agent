@@ -65,6 +65,7 @@ class TaskCreate:
     # recommends / modeling_setup defaults. Multi-element → multi-algorithm compare.
     target_type: str = ""
     recipes: list[str] = field(default_factory=list)
+    sample_weight_col: str = ""
     # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
     # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
     metrics: list[str] = field(default_factory=list)
@@ -106,6 +107,7 @@ class TaskRecord:
     task_type: str = TASK_TYPE_VALIDATION
     target_type: str = ""
     recipes: list[str] = field(default_factory=list)
+    sample_weight_col: str = ""
     metrics: list[str] = field(default_factory=list)
     capability_tier: str = ""
 

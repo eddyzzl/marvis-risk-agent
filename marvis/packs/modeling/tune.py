@@ -85,6 +85,7 @@ def tune_hyperparameters(
     early_stopping_rounds: int = 100,
     max_boost_round: int = 3000,
     overfit_penalty: float = 0.5,
+    sample_weight_col: str = "",
 ) -> TuneResult:
     """Random-search LightGBM params; select by test KS minus an overfit penalty.
 
@@ -92,17 +93,20 @@ def tune_hyperparameters(
     OOT is scored but never used for selection (it is the final unbiased metric).
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
-    cols = feats + [target_col, split_col]
+    weight_col = str(sample_weight_col or "").strip()
+    cols = feats + [target_col, split_col] + ([weight_col] if weight_col else [])
     frame = backend.read_frame(dataset_path, columns=cols)
     train, test, oot = _split(frame, split_col, split_values)
     ytr = train[target_col].to_numpy(dtype=float)
     yte = test[target_col].to_numpy(dtype=float)
-    pos = float((ytr == 1).sum())
-    neg = float((ytr == 0).sum())
+    wtr = _sample_weight(train, weight_col)
+    wte = _sample_weight(test, weight_col)
+    pos = _weighted_count(ytr, wtr, 1.0)
+    neg = _weighted_count(ytr, wtr, 0.0)
     pos_weight_hint = round(neg / pos, 1) if pos > 0 else 1.0
 
-    dtrain = lgb.Dataset(train[feats], label=ytr, free_raw_data=False)
-    dvalid = lgb.Dataset(test[feats], label=yte, reference=dtrain, free_raw_data=False)
+    dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
+    dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
     rng = np.random.RandomState(seed)
 
     best = None
@@ -164,6 +168,28 @@ def tune_hyperparameters(
         trials=tuple(trials),
         n_trials=len(trials),
     )
+
+
+def _sample_weight(frame: pd.DataFrame, column: str) -> np.ndarray | None:
+    if not column:
+        return None
+    if column not in frame.columns:
+        raise ModelingError(f"sample weight column not found in tuning frame: {column}")
+    weights = pd.to_numeric(frame[column], errors="coerce")
+    if weights.isna().any():
+        raise ModelingError(f"sample weight column `{column}` contains null or non-numeric values")
+    if (weights < 0).any():
+        raise ModelingError(f"sample weight column `{column}` contains negative values")
+    if float(weights.sum()) <= 0:
+        raise ModelingError(f"sample weight column `{column}` must have a positive total weight")
+    return weights.to_numpy(dtype=float)
+
+
+def _weighted_count(labels: np.ndarray, weights: np.ndarray | None, value: float) -> float:
+    mask = labels == value
+    if weights is None:
+        return float(mask.sum())
+    return float(weights[mask].sum())
 
 
 __all__ = ["tune_hyperparameters", "TuneResult"]

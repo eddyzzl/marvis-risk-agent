@@ -9,7 +9,13 @@ import lightgbm as lgb
 
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
-from marvis.packs.modeling.recipes.common import compute_model_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.common import (
+    artifact_params,
+    compute_model_metrics,
+    model_params,
+    sample_weight_values,
+    split_modeling_frame,
+)
 
 
 def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
@@ -17,7 +23,7 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     train, test, oot = split_modeling_frame(frame, config)
     params = {
         **get_recipe("lgb").default_params,
-        **config.params,
+        **model_params(config.params),
         "random_state": config.seed,
         "n_jobs": 1,
         "deterministic": True,
@@ -30,10 +36,13 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         **params,
         n_estimators=num_boost_round,
     )
+    test_weight = sample_weight_values(test, config)
     model.fit(
         train[list(config.features)],
         train[config.target_col],
+        sample_weight=sample_weight_values(train, config),
         eval_set=[(test[list(config.features)], test[config.target_col])],
+        eval_sample_weight=[test_weight] if test_weight is not None else None,
         callbacks=callbacks,
     )
     metrics = compute_model_metrics(
@@ -43,7 +52,12 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         oot,
         config,
     )
-    artifact = _save_lgb_model(model, config, out_dir, {**params, "num_boost_round": num_boost_round})
+    artifact = _save_lgb_model(
+        model,
+        config,
+        out_dir,
+        artifact_params({**params, "num_boost_round": num_boost_round}, config),
+    )
     return TrainResult(
         artifact=artifact,
         metrics=metrics,
@@ -60,7 +74,7 @@ def _save_lgb_model(
 ) -> ModelArtifact:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
-    model_path = f"{artifact_id}.joblib"
+    model_path = f"{artifact_id}.pkl"
     joblib.dump(model, out_dir / model_path)
     return ModelArtifact(
         id=artifact_id,
