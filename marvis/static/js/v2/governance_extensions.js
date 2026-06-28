@@ -8,7 +8,7 @@ const panelDefinitions = [
   { id: "capabilityPanel", className: "v2-capability-panel", label: "V2 能力档位", title: "能力档位", description: "控制自治程度，不改变证据和安全护栏。" },
 ];
 
-const mountStateKey = "__marvisV2MountState";
+const mountStateKey = "__marvisGovernanceExtensionMountState";
 
 function documentFor(root) {
   if (root?.ownerDocument?.createElement) {
@@ -17,7 +17,7 @@ function documentFor(root) {
   if (typeof document !== "undefined") {
     return document;
   }
-  throw new Error("mountV2 requires a DOM root with an ownerDocument");
+  throw new Error("mountGovernanceExtensionPanels requires a DOM root with an ownerDocument");
 }
 
 function ensurePanel(root, definition) {
@@ -37,9 +37,9 @@ function ensurePanel(root, definition) {
   return panel;
 }
 
-export function mountV2(root, options = {}) {
+export function mountGovernanceExtensionPanels(root, options = {}) {
   if (!root || typeof root.querySelector !== "function" || typeof root.appendChild !== "function") {
-    throw new Error("mountV2 requires a stable root element");
+    throw new Error("mountGovernanceExtensionPanels requires a stable root element");
   }
   const panels = {};
   for (const definition of panelDefinitions) {
@@ -79,12 +79,12 @@ export function mountV2(root, options = {}) {
     root[mountStateKey] = { cleanups };
   }
   if (root.dataset) {
-    root.dataset.v2Mounted = "true";
+    root.dataset.governanceExtensionsMounted = "true";
   }
-  return { root, panels, unmount: () => unmountV2(root) };
+  return { root, panels, unmount: () => unmountGovernanceExtensionPanels(root) };
 }
 
-export function unmountV2(root) {
+export function unmountGovernanceExtensionPanels(root) {
   const state = root?.[mountStateKey];
   if (!state) {
     return;
@@ -94,8 +94,8 @@ export function unmountV2(root) {
   }
   delete root[mountStateKey];
   if (root.dataset) {
-    delete root.dataset.v2Mounted;
+    delete root.dataset.governanceExtensionsMounted;
   }
 }
 
-export const v2PanelDefinitions = panelDefinitions.map((definition) => ({ ...definition }));
+export const governanceExtensionPanelDefinitions = panelDefinitions.map((definition) => ({ ...definition }));

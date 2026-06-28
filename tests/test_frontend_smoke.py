@@ -72,7 +72,7 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "async function refreshGovernancePlugins" in app_response.text
     assert "async function refreshGovernanceSkills" in app_response.text
     assert "async function refreshGovernanceCapability" in app_response.text
-    assert "mountV2(root, governanceExtensionActions())" in app_response.text
+    assert "mountGovernanceExtensionPanels(root, governanceExtensionActions())" in app_response.text
     assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_response.text
     assert '$("openGovernanceSettingsButton").onclick' in app_response.text
     assert '$("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;' in app_response.text
@@ -110,7 +110,7 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "/static/js/render-agent.js" in loaded_modules
     assert "/static/js/state.js" in loaded_modules
     assert "/static/js/ui-utils.js" in loaded_modules
-    assert "/static/js/v2/main_v2.js" in loaded_modules
+    assert "/static/js/v2/governance_extensions.js" in loaded_modules
     assert "/static/js/v2/plan_view.js" not in loaded_modules
     assert "/static/js/v2/subagent_view.js" not in loaded_modules
 

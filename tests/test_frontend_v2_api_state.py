@@ -29,7 +29,7 @@ def test_v2_static_modules_are_packaged_and_present():
     for module_name in (
         "api_v2.js",
         "state_v2.js",
-        "main_v2.js",
+        "governance_extensions.js",
         "plan_view.js",
         "plan_confirm.js",
         "join_review.js",
@@ -357,11 +357,11 @@ def test_v2_state_store_is_keyed_subscribable_and_resettable():
     )
 
 
-def test_v2_mount_creates_stable_panels_idempotently():
+def test_governance_extension_mount_creates_stable_panels_idempotently():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { mountGovernanceExtensionPanels } from "./marvis/static/js/v2/governance_extensions.js";
         import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
@@ -391,8 +391,8 @@ def test_v2_mount_creates_stable_panels_idempotently():
           return root.children.find((child) => child.id === id) ?? null;
         };
 
-        const first = mountV2(root);
-        const second = mountV2(root);
+        const first = mountGovernanceExtensionPanels(root);
+        const second = mountGovernanceExtensionPanels(root);
 
         assert.deepEqual(Object.keys(first.panels), [
           "pluginPanel",
@@ -408,7 +408,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
           "skillPanel",
           "capabilityPanel",
         ]);
-        assert.equal(root.dataset.v2Mounted, "true");
+        assert.equal(root.dataset.governanceExtensionsMounted, "true");
         assert.equal(first.panels.pluginPanel.dataset.v2PluginManager, "true");
         assert.equal(first.panels.skillPanel.dataset.v2SkillManager, "true");
         assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
@@ -421,11 +421,11 @@ def test_v2_mount_creates_stable_panels_idempotently():
     )
 
 
-def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
+def test_governance_extension_mount_registers_delegated_handlers_once_and_cleans_up():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { mountGovernanceExtensionPanels } from "./marvis/static/js/v2/governance_extensions.js";
         import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
@@ -462,8 +462,8 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
           listeners[type] = (listeners[type] || []).filter((candidate) => candidate !== handler);
         };
 
-        const mounted = mountV2(root);
-        mountV2(root);
+        const mounted = mountGovernanceExtensionPanels(root);
+        mountGovernanceExtensionPanels(root);
 
         assert.equal((listeners.click || []).length, 2);
         assert.equal((listeners.change || []).length, 2);
@@ -478,11 +478,11 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
     )
 
 
-def test_v2_mount_initially_loads_governance_panels():
+def test_governance_extension_mount_initially_loads_governance_panels():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { mountGovernanceExtensionPanels } from "./marvis/static/js/v2/governance_extensions.js";
         import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
@@ -513,7 +513,7 @@ def test_v2_mount_initially_loads_governance_panels():
           return root.children.find((child) => child.id === id) ?? null;
         };
 
-        const mounted = mountV2(root, {
+        const mounted = mountGovernanceExtensionPanels(root, {
           pluginActions: {
             listPlugins: async (includeDisabled) => {
               calls.push(["listPlugins", includeDisabled]);
@@ -559,11 +559,11 @@ def test_v2_mount_initially_loads_governance_panels():
     )
 
 
-def test_v2_mount_wires_plugin_and_skill_refresh_actions():
+def test_governance_extension_mount_wires_plugin_and_skill_refresh_actions():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { mountGovernanceExtensionPanels } from "./marvis/static/js/v2/governance_extensions.js";
         import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
@@ -601,7 +601,7 @@ def test_v2_mount_wires_plugin_and_skill_refresh_actions():
           listeners[type] = (listeners[type] || []).filter((candidate) => candidate !== handler);
         };
 
-        const mounted = mountV2(root, {
+        const mounted = mountGovernanceExtensionPanels(root, {
           pluginActions: {
             uploadPlugin: async (file) => calls.push(["uploadPlugin", file.name]),
             listPlugins: async (includeDisabled) => {
@@ -667,11 +667,11 @@ def test_v2_mount_wires_plugin_and_skill_refresh_actions():
     )
 
 
-def test_v2_mount_fetches_capability_tiers_into_panel_and_state():
+def test_governance_extension_mount_fetches_capability_tiers_into_panel_and_state():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
+        import { mountGovernanceExtensionPanels } from "./marvis/static/js/v2/governance_extensions.js";
         import {
           getCapabilityTiers,
           getSelectedTier,
@@ -706,7 +706,7 @@ def test_v2_mount_fetches_capability_tiers_into_panel_and_state():
           return root.children.find((child) => child.id === id) ?? null;
         };
 
-        const mounted = mountV2(root, {
+        const mounted = mountGovernanceExtensionPanels(root, {
           capabilityActions: {
             listCapabilityTiers: async () => {
               calls.push(["listCapabilityTiers"]);

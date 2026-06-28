@@ -4,7 +4,7 @@ import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
 import { renderTierSettings } from "./js/v2/capability.js";
-import { mountV2 } from "./js/v2/main_v2.js";
+import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
 import {
@@ -2122,7 +2122,7 @@ function governanceExtensionActions() {
 
 function mountGovernanceExtensions() {
   const root = $("governanceExtensionMount");
-  return root ? mountV2(root, governanceExtensionActions()) : null;
+  return root ? mountGovernanceExtensionPanels(root, governanceExtensionActions()) : null;
 }
 
 async function refreshGovernancePlugins() {
