@@ -10,6 +10,7 @@ from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.output.model_report import ModelReportPayload, render_model_report
+from marvis.output.model_report_minimal import render_minimal_model_report
 from marvis.packs.modeling.report_compute import (
     BusinessColumns,
     compute_amount_bin_table,
@@ -335,6 +336,54 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     ]
     assert workbook["样本分析"]["A1"].value.startswith("无业务数据")
     assert any(status.section == "product_list" and not status.available for status in statuses)
+
+
+def test_non_binary_model_report_keeps_fixed_sheets_and_adds_metrics(tmp_path):
+    from marvis.packs.modeling.contracts import Experiment, ModelMetrics, TrainConfig
+
+    config = TrainConfig(
+        dataset_id="ds",
+        features=("x1", "x2"),
+        target_col="income",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+        recipe_id="lgb_regressor",
+        target_type="continuous",
+    )
+    metrics = ModelMetrics(
+        train_ks=None, test_ks=None, oot_ks=None,
+        train_auc=None, test_auc=None, oot_auc=None,
+        psi_test_vs_train=None, psi_oot_vs_train=None,
+        overfit_train_test_gap=0.1, overfit_train_oot_gap=0.2, overfit_flag=False,
+        train_rmse=1.0, test_rmse=1.2, oot_rmse=1.3,
+        train_mae=0.8, test_mae=0.9, oot_mae=1.0,
+        train_r2=0.7, test_r2=0.6, oot_r2=0.5,
+    )
+    experiment = Experiment(
+        id="exp", task_id="task", recipe_id="lgb_regressor", config=config,
+        metrics=metrics, artifact_id="artifact", status="succeeded", created_at="now",
+    )
+    out = tmp_path / "non_binary.xlsx"
+
+    render_minimal_model_report(experiment, out)
+
+    workbook = load_workbook(out)
+    assert workbook.sheetnames == [
+        "汇总",
+        "样本分析",
+        "Vintage",
+        "特征重要性",
+        "oot分箱评估_十分箱",
+        "单变量分析",
+        "压力测试",
+        "模型指标",
+    ]
+    assert workbook["Vintage"]["B1"].value == "非二分类不适用"
+    assert workbook["模型指标"]["A2"].value == "RMSE"
+    assert workbook["样本分析"]["A1"].value == "n/a"
 
 
 def test_render_model_report_summary_lists_unique_products_from_feature_dictionary(tmp_path):

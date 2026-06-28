@@ -378,9 +378,11 @@ body[data-theme="dark"] .welcome-task-card[data-task-kind="vintage"] { --tone: #
 
 /* Temporarily-disabled task types: dimmed with a "敬请期待" corner badge. The card stays
    clickable so the click can surface the coming-soon toast (see app.js). */
+.welcome-task-card.unavailable,
 .welcome-task-card[data-coming-soon] {
   opacity: 0.6;
 }
+.welcome-task-card.unavailable::after,
 .welcome-task-card[data-coming-soon]::after {
   content: "敬请期待";
   position: absolute;

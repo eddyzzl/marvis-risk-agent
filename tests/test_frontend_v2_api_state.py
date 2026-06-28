@@ -362,11 +362,7 @@ def test_v2_mount_creates_stable_panels_idempotently():
         """
         import assert from "node:assert/strict";
         import { mountV2 } from "./marvis/static/js/v2/main_v2.js";
-        import {
-          resetV2State,
-          setCurrentJoin,
-          setPlan,
-        } from "./marvis/static/js/v2/state_v2.js";
+        import { resetV2State } from "./marvis/static/js/v2/state_v2.js";
 
         function makeElement(tagName) {
           return {
@@ -399,79 +395,28 @@ def test_v2_mount_creates_stable_panels_idempotently():
         const second = mountV2(root);
 
         assert.deepEqual(Object.keys(first.panels), [
-          "goalPanel",
-          "planPanel",
-          "joinPanel",
-          "subAgentPanel",
           "pluginPanel",
           "skillPanel",
-          "draftPanel",
           "capabilityPanel",
-          "memoryPanel",
-          "loopPanel",
-          "artifactPanel",
         ]);
-        assert.equal(first.panels.goalPanel, second.panels.goalPanel);
-        assert.equal(first.panels.joinPanel, second.panels.joinPanel);
-        assert.equal(second.panels.planPanel, first.panels.planPanel);
-        assert.equal(root.children.length, 11);
+        assert.equal(first.panels.pluginPanel, second.panels.pluginPanel);
+        assert.equal(first.panels.skillPanel, second.panels.skillPanel);
+        assert.equal(second.panels.capabilityPanel, first.panels.capabilityPanel);
+        assert.equal(root.children.length, 3);
         assert.deepEqual(root.children.map((child) => child.id), [
-          "goalPanel",
-          "planPanel",
-          "joinPanel",
-          "subAgentPanel",
           "pluginPanel",
           "skillPanel",
-          "draftPanel",
           "capabilityPanel",
-          "memoryPanel",
-          "loopPanel",
-          "artifactPanel",
         ]);
         assert.equal(root.dataset.v2Mounted, "true");
-        assert.equal(first.panels.goalPanel.dataset.v2GoalComposer, "true");
-        assert.equal(first.panels.joinPanel.dataset.v2JoinReview, "true");
         assert.equal(first.panels.pluginPanel.dataset.v2PluginManager, "true");
         assert.equal(first.panels.skillPanel.dataset.v2SkillManager, "true");
-        assert.equal(first.panels.draftPanel.dataset.v2DraftManager, "true");
         assert.equal(first.panels.capabilityPanel.dataset.v2TierSettings, "true");
-        assert.equal(first.panels.memoryPanel.dataset.v2MemoryManager, "true");
-        assert.equal(first.panels.goalPanel.dataset.panelTitle, "计划生成");
         assert.equal(first.panels.pluginPanel.dataset.panelTitle, "插件");
-        assert.ok(first.panels.goalPanel.innerHTML.includes('id="goalInput"'));
-        assert.ok(first.panels.planPanel.innerHTML.includes('data-v2-empty="plan"'));
-        assert.ok(first.panels.joinPanel.innerHTML.includes('data-v2-empty="join"'));
         assert.ok(first.panels.pluginPanel.innerHTML.includes('data-upload-plugin'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('id="reloadSkills"'));
         assert.ok(first.panels.skillPanel.innerHTML.includes('data-validate-skill'));
-        assert.ok(first.panels.draftPanel.innerHTML.includes("data-draft-status"));
         assert.ok(first.panels.capabilityPanel.innerHTML.includes('安全护栏保持一致'));
-        assert.ok(first.panels.memoryPanel.innerHTML.includes('data-consolidate-memory'));
-        assert.ok(first.panels.loopPanel.innerHTML.includes('data-v2-empty="loop-events"'));
-        assert.ok(first.panels.artifactPanel.innerHTML.includes('data-v2-empty="artifact"'));
-
-        setPlan({
-          id: "plan-1",
-          goal: "Mounted plan",
-          status: "validated",
-          steps: [],
-          sub_agents: [
-            {
-              scope: "Mounted subagent",
-              status: "running",
-              granted_tools: [{ plugin: "data_ops", tool: "profile" }],
-            },
-          ],
-        });
-        assert.ok(first.panels.planPanel.innerHTML.includes("Mounted plan"));
-        assert.ok(first.panels.subAgentPanel.innerHTML.includes("Mounted subagent"));
-
-        setCurrentJoin({
-          id: "join-mounted",
-          anchor_dataset_id: "sample",
-          joins: [],
-        });
-        assert.ok(first.panels.joinPanel.innerHTML.includes("join-mounted"));
         """
     )
 
@@ -520,8 +465,8 @@ def test_v2_mount_registers_delegated_handlers_once_and_cleans_up():
         const mounted = mountV2(root);
         mountV2(root);
 
-        assert.equal((listeners.click || []).length, 8);
-        assert.equal((listeners.change || []).length, 4);
+        assert.equal((listeners.click || []).length, 2);
+        assert.equal((listeners.change || []).length, 2);
         assert.equal((listeners.input || []).length, 1);
 
         mounted.unmount();
@@ -592,16 +537,10 @@ def test_v2_mount_initially_loads_governance_panels():
               return { active: ["demo_skill"], disabled: [], rejected: [] };
             },
           },
-          draftActions: {
-            listDrafts: async (query) => {
-              calls.push(["listDrafts", query]);
-              return { drafts: [{ id: "draft-1", name: "Draft Tool", status: "draft" }] };
-            },
-          },
-          memoryActions: {
-            listMemoryDistillations: async (query) => {
-              calls.push(["listMemoryDistillations", query]);
-              return { distillations: [{ id: "mem-1", summary: "Memory summary" }] };
+          capabilityActions: {
+            listCapabilityTiers: async () => {
+              calls.push(["listCapabilityTiers"]);
+              return { default: "reviewed", tiers: [{ name: "reviewed", summary: "Reviewed" }] };
             },
           },
         });
@@ -611,13 +550,11 @@ def test_v2_mount_initially_loads_governance_panels():
         assert.deepEqual(calls, [
           ["listPlugins", true],
           ["listSkills"],
-          ["listDrafts", {}],
-          ["listMemoryDistillations", { category: "" }],
+          ["listCapabilityTiers"],
         ]);
         assert.ok(mounted.panels.pluginPanel.innerHTML.includes("Demo Plugin"));
         assert.ok(mounted.panels.skillPanel.innerHTML.includes("demo_skill"));
-        assert.ok(mounted.panels.draftPanel.innerHTML.includes("Draft Tool"));
-        assert.ok(mounted.panels.memoryPanel.innerHTML.includes("Memory summary"));
+        assert.ok(mounted.panels.capabilityPanel.innerHTML.includes("Reviewed"));
         """
     )
 

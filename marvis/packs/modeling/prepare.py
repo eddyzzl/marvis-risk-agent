@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.feature.candidates import candidate_numeric_features
 from marvis.packs.modeling.errors import ModelingError
 
 
@@ -32,6 +33,15 @@ def prepare_modeling_frame(
     dataset = registry.get(dataset_id)
     dataset_path = registry.resolve_path(dataset.id)
     split_config = dict(split_config or {})
+    if not feature_cols:
+        feature_cols = candidate_numeric_features(
+            backend,
+            dataset_path,
+            target_col=target_col,
+            split_col=split_col,
+        )
+    if not feature_cols:
+        raise ModelingError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
     # Anti-leakage grouping is best-effort: keep only group columns that exist in the
     # dataset (the JOIN identity key is often dropped before modeling). Missing group
     # columns fall back to per-row assignment rather than erroring.

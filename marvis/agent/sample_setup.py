@@ -9,17 +9,11 @@ modeling prototype so both feature_analysis and modeling can reuse it.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Columns that are never modeling features regardless of dtype (ids / time / weights).
-_META_TOKENS = re.compile(
-    r"(^|_)(id|uid|uuid|idcard|cust|user|order|loan|apply|cert|phone|mobile|name|"
-    r"date|time|month|day|dt|ts|created|updated|weight|sample_weight)(_|$)",
-    re.IGNORECASE,
-)
+from marvis.feature.candidates import candidate_numeric_features
 # Preferred binary-target name tokens, most-specific first.
 _TARGET_PRIORITY = (
     "long_y", "fission_y", "y", "label", "target",
@@ -123,8 +117,13 @@ def detect_setup(
         notes.append("未能自动识别 train/test/oot 切分列；可指定切分列，或我按时间字段为你切分。")
 
     # -- candidate features (numeric, minus target/split/meta) ----------------
-    numeric = [c for c in probe.select_dtypes("number").columns if c not in {target, split_col}]
-    candidates = [c for c in numeric if not _META_TOKENS.search(c)]
+    candidates = candidate_numeric_features(
+        backend,
+        path,
+        target_col=target,
+        split_col=split_col,
+        sample_rows=sample_rows,
+    )
 
     # -- counts / bad-rate (read only key columns in full) --------------------
     counts: dict[str, int] = {}

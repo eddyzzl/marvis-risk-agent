@@ -12,6 +12,7 @@ import pandas as pd
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
+from marvis.feature.candidates import candidate_numeric_features
 from marvis.feature.metrics import feature_metrics
 from marvis.feature.encode import woe_encode
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
@@ -39,7 +40,7 @@ from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
-from marvis.feature.screen import screen_features
+from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
 from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import tune_hyperparameters
@@ -51,6 +52,7 @@ from marvis.validation.stress_test import run_stress_test
 
 MODELING_ARTIFACTS_DIR_NAME = "modeling_artifacts"
 MODEL_REPORT_SCORE_COL = "__model_score__"
+PMML_SUPPORTED_ALGORITHMS = frozenset({"lr", "lgb", "xgb", "scorecard"})
 
 
 def tool_check_data_quality(inputs: dict, ctx) -> dict:
@@ -81,23 +83,39 @@ def tool_modeling_readiness(inputs: dict, ctx) -> dict:
 
 def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    split_col = _optional_str(inputs.get("split_col"))
+    feature_cols = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("feature_cols") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=split_col,
+    )
     result = prepare_modeling_frame(
         runtime.registry,
         runtime.backend,
-        str(inputs["dataset_id"]),
+        dataset.id,
         target_col=str(inputs["target_col"]),
-        feature_cols=[str(item) for item in inputs["feature_cols"]],
-        split_col=_optional_str(inputs.get("split_col")),
+        feature_cols=feature_cols,
+        split_col=split_col,
         split_config=inputs.get("split_config") or {},
         seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
     )
-    split_col = _optional_str(inputs.get("split_col")) or "split"
+    split_col = split_col or "split"
     frame = runtime.backend.read_frame(runtime.registry.resolve_path(result.id), columns=[split_col])
     counts = {
         str(key): int(value)
         for key, value in frame[split_col].value_counts().sort_index().items()
     }
-    return {"result_dataset_id": result.id, "split_counts": counts}
+    return {
+        "result_dataset_id": result.id,
+        "split_counts": counts,
+        "split_col": split_col,
+        "split_values": {key: key for key in counts},
+        "holdout_values": ["oot"] if "oot" in counts else [],
+        "feature_cols": feature_cols,
+    }
 
 
 def tool_make_split(inputs: dict, ctx) -> dict:
@@ -112,26 +130,44 @@ def tool_make_split(inputs: dict, ctx) -> dict:
     # fallback). prepare_modeling_frame keeps the passed-through column's name, and names a
     # generated column SPLIT_COLUMN, so the effective name is one or the other.
     split_col = str(inputs["split_col"]) if inputs.get("split_col") else None
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    feature_cols = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("feature_cols") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=split_col,
+    )
     result = prepare_modeling_frame(
         runtime.registry,
         runtime.backend,
-        str(inputs["dataset_id"]),
+        dataset.id,
         target_col=str(inputs["target_col"]),
-        feature_cols=[str(item) for item in inputs["feature_cols"]],
+        feature_cols=feature_cols,
         split_col=split_col,
         split_config=inputs.get("split_config") or {},
         seed=int(inputs.get("seed") if inputs.get("seed") is not None else ctx.seed or 0),
     )
     effective_split_col = split_col or SPLIT_COLUMN
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
-    source_frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
     split_frame = runtime.backend.read_frame(
         runtime.registry.resolve_path(result.id), columns=[effective_split_col]
     )
+    dataset_path = runtime.registry.resolve_path(dataset.id)
+    source_columns = [profile.name for profile in dataset.columns] or runtime.backend.column_names(dataset_path)
+    group_columns = _detect_group_columns(source_columns)
+    source_frame = (
+        runtime.backend.read_frame(dataset_path, columns=group_columns)
+        if group_columns
+        else pd.DataFrame(index=split_frame.index)
+    )
     sample_analysis = _split_sample_analysis(split_frame[effective_split_col], source_frame)
+    split_counts = sample_analysis["split_counts"]
     return {
         "result_dataset_id": result.id,
         "split_col": effective_split_col,
+        "split_values": {key: key for key in split_counts},
+        "holdout_values": ["oot"] if "oot" in split_counts else [],
+        "feature_cols": feature_cols,
         "sample_analysis": _json_safe(sample_analysis),
     }
 
@@ -170,10 +206,17 @@ def _detect_group_columns(columns) -> list[str]:
 def tool_select_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    features = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+    )
     result = select_features(
         runtime.backend,
         runtime.registry.resolve_path(dataset.id),
-        features=[str(item) for item in inputs["features"]],
+        features=features,
         target_col=str(inputs["target_col"]),
         iv_min=float(inputs.get("iv_min", 0.02)),
         corr_max=float(inputs.get("corr_max", 0.8)),
@@ -197,11 +240,18 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         return _screen_features_non_binary(inputs, ctx)
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    features = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+    )
     holdout = inputs.get("holdout_values")
     result = screen_features(
         runtime.backend,
         runtime.registry.resolve_path(dataset.id),
-        features=[str(item) for item in inputs["features"]],
+        features=features,
         target_col=str(inputs["target_col"]),
         split_col=_optional_str(inputs.get("split_col")),
         holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
@@ -222,34 +272,39 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:
-    """Non-binary (continuous) screen: skip the binary-only leakage KS screen, keep every
-    candidate as selected with ks=None, reporting only missing_rate / unique_count."""
+    """Non-binary (continuous/multiclass) screen: the binary-only leakage KS screen is skipped,
+    but unusable columns are still dropped into ``unusable`` (mirroring the binary screen) —
+    constant (unique_count<=1) or mostly-missing (missing_rate>=max_missing_rate) — and the
+    rest are kept as selected (ks=None)."""
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
-    features = [str(item) for item in inputs["features"]]
-    target_col = str(inputs["target_col"])
-    feats = [feature for feature in dict.fromkeys(features) if feature != target_col]
-    frame = (
-        runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=feats)
-        if feats
-        else None
+    features = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
     )
-    scores: dict[str, dict] = {}
-    for feature in feats:
-        values = pd.to_numeric(frame[feature], errors="coerce").to_numpy(dtype=float)
-        finite = np.isfinite(values)
-        missing_rate = float(1.0 - finite.mean()) if values.size else 1.0
-        unique = int(np.unique(values[finite]).size)
-        scores[feature] = {"ks": None, "missing_rate": missing_rate, "unique_count": unique}
+    holdout = inputs.get("holdout_values")
+    result = screen_features_non_binary(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        features=features,
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+        holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
+        max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
+        top_k=_optional_int(inputs.get("top_k")),
+    )
     return {
-        "selected": list(feats),
-        "ranked": [[feature, None] for feature in feats],
+        "selected": list(result.selected),
+        "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [],
         "suspected": [],
-        "unusable": [],
-        "scores": _jsonable(scores),
-        "n_screened": len(feats),
-        "note": "非二分类目标：跳过泄漏KS筛选，保留全部候选特征",
+        "unusable": [[feature, reason] for feature, reason in result.unusable],
+        "scores": _jsonable(result.scores),
+        "n_screened": result.n_screened,
+        "note": "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列",
     }
 
 
@@ -385,18 +440,54 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             "metrics": _jsonable(experiment.metrics) or {},
         })
 
-    best = _pick_best_experiment(experiments)
+    best, selection_metric = _pick_best_experiment(experiments, target_type=target_type)
     return {
         "experiments": experiments,
         "experiment_ids": [exp["experiment_id"] for exp in experiments],
         "best_experiment_id": best["experiment_id"],
         "best_recipe": best["recipe"],
+        "target_type": target_type,
+        "selection_metric": selection_metric,
     }
 
 
-def _pick_best_experiment(experiments: list[dict]) -> dict:
-    """Best by OOT KS, falling back to test KS, then first. OOT is the unbiased
-    final metric; test KS is the fallback when there is no OOT set."""
+def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary") -> tuple[dict, str]:
+    """Pick the best experiment with the metric family that matches the target.
+
+    Binary maximizes OOT/test KS; regression minimizes OOT/test RMSE; multiclass
+    maximizes OOT/test macro-AUC, falling back to minimizing logloss.
+    """
+    target_type = str(target_type or "binary")
+    if target_type == "continuous":
+        metric_keys = ("oot_rmse", "test_rmse")
+
+        def score(experiment: dict) -> float:
+            metrics = experiment.get("metrics") or {}
+            for key in metric_keys:
+                value = metrics.get(key)
+                if isinstance(value, (int, float)):
+                    return -float(value)
+            return float("-inf")
+
+        return max(experiments, key=score), "oot_rmse"
+    if target_type == "multiclass":
+        auc_keys = ("oot_macro_auc", "test_macro_auc")
+        logloss_keys = ("oot_logloss", "test_logloss")
+
+        def score(experiment: dict) -> float:
+            metrics = experiment.get("metrics") or {}
+            for key in auc_keys:
+                value = metrics.get(key)
+                if isinstance(value, (int, float)):
+                    return float(value)
+            for key in logloss_keys:
+                value = metrics.get(key)
+                if isinstance(value, (int, float)):
+                    return -float(value)
+            return float("-inf")
+
+        return max(experiments, key=score), "oot_macro_auc"
+
     def score(experiment: dict) -> float:
         metrics = experiment.get("metrics") or {}
         for key in ("oot_ks", "test_ks"):
@@ -405,17 +496,24 @@ def _pick_best_experiment(experiments: list[dict]) -> dict:
                 return float(value)
         return float("-inf")
 
-    return max(experiments, key=score)
+    return max(experiments, key=score), "oot_ks"
 
 
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    return _jsonable(runtime.experiments.compare([str(item) for item in inputs["experiment_ids"]]))
+    compared = runtime.experiments.compare([str(item) for item in inputs["experiment_ids"]])
+    for row in compared.get("experiments", []):
+        artifact_id = row.get("artifact_id") if isinstance(row, dict) else None
+        artifact = runtime.modeling_repo.get_model_artifact(str(artifact_id)) if artifact_id else None
+        if artifact is not None:
+            row["capabilities"] = _artifact_capabilities(artifact)
+    return _jsonable(compared)
 
 
 def tool_export_pmml(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     artifact = _artifact(runtime, str(inputs["artifact_id"]))
+    _require_pmml_supported(artifact)
     pmml_path = _pmml_path(runtime, artifact)
     return {"pmml_path": str(pmml_path)}
 
@@ -426,6 +524,7 @@ def tool_handoff_to_validation(inputs: dict, ctx) -> dict:
     if experiment.artifact_id is None:
         raise ModelingError(f"experiment has no artifact: {experiment.id}")
     artifact = _artifact(runtime, experiment.artifact_id)
+    _require_pmml_supported(artifact, operation="validation handoff")
     validation_task_id = handoff_to_validation(
         runtime.experiments,
         artifact,
@@ -618,6 +717,29 @@ def _runtime(ctx) -> _Runtime:
     return _Runtime(ctx)
 
 
+def _resolve_feature_cols(
+    runtime: _Runtime,
+    dataset_id: str,
+    features,
+    *,
+    target_col: str,
+    split_col: str | None = None,
+) -> list[str]:
+    provided = [str(item) for item in (features or []) if str(item).strip()]
+    if provided:
+        return provided
+    dataset = runtime.registry.get(str(dataset_id))
+    inferred = candidate_numeric_features(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=str(target_col),
+        split_col=split_col,
+    )
+    if not inferred:
+        raise ModelingError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
+    return inferred
+
+
 def _train_recipe(
     recipe: str,
     backend,
@@ -648,6 +770,28 @@ def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
     if artifact is None:
         raise ModelingError(f"model artifact not found: {artifact_id}")
     return artifact
+
+
+def _artifact_capabilities(artifact: ModelArtifact) -> dict:
+    pmml_supported = artifact.algorithm in PMML_SUPPORTED_ALGORITHMS
+    reason = None if pmml_supported else (
+        f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
+        f"{artifact.algorithm} 可保留原生模型文件和报告。"
+    )
+    return {
+        "pmml_supported": pmml_supported,
+        "handoff_supported": pmml_supported,
+        "native_model_supported": True,
+        "reason": reason,
+    }
+
+
+def _require_pmml_supported(artifact: ModelArtifact, *, operation: str = "PMML export") -> None:
+    if artifact.algorithm not in PMML_SUPPORTED_ALGORITHMS:
+        raise ModelingError(
+            f"{operation} currently supports lr/lgb/xgb/scorecard only; got: {artifact.algorithm}. "
+            "Use the native model artifact/report, or retrain/export a supported binary model for V1 validation handoff."
+        )
 
 
 def _pmml_path(runtime: _Runtime, artifact: ModelArtifact) -> Path:
@@ -966,7 +1110,7 @@ class _ModelArtifactScorer:
 
     def score(self, dataframe: pd.DataFrame) -> list[float]:
         features = list(self.artifact.feature_list)
-        if self.artifact.algorithm == "xgb":
+        if self.artifact.algorithm == "xgb" and not hasattr(self.model, "predict_proba"):
             import xgboost as xgb
 
             matrix = xgb.DMatrix(dataframe[features], feature_names=features)

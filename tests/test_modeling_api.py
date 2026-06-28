@@ -54,6 +54,22 @@ def _multiclass_dir(root: Path, n: int = 900) -> Path:
     return src
 
 
+def _continuous_dir(root: Path, n: int = 240) -> Path:
+    src = root / "continuous_material"
+    src.mkdir(parents=True, exist_ok=True)
+    rng = np.random.RandomState(17)
+    split = np.array(["train"] * n, dtype=object)
+    split[int(n * 0.6):int(n * 0.8)] = "test"
+    split[int(n * 0.8):] = "oot"
+    pd.DataFrame({
+        "f1": rng.normal(size=n),
+        "f2": rng.normal(size=n),
+        "income": 3000 + rng.normal(size=n) * 300,
+        "model_flag": split,
+    }).to_parquet(src / "sample.parquet")
+    return src
+
+
 def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
@@ -158,6 +174,74 @@ def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: 
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "报告已生成" in done["content"]
     assert not done["metadata"].get("error")
+
+
+def test_modeling_persists_explicit_target_type_and_defaults_recipe(client: TestClient, tmp_path: Path):
+    src = _continuous_dir(tmp_path)
+    resp = client.post("/api/tasks", json={
+        "model_name": "收入回归",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "target_type": "continuous",
+    })
+    assert resp.status_code == 200, resp.text
+    task = resp.json()
+    assert task["target_type"] == "continuous"
+    assert task["recipes"] == []
+
+    task_id = task["id"]
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    opening = next(m for m in messages if m["role"] == "assistant")
+    assert "回归任务" in opening["content"]
+    assert "lgb_regressor" in opening["content"]
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans
+    train_step = next(step for step in plans[0].steps if step.title == "训练模型")
+    screen_step = next(step for step in plans[0].steps if step.title == "特征筛选")
+    assert screen_step.inputs["target_type"] == "continuous"
+    assert train_step.inputs["target_type"] == "continuous"
+    assert train_step.inputs["recipes"] == ["lgb_regressor"]
+
+
+def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClient, tmp_path: Path):
+    src = _sample_dir(tmp_path, n=200)
+    pd.DataFrame({
+        "cust_id": np.arange(200),
+        "extra_score": np.linspace(0, 1, 200),
+    }).to_parquet(src / "feature_table.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "多表建模",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    plan = plans[-1]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    join_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert join_gate["metadata"].get("kind") == "gate"
+    assert "拼接诊断完成" in join_gate["content"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert split_gate["metadata"].get("kind") == "gate"
+    assert "样本切分完成" in split_gate["content"]
+    plan = client.app.state.plan_repo.load_plan(plan.id)
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    split_output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert "extra_score" in split_output["feature_cols"]
 
 
 def test_modeling_without_split_auto_generates_grouped_split(client: TestClient, tmp_path: Path):

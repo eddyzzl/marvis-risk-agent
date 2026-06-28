@@ -194,15 +194,25 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
         {"experiment_ids": [output["experiment_id"] for output in train_outputs.values()]},
         task_id=task.id,
     )
-    exported = runner.invoke(
-        ToolRef("modeling", "export_pmml"),
-        {"artifact_id": train_outputs["lr"]["artifact_id"]},
-        task_id=task.id,
-    )
+    exported_by_recipe = {}
+    for recipe, output in train_outputs.items():
+        exported_by_recipe[recipe] = runner.invoke(
+            ToolRef("modeling", "export_pmml"),
+            {"artifact_id": output["artifact_id"]},
+            task_id=task.id,
+        )
     handed_off = runner.invoke(
         ToolRef("modeling", "handoff_to_validation"),
         {
             "experiment_id": train_outputs["lr"]["experiment_id"],
+            "sample_dataset_id": prepared.output["result_dataset_id"],
+        },
+        task_id=task.id,
+    )
+    scorecard_handed_off = runner.invoke(
+        ToolRef("modeling", "handoff_to_validation"),
+        {
+            "experiment_id": train_outputs["scorecard"]["experiment_id"],
             "sample_dataset_id": prepared.output["result_dataset_id"],
         },
         task_id=task.id,
@@ -215,14 +225,26 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
         "lr",
         "scorecard",
     ]
-    assert exported.ok is True, exported.error
-    assert Path(exported.output["pmml_path"]).exists()
+    rows_by_recipe = {row["recipe"]: row for row in compared.output["experiments"]}
+    for recipe in ("lgb", "xgb", "lr", "scorecard"):
+        assert rows_by_recipe[recipe]["capabilities"]["pmml_supported"] is True
+        assert rows_by_recipe[recipe]["capabilities"]["handoff_supported"] is True
+        assert rows_by_recipe[recipe]["capabilities"]["reason"] is None
+        assert exported_by_recipe[recipe].ok is True, exported_by_recipe[recipe].error
+        assert Path(exported_by_recipe[recipe].output["pmml_path"]).exists()
     assert handed_off.ok is True, handed_off.error
+    assert scorecard_handed_off.ok is True, scorecard_handed_off.error
     validation_task = TaskRepository(settings.db_path).get_task(
         handed_off.output["validation_task_id"]
     )
+    scorecard_validation_task = TaskRepository(settings.db_path).get_task(
+        scorecard_handed_off.output["validation_task_id"]
+    )
     assert validation_task.task_type == "validation"
     assert validation_task.pmml_path == "model.pmml"
+    assert scorecard_validation_task.task_type == "validation"
+    assert scorecard_validation_task.algorithm == "scorecard"
+    assert scorecard_validation_task.pmml_path == "model.pmml"
 
 
 def test_modeling_pack_trains_income_regression_scenario_via_runner(tmp_path):
@@ -402,6 +424,28 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert len(out["experiment_ids"]) == 2
     assert out["best_experiment_id"] in out["experiment_ids"]
     assert out["best_recipe"] in {"lgb", "lr"}
+    assert out["target_type"] == "binary"
+    assert out["selection_metric"] == "oot_ks"
+
+
+def test_pick_best_experiment_is_target_type_aware():
+    from marvis.packs.modeling.tools import _pick_best_experiment
+
+    regression = [
+        {"experiment_id": "reg-a", "recipe": "lgb_regressor", "metrics": {"oot_rmse": 2.5, "test_rmse": 2.0}},
+        {"experiment_id": "reg-b", "recipe": "lgb_regressor", "metrics": {"oot_rmse": 1.8, "test_rmse": 2.2}},
+    ]
+    best, metric = _pick_best_experiment(regression, target_type="continuous")
+    assert best["experiment_id"] == "reg-b"
+    assert metric == "oot_rmse"
+
+    multiclass = [
+        {"experiment_id": "mc-a", "recipe": "lgb_multiclass", "metrics": {"oot_macro_auc": 0.71}},
+        {"experiment_id": "mc-b", "recipe": "lgb_multiclass", "metrics": {"oot_macro_auc": 0.82}},
+    ]
+    best, metric = _pick_best_experiment(multiclass, target_type="multiclass")
+    assert best["experiment_id"] == "mc-b"
+    assert metric == "oot_macro_auc"
 
 
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):
@@ -462,6 +506,86 @@ def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_p
     json.dumps(analysis, allow_nan=False)
 
 
+def test_continuous_screen_drops_constant_and_all_missing(tmp_path):
+    """The modeling-pack non-binary screen mirrors the feature-pack one: constant and all-NaN
+    columns land in `unusable`, not `selected`."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    rows = 60
+    frame = pd.DataFrame({
+        "good1": [i / rows for i in range(rows)],
+        "good2": [(rows - i) / rows for i in range(rows)],
+        "const": [3.0] * rows,
+        "allnan": [float("nan")] * rows,
+        "income": [1000.0 + i for i in range(rows)],
+        "split": ["train"] * 36 + ["test"] * 12 + ["oot"] * 12,
+    })
+    path = tmp_path / "screen_unusable.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    screened = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good1", "good2", "const", "allnan"],
+            "target_col": "income",
+            "split_col": "split",
+            "target_type": "continuous",
+        },
+        task_id=task.id,
+    )
+    assert screened.ok is True, screened.error
+    assert set(screened.output["selected"]) == {"good1", "good2"}
+    reasons = {row[0]: row[1] for row in screened.output["unusable"]}
+    assert reasons == {"const": "constant", "allnan": "high_missing"}
+
+    capped = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good1", "good2", "const", "allnan"],
+            "target_col": "income",
+            "split_col": "split",
+            "target_type": "continuous",
+            "top_k": 1,
+        },
+        task_id=task.id,
+    )
+    assert capped.ok is True, capped.error
+    assert len(capped.output["selected"]) == 1
+    assert [row[0] for row in capped.output["ranked"]] == ["good1", "good2"]
+
+
+def test_continuous_screen_uses_dev_rows_for_usability_stats(tmp_path):
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "good_dev_missing_oot": [1.0, 2.0, 3.0, 4.0, None, None],
+        "bad_dev_constant": [5.0, 5.0, 5.0, 5.0, 6.0, 7.0],
+        "income": [1000.0, 1100.0, 1200.0, 1300.0, 1400.0, 1500.0],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+    })
+    path = tmp_path / "screen_holdout.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    screened = runner.invoke(
+        ToolRef("modeling", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good_dev_missing_oot", "bad_dev_constant"],
+            "target_col": "income",
+            "split_col": "split",
+            "target_type": "continuous",
+        },
+        task_id=task.id,
+    )
+
+    assert screened.ok is True, screened.error
+    assert screened.output["selected"] == ["good_dev_missing_oot"]
+    assert {row[0]: row[1] for row in screened.output["unusable"]} == {"bad_dev_constant": "constant"}
+    assert screened.output["scores"]["good_dev_missing_oot"]["missing_rate"] == 0.0
+
+
 def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
     """End-to-end regression unblock: a continuous screen (target_type='continuous')
     does NOT crash and keeps every candidate, and train_models with lgb_regressor +
@@ -483,7 +607,7 @@ def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
     assert screened.ok is True, screened.error
     assert set(screened.output["selected"]) == {"x1", "x2"}
     assert screened.output["leakage"] == []
-    assert screened.output["note"] == "非二分类目标：跳过泄漏KS筛选，保留全部候选特征"
+    assert screened.output["note"] == "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列"
 
     trained = runner.invoke(
         ToolRef("modeling", "train_models"),

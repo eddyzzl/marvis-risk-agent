@@ -2740,7 +2740,7 @@ def test_workflow_step_status_separates_next_action_from_running_action():
 def test_modeling_create_dialog_has_algorithm_selector():
     """The create dialog exposes a manual-mode modeling algorithm multi-select
     (G2: 算法可选), gated to modeling tasks via the algorithmField flag, and
-    posted as `payload.recipes`."""
+    posted as `payload.recipes` + `payload.target_type`."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
 
@@ -2749,12 +2749,18 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'name="modelAlgorithm"' in index_html
     for recipe in ('value="lgb"', 'value="xgb"', 'value="lr"', 'value="scorecard"', 'value="mlp"'):
         assert recipe in index_html
-    # regression + multiclass target types are exposed too (backend derives target_type from
-    # the recipe), so the UI can drive §8.2/§8.3 tasks, not only binary
+    assert 'data-recipe-family="binary"' in index_html
+    # regression + multiclass target types are exposed too, so the UI can drive
+    # §8.2/§8.3 tasks, not only binary
     assert 'value="lgb_regressor"' in index_html
     assert 'value="lgb_multiclass"' in index_html
+    assert 'data-recipe-family="continuous"' in index_html
+    assert 'data-recipe-family="multiclass"' in index_html
     assert "algorithmField: true" in app_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
+    assert 'payload.target_type = [...families][0] || "binary";' in app_js
+    assert "normalizeModelAlgorithmFamilies" in app_js
+    assert "二分类、回归与多分类算法不能混选。" in app_js
     assert "请至少选择一个建模算法。" in app_js
     assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
 
@@ -2768,11 +2774,16 @@ def test_coming_soon_task_types_are_disabled_with_notice():
     for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
         start = index_html.index(f'id="{card_id}"')
         tag_end = index_html.index(">", start)
-        assert "data-coming-soon" in index_html[start:tag_end], card_id
+        tag = index_html[start:tag_end]
+        assert "data-coming-soon" in tag, card_id
+        assert 'class="welcome-task-card unavailable"' in tag, card_id
+        assert 'aria-disabled="true"' in tag, card_id
     # the card-click handler short-circuits coming-soon cards to the toast (no dialog)
     assert "card.dataset.comingSoon" in app_js
+    assert "definition.available === false" in app_js
+    assert "unavailableMessage" in app_js
     assert "function showComingSoonToast" in app_js
-    assert "新功能开发中，敬请期待" in app_js
+    assert "该任务暂未开放" in app_js
 
 
 def test_acceptance_chip_relabels_auto_accept_per_task_type():
@@ -4771,13 +4782,16 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
         "data_join",
         "modeling",
         "validation",
-        "strategy",
-        "vintage",
     ]:
         task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
         class_start = cards_markup.rfind('class="', 0, task_index)
         class_end = cards_markup.index('"', class_start + len('class="'))
         assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card available"'
+    for task_kind in ["strategy", "vintage"]:
+        task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
+        class_start = cards_markup.rfind('class="', 0, task_index)
+        class_end = cards_markup.index('"', class_start + len('class="'))
+        assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card unavailable"'
 
 
 def test_agent_task_creation_prefills_conversation_composer_with_goal():
@@ -5066,7 +5080,7 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in llm_cancel_hover_rule
 
 
-def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
+def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
@@ -5102,8 +5116,8 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert '<path d="m14.85 14.85 4.15 4.15"></path>' in search_field_markup
     assert 'id="closeGovernanceSettingsButton"' in index_html
     # The IA refactor consolidated 11 nav items into 6: memory records /
-    # distillations moved inside the memory-policy panel, while drafts +
-    # runtime-plan + audit collapsed into the shared runtime panel.
+    # distillations moved inside the memory-policy panel, while the old
+    # plan/audit runtime workbench was retired from settings.
     for nav in [
         "execution-environment",
         "llm",
@@ -5174,13 +5188,18 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert 'data-agent-memory-view="raw"' in index_html
     assert 'data-agent-memory-view="distillation"' in index_html
     assert 'data-agent-memory-mode=' not in index_html
-    assert 'id="v2RuntimeMount"' in index_html
-    # Plugins / workflows / capabilities share the runtime panel and are
-    # selected via data-v2-view; their refresh controls are rendered into
-    # v2RuntimeMount by the runtime modules rather than baked into index.html.
-    assert 'data-governance-panel="runtime" data-v2-view="plugins"' in index_html
-    assert 'data-governance-panel="runtime" data-v2-view="workflows"' in index_html
-    assert 'data-governance-panel="runtime" data-v2-view="capabilities"' in index_html
+    assert 'id="governanceExtensionMount"' in index_html
+    assert 'id="v2RuntimeMount"' not in index_html
+    assert '计划与执行' not in index_html
+    assert 'data-governance-panel-content="extensions"' in index_html
+    # Plugins / workflows / capabilities share the extension panel and are
+    # selected via data-extension-view; their controls are rendered into the
+    # extension mount by the settings modules rather than baked into index.html.
+    assert 'data-governance-panel="extensions" data-extension-view="plugins"' in index_html
+    assert 'data-governance-panel="extensions" data-extension-view="workflows"' in index_html
+    assert 'data-governance-panel="extensions" data-extension-view="capabilities"' in index_html
+    assert 'data-governance-panel="runtime"' not in index_html
+    assert 'data-v2-view=' not in index_html
     capabilities_nav_start = index_html.index('data-governance-nav="capabilities"')
     capabilities_nav_end = index_html.index("</button>", capabilities_nav_start)
     capabilities_nav_markup = index_html[capabilities_nav_start:capabilities_nav_end]
@@ -5208,7 +5227,7 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert 'openGovernanceSettingsCenter("llm")' in app_js
     assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
     assert "let draftTools = [];" in app_js
-    # Drafts open via the runtime panel's <details> toggle (lazy load) and the
+    # Drafts open via the plugins extension <details> toggle (lazy load) and the
     # status filter, not a dedicated dialog or nav key.
     assert '$("draftManageDetails").addEventListener("toggle"' in app_js
     assert 'runAction(loadDraftTools, { actionId: "draftTools"' in app_js
@@ -5224,19 +5243,21 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in app_js
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in app_js
     assert '"X-MARVIS-Plugin-Admin": "local-dev"' in app_js
-    assert "function v2RuntimePlatformActions" in app_js
+    assert "function governanceExtensionActions" in app_js
     assert "pluginActions:" in app_js
     assert "skillActions:" in app_js
-    assert "draftActions:" in app_js
-    assert "memoryActions:" in app_js
+    assert "draftActions:" not in app_js
+    assert "memoryActions:" not in app_js
+    assert "function mountV2Runtime" not in app_js
+    assert "function mountGovernanceExtensions" in app_js
+    assert "function runV2WorkspaceAction" not in app_js
+    assert "function runGovernanceExtensionAction" in app_js
     assert 'title: "移除插件"' in app_js
-    assert 'title: "转正草稿工具"' in app_js
-    assert "showError: showV2Error" in app_js
-    assert "showMessage: showV2Message" in app_js
+    assert "showError: showExtensionError" in app_js
     assert "confirmRemove: (name) => showPlatformConfirm({" in app_js
-    assert "confirmPromote: (id) => showPlatformConfirm({" in app_js
     assert "await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions)" in app_js
     assert "await renderSkillManager(mounted.panels.skillPanel, actions.skillActions)" in app_js
+    assert "await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions)" in app_js
     assert "请填写转正测试用例。" in app_js
     assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in app_js
 
@@ -5291,27 +5312,27 @@ def test_system_settings_center_merges_runtime_memory_drafts_and_v2_runtime():
     assert ".draft-code-block" in styles_css
 
     assert ".v2-workspace-summary" in v2_css
-    assert "grid-template-areas:" in v2_css
-    for area in [
-        '"goal plan plugin"',
-        '"join subagent skill"',
-        '"loop artifact draft"',
-        '"capability memory memory"',
-    ]:
-        assert area in v2_css
+    assert "grid-template-areas:" not in v2_css
     for selector in [
-        ".v2-goal-panel",
-        ".v2-plan-panel",
         ".v2-plugin-panel",
         ".v2-skill-panel",
-        ".v2-draft-panel",
         ".v2-capability-panel",
-        ".v2-memory-panel",
     ]:
         assert selector in v2_css
+    for retired_selector in [
+        ".v2-goal-panel",
+        ".v2-plan-panel",
+        ".v2-join-panel",
+        ".v2-subagent-panel",
+        ".v2-draft-panel",
+        ".v2-memory-panel",
+        ".v2-loop-panel",
+        ".v2-artifact-panel",
+    ]:
+        assert retired_selector not in v2_css
     assert '.governance-settings-dialog .plugin-row input[type="checkbox"]' in v2_css
-    assert '.governance-settings-dialog[data-v2-view="plugins"] .v2-plugin-panel' in v2_css
-    assert '.governance-settings-dialog[data-v2-view="capabilities"] .v2-capability-panel' in v2_css
+    assert '.governance-settings-dialog[data-extension-view="plugins"] .v2-plugin-panel' in v2_css
+    assert '.governance-settings-dialog[data-extension-view="capabilities"] .v2-capability-panel' in v2_css
     runtime_panel_rule = _css_rule(v2_css, ".governance-settings-dialog .v2-panel")
     assert "padding: 0" in runtime_panel_rule
     assert "border: 0" in runtime_panel_rule

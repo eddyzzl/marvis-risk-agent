@@ -35,7 +35,7 @@ _SUSPECTED_OUTPUT = re.compile(
 
 @dataclass(frozen=True)
 class ScreenResult:
-    ranked: tuple[tuple[str, float], ...]
+    ranked: tuple[tuple[str, float | None], ...]
     """Clean, usable features ordered by descending univariate KS: (feature, ks)."""
     selected: tuple[str, ...]
     """Proposed candidate set (top_k of ``ranked``) — for the user to confirm."""
@@ -45,7 +45,7 @@ class ScreenResult:
     """Soft flags (name looks like a model output/score): (feature, ks, reason)."""
     unusable: tuple[tuple[str, str], ...]
     """Dropped as non-numeric / near-constant / mostly-missing: (feature, reason)."""
-    scores: dict[str, dict[str, float]] = field(default_factory=dict)
+    scores: dict[str, dict[str, float | None]] = field(default_factory=dict)
     """Per-feature {ks, missing_rate, unique_count}; iv added for selected ones."""
     n_screened: int = 0
 
@@ -95,7 +95,7 @@ def screen_features(
     dev = _dev_mask(base, split_col, holdout_values)
     target_dev = target[dev]
 
-    scores: dict[str, dict[str, float]] = {}
+    scores: dict[str, dict[str, float | None]] = {}
     leakage: list[tuple[str, float, str]] = []
     suspected: list[tuple[str, float, str]] = []
     unusable: list[tuple[str, str]] = []
@@ -156,4 +156,63 @@ def screen_features(
     )
 
 
-__all__ = ["screen_features", "ScreenResult"]
+def screen_features_non_binary(
+    backend,
+    dataset_path: Path,
+    *,
+    features: list[str],
+    target_col: str,
+    split_col: str | None = None,
+    holdout_values: tuple[str, ...] = ("oot",),
+    max_missing_rate: float = 0.95,
+    min_unique: int = 2,
+    top_k: int | None = None,
+) -> ScreenResult:
+    """Screen regression/multiclass candidates without binary KS leakage math.
+
+    Eligibility still uses the same dev-row contract as binary screening: OOT or
+    other holdout rows must not decide whether a feature is usable. ``ranked``
+    contains every clean feature, while ``selected`` applies ``top_k``.
+    """
+    feats = [f for f in dict.fromkeys(features) if f != target_col]
+    base = (
+        backend.read_frame(dataset_path, columns=[split_col])
+        if split_col
+        else None
+    )
+    dev = _dev_mask(base, split_col, holdout_values) if base is not None else None
+
+    scores: dict[str, dict[str, float | None]] = {}
+    unusable: list[tuple[str, str]] = []
+    clean: list[tuple[str, None]] = []
+    if feats:
+        frame = backend.read_frame(dataset_path, columns=feats)
+        for col in feats:
+            values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+            v_dev = values if dev is None else values[dev]
+            finite = np.isfinite(v_dev)
+            missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
+            unique = int(np.unique(v_dev[finite]).size)
+            scores[col] = {"ks": None, "missing_rate": missing_rate, "unique_count": unique}
+            if missing_rate >= max_missing_rate:
+                unusable.append((col, "high_missing"))
+                continue
+            if unique < min_unique:
+                unusable.append((col, "constant"))
+                continue
+            clean.append((col, None))
+
+    ranked = tuple(clean)
+    selected = tuple(c for c, _ in (clean[:top_k] if top_k else clean))
+    return ScreenResult(
+        ranked=ranked,
+        selected=selected,
+        leakage=(),
+        suspected=(),
+        unusable=tuple(unusable),
+        scores=scores,
+        n_screened=len(feats),
+    )
+
+
+__all__ = ["screen_features", "screen_features_non_binary", "ScreenResult"]

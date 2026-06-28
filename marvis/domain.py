@@ -63,6 +63,7 @@ class TaskCreate:
     feature_columns: list[str] = field(default_factory=list)
     # Modeling recipes the user picked (manual mode multi-select); empty → the agent
     # recommends / modeling_setup defaults. Multi-element → multi-algorithm compare.
+    target_type: str = ""
     recipes: list[str] = field(default_factory=list)
     # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
     # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
@@ -103,6 +104,7 @@ class TaskRecord:
     updated_at: str
     status_reason_code: str = ""
     task_type: str = TASK_TYPE_VALIDATION
+    target_type: str = ""
     recipes: list[str] = field(default_factory=list)
     metrics: list[str] = field(default_factory=list)
     capability_tier: str = ""

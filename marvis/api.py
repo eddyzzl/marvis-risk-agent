@@ -492,13 +492,16 @@ def _stage_hook_payload(
 
 
 def _task_hook_payload(task: TaskRecord) -> dict:
-    return {
+    payload = {
         "task_id": task.id,
         "task_type": task.task_type,
         "status": task.status.value,
         "run_mode": task.run_mode,
         "algorithm": task.algorithm,
     }
+    if getattr(task, "target_type", ""):
+        payload["target_type"] = task.target_type
+    return payload
 
 
 def _scan_hook_payload(payload: dict) -> dict:
@@ -682,6 +685,11 @@ def _normalized_capability_tier(value: str | None) -> str:
     return name if name in TIERS else ""
 
 
+def _normalized_target_type(value: str | None) -> str:
+    name = str(value or "").strip().lower()
+    return name if name in {"binary", "continuous", "multiclass"} else ""
+
+
 def _task_tier(request, task) -> str:
     """The capability tier name for a task's plan: the per-task pick if set, else the
     global settings default (spec §5.1). Affects only the autonomy budget
@@ -725,6 +733,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             split_col=payload.split_col,
             time_col=payload.time_col,
             feature_columns=payload.feature_columns,
+            target_type=_normalized_target_type(payload.target_type),
             recipes=payload.recipes,
             metrics=payload.metrics,
             capability_tier=_normalized_capability_tier(payload.capability_tier),
@@ -3251,13 +3260,8 @@ def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *,
             metadata={"intent": "feature_analysis"},
         )
         turn = driver.start(
-            task_id=task.id, template_id="feature_analysis",
-            slots={
-                "dataset_id": proposal.dataset_id,
-                "target_col": proposal.target_col,
-                "features": proposal.features,
-                "metrics": proposal.metrics,
-            },
+            task_id=task.id, template_id=proposal.template_id,
+            slots=proposal.template_slots(),
             tier=_task_tier(request, task),
         )
         _append_driver_messages(repo, task.id, turn)
@@ -3280,6 +3284,11 @@ def _modeling_recipes(task: TaskRecord) -> list[str] | None:
     no options are shown). Multiple → train each and pick the best (G2 multi-algorithm)."""
     recipes = [str(item).strip() for item in (getattr(task, "recipes", None) or []) if str(item).strip()]
     return recipes or None
+
+
+def _modeling_target_type(task: TaskRecord) -> str | None:
+    target_type = str(getattr(task, "target_type", "") or "").strip()
+    return target_type or None
 
 
 def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
@@ -3306,7 +3315,9 @@ def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *
             return _join_turn_response(repo, task.id)
         backend, registry = _modeling_data_runtime(state.settings)
         proposal = build_modeling_proposal(
-            registry, backend, task.id, task.source_dir, recipes=_modeling_recipes(task)
+            registry, backend, task.id, task.source_dir,
+            target_type=_modeling_target_type(task),
+            recipes=_modeling_recipes(task),
         )
         counts = proposal.counts
         bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""
@@ -3322,7 +3333,12 @@ def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *
             ),
             metadata={"intent": "modeling"},
         )
-        turn = driver.start(task_id=task.id, template_id="modeling", slots=proposal.template_slots(), tier=_task_tier(request, task))
+        turn = driver.start(
+            task_id=task.id,
+            template_id=proposal.template_id,
+            slots=proposal.template_slots(),
+            tier=_task_tier(request, task),
+        )
         _append_driver_messages(repo, task.id, turn)
         return _join_turn_response(repo, task.id)
     except ModelingSetupError as exc:

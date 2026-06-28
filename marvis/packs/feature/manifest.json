@@ -13,7 +13,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
-          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 0},
           "target_col": {"type": "string", "minLength": 1},
           "bins": {"type": "integer", "minimum": 1},
           "compare_dataset_id": {"type": "string", "minLength": 1},
@@ -79,7 +79,7 @@
         "type": "object",
         "properties": {
           "dataset_id": {"type": "string", "minLength": 1},
-          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 0},
           "target_col": {"type": "string", "minLength": 1},
           "target_type": {"type": "string"},
           "split_col": {"type": "string", "minLength": 1},

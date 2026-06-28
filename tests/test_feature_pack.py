@@ -382,10 +382,94 @@ def test_screen_features_continuous_skips_leakage_and_keeps_all(tmp_path):
     assert set(result.output["selected"]) == {"x1", "x2", "missing"}
     assert result.output["leakage"] == []
     assert result.output["suspected"] == []
-    assert result.output["note"] == "非二分类目标：跳过泄漏KS筛选，保留全部候选特征"
+    assert result.output["note"] == "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列"
     # Continuous screen reports missing_rate/unique_count only — KS is None (not computed).
     assert result.output["scores"]["x1"]["ks"] is None
     assert "missing_rate" in result.output["scores"]["x1"]
+
+
+def test_screen_features_continuous_drops_constant_and_all_missing(tmp_path):
+    """The non-binary screen still drops unusable columns (mirroring the binary path): a
+    constant column and an all-NaN column land in `unusable`, not `selected`; top_k truncates."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "good1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "good2": [6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+        "const": [7.0, 7.0, 7.0, 7.0, 7.0, 7.0],
+        "allnan": [np.nan] * 6,
+        "amount": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    })
+    path = tmp_path / "screen_unusable.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good1", "good2", "const", "allnan"],
+            "target_col": "amount",
+            "target_type": "continuous",
+        },
+        task_id="task-feature",
+    )
+    assert result.ok is True, result.error
+    assert set(result.output["selected"]) == {"good1", "good2"}
+    reasons = {row[0]: row[1] for row in result.output["unusable"]}
+    assert reasons == {"const": "constant", "allnan": "high_missing"}
+    # all candidates are still scored, and the stats stay JSON-safe (no NaN/inf)
+    assert result.output["scores"]["allnan"]["missing_rate"] == 1.0
+    assert result.output["scores"]["const"]["unique_count"] == 1
+
+    # top_k truncates only the proposed selected set; ranked remains the full clean
+    # review surface so the user can re-add clean features outside top_k.
+    capped = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good1", "good2", "const", "allnan"],
+            "target_col": "amount",
+            "target_type": "continuous",
+            "top_k": 1,
+        },
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    assert len(capped.output["selected"]) == 1
+    assert [row[0] for row in capped.output["ranked"]] == ["good1", "good2"]
+
+
+def test_screen_features_continuous_ignores_oot_for_usability_stats(tmp_path):
+    """Non-binary eligibility must match binary screening's dev-mask contract: OOT
+    rows do not decide whether a train/test-usable feature is missing or constant."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "good_dev_missing_oot": [1.0, 2.0, 3.0, 4.0, np.nan, np.nan],
+        "good_dev_constant_oot_varies": [9.0, 8.0, 7.0, 6.0, 100.0, 200.0],
+        "bad_dev_constant": [5.0, 5.0, 5.0, 5.0, 6.0, 7.0],
+        "amount": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+    })
+    path = tmp_path / "screen_holdout.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["good_dev_missing_oot", "good_dev_constant_oot_varies", "bad_dev_constant"],
+            "target_col": "amount",
+            "split_col": "split",
+            "target_type": "continuous",
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert set(result.output["selected"]) == {"good_dev_missing_oot", "good_dev_constant_oot_varies"}
+    assert {row[0]: row[1] for row in result.output["unusable"]} == {"bad_dev_constant": "constant"}
+    assert result.output["scores"]["good_dev_missing_oot"]["missing_rate"] == 0.0
 
 
 def test_screen_features_binary_default_runs_leakage_screen_unchanged(tmp_path):

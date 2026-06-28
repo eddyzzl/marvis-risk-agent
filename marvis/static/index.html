@@ -213,34 +213,34 @@
             <p class="dialog-subtitle">可多选——选多个会各训一版、按 OOT KS 自动对比取最优。</p>
             <div id="modelAlgorithmChoices" class="algorithm-choices" role="group" aria-label="建模算法">
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="lgb" />
+                <input type="checkbox" name="modelAlgorithm" value="lgb" data-recipe-family="binary" />
                 <span>LightGBM (lgb)</span>
               </label>
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="xgb" />
+                <input type="checkbox" name="modelAlgorithm" value="xgb" data-recipe-family="binary" />
                 <span>XGBoost (xgb)</span>
               </label>
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="lr" />
+                <input type="checkbox" name="modelAlgorithm" value="lr" data-recipe-family="binary" />
                 <span>逻辑回归 (lr)</span>
               </label>
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="scorecard" />
+                <input type="checkbox" name="modelAlgorithm" value="scorecard" data-recipe-family="binary" />
                 <span>评分卡 (scorecard)</span>
               </label>
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="mlp" />
+                <input type="checkbox" name="modelAlgorithm" value="mlp" data-recipe-family="binary" />
                 <span>神经网络 (MLP/DNN)</span>
               </label>
             </div>
-            <p class="dialog-subtitle">回归 / 多分类为独立目标类型(指标用 RMSE/MAE/R² 或 macro-AUC/logloss),请单选其一、勿与上面二分类算法混选。</p>
+            <p class="dialog-subtitle">二分类算法可多选；回归 / 多分类为独立目标类型(指标用 RMSE/MAE/R² 或 macro-AUC/logloss)，会与其它目标类型互斥。</p>
             <div class="algorithm-choices" role="group" aria-label="其它目标类型">
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="lgb_regressor" />
+                <input type="checkbox" name="modelAlgorithm" value="lgb_regressor" data-recipe-family="continuous" />
                 <span>回归 (LightGBM)</span>
               </label>
               <label class="algorithm-choice">
-                <input type="checkbox" name="modelAlgorithm" value="lgb_multiclass" />
+                <input type="checkbox" name="modelAlgorithm" value="lgb_multiclass" data-recipe-family="multiclass" />
                 <span>多分类 (LightGBM)</span>
               </label>
             </div>
@@ -369,7 +369,7 @@
                 </span>
                 <strong>模型引擎</strong>
               </button>
-              <button class="governance-nav-item" type="button" data-governance-nav="capabilities" data-governance-panel="runtime" data-v2-view="capabilities" aria-selected="false">
+              <button class="governance-nav-item" type="button" data-governance-nav="capabilities" data-governance-panel="extensions" data-extension-view="capabilities" aria-selected="false">
                 <span class="governance-nav-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M3.34 19a10 10 0 1 1 17.32 0"></path><path d="M12 14l4-4"></path></svg>
                 </span>
@@ -384,13 +384,13 @@
             </section>
             <section class="governance-nav-group">
               <span>扩展</span>
-              <button class="governance-nav-item" type="button" data-governance-nav="plugins" data-governance-panel="runtime" data-v2-view="plugins" aria-selected="false">
+              <button class="governance-nav-item" type="button" data-governance-nav="plugins" data-governance-panel="extensions" data-extension-view="plugins" aria-selected="false">
                 <span class="governance-nav-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M9.2 5a2 2 0 1 1 4 0v1.4h2.4A1.4 1.4 0 0 1 17 7.8v2.4h1.4a2 2 0 1 1 0 4H17v2.4a1.4 1.4 0 0 1-1.4 1.4H13v-1.4a2 2 0 1 0-4 0V18H6.6a1.4 1.4 0 0 1-1.4-1.4V14H3.8a2 2 0 1 1 0-4h1.4V7.6A1.4 1.4 0 0 1 6.6 6.2H9.2z"></path></svg>
                 </span>
                 <strong>插件</strong>
               </button>
-              <button class="governance-nav-item" type="button" data-governance-nav="workflows" data-governance-panel="runtime" data-v2-view="workflows" aria-selected="false">
+              <button class="governance-nav-item" type="button" data-governance-nav="workflows" data-governance-panel="extensions" data-extension-view="workflows" aria-selected="false">
                 <span class="governance-nav-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false"><rect x="4" y="4" width="16" height="16" rx="2.2"></rect><path d="M4 9h16M9.5 9V20"></path></svg>
                 </span>
@@ -550,15 +550,15 @@
               </details>
             </section>
 
-            <section class="governance-panel governance-runtime-panel" data-governance-panel-content="runtime">
+            <section class="governance-panel governance-extension-panel" data-governance-panel-content="extensions">
               <div class="governance-page-head">
                 <div>
-                  <h3 id="governanceRuntimeTitle">计划与执行</h3>
-                  <p id="governanceRuntimeDescription">生成计划、确认步骤、查看子 Agent 和执行工件。</p>
+                  <h3 id="governanceExtensionTitle">插件</h3>
+                  <p id="governanceExtensionDescription">管理可调用工具包，启停插件并查看插件暴露的工具。</p>
                 </div>
               </div>
-              <div id="v2WorkspaceStatus" class="status" role="status" aria-live="polite"></div>
-              <div id="v2RuntimeMount" class="v2-runtime-shell" aria-label="运行时管理"></div>
+              <div id="governanceExtensionStatus" class="status" role="status" aria-live="polite"></div>
+              <div id="governanceExtensionMount" class="governance-extension-shell" aria-label="扩展设置"></div>
               <details id="draftManageDetails" class="memory-manage draft-manage">
                 <summary class="memory-manage-summary">
                   <span class="memory-manage-summary-text">
@@ -984,10 +984,11 @@
               </button>
               <button
                 id="welcomeVintageAnalysisCard"
-                class="welcome-task-card available"
+                class="welcome-task-card unavailable"
                 type="button"
                 data-task-kind="vintage"
                 data-coming-soon="1"
+                aria-disabled="true"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
@@ -1080,10 +1081,11 @@
               </button>
               <button
                 id="welcomeStrategyDevelopmentCard"
-                class="welcome-task-card available"
+                class="welcome-task-card unavailable"
                 type="button"
                 data-task-kind="strategy"
                 data-coming-soon="1"
+                aria-disabled="true"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">

@@ -96,6 +96,44 @@ def test_feature_analysis_with_vif_metric_shows_collinear_section(client: TestCl
     assert "VIF(共线性)" in titles  # the selected optional metric was computed + shown
 
 
+def test_feature_analysis_multiple_files_runs_join_then_feature_analysis(client: TestClient, tmp_path: Path):
+    src = _sample_dir(tmp_path, n=200)
+    pd.DataFrame({
+        "cust_id": np.arange(200),
+        "external_score": np.linspace(0, 1, 200),
+    }).to_parquet(src / "feature_table.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "多表特征",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "feature_analysis",
+        "run_mode": "manual",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "确认「开始」后按计划执行" in overview["content"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    join_gate = _last_assistant(messages)
+    assert join_gate["metadata"].get("kind") == "gate"
+    assert "拼接诊断完成" in join_gate["content"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "特征分析完成" in done["content"]
+    table = next(t for t in done["metadata"]["tables"] if t["title"] == "特征指标")
+    feature_names = {row[0] for row in table["rows"]}
+    assert "external_score" in feature_names
+
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "feature_analysis_with_join"
+
+
 def test_feature_analysis_with_head_tail_lift_adds_columns(client: TestClient, tmp_path: Path):
     """Selecting head/tail lift adds the risk-aware 头部/尾部 lift columns to the wide
     table; without it those columns are absent (base table keeps its 7 columns)."""

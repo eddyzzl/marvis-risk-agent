@@ -202,6 +202,8 @@ const taskTypeDefinitions = {
     initialGoal: "请基于当前任务材料开始模型验证。先扫描材料并确认 Notebook、样本、PMML 和数据字典是否齐全；如果材料完备，再按平台证据逐步完成一致性、效果、稳定性、压力测试和报告草稿。",
   },
   strategy: {
+    available: false,
+    unavailableMessage: "该任务暂未开放，当前可用入口为数据拼接、特征分析、模型开发和模型验证。",
     label: "策略开发",
     dialogTitle: "创建策略开发任务",
     dialogSubtitle: "上传评分或申请数据，Agent 会构造规则、回测并比较策略收益。",
@@ -219,6 +221,8 @@ const taskTypeDefinitions = {
     initialGoal: "请基于当前任务材料做策略开发。先识别评分列、目标列、客群字段和候选规则；如果缺少规则口径请先提问。随后生成 V2 Workflow，构造策略、执行回测、计算收益和 swap 分析，并给出阈值权衡建议。",
   },
   vintage: {
+    available: false,
+    unavailableMessage: "该任务暂未开放，当前可用入口为数据拼接、特征分析、模型开发和模型验证。",
     label: "风险分析",
     dialogTitle: "创建风险分析任务",
     dialogSubtitle: "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据，Agent 会生成风险观察和结论。",
@@ -548,6 +552,24 @@ function resetModelAlgorithmChoices() {
   });
 }
 
+function modelRecipeFamily(recipe) {
+  if (recipe === "lgb_regressor") return "continuous";
+  if (recipe === "lgb_multiclass") return "multiclass";
+  return "binary";
+}
+
+function normalizeModelAlgorithmFamilies(changedInput = null) {
+  const checked = [...document.querySelectorAll('input[name="modelAlgorithm"]:checked')];
+  if (!checked.length) return;
+  const activeFamily = changedInput?.checked
+    ? (changedInput.dataset.recipeFamily || modelRecipeFamily(changedInput.value))
+    : (checked[0].dataset.recipeFamily || modelRecipeFamily(checked[0].value));
+  for (const input of document.querySelectorAll('input[name="modelAlgorithm"]')) {
+    const family = input.dataset.recipeFamily || modelRecipeFamily(input.value);
+    if (family !== activeFamily) input.checked = false;
+  }
+}
+
 function openTaskDialog(taskType = defaultTaskType) {
   applyTaskTypeToDialog(taskType);
   document.querySelectorAll('input[name="runMode"]').forEach((input) => {
@@ -568,10 +590,11 @@ function openTaskDialog(taskType = defaultTaskType) {
 function openTaskDialogFromCard(event) {
   const card = event.target.closest("[data-task-kind]");
   if (!card) return;
+  const definition = taskTypeDefinition(card.dataset.taskKind || defaultTaskType);
   // Temporarily disabled task types (data-coming-soon) show a notice instead of opening
   // the create dialog. Re-enable by removing the data-coming-soon attribute in index.html.
-  if (card.dataset.comingSoon) {
-    showComingSoonToast("新功能开发中，敬请期待");
+  if (card.dataset.comingSoon || definition.available === false) {
+    showComingSoonToast(definition.unavailableMessage || "新功能开发中，敬请期待");
     return;
   }
   openTaskDialog(card.dataset.taskKind || defaultTaskType);
@@ -722,6 +745,9 @@ function bindRunModeDeselectableCards() {
   document.querySelectorAll('input[name="runMode"]').forEach((input) => {
     input.addEventListener("change", updateAlgorithmFieldVisibility);
   });
+  document.querySelectorAll('input[name="modelAlgorithm"]').forEach((input) => {
+    input.addEventListener("change", () => normalizeModelAlgorithmFamilies(input));
+  });
 }
 
 function openExecutionEnvironmentDialog() {
@@ -759,20 +785,20 @@ const governanceSettingsCopy = {
   plugins: {
     title: "插件",
     subtitle: "管理可调用工具包，启停插件并查看插件暴露的工具。",
-    runtimeTitle: "插件",
-    runtimeDescription: "管理可调用工具包，启停插件并查看插件暴露的工具。",
+    extensionTitle: "插件",
+    extensionDescription: "管理可调用工具包，启停插件并查看插件暴露的工具。",
   },
   workflows: {
     title: "Workflow 模板",
     subtitle: "加载、校验和复用用户可编写的 Workflow 模板。",
-    runtimeTitle: "Workflow 模板",
-    runtimeDescription: "加载、校验和复用用户可编写的 Workflow 模板。",
+    extensionTitle: "Workflow 模板",
+    extensionDescription: "加载、校验和复用用户可编写的 Workflow 模板。",
   },
   capabilities: {
     title: "能力档位",
     subtitle: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
-    runtimeTitle: "能力档位",
-    runtimeDescription: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
+    extensionTitle: "能力档位",
+    extensionDescription: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
   },
 };
 
@@ -790,18 +816,18 @@ function setGovernanceCopy(navKey, button) {
   const copy = governanceSettingsCopy[navKey] || governanceSettingsCopy["execution-environment"];
   $("governanceSettingsTitle").textContent = copy.title;
   $("governanceSettingsSubtitle").textContent = copy.subtitle;
-  if (button?.dataset?.v2View) {
-    $("governanceRuntimeTitle").textContent = copy.runtimeTitle || copy.title;
-    $("governanceRuntimeDescription").textContent = copy.runtimeDescription || copy.subtitle;
+  if (button?.dataset?.extensionView) {
+    $("governanceExtensionTitle").textContent = copy.extensionTitle || copy.title;
+    $("governanceExtensionDescription").textContent = copy.extensionDescription || copy.subtitle;
   }
 }
 
 // Single, context-aware refresh for the dialog title bar. Only panels that load
 // remote data appear here; execution-environment keeps its own 扫描环境 action.
 const governanceRefreshActions = {
-  plugins: () => runV2WorkspaceAction(refreshV2Plugins),
-  workflows: () => runV2WorkspaceAction(refreshV2Skills),
-  capabilities: () => runV2WorkspaceAction(refreshV2Capability),
+  plugins: () => runGovernanceExtensionAction(refreshGovernancePlugins),
+  workflows: () => runGovernanceExtensionAction(refreshGovernanceSkills),
+  capabilities: () => runGovernanceExtensionAction(refreshGovernanceCapability),
 };
 
 function syncGovernanceRefreshButton(navKey = activeGovernanceNav) {
@@ -840,11 +866,11 @@ function setGovernanceSettingsPanel(navKey = "execution-environment", options = 
   }
   const dialog = $("governanceSettingsDialog");
   dialog.dataset.governanceActive = normalizedNav;
-  dialog.dataset.v2View = button?.dataset?.v2View || "";
+  dialog.dataset.extensionView = button?.dataset?.extensionView || "";
   setGovernanceCopy(normalizedNav, button);
-  if (panel === "runtime") {
-    mountV2Runtime();
-    setV2WorkspaceStatus("");
+  if (panel === "extensions") {
+    mountGovernanceExtensions();
+    setGovernanceExtensionStatus("");
   }
 }
 
@@ -2061,23 +2087,20 @@ function setAgentMemoryStatus(message = "", kind = "") {
   status.className = ["status", kind].filter(Boolean).join(" ");
 }
 
-function setV2WorkspaceStatus(message = "", kind = "") {
-  const status = $("v2WorkspaceStatus");
+function setGovernanceExtensionStatus(message = "", kind = "") {
+  const status = $("governanceExtensionStatus");
   if (!status) return;
   status.textContent = message;
   status.className = ["status", kind].filter(Boolean).join(" ");
 }
 
-function v2RuntimePlatformActions() {
-  const showV2Error = (message) => {
-    setV2WorkspaceStatus(message || "操作失败", "error");
-  };
-  const showV2Message = (message) => {
-    setV2WorkspaceStatus(message || "操作已完成。", "success");
+function governanceExtensionActions() {
+  const showExtensionError = (message) => {
+    setGovernanceExtensionStatus(message || "操作失败", "error");
   };
   return {
     pluginActions: {
-      showError: showV2Error,
+      showError: showExtensionError,
       confirmRemove: (name) => showPlatformConfirm({
         title: "移除插件",
         message: `确定移除插件「${name}」？移除后该插件提供的工具将不可用。`,
@@ -2087,60 +2110,49 @@ function v2RuntimePlatformActions() {
       }),
     },
     skillActions: {
-      showError: showV2Error,
+      showError: showExtensionError,
     },
-    draftActions: {
-      showError: showV2Error,
-      showMessage: showV2Message,
-      confirmPromote: (id) => showPlatformConfirm({
-        title: "转正草稿工具",
-        message: `确定将草稿「${id}」转正到可信工具注册表？`,
-        confirmText: "转正",
-        cancelText: "取消",
-      }),
-    },
-    memoryActions: {
-      showError: showV2Error,
-      showMessage: showV2Message,
+    capabilityActions: {
+      showError: showExtensionError,
     },
   };
 }
 
-function mountV2Runtime() {
-  const root = $("v2RuntimeMount");
-  return root ? mountV2(root, { taskId: () => selectedTaskId, ...v2RuntimePlatformActions() }) : null;
+function mountGovernanceExtensions() {
+  const root = $("governanceExtensionMount");
+  return root ? mountV2(root, governanceExtensionActions()) : null;
 }
 
-async function refreshV2Plugins() {
-  const mounted = mountV2Runtime();
+async function refreshGovernancePlugins() {
+  const mounted = mountGovernanceExtensions();
   if (!mounted) return;
-  const actions = v2RuntimePlatformActions();
-  setV2WorkspaceStatus("正在读取插件...");
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取插件...");
   await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions);
-  setV2WorkspaceStatus("插件已更新。", "success");
+  setGovernanceExtensionStatus("插件已更新。", "success");
 }
 
-async function refreshV2Skills() {
-  const mounted = mountV2Runtime();
+async function refreshGovernanceSkills() {
+  const mounted = mountGovernanceExtensions();
   if (!mounted) return;
-  const actions = v2RuntimePlatformActions();
-  setV2WorkspaceStatus("正在读取 Workflow 模板...");
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取 Workflow 模板...");
   await renderSkillManager(mounted.panels.skillPanel, actions.skillActions);
-  setV2WorkspaceStatus("Workflow 模板已更新。", "success");
+  setGovernanceExtensionStatus("Workflow 模板已更新。", "success");
 }
 
-async function refreshV2Capability() {
-  const mounted = mountV2Runtime();
+async function refreshGovernanceCapability() {
+  const mounted = mountGovernanceExtensions();
   if (!mounted) return;
-  const actions = v2RuntimePlatformActions();
-  setV2WorkspaceStatus("正在读取能力档位...");
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取能力档位...");
   await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions);
-  setV2WorkspaceStatus("能力档位已更新。", "success");
+  setGovernanceExtensionStatus("能力档位已更新。", "success");
 }
 
-function runV2WorkspaceAction(action) {
+function runGovernanceExtensionAction(action) {
   action().catch((error) => {
-    setV2WorkspaceStatus(error?.message || "V2 工作台操作失败", "error");
+    setGovernanceExtensionStatus(error?.message || "扩展设置操作失败", "error");
   });
 }
 
@@ -7316,11 +7328,18 @@ async function createTask() {
   // Manual modeling: the user must pick ≥1 algorithm (no default — spec §3 无默认每次必选).
   // Agent mode shows no options here; the agent recommends during the flow.
   if (definition.algorithmField && selectedRunMode === "manual") {
+    normalizeModelAlgorithmFamilies();
     payload.recipes = [...document.querySelectorAll('input[name="modelAlgorithm"]:checked')].map((box) => box.value);
     if (payload.recipes.length === 0) {
       setCreateStatus("请至少选择一个建模算法。", "error");
       return null;
     }
+    const families = new Set(payload.recipes.map(modelRecipeFamily));
+    if (families.size > 1) {
+      setCreateStatus("二分类、回归与多分类算法不能混选。", "error");
+      return null;
+    }
+    payload.target_type = [...families][0] || "binary";
   }
   // Manual feature analysis: optional metrics (e.g. VIF). Empty is valid — base
   // per-feature metrics are always computed (spec §2: 选了才算).
@@ -8064,7 +8083,7 @@ function agentAcceptanceModeValue() {
 bindRunModeDeselectableCards();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
-mountV2Runtime();
+mountGovernanceExtensions();
 materialSourceController.bindTabs();
 materialSourceController.bindDropzone();
 const pet = $("petCompanion");

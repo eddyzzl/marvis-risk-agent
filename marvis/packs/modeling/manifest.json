@@ -134,7 +134,7 @@
               "type": "string",
               "minLength": 1
             },
-            "minItems": 1
+            "minItems": 0
           },
           "split_col": {
             "type": "string",
@@ -162,6 +162,24 @@
           },
           "split_counts": {
             "type": "object"
+          },
+          "split_col": {
+            "type": "string"
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -200,7 +218,7 @@
               "type": "string",
               "minLength": 1
             },
-            "minItems": 1
+            "minItems": 0
           },
           "split_config": {
             "type": "object"
@@ -249,6 +267,21 @@
           },
           "split_col": {
             "type": "string"
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
@@ -284,7 +317,7 @@
               "type": "string",
               "minLength": 1
             },
-            "minItems": 1
+            "minItems": 0
           },
           "target_col": {
             "type": "string",
@@ -404,7 +437,7 @@
               "type": "string",
               "minLength": 1
             },
-            "minItems": 1
+            "minItems": 0
           },
           "target_col": {
             "type": "string",
@@ -587,6 +620,7 @@
               "xgb",
               "lr",
               "scorecard",
+              "mlp",
               "lgb_regressor",
               "lgb_multiclass"
             ]
@@ -701,6 +735,7 @@
                 "xgb",
                 "lr",
                 "scorecard",
+                "mlp",
                 "lgb_regressor",
                 "lgb_multiclass"
               ]
@@ -770,13 +805,21 @@
           },
           "best_recipe": {
             "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "selection_metric": {
+            "type": "string"
           }
         },
         "required": [
           "experiments",
           "experiment_ids",
           "best_experiment_id",
-          "best_recipe"
+          "best_recipe",
+          "target_type",
+          "selection_metric"
         ],
         "additionalProperties": false
       },

@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import joblib
 import xgboost as xgb
 
 from marvis.data.labels import resolve_modeling_splits
@@ -21,22 +22,24 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     params = {
         **get_recipe("xgb").default_params,
         **config.params,
-        "seed": config.seed,
-        "nthread": 1,
+        "random_state": config.seed,
+        "n_jobs": 1,
     }
     num_boost_round = int(params.pop("num_boost_round", 20))
-    dtrain = _dmatrix(train, config)
-    dtest = _dmatrix(test, config)
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=num_boost_round,
-        evals=[(dtest, "test")],
-        early_stopping_rounds=config.early_stopping_rounds,
-        verbose_eval=False,
+    if config.early_stopping_rounds:
+        params["early_stopping_rounds"] = int(config.early_stopping_rounds)
+    model = xgb.XGBClassifier(
+        **params,
+        n_estimators=num_boost_round,
+    )
+    model.fit(
+        train[list(config.features)],
+        train[config.target_col].to_numpy(dtype=int),
+        eval_set=[(test[list(config.features)], test[config.target_col].to_numpy(dtype=int))],
+        verbose=False,
     )
     metrics = compute_model_metrics(
-        lambda data: model.predict(_dmatrix(data, config)),
+        lambda data: model.predict_proba(data[list(config.features)])[:, 1],
         train,
         test,
         oot,
@@ -53,26 +56,16 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     )
 
 
-def _dmatrix(frame, config: TrainConfig) -> xgb.DMatrix:
-    # Float labels: train/test are label-resolved upstream; OOT may be scoring-only, where
-    # the label is unused by predict() and must never be coerced into a class.
-    return xgb.DMatrix(
-        frame[list(config.features)],
-        label=frame[config.target_col].to_numpy(dtype=float),
-        feature_names=list(config.features),
-    )
-
-
 def _save_xgb_model(
-    model: xgb.Booster,
+    model: xgb.XGBClassifier,
     config: TrainConfig,
     out_dir: Path,
     params: dict,
 ) -> ModelArtifact:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
-    model_path = f"{artifact_id}.json"
-    model.save_model(out_dir / model_path)
+    model_path = f"{artifact_id}.joblib"
+    joblib.dump(model, out_dir / model_path)
     return ModelArtifact(
         id=artifact_id,
         experiment_id="",
@@ -87,10 +80,10 @@ def _save_xgb_model(
 
 
 def _xgb_importance(
-    model: xgb.Booster,
+    model: xgb.XGBClassifier,
     features: tuple[str, ...],
 ) -> tuple[tuple[str, float], ...]:
-    gains = model.get_score(importance_type="gain")
+    gains = model.get_booster().get_score(importance_type="gain")
     return tuple((feature, float(gains.get(feature, 0.0))) for feature in features)
 
 

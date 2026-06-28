@@ -411,6 +411,29 @@ def test_build_modeling_proposal_derives_continuous_target_type_from_regressor(t
     assert proposal.template_slots()["target_type"] == "continuous"
 
 
+def test_build_modeling_proposal_uses_explicit_target_type_default_recipe(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "income": [3500 + (((i * 37) % 101) * 38) for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "explicit_income_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-explicit-reg", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry, backend, "task-explicit-reg", tmp_path, target_type="continuous"
+    )
+
+    assert proposal.target_type == "continuous"
+    assert proposal.recipe == "lgb_regressor"
+    assert proposal.recipes == ["lgb_regressor"]
+    assert proposal.target_col == "income"
+
+
 def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_path):
     """A classification recipe leaves target_type 'binary' (default) and resolves the 0/1
     label — the existing binary behaviour is unchanged."""
@@ -460,3 +483,45 @@ def test_build_modeling_proposal_derives_multiclass_target_type_from_recipe(tmp_
     assert proposal.bad_rate is None
     assert "risk_grade" not in proposal.feature_cols
     assert proposal.template_slots()["target_type"] == "multiclass"
+
+
+def test_build_modeling_proposal_rejects_mixed_recipe_families(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 90
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "income": [3500 + i * 10 for i in range(rows)],
+        "split": ["train"] * 50 + ["test"] * 25 + ["oot"] * 15,
+    })
+    path = tmp_path / "mixed_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-mixed", path, role="sample")
+
+    with pytest.raises(ValueError, match="不能在同一次训练混用"):
+        build_modeling_proposal(
+            registry, backend, "task-mixed", tmp_path, recipes=["lgb", "lgb_regressor"]
+        )
+
+
+def test_build_modeling_proposal_rejects_target_type_recipe_mismatch(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 90
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "income": [3500 + i * 10 for i in range(rows)],
+        "split": ["train"] * 50 + ["test"] * 25 + ["oot"] * 15,
+    })
+    path = tmp_path / "mismatch_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-mismatch", path, role="sample")
+
+    with pytest.raises(ValueError, match="目标类型 `binary` 与算法 `lgb_regressor` 不匹配"):
+        build_modeling_proposal(
+            registry,
+            backend,
+            "task-mismatch",
+            tmp_path,
+            target_type="binary",
+            recipes=["lgb_regressor"],
+        )

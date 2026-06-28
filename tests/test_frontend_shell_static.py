@@ -174,7 +174,12 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert 'data-task-kind="modeling"' in welcome_markup
     assert 'data-task-kind="strategy"' in welcome_markup
     assert 'disabled aria-disabled="true"' not in welcome_markup
-    assert "暂未开放" not in welcome_markup
+    for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
+        card_start = welcome_markup.index(f'id="{card_id}"')
+        card_end = welcome_markup.index("</button>", card_start)
+        card_markup = welcome_markup[card_start:card_end]
+        assert 'class="welcome-task-card unavailable"' in card_markup
+        assert 'aria-disabled="true"' in card_markup
     assert "validationWorkspace" in app_js
     assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in app_js
     assert 'classList.toggle("is-empty", !hasTaskContext)' in app_js

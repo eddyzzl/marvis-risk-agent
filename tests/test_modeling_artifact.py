@@ -5,8 +5,8 @@ import xgboost as xgb
 from pypmml import Model
 from sklearn.linear_model import LogisticRegression
 
+from marvis.feature.contracts import WOEResult
 from marvis.packs.modeling.artifact import export_pmml, load_model, save_model
-from marvis.packs.modeling.errors import ModelingError
 
 
 def test_save_and_load_lr_model_round_trips_predictions(tmp_path):
@@ -67,18 +67,29 @@ def test_export_lr_pmml_can_be_loaded_by_pypmml(tmp_path):
     assert Model.load(pmml_path.as_posix()) is not None
 
 
-def test_save_scorecard_model_preserves_woe_maps_and_unsupported_pmml_error_is_clear(tmp_path):
+def test_save_scorecard_model_preserves_woe_maps_and_exports_pmml(tmp_path):
+    frame = pd.DataFrame({"x1": [0.1, 0.2, 0.8, 0.9], "y": [0, 0, 1, 1]})
+    sample_path = tmp_path / "sample.parquet"
+    frame.to_parquet(sample_path, index=False)
     model = LogisticRegression().fit([[0.1], [0.2], [0.8], [0.9]], [0, 0, 1, 1])
+    woe = WOEResult(
+        feature="x1",
+        edges=(-float("inf"), 0.5, float("inf")),
+        woe_by_bin=(-1.0, 1.0),
+        na_woe=0.0,
+    )
     artifact = save_model(
         model,
         "scorecard",
         tmp_path,
         feature_list=("x1",),
         params={"base_score": 600},
-        woe_maps={"x1": {"edges": [-float("inf"), 0.5, float("inf")]}},
+        woe_maps={"x1": woe},
     )
 
-    assert artifact.woe_maps == {"x1": {"edges": [-float("inf"), 0.5, float("inf")]}}
-    assert isinstance(load_model(artifact, base_dir=tmp_path), LogisticRegression)
-    with pytest.raises(ModelingError, match="PMML export is not supported"):
-        export_pmml(artifact, tmp_path / "sample.parquet", tmp_path / "model.pmml", base_dir=tmp_path)
+    assert artifact.woe_maps == {"x1": woe}
+    loaded = load_model(artifact, base_dir=tmp_path)
+    assert isinstance(loaded["model"], LogisticRegression)
+    pmml_path = export_pmml(artifact, sample_path, tmp_path / "model.pmml", base_dir=tmp_path)
+    assert pmml_path.exists()
+    assert Model.load(pmml_path.as_posix()) is not None

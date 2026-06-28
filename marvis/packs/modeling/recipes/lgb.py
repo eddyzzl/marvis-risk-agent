@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import joblib
 import lightgbm as lgb
 
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
@@ -17,25 +18,26 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     params = {
         **get_recipe("lgb").default_params,
         **config.params,
-        "seed": config.seed,
-        "num_threads": 1,
+        "random_state": config.seed,
+        "n_jobs": 1,
         "deterministic": True,
     }
     num_boost_round = int(params.pop("num_boost_round", 20))
-    dtrain = lgb.Dataset(train[list(config.features)], label=train[config.target_col])
-    dvalid = lgb.Dataset(test[list(config.features)], label=test[config.target_col], reference=dtrain)
     callbacks = []
     if config.early_stopping_rounds:
         callbacks.append(lgb.early_stopping(config.early_stopping_rounds, verbose=False))
-    model = lgb.train(
-        params,
-        dtrain,
-        num_boost_round=num_boost_round,
-        valid_sets=[dvalid],
+    model = lgb.LGBMClassifier(
+        **params,
+        n_estimators=num_boost_round,
+    )
+    model.fit(
+        train[list(config.features)],
+        train[config.target_col],
+        eval_set=[(test[list(config.features)], test[config.target_col])],
         callbacks=callbacks,
     )
     metrics = compute_model_metrics(
-        lambda data: model.predict(data[list(config.features)]),
+        lambda data: model.predict_proba(data[list(config.features)])[:, 1],
         train,
         test,
         oot,
@@ -51,15 +53,15 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
 
 
 def _save_lgb_model(
-    model: lgb.Booster,
+    model: lgb.LGBMClassifier,
     config: TrainConfig,
     out_dir: Path,
     params: dict,
 ) -> ModelArtifact:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
-    model_path = f"{artifact_id}.txt"
-    model.save_model(out_dir / model_path)
+    model_path = f"{artifact_id}.joblib"
+    joblib.dump(model, out_dir / model_path)
     return ModelArtifact(
         id=artifact_id,
         experiment_id="",
@@ -74,10 +76,10 @@ def _save_lgb_model(
 
 
 def _lgb_importance(
-    model: lgb.Booster,
+    model: lgb.LGBMClassifier,
     features: tuple[str, ...],
 ) -> tuple[tuple[str, float], ...]:
-    gains = model.feature_importance(importance_type="gain")
+    gains = model.booster_.feature_importance(importance_type="gain")
     return tuple((feature, float(value)) for feature, value in zip(features, gains, strict=True))
 
 

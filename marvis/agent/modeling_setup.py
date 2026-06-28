@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
@@ -42,8 +43,27 @@ class ModelingProposal:
     seed: int = 23
     target_type: str = "binary"  # derived: _regressor⇒continuous, *multiclass*⇒multiclass, else binary
     notes: list[str] = field(default_factory=list)
+    template_id: str = "modeling"
+    anchor_id: str | None = None
+    join_feature_ids: list[str] = field(default_factory=list)
 
     def template_slots(self) -> dict:
+        if self.template_id == "modeling_with_join":
+            return {
+                "anchor_id": self.anchor_id or self.dataset_id,
+                "feature_ids": list(self.join_feature_ids),
+                "target_col": self.target_col,
+                # Empty means: infer candidate numeric features from the joined schema.
+                "feature_cols": [],
+                "split_col": self.split_col,
+                "split_values": self.split_values,
+                "recipe": self.recipe,
+                "recipes": self.recipes,
+                "seed": self.seed,
+                "holdout_values": self.holdout_values,
+                "target_type": self.target_type,
+                "split_config": {},
+            }
         return {
             "dataset_id": self.dataset_id,
             "target_col": self.target_col,
@@ -65,30 +85,42 @@ class ModelingProposal:
 # starting algorithm. mlp = a sklearn DNN (impute→scale→MLP pipeline).
 # lgb_regressor = the continuous-target (regression) recipe.
 _SUPPORTED_RECIPES = ("lgb", "xgb", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass")
+_BINARY_RECIPES = frozenset({"lgb", "xgb", "lr", "scorecard", "mlp"})
 
 
 def build_modeling_proposal(
     registry, backend, task_id: str, source_dir, *, seed: int = 23,
     recipe: str | None = None, recipes: list[str] | None = None,
+    target_type: str | None = None,
 ) -> ModelingProposal:
-    dataset = _resolve_dataset(registry, task_id, source_dir)
+    datasets = _resolve_datasets(registry, task_id, source_dir)
+    joined = len(datasets) > 1
+    if joined:
+        ranked = propose_roles(datasets)
+        dataset = ranked[0]
+        join_feature_ids = [item.id for item in ranked[1:]]
+    else:
+        dataset = datasets[0]
+        join_feature_ids = []
     path = registry.resolve_path(dataset.id)
+    requested_target_type = _normalize_target_type(target_type)
     if recipes:
         recipe_list = [str(item).strip() for item in recipes]
     elif recipe:
         recipe_list = [str(recipe).strip()]
     else:
-        recipe_list = ["lgb"]
+        recipe_list = [_default_recipe_for_target_type(requested_target_type or "binary")]
     for item in recipe_list:
         if item not in _SUPPORTED_RECIPES:
             raise ModelingSetupError(
                 f"不支持的算法 `{item}`;可选:{', '.join(_SUPPORTED_RECIPES)}。"
             )
-    # target_type is DERIVED from the chosen recipes (no DB/task field): a regression
-    # recipe (id ends with "_regressor") ⇒ continuous; a multiclass recipe (id contains
-    # "multiclass") ⇒ multiclass; otherwise binary. Mixing regression and multiclass
-    # recipes in one run is contradictory, so reject it.
-    target_type = _derive_target_type(recipe_list)
+    derived_target_type = _derive_target_type(recipe_list)
+    if requested_target_type and requested_target_type != derived_target_type:
+        raise ModelingSetupError(
+            f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配;请重新选择同一目标类型的算法。"
+        )
+    target_type = requested_target_type or derived_target_type
     setup = detect_setup(backend, path, target_type=target_type)
     if not setup.target_col:
         if target_type == "continuous":
@@ -109,13 +141,24 @@ def build_modeling_proposal(
         split_col = setup.split_col
         split_values = dict(setup.split_values)
         counts = dict(setup.counts)
+    elif joined:
+        dataset_id = dataset.id
+        split_col = ""
+        split_values = {}
+        counts = {}
+        group_cols = _detect_group_cols(dataset)
+        grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
+        notes.append(
+            f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping};"
+            "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
+        )
     else:
         dataset_id, split_col, split_values, counts, note = _generate_split(
             registry, backend, dataset, setup, seed
         )
         notes.append(note)
     if len(recipe_list) > 1:
-        notes.append(f"算法:{'/'.join(recipe_list)}(多算法训练后按 OOT KS 取最优)。")
+        notes.append(f"算法:{'/'.join(recipe_list)}(多算法训练后按 {_selection_metric_label(target_type)} 取最优)。")
     else:
         notes.append(f"算法:`{recipe_list[0]}`(可选 {'/'.join(_SUPPORTED_RECIPES)})。")
     oot = split_values.get("oot")
@@ -134,6 +177,9 @@ def build_modeling_proposal(
         seed=seed,
         target_type=target_type,
         notes=notes,
+        template_id="modeling_with_join" if joined else "modeling",
+        anchor_id=dataset.id if joined else None,
+        join_feature_ids=join_feature_ids,
     )
 
 
@@ -141,20 +187,49 @@ def _derive_target_type(recipe_list: list[str]) -> str:
     """Derive the task target_type from the chosen recipes.
 
     A regression recipe (id ends with "_regressor") ⇒ "continuous"; a multiclass recipe
-    (id contains "multiclass") ⇒ "multiclass"; otherwise "binary". Regression and
-    multiclass recipes are mutually exclusive within one run (different target shapes),
-    so reject a mix rather than silently picking one."""
+    (id contains "multiclass") ⇒ "multiclass"; otherwise "binary". Recipe families are
+    mutually exclusive within one run (different target shapes), so reject any mix rather
+    than silently picking one."""
     has_regression = any(item.endswith("_regressor") for item in recipe_list)
     has_multiclass = any("multiclass" in item for item in recipe_list)
-    if has_regression and has_multiclass:
+    has_binary = any(item in _BINARY_RECIPES for item in recipe_list)
+    family_count = sum(1 for flag in (has_binary, has_regression, has_multiclass) if flag)
+    if family_count > 1:
         raise ModelingSetupError(
-            "回归与多分类算法不能在同一次训练混用(目标列形态不同);请分别建模。"
+            "二分类、回归与多分类算法不能在同一次训练混用(目标列形态不同);请分别建模。"
         )
     if has_regression:
         return "continuous"
     if has_multiclass:
         return "multiclass"
     return "binary"
+
+
+def _normalize_target_type(value: str | None) -> str | None:
+    if value is None:
+        return None
+    target_type = str(value).strip().lower()
+    if not target_type:
+        return None
+    if target_type not in {"binary", "continuous", "multiclass"}:
+        raise ModelingSetupError(f"不支持的目标类型 `{target_type}`;可选:binary/continuous/multiclass。")
+    return target_type
+
+
+def _default_recipe_for_target_type(target_type: str) -> str:
+    if target_type == "continuous":
+        return "lgb_regressor"
+    if target_type == "multiclass":
+        return "lgb_multiclass"
+    return "lgb"
+
+
+def _selection_metric_label(target_type: str) -> str:
+    if target_type == "continuous":
+        return "OOT RMSE"
+    if target_type == "multiclass":
+        return "OOT macro-AUC"
+    return "OOT KS"
 
 
 # Identity-like column names used for anti-leakage grouping (best-effort).
@@ -202,7 +277,7 @@ def _generate_split(registry, backend, dataset, setup, seed):
     return derived.id, "split", split_values, counts, note
 
 
-def _resolve_dataset(registry, task_id: str, source_dir):
+def _resolve_datasets(registry, task_id: str, source_dir):
     datasets = [d for d in registry.list_for_task(task_id) if d.role in _DATA_ROLES]
     if not datasets and source_dir is not None:
         for artifact in scan_source_dir(Path(source_dir)):
@@ -214,7 +289,7 @@ def _resolve_dataset(registry, task_id: str, source_dir):
     return sorted(
         datasets,
         key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
-    )[0]
+    )
 
 
 def _dataset_name(dataset) -> str:

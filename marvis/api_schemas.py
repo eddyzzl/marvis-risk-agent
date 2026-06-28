@@ -16,6 +16,7 @@ class CreateTaskRequest(BaseModel):
     time_col: str = "apply_month"
     run_mode: str = "manual"
     feature_columns: list[str] = Field(default_factory=list)
+    target_type: str = ""
     recipes: list[str] = Field(default_factory=list)
     metrics: list[str] = Field(default_factory=list)
     # Per-task capability tier (conservative/balanced/aggressive); "" → global default.

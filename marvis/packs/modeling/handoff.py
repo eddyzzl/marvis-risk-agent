@@ -35,11 +35,6 @@ def handoff_to_validation(
         raise ModelingError(
             f"artifact {artifact.id} is not attached to experiment {experiment.id}"
         )
-    if artifact.algorithm != "lr":
-        raise ModelingError(
-            f"validation handoff currently requires lr PMML export, got: {artifact.algorithm}"
-        )
-
     sample_path = _sample_dataset_path(settings, sample_dataset_id)
     artifact_base_dir = _artifact_base_dir(settings, experiment)
     model_path = _resolve_artifact_path(artifact.model_path, base_dir=artifact_base_dir)
@@ -212,6 +207,7 @@ def _scoring_notebook_source(
             "",
             "import joblib",
             "import pandas as pd",
+            "from marvis.feature.encode import woe_encode",
             "",
             f"RMC_FEATURES = json.loads({features_json!r})",
             f"RMC_MODEL_PARAMS = json.loads({params_json!r})",
@@ -234,6 +230,11 @@ def _scoring_notebook_source(
             f"_RMC_MODEL = joblib.load(Path({model_filename!r}))",
             "",
             "def RMC_SCORE_FN(dataframe):",
+            "    if isinstance(_RMC_MODEL, dict) and 'model' in _RMC_MODEL and 'woe_maps' in _RMC_MODEL:",
+            "        encoded = pd.DataFrame(index=dataframe.index)",
+            "        for feature in RMC_FEATURES:",
+            "            encoded[feature] = woe_encode(dataframe, feature, _RMC_MODEL['woe_maps'][feature]).to_numpy(dtype=float)",
+            "        return _RMC_MODEL['model'].predict_proba(encoded)[:, 1]",
             "    return _RMC_MODEL.predict_proba(dataframe[RMC_FEATURES])[:, 1]",
         ]
     )

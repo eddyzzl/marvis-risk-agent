@@ -692,24 +692,33 @@ def _render_train_models(o: dict):
     experiments = [e for e in (o.get("experiments") or []) if isinstance(e, dict)]
     best_id = o.get("best_experiment_id")
     best_recipe = o.get("best_recipe")
+    target_type = str(o.get("target_type") or "binary")
     tables = []
     rows = []
     best_metrics: dict = {}
+    if target_type == "continuous":
+        metric_columns = ["train_rmse", "test_rmse", "oot_rmse", "test_mae", "oot_mae", "test_r2", "oot_r2"]
+        selector_label = "按 OOT RMSE"
+    elif target_type == "multiclass":
+        metric_columns = ["train_macro_auc", "test_macro_auc", "oot_macro_auc", "test_logloss", "oot_logloss", "test_accuracy", "oot_accuracy"]
+        selector_label = "按 OOT macro-AUC"
+    else:
+        metric_columns = ["train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"]
+        selector_label = "按 OOT KS"
     for exp in experiments:
         metrics = exp.get("metrics") or {}
         is_best = exp.get("experiment_id") == best_id
         if is_best:
             best_metrics = metrics
-        rows.append([
-            str(exp.get("recipe", "?")) + (" ★" if is_best else ""),
-            _num(metrics.get("train_ks")), _num(metrics.get("test_ks")), _num(metrics.get("oot_ks")),
-            _num(metrics.get("test_auc")), _num(metrics.get("oot_auc")),
-        ])
+        rows.append(
+            [str(exp.get("recipe", "?")) + (" ★" if is_best else "")]
+            + [_num(metrics.get(column)) for column in metric_columns]
+        )
     if len(experiments) > 1:
-        text = f"**训练完成**:对比 {len(experiments)} 个算法,最优 **{best_recipe}**(★;按 OOT KS)。"
+        text = f"**训练完成**:对比 {len(experiments)} 个算法,最优 **{best_recipe}**(★;{selector_label})。"
         tables.append({
             "title": "候选模型对比",
-            "columns": ["算法", "train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"],
+            "columns": ["算法", *metric_columns],
             "rows": rows,
         })
     else:
@@ -723,7 +732,26 @@ def _render_train_models(o: dict):
 
 def _render_compare(o: dict):
     experiments = o.get("experiments") or []
-    return f"**实验对比完成**:共 {len(experiments)} 个实验候选。", []
+    rows = []
+    for exp in experiments:
+        if not isinstance(exp, dict):
+            continue
+        caps = exp.get("capabilities") or {}
+        rows.append([
+            exp.get("recipe") or "?",
+            "是" if caps.get("pmml_supported") else "否",
+            "是" if caps.get("handoff_supported") else "否",
+            "是" if caps.get("native_model_supported") else "否",
+            caps.get("reason") or "",
+        ])
+    tables = []
+    if rows:
+        tables.append({
+            "title": "训练后动作能力",
+            "columns": ["算法", "PMML", "移交验证", "原生模型", "说明"],
+            "rows": rows,
+        })
+    return f"**实验对比完成**:共 {len(experiments)} 个实验候选。", tables
 
 
 def _render_report(o: dict):

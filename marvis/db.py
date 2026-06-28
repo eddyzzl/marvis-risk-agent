@@ -94,6 +94,7 @@ def init_db(db_path: Path) -> None:
                 score_col TEXT NOT NULL DEFAULT 'pred',
                 split_col TEXT NOT NULL DEFAULT 'split',
                 time_col TEXT NOT NULL DEFAULT 'apply_month',
+                target_type TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 status_message TEXT NOT NULL,
                 status_reason_code TEXT NOT NULL DEFAULT '',
@@ -155,6 +156,12 @@ def init_db(db_path: Path) -> None:
             table="tasks",
             column="recipes_json",
             definition="TEXT NOT NULL DEFAULT '[]'",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
+            column="target_type",
+            definition="TEXT NOT NULL DEFAULT ''",
         )
         _ensure_column(
             conn,
@@ -598,6 +605,7 @@ class TaskRepository:
             split_col=payload.split_col,
             time_col=payload.time_col,
             feature_columns=list(payload.feature_columns),
+            target_type=payload.target_type,
             recipes=list(payload.recipes),
             metrics=list(payload.metrics),
             capability_tier=payload.capability_tier,
@@ -619,12 +627,12 @@ class TaskRepository:
                 (
                     id, task_type, model_name, model_version, validator, source_dir,
                     algorithm, run_mode, target_col, score_col, split_col,
-                    time_col, feature_columns_json, recipes_json, metrics_json, capability_tier, notebook_path, sample_path,
+                    time_col, feature_columns_json, target_type, recipes_json, metrics_json, capability_tier, notebook_path, sample_path,
                     pmml_path, dictionary_path, report_values_json,
                     report_values_revision, status, status_message,
                     status_reason_code, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -640,6 +648,7 @@ class TaskRepository:
                     record.split_col,
                     record.time_col,
                     _dump_json_list(record.feature_columns),
+                    record.target_type,
                     _dump_json_list(record.recipes),
                     _dump_json_list(record.metrics),
                     record.capability_tier,
@@ -2960,6 +2969,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         split_col=row["split_col"],
         time_col=row["time_col"],
         feature_columns=_load_json_list(row["feature_columns_json"]),
+        target_type=(row["target_type"] if "target_type" in row.keys() else "") or "",
         recipes=_load_json_list(row["recipes_json"]),
         metrics=_load_json_list(row["metrics_json"]),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",

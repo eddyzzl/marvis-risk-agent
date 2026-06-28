@@ -11,6 +11,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.labels import require_labels_confirmed
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
+from marvis.feature.candidates import candidate_numeric_features
 from marvis.feature.binning import (
     chimerge_edges,
     equal_frequency_edges,
@@ -35,10 +36,16 @@ from marvis.settings import build_settings
 
 def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    features = _resolve_feature_cols(
+        runtime,
+        str(inputs["dataset_id"]),
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+    )
     dataset, frame = _read_frame(
         runtime,
         str(inputs["dataset_id"]),
-        _unique([*inputs["features"], inputs["target_col"]]),
+        _unique([*features, inputs["target_col"]]),
     )
     nan_labels_dropped = require_labels_confirmed(
         frame,
@@ -50,10 +57,10 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         _compare_dataset, compare_frame = _read_frame(
             runtime,
             str(inputs["compare_dataset_id"]),
-            [str(feature) for feature in inputs["features"]],
+            features,
         )
     metrics = []
-    for feature in inputs["features"]:
+    for feature in features:
         compare_values = None if compare_frame is None else compare_frame[str(feature)].to_numpy(dtype=float)
         item = feature_metrics(
             frame[str(feature)].to_numpy(dtype=float),
@@ -70,7 +77,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
     if selected & {"vif", "collinear", "共线"}:
         report = correlation_report(
             frame,
-            [str(feature) for feature in inputs["features"]],
+            features,
             method="pearson",
             threshold=float(inputs.get("corr_threshold", 0.8)),
         )
@@ -79,7 +86,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         # Merge the risk-direction-aware head/tail lift into each per-feature row so it
         # rides the existing metrics echo (no new output key / $ref needed).
         target_values = _target_values(frame, str(inputs["target_col"]))
-        for index, feature in enumerate(inputs["features"]):
+        for index, feature in enumerate(features):
             metrics[index].update(
                 head_tail_lift(frame[str(feature)].to_numpy(dtype=float), target_values)
             )
@@ -88,7 +95,7 @@ def tool_compute_feature_metrics(inputs: dict, ctx) -> dict:
         # features and merge each feature's share into its row (lazy lightgbm import).
         from marvis.feature.importance import feature_importance
 
-        feature_names = [str(feature) for feature in inputs["features"]]
+        feature_names = list(features)
         importance = feature_importance(frame, feature_names, str(inputs["target_col"]))
         for index, feature in enumerate(feature_names):
             metrics[index]["importance"] = importance.get(feature)
@@ -113,13 +120,20 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
 
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
-    holdout = inputs.get("holdout_values")
     split_col = inputs.get("split_col")
+    features = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=str(split_col) if split_col else None,
+    )
+    holdout = inputs.get("holdout_values")
     top_k = inputs.get("top_k")
     result = screen_features(
         runtime.backend,
         runtime.registry.resolve_path(dataset.id),
-        features=[str(item) for item in inputs["features"]],
+        features=features,
         target_col=str(inputs["target_col"]),
         split_col=str(split_col) if split_col else None,
         holdout_values=tuple(str(value) for value in holdout) if holdout else ("oot",),
@@ -140,37 +154,41 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:
-    """Screen path for a non-binary (continuous) target: skip the binary-only leakage KS
-    screen, keep every candidate as selected with ks=None, and report per-feature
-    missing_rate / unique_count only (no ks/iv)."""
+    """Screen path for a non-binary (continuous/multiclass) target: the binary-only leakage
+    KS screen is skipped, but unusable columns are still dropped into ``unusable`` — mirroring
+    the binary screen — namely constant (unique_count<=1) or mostly-missing
+    (missing_rate>=max_missing_rate) columns; the rest are kept as selected (ks=None)."""
+    from marvis.feature.screen import screen_features_non_binary
+
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
-    features = [str(item) for item in inputs["features"]]
-    target_col = str(inputs["target_col"])
-    feats = [feature for feature in dict.fromkeys(features) if feature != target_col]
-    frame = runtime.backend.read_frame(
-        runtime.registry.resolve_path(dataset.id), columns=feats
-    ) if feats else None
-    scores: dict[str, dict] = {}
-    for feature in feats:
-        values = pd.to_numeric(frame[feature], errors="coerce").to_numpy(dtype=float)
-        finite = np.isfinite(values)
-        missing_rate = float(1.0 - finite.mean()) if values.size else 1.0
-        unique = int(np.unique(values[finite]).size)
-        scores[feature] = {
-            "ks": None,
-            "missing_rate": missing_rate,
-            "unique_count": unique,
-        }
+    holdout = inputs.get("holdout_values")
+    features = _resolve_feature_cols(
+        runtime,
+        dataset.id,
+        inputs.get("features") or [],
+        target_col=str(inputs["target_col"]),
+        split_col=str(inputs["split_col"]) if inputs.get("split_col") else None,
+    )
+    result = screen_features_non_binary(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        features=features,
+        target_col=str(inputs["target_col"]),
+        split_col=str(inputs["split_col"]) if inputs.get("split_col") else None,
+        holdout_values=tuple(str(value) for value in holdout) if holdout else ("oot",),
+        max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
+        top_k=int(inputs["top_k"]) if inputs.get("top_k") is not None else None,
+    )
     return {
-        "selected": list(feats),
-        "ranked": [[feature, None] for feature in feats],
+        "selected": list(result.selected),
+        "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [],
         "suspected": [],
-        "unusable": [],
-        "scores": _jsonable(scores),
-        "n_screened": len(feats),
-        "note": "非二分类目标：跳过泄漏KS筛选，保留全部候选特征",
+        "unusable": [[feature, reason] for feature, reason in result.unusable],
+        "scores": _jsonable(result.scores),
+        "n_screened": result.n_screened,
+        "note": "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列",
     }
 
 
@@ -377,6 +395,29 @@ class _Runtime:
 
 def _runtime(ctx) -> _Runtime:
     return _Runtime(ctx)
+
+
+def _resolve_feature_cols(
+    runtime: _Runtime,
+    dataset_id: str,
+    features,
+    *,
+    target_col: str,
+    split_col: str | None = None,
+) -> list[str]:
+    provided = [str(item) for item in (features or []) if str(item).strip()]
+    if provided:
+        return provided
+    dataset = runtime.registry.get(str(dataset_id))
+    inferred = candidate_numeric_features(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=str(target_col),
+        split_col=split_col,
+    )
+    if not inferred:
+        raise FeatureError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
+    return inferred
 
 
 def _read_frame(

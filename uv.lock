@@ -342,6 +342,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dill"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e1/56027a71e31b02ddc53c7d65b01e68edf64dea2932122fe7746a516f75d5/dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa", size = 187315, upload-time = "2026-01-19T02:36:56.85Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1e/77/dc8c558f7593132cf8fefec57c4f60c83b16941c574ac5f619abb3ae7933/dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d", size = 120019, upload-time = "2026-01-19T02:36:55.663Z" },
+]
+
+[[package]]
 name = "duckdb"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -998,6 +1007,7 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "seaborn" },
+    { name = "sklearn2pmml" },
     { name = "statsmodels" },
     { name = "uvicorn" },
     { name = "xgboost", version = "3.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -1043,6 +1053,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.4,<2" },
     { name = "scipy", specifier = ">=1.12,<2" },
     { name = "seaborn", specifier = ">=0.13,<1" },
+    { name = "sklearn2pmml", specifier = ">=0.131,<1" },
     { name = "statsmodels", specifier = ">=0.14,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
     { name = "xgboost", specifier = ">=2.0,<4" },
@@ -1436,7 +1447,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -2402,6 +2413,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "sklearn2pmml"
+version = "0.131.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dill" },
+    { name = "joblib" },
+    { name = "pandas" },
+    { name = "scikit-learn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ef/69/ea01588603eb4ae01efa7fcb081e8f2673c99d9acb67727cd6e0b72b54c0/sklearn2pmml-0.131.0.tar.gz", hash = "sha256:1a4e422c0a6a6717cbd4e38d9c8a7f675da27830e1c3b243fda490511c396c02", size = 7512341, upload-time = "2026-06-16T07:07:33.868Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/6f/a590b38d081b57c7f9a69fcf4a6acfb2662cd8bfbeeb89bd66893586b15b/sklearn2pmml-0.131.0-py3-none-any.whl", hash = "sha256:cc31371d4ee9b3206f97543163ac310ade6c6c11efd5195d96412b3299078d11", size = 7522500, upload-time = "2026-06-16T07:07:32.334Z" },
 ]
 
 [[package]]

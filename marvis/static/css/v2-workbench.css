@@ -45,16 +45,11 @@
   align-items: center;
 }
 
-.v2-runtime-shell {
+.governance-extension-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(280px, 0.86fr);
-  grid-template-areas:
-    "goal plan plugin"
-    "join subagent skill"
-    "loop artifact draft"
-    "capability memory memory";
+  grid-template-columns: 1fr;
   gap: 12px;
-  min-height: 360px;
+  min-height: 0;
 }
 
 .v2-panel {
@@ -65,50 +60,6 @@
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px;
-}
-
-.v2-goal-panel {
-  grid-area: goal;
-}
-
-.v2-plan-panel {
-  grid-area: plan;
-}
-
-.v2-join-panel {
-  grid-area: join;
-}
-
-.v2-subagent-panel {
-  grid-area: subagent;
-}
-
-.v2-plugin-panel {
-  grid-area: plugin;
-}
-
-.v2-skill-panel {
-  grid-area: skill;
-}
-
-.v2-draft-panel {
-  grid-area: draft;
-}
-
-.v2-capability-panel {
-  grid-area: capability;
-}
-
-.v2-memory-panel {
-  grid-area: memory;
-}
-
-.v2-loop-panel {
-  grid-area: loop;
-}
-
-.v2-artifact-panel {
-  grid-area: artifact;
 }
 
 .v2-panel::before {
@@ -133,10 +84,9 @@
   display: none;
 }
 
-.governance-settings-dialog .v2-runtime-shell {
+.governance-settings-dialog .governance-extension-shell {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-areas: none;
   gap: 0;
   min-height: 0;
 }
@@ -159,15 +109,14 @@
 }
 
 /* The dialog header already shows the per-view title/description and now also
-   carries the single refresh icon, so the whole in-panel page-head is redundant.
-   (The #governanceRuntimeTitle/Description nodes stay in the DOM for JS.) */
+   carries the single refresh icon, so the whole in-panel page-head is redundant. */
 .governance-settings-dialog .governance-page-head {
   display: none;
 }
 
-.governance-settings-dialog[data-v2-view="plugins"] .v2-plugin-panel,
-.governance-settings-dialog[data-v2-view="workflows"] .v2-skill-panel,
-.governance-settings-dialog[data-v2-view="capabilities"] .v2-capability-panel {
+.governance-settings-dialog[data-extension-view="plugins"] .v2-plugin-panel,
+.governance-settings-dialog[data-extension-view="workflows"] .v2-skill-panel,
+.governance-settings-dialog[data-extension-view="capabilities"] .v2-capability-panel {
   display: grid;
 }
 
@@ -177,7 +126,7 @@
   display: none;
 }
 
-.governance-settings-dialog[data-v2-view="plugins"] #draftManageDetails {
+.governance-settings-dialog[data-extension-view="plugins"] #draftManageDetails {
   display: block;
 }
 
@@ -790,9 +739,8 @@
 
 @media (max-width: 860px) {
   .v2-workspace-summary,
-  .v2-runtime-shell {
+  .governance-extension-shell {
     grid-template-columns: 1fr;
-    grid-template-areas: none;
   }
 
   .v2-panel {
