@@ -49,6 +49,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_modeling_recipes.py tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `116 passed, 2 warnings` after adding sample-weight quality diagnostics to modeling setup, gate metadata, frontend controls, and AUTO prompts.
   - `tests/test_orch_db.py tests/test_orch_api.py tests/test_orch_executor.py tests/test_plan_driver.py`: `96 passed` after making step confirmation require the persisted step to still be `awaiting_confirm`.
   - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py tests/test_agent_autodrive.py`: `63 passed` after making AUTO halt on gate-level high-risk flags and wide downstream reset policies.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `72 passed` after expanding the modeling setup panel/contract with target type, algorithms, tuning budget, PMML support, split/OOT diagnostics, and AUTO context.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
@@ -59,6 +60,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight diagnostics update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step confirmation state guard update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO gate-risk policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the modeling setup panel expansion.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
 
 ## Executive Summary
@@ -102,13 +104,14 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Modeling setup now diagnoses sample-weight candidates for numeric validity, missingness, range, mean, feature exclusion, and exposes those diagnostics in gate metadata, front-end controls, renderer tables, and AUTO prompts.
   - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
   - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
+  - The modeling setup gate now renders a real setup panel rather than only a weight picker: it stays visible without weight candidates, shows target type, selected algorithms, primary tuning recipe, candidate feature count, tuning trials, metric policy, algorithm/PMML support, split/OOT counts and warnings, and feeds the same context into AUTO prompts.
 
 Items confirmed still not complete and therefore still part of the plan:
 
 - OS-level sandboxing is not complete. Plugin/draft tools and ordinary notebook execution have subprocess/resource-limit isolation, but the live keep-alive notebook path still needs either worker RPC redesign or removal from safety-critical flows.
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths, but there is still no single cross-resource `UnitOfWork` that makes SQLite state and file promotion atomic as one unit.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
-- The frontend still lacks a dedicated modeling setup panel, full model comparison/delivery surface, and Playwright desktop/mobile visual smoke. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
+- The frontend now has a richer modeling setup panel, but still lacks full model comparison/delivery surfaces and Playwright desktop/mobile visual smoke. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff risk flags and wide downstream resets. More domain fixtures are still useful for strategy, vintage, and future extracted modeling setup panels.
 
@@ -119,12 +122,12 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | # | Item | Status | Evidence / Gap | Next Action |
 |---|---|---|---|---|
 | 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. | Add more fixtures for destructive domain gates and frontend stale-control paths. |
-| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; sample-weight candidate choice now has a gate control. Broader setup UI and business delivery surfaces are still missing. | Expand the modeling setup panel to target type, split warnings, algorithm family, tuning budget, and delivery readiness. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel now shows target type, algorithms, tuning budget, PMML support, split/OOT diagnostics, warnings, and sample-weight controls. Business delivery/model-comparison surfaces are still missing. | Expand model comparison and delivery readiness surfaces; keep setup controls schema-driven before allowing broader human edits. |
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
 | 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash, parent refs, source dataset refs, artifact refs, tool version, manifest hash, seed, and renderer hint; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. | Add a deeper DB+file `UnitOfWork` and keep expanding domain-specific lineage where tools expose richer refs. |
-| 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the first modeling gate renders detected candidates and posts a structured `sample_weight_col` adjust that reruns `choose_modeling_spec` and downstream screening. Candidate diagnostics now expose numeric validity, missingness, range, mean, and feature exclusion in gate/UI/AUTO context. | Expose the same decision in the future extracted `ModelingSetupPanel` with richer target/split/tuning controls. |
+| 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the modeling setup panel renders detected candidates, diagnostics, target/split/tuning context, and posts a structured `sample_weight_col` adjust that reruns `choose_modeling_spec` and downstream screening. | Extract the panel from `app.js` and add richer business rationale/override reasons when broader setup editing is enabled. |
 | 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`, and task/welcome tones use semantic tokens. `app.js` still owns create dialog, rail, transcript, and driver gates. | Extract `CreateTaskDialog`, `PlanRailController`, `DriverConversationView`, `TaskWorkspace`. |
 | 9 | PMML manifest contract | Done | Manifest now advertises `lr/lgb/xgb/scorecard`, matching current PMML-supported list. | Keep regression test. |
 | 10 | CI gate | Done | `.github/workflows/ci.yml` and `scripts/check` exist; `docs/versioning.md` references the local gate. | Keep full CI green after remaining refactors. |
@@ -235,10 +238,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 
 1. G2 algorithm/task selection now has a typed backend step, but the UI is still thin.
    - Current behavior: `choose_modeling_spec` normalizes target type, recipe family, eligible/disabled algorithms, metric policy, sample-weight policy, tuning budget, fixed params, and exposes a rendered gate table before feature screening.
-   - Current update: sample-weight candidates now render as a first-gate control; changing the selected candidate posts structured `adjust_params.sample_weight_col` and reruns the modeling spec plus downstream screening. The create dialog also distinguishes "no weight" from an explicit column.
-   - Remaining problem: the frontend still lacks a dedicated modeling setup panel for target type, split/OOT diagnostics, algorithm family, tuning budget, and override reasons.
+   - Current update: sample-weight candidates now render inside a fuller setup panel; changing the selected candidate posts structured `adjust_params.sample_weight_col` and reruns the modeling spec plus downstream screening. The panel also shows target type, split/OOT diagnostics, algorithm family, PMML support, tuning budget, metric policy, and warnings. The create dialog also distinguishes "no weight" from an explicit column.
+   - Remaining problem: the frontend still lacks extracted setup-panel ownership, broader editable controls for target/algorithm/tuning with explicit human review, and downstream delivery-readiness surfaces.
    - Remaining fix:
-     - Add `ModelingSetupPanel` / gate controls for target type, algorithm family, OOT/split warnings, tuning budget, and explicit override reasons.
+     - Extract `ModelingSetupPanel` from `app.js` and add explicit override reasons before allowing target/algorithm/tuning edits.
      - Keep the typed modeling spec as the single downstream contract.
 
 2. G3 tuning needs a typed control surface.
@@ -442,7 +445,7 @@ Tasks:
 - Done: add G3 tuning configuration gate.
 - Done: add `select_experiment`.
 - Done: add G5 `post_training_action` gate.
-- Mostly done for sample-weight gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, and detected-candidate gate adjust/rerun; broader setup panel still remains.
+- Mostly done for modeling setup gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, detected-candidate gate adjust/rerun, target/algorithm/tuning/split/PMML display, and AUTO context; extracted ownership plus broader editable setup controls still remain.
 - Done for `train_models`: add `TrainingDataset` adapter and read-count tests.
 - Done: remove hard-coded `oot_ks >= 0.3331` as a universal success gate.
 - Done for chat renderer: improve report renderer with section status and missing inputs; broader report content remains.

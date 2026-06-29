@@ -6942,10 +6942,64 @@ function agentMessageModelingSetupHtml(message, options = {}) {
     ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
     : [];
   const selected = String(setup.sample_weight_col || "");
-  if (!candidates.length && !selected) return "";
   const interactive = options.interactive !== false;
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const uniqueCandidates = [...new Set(selected ? [selected, ...candidates] : candidates)];
+  const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
+    ? setup.recipes.map((recipe) => String(recipe)).join("/")
+    : "-";
+  const primaryRecipe = String(setup.recipe || (Array.isArray(setup.recipes) ? setup.recipes[0] : "") || "-");
+  const featureCount = Number.isFinite(Number(setup.feature_count)) ? String(Number(setup.feature_count)) : "-";
+  const nTrials = Number.isFinite(Number(setup.n_trials)) ? String(Number(setup.n_trials)) : "-";
+  const metricPolicy = String(setup.metric_policy || "-");
+  const supportedPmml = new Set(Array.isArray(setup.pmml_supported_algorithms)
+    ? setup.pmml_supported_algorithms.map((item) => String(item))
+    : []);
+  const setupWarnings = Array.isArray(setup.warnings) ? setup.warnings.map((item) => String(item)).filter(Boolean) : [];
+  const splitSummary = setup.split_summary && typeof setup.split_summary === "object" ? setup.split_summary : null;
+  const splitCounts = splitSummary && splitSummary.split_counts && typeof splitSummary.split_counts === "object"
+    ? Object.entries(splitSummary.split_counts)
+    : [];
+  const splitWarnings = splitSummary && Array.isArray(splitSummary.warnings)
+    ? splitSummary.warnings.map((item) => String(item)).filter(Boolean)
+    : [];
+  const specChips = [
+    ["目标", String(setup.target_type || "binary")],
+    ["算法", recipeText],
+    ["主调参", primaryRecipe],
+    ["候选特征", featureCount],
+    ["调参轮数", nTrials],
+    ["选择指标", metricPolicy],
+  ].map(([label, value]) => `<div class="modeling-spec-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const eligibleAlgorithms = Array.isArray(setup.eligible_algorithms)
+    ? setup.eligible_algorithms.map((item) => String(item)).filter(Boolean)
+    : [];
+  const disabledAlgorithms = Array.isArray(setup.disabled_algorithms)
+    ? setup.disabled_algorithms.filter((item) => item && typeof item === "object")
+    : [];
+  const algorithmHtml = [...eligibleAlgorithms.map((recipe) => ({
+    recipe,
+    state: "可用",
+    reason: supportedPmml.has(recipe) ? "PMML 可导出" : "仅原生模型",
+    enabled: true,
+  })), ...disabledAlgorithms.map((item) => ({
+    recipe: String(item.recipe || ""),
+    state: "不可用",
+    reason: String(item.reason || ""),
+    enabled: false,
+  }))].filter((item) => item.recipe).map((item) => `<div class="modeling-algorithm-chip" data-enabled="${item.enabled ? "true" : "false"}">
+      <strong>${escapeHtml(item.recipe)}</strong>
+      <span>${escapeHtml(item.state)} · ${escapeHtml(item.reason || "-")}</span>
+    </div>`).join("");
+  const splitCountsHtml = splitCounts.map(([split, count]) => {
+    const total = Number(splitSummary?.total_rows || 0);
+    const n = Number(count);
+    const pct = total > 0 && Number.isFinite(n) ? `${((n / total) * 100).toFixed(1)}%` : "n/a";
+    return `<div class="modeling-split-chip"><span>${escapeHtml(String(split).toUpperCase())}</span><strong>${escapeHtml(String(count))}</strong><small>${escapeHtml(pct)}</small></div>`;
+  }).join("");
+  const warningHtml = [...setupWarnings, ...splitWarnings].map((warning) => (
+    `<div class="modeling-setup-warning">${escapeHtml(warning)}</div>`
+  )).join("");
   const optionRows = [
     { value: "", label: "不使用权重" },
     ...uniqueCandidates.map((value) => ({ value, label: value })),
@@ -6956,9 +7010,6 @@ function agentMessageModelingSetupHtml(message, options = {}) {
       <span>${escapeHtml(option.label)}</span>
     </label>`;
   }).join("");
-  const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
-    ? setup.recipes.map((recipe) => String(recipe)).join("/")
-    : "-";
   const diagnostics = Array.isArray(setup.sample_weight_diagnostics)
     ? setup.sample_weight_diagnostics.filter((item) => item && typeof item === "object")
     : [];
@@ -6988,6 +7039,13 @@ function agentMessageModelingSetupHtml(message, options = {}) {
       <span>建模规格</span>
       <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
     </div>
+    <div class="modeling-spec-grid">${specChips}</div>
+    ${algorithmHtml ? `<div class="modeling-algorithm-grid">${algorithmHtml}</div>` : ""}
+    ${splitCountsHtml ? `<div class="modeling-split-summary">
+      <div class="modeling-section-label">样本切分 · ${escapeHtml(String(splitSummary?.split_col || "split"))}</div>
+      <div class="modeling-split-grid">${splitCountsHtml}</div>
+    </div>` : ""}
+    ${warningHtml ? `<div class="modeling-setup-warnings">${warningHtml}</div>` : ""}
     <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
     ${diagnosticsHtml ? `<div class="modeling-weight-diagnostics">${diagnosticsHtml}</div>` : ""}
     <div class="modeling-setup-foot">

@@ -84,7 +84,12 @@ def build_screen_payload(output: dict, dep) -> dict:
     }
 
 
-def build_modeling_setup_payload(output: dict, dep) -> dict | None:
+def build_modeling_setup_payload(
+    output: dict,
+    dep,
+    *,
+    split_output: dict | None = None,
+) -> dict | None:
     """Interactive modeling setup payload.
 
     The modeling spec step is usually not a pause point by itself; its output is
@@ -94,17 +99,33 @@ def build_modeling_setup_payload(output: dict, dep) -> dict | None:
     where the full schema is available for validation.
     """
     o = output if isinstance(output, dict) else {}
+    if not o:
+        return None
     candidates = [str(col) for col in (o.get("sample_weight_candidates") or []) if str(col).strip()]
     selected = str(o.get("sample_weight_col") or "").strip()
     if selected and selected not in candidates:
         candidates.insert(0, selected)
-    if not candidates and not selected:
-        return None
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
         "target_type": str(o.get("target_type") or "binary"),
+        "recipe": str(o.get("recipe") or ""),
         "recipes": [str(item) for item in (o.get("recipes") or [])],
+        "feature_count": o.get("feature_count"),
+        "n_trials": o.get("n_trials"),
+        "metric_policy": str(o.get("metric_policy") or ""),
+        "eligible_algorithms": [str(item) for item in (o.get("eligible_algorithms") or [])],
+        "disabled_algorithms": [
+            dict(item)
+            for item in (o.get("disabled_algorithms") or [])
+            if isinstance(item, dict)
+        ],
+        "pmml_supported_algorithms": [
+            str(item) for item in (o.get("pmml_supported_algorithms") or [])
+        ],
+        "warnings": [str(item) for item in (o.get("warnings") or []) if str(item)],
+        "reason": str(o.get("reason") or ""),
+        "split_summary": _split_summary(split_output),
         "sample_weight_col": selected,
         "sample_weight_candidates": candidates,
         "sample_weight_diagnostics": [
@@ -112,6 +133,42 @@ def build_modeling_setup_payload(output: dict, dep) -> dict | None:
             for item in (o.get("sample_weight_diagnostics") or [])
             if isinstance(item, dict)
         ],
+    }
+
+
+def _split_summary(output: dict | None) -> dict | None:
+    if not isinstance(output, dict):
+        return None
+    analysis = output.get("sample_analysis") if isinstance(output.get("sample_analysis"), dict) else {}
+    split_counts = {
+        str(key): int(value)
+        for key, value in (analysis.get("split_counts") or {}).items()
+        if str(key)
+    }
+    if not split_counts:
+        return None
+    total_rows = analysis.get("total_rows")
+    try:
+        total_rows = int(total_rows)
+    except (TypeError, ValueError):
+        total_rows = sum(split_counts.values())
+    holdout_values = [str(item) for item in (output.get("holdout_values") or []) if str(item)]
+    warnings: list[str] = []
+    lowered = {key.lower(): value for key, value in split_counts.items()}
+    if lowered.get("train", 0) <= 0:
+        warnings.append("缺少 train 样本。")
+    if lowered.get("test", 0) <= 0:
+        warnings.append("缺少 test 样本。")
+    if lowered.get("oot", 0) <= 0:
+        warnings.append("缺少 OOT 样本,上线前建议补充时间外验证。")
+    if total_rows and lowered.get("oot", 0) / total_rows < 0.05:
+        warnings.append("OOT 占比低于 5%,稳定性结论需谨慎。")
+    return {
+        "split_col": str(output.get("split_col") or ""),
+        "split_counts": split_counts,
+        "total_rows": total_rows,
+        "holdout_values": holdout_values,
+        "warnings": warnings,
     }
 
 

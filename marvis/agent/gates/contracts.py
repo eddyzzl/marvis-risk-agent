@@ -311,6 +311,32 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
         if "adjust" not in allowed:
             allowed = ["confirm", "adjust", "replan", "clarify", "halt"]
         setup = _dict(meta.get("modeling_setup"))
+        eligible = [
+            _clean_str(item)
+            for item in setup.get("eligible_algorithms") or setup.get("recipes") or []
+            if _clean_str(item)
+        ]
+        controls.append(GateControl(
+            id="target_type",
+            kind="select",
+            label="Target type",
+            default=_clean_str(setup.get("target_type") or "binary"),
+            schema={"enum": ["binary", "continuous", "multiclass"]},
+        ))
+        controls.append(GateControl(
+            id="recipes",
+            kind="multi_select",
+            label="Algorithms",
+            default=list(setup.get("recipes") or []),
+            schema={"items": "string", "enum": eligible},
+        ))
+        controls.append(GateControl(
+            id="n_trials",
+            kind="number",
+            label="Tuning trials",
+            default=setup.get("n_trials"),
+            bounds={"min": 1, "max": 200},
+        ))
         candidates = [
             _clean_str(item)
             for item in setup.get("sample_weight_candidates") or []

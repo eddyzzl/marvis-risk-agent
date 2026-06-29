@@ -538,6 +538,14 @@ def test_decide_gate_injects_sample_weight_diagnostics_into_prompt():
             "modeling_setup": {
                 "target_type": "binary",
                 "recipes": ["lgb"],
+                "feature_count": 9,
+                "n_trials": 12,
+                "metric_policy": "oot_ks",
+                "split_summary": {
+                    "split_col": "split",
+                    "split_counts": {"train": 80, "test": 10, "oot": 1},
+                    "warnings": ["OOT 占比低于 5%,稳定性结论需谨慎。"],
+                },
                 "sample_weight_candidates": ["weight"],
                 "sample_weight_diagnostics": [
                     {
@@ -557,6 +565,10 @@ def test_decide_gate_injects_sample_weight_diagnostics_into_prompt():
 
     prompt = fake.calls[0]["user_prompt"]
     assert "sample_weight_diagnostic" in prompt
+    assert "feature_count: 9" in prompt
+    assert "n_trials: 12" in prompt
+    assert "split_counts: train=80, test=10, oot=1" in prompt
+    assert "split_warning: OOT 占比低于 5%,稳定性结论需谨慎。" in prompt
     assert "weight valid" in prompt
     assert "missing_rate=0.0" in prompt
 

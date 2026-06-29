@@ -321,7 +321,16 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
     runner = FakeRunner([
         {
             "target_type": "binary",
+            "recipe": "lgb",
             "recipes": ["lgb"],
+            "feature_count": 2,
+            "n_trials": 12,
+            "metric_policy": "oot_ks",
+            "eligible_algorithms": ["lgb", "xgb"],
+            "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+            "pmml_supported_algorithms": ["lgb", "xgb"],
+            "warnings": ["样本权重列已从入模特征中移除。"],
+            "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
             "sample_weight_col": "",
             "sample_weight_candidates": ["weight", "sample_weight"],
             "sample_weight_diagnostics": [
@@ -349,7 +358,17 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
         "step_id": "spec",
         "step_title": "spec",
         "target_type": "binary",
+        "recipe": "lgb",
         "recipes": ["lgb"],
+        "feature_count": 2,
+        "n_trials": 12,
+        "metric_policy": "oot_ks",
+        "eligible_algorithms": ["lgb", "xgb"],
+        "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+        "pmml_supported_algorithms": ["lgb", "xgb"],
+        "warnings": ["样本权重列已从入模特征中移除。"],
+        "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
+        "split_summary": None,
         "sample_weight_col": "",
         "sample_weight_candidates": ["weight", "sample_weight"],
         "sample_weight_diagnostics": [
@@ -366,8 +385,80 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
     }
     envelope = turn.messages[0].metadata["gate_envelope"]
     assert "adjust" in envelope["allowed_actions"]
+    control_ids = {control["id"] for control in envelope["controls"]}
+    assert {"target_type", "recipes", "n_trials"}.issubset(control_ids)
     sample_weight_control = next(control for control in envelope["controls"] if control["id"] == "sample_weight_col")
     assert sample_weight_control["schema"]["enum"] == ["", "weight", "sample_weight"]
+
+
+def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("split", index=0, tool="make_split", phase="特征"),
+            _step("spec", index=1, tool="choose_modeling_spec", depends_on=["split"], phase="建模"),
+            _step(
+                "screen",
+                index=2,
+                tool="screen_features",
+                depends_on=["split", "spec"],
+                needs_confirmation=True,
+                phase="特征",
+            ),
+        ],
+    )
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "result_dataset_id": "ds-split",
+            "split_col": "split",
+            "holdout_values": ["oot"],
+            "sample_analysis": {
+                "split_counts": {"train": 90, "test": 10, "oot": 2},
+                "total_rows": 102,
+            },
+        },
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb", "xgb"],
+            "feature_count": 8,
+            "n_trials": 12,
+            "metric_policy": "oot_ks",
+            "eligible_algorithms": ["lgb", "xgb"],
+            "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+            "pmml_supported_algorithms": ["lgb", "xgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    setup = turn.messages[0].metadata["modeling_setup"]
+    assert setup["feature_count"] == 8
+    assert setup["n_trials"] == 12
+    assert setup["metric_policy"] == "oot_ks"
+    assert setup["eligible_algorithms"] == ["lgb", "xgb"]
+    assert setup["disabled_algorithms"] == [{"recipe": "regressor", "reason": "target mismatch"}]
+    assert setup["split_summary"]["split_counts"] == {"train": 90, "test": 10, "oot": 2}
+    assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%,稳定性结论需谨慎。"]
+    controls = {control["id"]: control for control in turn.messages[0].metadata["gate_envelope"]["controls"]}
+    assert controls["target_type"]["schema"]["enum"] == ["binary", "continuous", "multiclass"]
+    assert controls["recipes"]["schema"]["enum"] == ["lgb", "xgb"]
+    assert controls["n_trials"]["bounds"] == {"min": 1, "max": 200}
 
 
 def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(tmp_path):

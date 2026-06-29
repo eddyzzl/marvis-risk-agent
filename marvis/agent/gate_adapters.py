@@ -38,6 +38,9 @@ def render_gate_dependencies(
     result = GateRenderResult()
     confirm_join_o: dict | None = None
     propose_join_o: dict | None = None
+    split_o: dict | None = None
+    modeling_spec_o: dict | None = None
+    modeling_spec_step: PlanStep | None = None
     for dep_id in gate.depends_on if gate else []:
         dep = _find_step(plan, dep_id)
         if dep is None:
@@ -57,8 +60,17 @@ def render_gate_dependencies(
             confirm_join_o = output
         elif dep.tool_ref.tool == "propose_join":
             propose_join_o = output
+        elif dep.tool_ref.tool == "make_split" and isinstance(output, dict):
+            split_o = output
         elif dep.tool_ref.tool == "choose_modeling_spec":
-            result.modeling_setup = build_modeling_setup_payload(output, dep)
+            modeling_spec_o = output if isinstance(output, dict) else None
+            modeling_spec_step = dep
+    if modeling_spec_o is not None and modeling_spec_step is not None:
+        result.modeling_setup = build_modeling_setup_payload(
+            modeling_spec_o,
+            modeling_spec_step,
+            split_output=split_o,
+        )
     result.dedup = build_dedup_payload(confirm_join_o, propose_join_o)
     return result
 

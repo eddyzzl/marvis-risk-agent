@@ -138,6 +138,27 @@ def _format_gate(gate: dict) -> str:
         recipes = modeling_setup.get("recipes") or []
         if recipes:
             lines.append(f"- recipes: {', '.join(str(item) for item in recipes)}")
+        if modeling_setup.get("feature_count") is not None:
+            lines.append(f"- feature_count: {modeling_setup.get('feature_count')}")
+        if modeling_setup.get("n_trials") is not None:
+            lines.append(f"- n_trials: {modeling_setup.get('n_trials')}")
+        if modeling_setup.get("metric_policy"):
+            lines.append(f"- metric_policy: {modeling_setup.get('metric_policy')}")
+        split_summary = (
+            modeling_setup.get("split_summary")
+            if isinstance(modeling_setup.get("split_summary"), dict)
+            else {}
+        )
+        if split_summary:
+            lines.append(f"- split_col: {split_summary.get('split_col') or 'split'}")
+            counts = split_summary.get("split_counts") if isinstance(split_summary.get("split_counts"), dict) else {}
+            if counts:
+                lines.append(
+                    "- split_counts: "
+                    + ", ".join(f"{key}={value}" for key, value in counts.items())
+                )
+            for warning in split_summary.get("warnings") or []:
+                lines.append(f"- split_warning: {warning}")
         selected_weight = str(modeling_setup.get("sample_weight_col") or "")
         candidates = [str(item) for item in (modeling_setup.get("sample_weight_candidates") or []) if str(item)]
         lines.append(f"- sample_weight_col: {selected_weight or '不使用'}")

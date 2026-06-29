@@ -91,8 +91,14 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert "sample_weight_col: sampleWeightCol" in app_js
     assert "sample_weight_diagnostics" in app_js
     assert "modeling-weight-diagnostic" in app_js
+    assert "modeling-spec-grid" in app_js
+    assert "modeling-algorithm-grid" in app_js
+    assert "modeling-split-summary" in app_js
     assert "handleModelingWeightAdjustClick" in app_js
     assert ".modeling-setup-panel" in css
+    assert ".modeling-spec-grid" in css
+    assert ".modeling-algorithm-grid" in css
+    assert ".modeling-split-grid" in css
     assert ".modeling-weight-options" in css
     assert ".modeling-weight-diagnostics" in css
 
@@ -112,7 +118,21 @@ def test_modeling_setup_weight_picker_renders_candidates():
             step_id: "gate-1",
             modeling_setup: {{
               target_type: "binary",
+              recipe: "lgb",
               recipes: ["lgb", "xgb"],
+              feature_count: 12,
+              n_trials: 24,
+              metric_policy: "oot_ks",
+              eligible_algorithms: ["lgb", "xgb"],
+              disabled_algorithms: [{{ recipe: "regressor", reason: "target mismatch" }}],
+              pmml_supported_algorithms: ["lgb", "xgb"],
+              warnings: ["样本权重列已从入模特征中移除。"],
+              split_summary: {{
+                split_col: "split",
+                split_counts: {{ train: 80, test: 10, oot: 10 }},
+                total_rows: 100,
+                warnings: [],
+              }},
               sample_weight_col: "weight",
               sample_weight_candidates: ["weight", "sample_weight"],
               sample_weight_diagnostics: [
@@ -133,6 +153,13 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes('value="weight" checked'), true);
         assert.equal(html.includes("sample_weight"), true);
         assert.equal(html.includes("lgb/xgb"), true);
+        assert.equal(html.includes("候选特征"), true);
+        assert.equal(html.includes("24"), true);
+        assert.equal(html.includes("PMML 可导出"), true);
+        assert.equal(html.includes("target mismatch"), true);
+        assert.equal(html.includes("样本切分 · split"), true);
+        assert.equal(html.includes("TRAIN"), true);
+        assert.equal(html.includes("样本权重列已从入模特征中移除。"), true);
         assert.equal(html.includes("modeling-weight-diagnostic"), true);
         assert.equal(html.includes("缺失 0.0%"), true);
         assert.equal(html.includes("范围 1-2"), true);
@@ -143,6 +170,27 @@ def test_modeling_setup_weight_picker_renders_candidates():
         }}, {{ interactive: false }});
         assert.equal(readonly.includes('data-modeling-readonly="true"'), true);
         assert.equal(readonly.includes("历史规格"), true);
+        const noWeight = agentMessageModelingSetupHtml({{
+          id: "m3",
+          metadata: {{
+            step_id: "gate-3",
+            modeling_setup: {{
+              target_type: "continuous",
+              recipe: "regressor",
+              recipes: ["regressor"],
+              feature_count: 5,
+              n_trials: 6,
+              metric_policy: "oot_rmse",
+              eligible_algorithms: ["regressor"],
+              pmml_supported_algorithms: [],
+              sample_weight_candidates: [],
+            }},
+          }},
+        }});
+        assert.equal(noWeight.includes("建模规格"), true);
+        assert.equal(noWeight.includes("continuous"), true);
+        assert.equal(noWeight.includes("regressor"), true);
+        assert.equal(noWeight.includes("不使用权重"), true);
         process.stdout.write("ok");
         """
     )
