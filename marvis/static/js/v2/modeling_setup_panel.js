@@ -50,7 +50,8 @@ export function renderModelingSetupPanel(message, options = {}) {
   const disabledAlgorithms = Array.isArray(setup.disabled_algorithms)
     ? setup.disabled_algorithms.filter((item) => item && typeof item === "object")
     : [];
-  const algorithmHtml = [...eligibleAlgorithms.map((recipe) => ({
+  const algorithmChoices = uniqueRecipeChoices([
+    ...eligibleAlgorithms.map((recipe) => ({
     recipe,
     state: "可用",
     reason: supportedPmml.has(recipe) ? "PMML 可导出" : "仅原生模型",
@@ -60,7 +61,8 @@ export function renderModelingSetupPanel(message, options = {}) {
     state: "不可用",
     reason: String(item.reason || ""),
     enabled: false,
-  }))].filter((item) => item.recipe).map((item) => `<div class="modeling-algorithm-chip" data-enabled="${item.enabled ? "true" : "false"}">
+  }))]);
+  const algorithmHtml = algorithmChoices.filter((item) => item.recipe).map((item) => `<div class="modeling-algorithm-chip" data-enabled="${item.enabled ? "true" : "false"}">
       <strong>${escapeHtml(item.recipe)}</strong>
       <span>${escapeHtml(item.state)} · ${escapeHtml(item.reason || "-")}</span>
     </div>`).join("");
@@ -76,13 +78,14 @@ export function renderModelingSetupPanel(message, options = {}) {
   const targetOptions = ["binary", "continuous", "multiclass"].map((value) => (
     `<option value="${escapeHtml(value)}"${value === currentTargetType ? " selected" : ""}>${escapeHtml(value)}</option>`
   )).join("");
-  const recipeOptions = eligibleAlgorithms.map((recipe) => {
+  const recipeOptions = algorithmChoices.filter((item) => item.recipe).map((item) => {
+    const recipe = item.recipe;
     const checked = selectedRecipes.includes(recipe);
     const pmmlText = supportedPmml.has(recipe) ? "PMML" : "原生";
     return `<label class="modeling-recipe-option">
       <input type="checkbox" class="modeling-recipe-pick" value="${escapeHtml(recipe)}"${checked ? " checked" : ""}${disabledAttr} />
       <span>${escapeHtml(recipe)}</span>
-      <small>${escapeHtml(pmmlText)}</small>
+      <small>${escapeHtml(recipeFamily(recipe))} · ${escapeHtml(pmmlText)}</small>
     </label>`;
   }).join("");
   const setupControlsHtml = `<div class="modeling-setup-controls">
@@ -179,6 +182,13 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     setActionStatus("请至少选择一个训练算法。", "error");
     return;
   }
+  const targetType = selectedModelingTargetType(form);
+  const selectedRecipes = selectedModelingRecipes(form);
+  const mismatchedRecipe = selectedRecipes.find((recipe) => recipeFamily(recipe) !== targetType);
+  if (mismatchedRecipe) {
+    setActionStatus(`目标类型 ${targetType} 与算法 ${mismatchedRecipe} 不匹配,请选择同一目标类型的算法。`, "error");
+    return;
+  }
   if (structuralKeys.some((key) => Object.prototype.hasOwnProperty.call(adjustParams, key)) && reason.length < 4) {
     setActionStatus("调整目标类型、算法或调参轮数时请填写变更原因。", "error");
     return;
@@ -243,6 +253,37 @@ function collectModelingSetupAdjustParams(form) {
   const currentWeight = String(form.dataset.modelingCurrentWeight || "").trim();
   if (sampleWeightCol !== currentWeight) params.sample_weight_col = sampleWeightCol;
   return params;
+}
+
+function selectedModelingTargetType(form) {
+  const target = form.querySelector(".modeling-target-select");
+  return String(target?.value || "binary").trim() || "binary";
+}
+
+function selectedModelingRecipes(form) {
+  const recipeControl = form.querySelector(".modeling-recipe-control");
+  if (!recipeControl) return [];
+  return [...recipeControl.querySelectorAll(".modeling-recipe-pick:checked")]
+    .map((input) => String(input.value || "").trim())
+    .filter(Boolean);
+}
+
+function uniqueRecipeChoices(items) {
+  const seen = new Set();
+  const choices = [];
+  for (const item of items) {
+    const recipe = String(item.recipe || "");
+    if (!recipe || seen.has(recipe)) continue;
+    seen.add(recipe);
+    choices.push(item);
+  }
+  return choices;
+}
+
+function recipeFamily(recipe) {
+  if (recipe === "lgb_regressor") return "continuous";
+  if (recipe === "lgb_multiclass") return "multiclass";
+  return "binary";
 }
 
 export function handleModelingWeightAdjustClick(event, context = {}) {

@@ -327,7 +327,7 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
             "n_trials": 12,
             "metric_policy": "oot_ks",
             "eligible_algorithms": ["lgb", "xgb"],
-            "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+            "disabled_algorithms": [{"recipe": "lgb_regressor", "reason": "target mismatch"}],
             "pmml_supported_algorithms": ["lgb", "xgb"],
             "warnings": ["样本权重列已从入模特征中移除。"],
             "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
@@ -364,7 +364,7 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
         "n_trials": 12,
         "metric_policy": "oot_ks",
         "eligible_algorithms": ["lgb", "xgb"],
-        "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+        "disabled_algorithms": [{"recipe": "lgb_regressor", "reason": "target mismatch"}],
         "pmml_supported_algorithms": ["lgb", "xgb"],
         "warnings": ["样本权重列已从入模特征中移除。"],
         "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
@@ -435,7 +435,7 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
             "n_trials": 12,
             "metric_policy": "oot_ks",
             "eligible_algorithms": ["lgb", "xgb"],
-            "disabled_algorithms": [{"recipe": "regressor", "reason": "target mismatch"}],
+            "disabled_algorithms": [{"recipe": "lgb_regressor", "reason": "target mismatch"}],
             "pmml_supported_algorithms": ["lgb", "xgb"],
             "sample_weight_col": "",
             "sample_weight_candidates": [],
@@ -452,7 +452,7 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert setup["n_trials"] == 12
     assert setup["metric_policy"] == "oot_ks"
     assert setup["eligible_algorithms"] == ["lgb", "xgb"]
-    assert setup["disabled_algorithms"] == [{"recipe": "regressor", "reason": "target mismatch"}]
+    assert setup["disabled_algorithms"] == [{"recipe": "lgb_regressor", "reason": "target mismatch"}]
     assert setup["split_summary"]["split_counts"] == {"train": 90, "test": 10, "oot": 2}
     assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%,稳定性结论需谨慎。"]
     controls = {control["id"]: control for control in turn.messages[0].metadata["gate_envelope"]["controls"]}
@@ -763,8 +763,8 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
         {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
         {
             "target_type": "continuous",
-            "recipe": "regressor",
-            "recipes": ["regressor"],
+            "recipe": "lgb_regressor",
+            "recipes": ["lgb_regressor"],
             "n_trials": 20,
             "sample_weight_col": "",
             "sample_weight_candidates": [],
@@ -780,7 +780,7 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
         plan_id="plan-1",
         user_text="调整建模规格",
         run_seq=1,
-        adjust_params={"target_type": "continuous", "recipes": ["regressor"], "n_trials": 20},
+        adjust_params={"target_type": "continuous", "recipes": ["lgb_regressor"], "n_trials": 20},
         expected_step_id="tune",
     )
 
@@ -792,10 +792,10 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
         "screen_features",
     ]
     assert runner.calls[2][1]["target_type"] == "continuous"
-    assert runner.calls[2][1]["recipes"] == ["regressor"]
+    assert runner.calls[2][1]["recipes"] == ["lgb_regressor"]
     assert runner.calls[2][1]["n_trials"] == 20
     assert turn.messages[-1].metadata["modeling_setup"]["target_type"] == "continuous"
-    assert turn.messages[-1].metadata["modeling_setup"]["recipes"] == ["regressor"]
+    assert turn.messages[-1].metadata["modeling_setup"]["recipes"] == ["lgb_regressor"]
     assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 20
 
 

@@ -136,7 +136,7 @@ def test_modeling_setup_weight_picker_renders_candidates():
               n_trials: 24,
               metric_policy: "oot_ks",
               eligible_algorithms: ["lgb", "xgb"],
-              disabled_algorithms: [{{ recipe: "regressor", reason: "target mismatch" }}],
+              disabled_algorithms: [{{ recipe: "lgb_regressor", reason: "target mismatch" }}],
               pmml_supported_algorithms: ["lgb", "xgb"],
               warnings: ["样本权重列已从入模特征中移除。"],
               split_summary: {{
@@ -192,12 +192,12 @@ def test_modeling_setup_weight_picker_renders_candidates():
             step_id: "gate-3",
             modeling_setup: {{
               target_type: "continuous",
-              recipe: "regressor",
-              recipes: ["regressor"],
+              recipe: "lgb_regressor",
+              recipes: ["lgb_regressor"],
               feature_count: 5,
               n_trials: 6,
               metric_policy: "oot_rmse",
-              eligible_algorithms: ["regressor"],
+              eligible_algorithms: ["lgb_regressor"],
               pmml_supported_algorithms: [],
               sample_weight_candidates: [],
             }},
@@ -205,7 +205,7 @@ def test_modeling_setup_weight_picker_renders_candidates():
         }});
         assert.equal(noWeight.includes("建模规格"), true);
         assert.equal(noWeight.includes("continuous"), true);
-        assert.equal(noWeight.includes("regressor"), true);
+        assert.equal(noWeight.includes("lgb_regressor"), true);
         assert.equal(noWeight.includes("不使用权重"), true);
         process.stdout.write("ok");
         """
@@ -390,7 +390,14 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         assert.deepEqual(statuses.at(-1), ["请至少选择一个训练算法。", "error"]);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           targetType: "continuous",
-          selectedRecipes: ["regressor"],
+          selectedRecipes: ["lgb"],
+          currentRecipes: "lgb",
+          reason: "目标改为连续",
+        }}) }}, context);
+        assert.deepEqual(statuses.at(-1), ["目标类型 continuous 与算法 lgb 不匹配,请选择同一目标类型的算法。", "error"]);
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
+          targetType: "continuous",
+          selectedRecipes: ["lgb_regressor"],
           currentRecipes: "lgb",
           trials: "20",
           reason: "",
@@ -398,7 +405,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         assert.deepEqual(statuses.at(-1), ["调整目标类型、算法或调参轮数时请填写变更原因。", "error"]);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           targetType: "continuous",
-          selectedRecipes: ["regressor"],
+          selectedRecipes: ["lgb_regressor"],
           currentRecipes: "lgb",
           trials: "20",
           reason: "目标是连续金额预测",
@@ -406,7 +413,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         assert.deepEqual(calls.at(-1)[1].adjust_params, {{
           target_type: "continuous",
           n_trials: 20,
-          recipes: ["regressor"],
+          recipes: ["lgb_regressor"],
         }});
         assert.equal(calls.at(-1)[1].content, "调整建模规格：目标是连续金额预测");
         const eventCalls = [];
