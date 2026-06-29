@@ -75,6 +75,18 @@ export function renderModelingSetupPanel(message, options = {}) {
   const warningHtml = [...setupWarnings, ...splitWarnings].map((warning) => (
     `<div class="modeling-setup-warning">${escapeHtml(warning)}</div>`
   )).join("");
+  const guidance = Array.isArray(setup.override_guidance)
+    ? setup.override_guidance.filter((item) => item && typeof item === "object")
+    : [];
+  const guidanceHtml = guidance.map((item) => {
+    const level = ["info", "review", "warning"].includes(String(item.level || ""))
+      ? String(item.level)
+      : "info";
+    return `<div class="modeling-guidance-item" data-level="${escapeHtml(level)}">
+      <strong>${escapeHtml(String(item.label || "业务提示"))}</strong>
+      <span>${escapeHtml(String(item.message || ""))}</span>
+    </div>`;
+  }).join("");
   const targetOptions = ["binary", "continuous", "multiclass"].map((value) => (
     `<option value="${escapeHtml(value)}"${value === currentTargetType ? " selected" : ""}>${escapeHtml(value)}</option>`
   )).join("");
@@ -143,6 +155,7 @@ export function renderModelingSetupPanel(message, options = {}) {
       <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
     </div>
     <div class="modeling-spec-grid">${specChips}</div>
+    ${guidanceHtml ? `<div class="modeling-guidance-list">${guidanceHtml}</div>` : ""}
     ${setupControlsHtml}
     ${algorithmHtml ? `<div class="modeling-algorithm-grid">${algorithmHtml}</div>` : ""}
     ${splitCountsHtml ? `<div class="modeling-split-summary">

@@ -354,6 +354,20 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
     turn = driver._run_and_handle("plan-1", run_seq=0)
 
     setup = turn.messages[0].metadata.get("modeling_setup")
+    guidance = setup.pop("override_guidance")
+    assert [item["id"] for item in guidance] == [
+        "target_type",
+        "recipes",
+        "disabled_algorithms",
+        "n_trials",
+        "sample_weight",
+    ]
+    assert guidance[0]["label"] == "目标类型"
+    assert "0/1 风控标签" in guidance[0]["message"]
+    assert guidance[1]["level"] == "info"
+    assert "均可导出 PMML" in guidance[1]["message"]
+    assert guidance[-1]["level"] == "info"
+    assert "检测到候选权重列 weight, sample_weight" in guidance[-1]["message"]
     assert setup == {
         "step_id": "spec",
         "step_title": "spec",
@@ -455,6 +469,10 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert setup["disabled_algorithms"] == [{"recipe": "lgb_regressor", "reason": "target mismatch"}]
     assert setup["split_summary"]["split_counts"] == {"train": 90, "test": 10, "oot": 2}
     assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%,稳定性结论需谨慎。"]
+    guidance_by_id = {item["id"]: item for item in setup["override_guidance"]}
+    assert guidance_by_id["split_quality"]["level"] == "warning"
+    assert "OOT 占比低于 5%" in guidance_by_id["split_quality"]["message"]
+    assert guidance_by_id["n_trials"]["message"].startswith("当前调参轮数 12")
     controls = {control["id"]: control for control in turn.messages[0].metadata["gate_envelope"]["controls"]}
     assert controls["target_type"]["schema"]["enum"] == ["binary", "continuous", "multiclass"]
     assert controls["recipes"]["schema"]["enum"] == ["lgb", "xgb"]

@@ -105,6 +105,7 @@ def build_modeling_setup_payload(
     selected = str(o.get("sample_weight_col") or "").strip()
     if selected and selected not in candidates:
         candidates.insert(0, selected)
+    split_summary = _split_summary(split_output)
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
@@ -125,7 +126,7 @@ def build_modeling_setup_payload(
         ],
         "warnings": [str(item) for item in (o.get("warnings") or []) if str(item)],
         "reason": str(o.get("reason") or ""),
-        "split_summary": _split_summary(split_output),
+        "split_summary": split_summary,
         "sample_weight_col": selected,
         "sample_weight_candidates": candidates,
         "sample_weight_diagnostics": [
@@ -133,6 +134,12 @@ def build_modeling_setup_payload(
             for item in (o.get("sample_weight_diagnostics") or [])
             if isinstance(item, dict)
         ],
+        "override_guidance": _modeling_override_guidance(
+            o,
+            split_summary=split_summary,
+            sample_weight_candidates=candidates,
+            sample_weight_col=selected,
+        ),
     }
 
 
@@ -219,6 +226,135 @@ def _split_summary(output: dict | None) -> dict | None:
         "holdout_values": holdout_values,
         "warnings": warnings,
     }
+
+
+def _modeling_override_guidance(
+    output: dict,
+    *,
+    split_summary: dict | None,
+    sample_weight_candidates: list[str],
+    sample_weight_col: str,
+) -> list[dict]:
+    """Business guidance shown before users change modeling setup controls."""
+    target_type = str(output.get("target_type") or "binary")
+    recipes = [str(item) for item in (output.get("recipes") or []) if str(item)]
+    pmml_supported = {str(item) for item in (output.get("pmml_supported_algorithms") or []) if str(item)}
+    disabled_algorithms = [
+        item
+        for item in (output.get("disabled_algorithms") or [])
+        if isinstance(item, dict)
+    ]
+    diagnostics = [
+        item
+        for item in (output.get("sample_weight_diagnostics") or [])
+        if isinstance(item, dict)
+    ]
+    guidance: list[dict] = []
+    target_messages = {
+        "binary": "二分类适合好/坏、通过/拒绝等 0/1 风控标签；切换到回归或多分类会同步改变指标、报告章节和可交付物。",
+        "continuous": "回归适合金额、额度、损失率等连续目标；不会使用 KS/AUC 作为主评估口径，报告也会走回归指标。",
+        "multiclass": "多分类适合风险等级或评级标签；指标、PMML 支持和验证移交通常比二分类更受限制。",
+    }
+    guidance.append({
+        "id": "target_type",
+        "label": "目标类型",
+        "level": "info",
+        "message": target_messages.get(target_type, target_messages["binary"]),
+    })
+    if recipes:
+        non_pmml = [recipe for recipe in recipes if recipe not in pmml_supported]
+        if non_pmml:
+            guidance.append({
+                "id": "recipes",
+                "label": "算法组合",
+                "level": "warning",
+                "message": (
+                    f"当前选择包含仅原生模型算法 {', '.join(non_pmml)}；需要 PMML 或验证移交时请确认替代算法或交付方案。"
+                ),
+            })
+        else:
+            guidance.append({
+                "id": "recipes",
+                "label": "算法组合",
+                "level": "info",
+                "message": (
+                    f"当前算法 {', '.join(recipes)} 均可导出 PMML；仍需一起比较效果、稳定性、特征复杂度和交付形态。"
+                ),
+            })
+    if disabled_algorithms:
+        guidance.append({
+            "id": "disabled_algorithms",
+            "label": "不可用算法",
+            "level": "review",
+            "message": (
+                f"有 {len(disabled_algorithms)} 个算法因当前目标或依赖条件不可用；切换目标类型后需要重新确认算法家族和下游报告口径。"
+            ),
+        })
+    n_trials = _safe_int(output.get("n_trials"))
+    if n_trials is not None:
+        if n_trials < 5:
+            message = "当前调参轮数较少，适合快速烟测；用于正式候选模型时建议扩大搜索或记录人工原因。"
+            level = "warning"
+        elif n_trials > 50:
+            message = "当前调参轮数较高，会显著增加运行成本并扩大后续重算范围；AUTO 不应直接放大该预算。"
+            level = "warning"
+        else:
+            message = f"当前调参轮数 {n_trials} 适合作为常规搜索；大幅上调会增加运行成本并触发更宽的下游重算。"
+            level = "info"
+        guidance.append({
+            "id": "n_trials",
+            "label": "调参预算",
+            "level": level,
+            "message": message,
+        })
+    invalid_weights = [
+        str(item.get("column") or "")
+        for item in diagnostics
+        if item.get("valid") is False and str(item.get("column") or "")
+    ]
+    if sample_weight_col:
+        guidance.append({
+            "id": "sample_weight",
+            "label": "样本权重",
+            "level": "review",
+            "message": (
+                f"权重列 {sample_weight_col} 会改变拟合目标且不会入模；请确认它来自抽样、拒绝推断或业务权重，而不是贷后结果泄漏。"
+            ),
+        })
+    elif sample_weight_candidates:
+        guidance.append({
+            "id": "sample_weight",
+            "label": "样本权重",
+            "level": "info",
+            "message": (
+                f"检测到候选权重列 {', '.join(sample_weight_candidates)}；默认不使用，除非样本抽样、拒绝推断或业务策略明确需要加权。"
+            ),
+        })
+    if invalid_weights:
+        guidance.append({
+            "id": "sample_weight_quality",
+            "label": "权重质量",
+            "level": "warning",
+            "message": f"权重列 {', '.join(invalid_weights)} 存在非正数、缺失或不可用问题，使用前需要先清洗或重新选择。",
+        })
+    split_warnings = []
+    if isinstance(split_summary, dict):
+        split_warnings = [str(item) for item in (split_summary.get("warnings") or []) if str(item)]
+    if split_warnings:
+        guidance.append({
+            "id": "split_quality",
+            "label": "样本切分",
+            "level": "warning",
+            "message": "；".join(split_warnings),
+        })
+    return guidance
+
+
+def _safe_int(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _metrics(value) -> dict:

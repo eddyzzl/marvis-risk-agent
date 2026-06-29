@@ -1275,6 +1275,35 @@
   overflow-wrap: anywhere;
   color: var(--text, #111827);
 }
+.modeling-guidance-list {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px 0;
+}
+.modeling-guidance-item {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-left: 3px solid var(--text-muted, #6b7280);
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface-soft, #f9fafb);
+  font-size: 12px;
+}
+.modeling-guidance-item strong {
+  color: var(--text, #111827);
+}
+.modeling-guidance-item span {
+  color: var(--text-muted, #6b7280);
+  overflow-wrap: anywhere;
+}
+.modeling-guidance-item[data-level="review"] {
+  border-left-color: var(--status-info, #2563eb);
+}
+.modeling-guidance-item[data-level="warning"] {
+  border-left-color: var(--warning, #f59e0b);
+  background: color-mix(in srgb, var(--warning, #f59e0b) 7%, var(--surface, #fff));
+}
 .modeling-algorithm-chip[data-enabled="false"] {
   border-color: var(--warning, #f59e0b);
   background: color-mix(in srgb, var(--warning, #f59e0b) 8%, var(--surface, #fff));

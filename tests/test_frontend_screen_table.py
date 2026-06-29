@@ -103,6 +103,8 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert "modeling-n-trials-input" in module_js
     assert "modeling-override-reason-input" in module_js
     assert "sample_weight_diagnostics" in module_js
+    assert "override_guidance" in module_js
+    assert "modeling-guidance-list" in module_js
     assert "modeling-weight-diagnostic" in module_js
     assert "modeling-spec-grid" in module_js
     assert "modeling-algorithm-grid" in module_js
@@ -113,6 +115,8 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert ".modeling-algorithm-grid" in css
     assert ".modeling-split-grid" in css
     assert ".modeling-setup-controls" in css
+    assert ".modeling-guidance-list" in css
+    assert ".modeling-guidance-item" in css
     assert ".modeling-recipe-options" in css
     assert ".modeling-weight-options" in css
     assert ".modeling-weight-diagnostics" in css
@@ -139,6 +143,10 @@ def test_modeling_setup_weight_picker_renders_candidates():
               disabled_algorithms: [{{ recipe: "lgb_regressor", reason: "target mismatch" }}],
               pmml_supported_algorithms: ["lgb", "xgb"],
               warnings: ["样本权重列已从入模特征中移除。"],
+              override_guidance: [
+                {{ id: "target_type", label: "目标类型", level: "info", message: "二分类适合 0/1 风控标签。" }},
+                {{ id: "sample_weight", label: "样本权重", level: "review", message: "权重列会改变拟合目标。" }},
+              ],
               split_summary: {{
                 split_col: "split",
                 split_counts: {{ train: 80, test: 10, oot: 10 }},
@@ -166,6 +174,9 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes("sample_weight"), true);
         assert.equal(html.includes("lgb/xgb"), true);
         assert.equal(html.includes("modeling-target-select"), true);
+        assert.equal(html.includes("modeling-guidance-list"), true);
+        assert.equal(html.includes("二分类适合 0/1 风控标签。"), true);
+        assert.equal(html.includes('data-level="review"'), true);
         assert.equal(html.includes("modeling-recipe-pick"), true);
         assert.equal(html.includes("modeling-n-trials-input"), true);
         assert.equal(html.includes("变更原因"), true);
@@ -359,6 +370,10 @@ def test_modeling_panels_combined_dom_smoke_contract():
                 {{ recipe: "lgb_multiclass", reason: "recipe target family does not match `binary`" }},
               ],
               pmml_supported_algorithms: ["lgb", "xgb", "lr"],
+              override_guidance: [
+                {{ id: "recipes", label: "算法组合", level: "info", message: "当前算法均可交付。" }},
+                {{ id: "n_trials", label: "调参预算", level: "warning", message: "调参轮数较高。" }},
+              ],
               sample_weight_col: "",
               sample_weight_candidates: ["weight"],
               sample_weight_diagnostics: [
@@ -399,6 +414,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
         const html = setupHtml + deliveryHtml;
         for (const fragment of [
           "modeling-setup-panel",
+          "modeling-guidance-list",
           "modeling-target-select",
           "modeling-recipe-pick",
           "modeling-override-reason-input",
