@@ -183,6 +183,44 @@ def test_reviewer_final_review_goal_doubt_blocks_goal_met():
     assert review.open_items == ["review business wording"]
 
 
+def test_reviewer_final_review_llm_goal_met_false_blocks_goal_met():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = FakeLLM(json.dumps({
+        "summary": "Outputs exist but do not satisfy the business goal.",
+        "open_items": ["choose final production model"],
+        "goal_doubt": False,
+        "goal_met": False,
+    }))
+
+    review = Reviewer(lambda: llm).final_review(
+        _plan(done),
+        {"step-1": {"ok": True}},
+        "finish",
+    )
+
+    assert review.goal_met is False
+    assert review.goal_doubt is False
+    assert review.llm_goal_met is False
+    assert review.open_items == ["choose final production model"]
+
+
+def test_reviewer_final_review_llm_goal_met_false_adds_default_open_item():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = FakeLLM(json.dumps({
+        "summary": "Not done.",
+        "open_items": [],
+        "goal_doubt": False,
+        "goal_met": False,
+    }))
+
+    review = Reviewer(lambda: llm).final_review(_plan(done), {"step-1": {"ok": True}}, "finish")
+
+    assert review.goal_met is False
+    assert review.open_items == ["LLM final review marked goal_met=false"]
+
+
 def test_reviewer_final_review_retries_summary_after_unparseable_reply():
     done = _step([])
     done.status = StepStatus.DONE

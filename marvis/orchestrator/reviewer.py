@@ -31,6 +31,7 @@ class FinalReview:
     summary: str
     open_items: list[str]
     goal_doubt: bool = False
+    llm_goal_met: bool | None = None
 
 
 class Reviewer:
@@ -94,14 +95,17 @@ class Reviewer:
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
         ]
         criteria_failures = _evaluate_success_criteria(plan.success_criteria, outputs)
-        summary, llm_items, goal_doubt = self._llm_summarize(goal, plan, outputs)
+        summary, llm_items, goal_doubt, llm_goal_met = self._llm_summarize(goal, plan, outputs)
         if criteria_failures:
             summary = f"{summary} 成功标准未达成: {'; '.join(criteria_failures)}"
+        if llm_goal_met is False and not llm_items:
+            llm_items = ["LLM final review marked goal_met=false"]
         return FinalReview(
-            goal_met=not incomplete and not criteria_failures and not goal_doubt,
+            goal_met=not incomplete and not criteria_failures and not goal_doubt and llm_goal_met is not False,
             summary=summary,
             open_items=incomplete + criteria_failures + llm_items,
             goal_doubt=goal_doubt,
+            llm_goal_met=llm_goal_met,
         )
 
     def _llm_summarize(
@@ -109,7 +113,7 @@ class Reviewer:
         goal: str,
         plan: Plan,
         outputs: dict[str, dict],
-    ) -> tuple[str, list[str], bool]:
+    ) -> tuple[str, list[str], bool, bool | None]:
         try:
             prompt = json.dumps(
                 {
@@ -133,22 +137,24 @@ class Reviewer:
                     user_prompt=_retry_json_prompt(
                         prompt,
                         raw,
-                        '{"summary": "...", "open_items": [], "goal_doubt": false}',
+                        '{"summary": "...", "open_items": [], "goal_doubt": false, "goal_met": true|false}',
                     ),
                     stream=False,
                 )
                 data, error = load_json_object(raw)
         except Exception:
-            return "Plan execution reviewed.", [], False
+            return "Plan execution reviewed.", [], False, None
         if not isinstance(data, dict) or error is not None:
-            return "Plan execution reviewed.", [], False
+            return "Plan execution reviewed.", [], False, None
         summary = str(data.get("summary") or "Plan execution reviewed.")
         open_items = [
             str(item)
             for item in data.get("open_items") or []
             if isinstance(item, str)
         ]
-        return summary, open_items, bool(data.get("goal_doubt", False))
+        raw_goal_met = data.get("goal_met")
+        llm_goal_met = raw_goal_met if isinstance(raw_goal_met, bool) else None
+        return summary, open_items, bool(data.get("goal_doubt", False)), llm_goal_met
 
 
 def _run_post_check(pc: PostCheck, output: dict, step: PlanStep) -> tuple[bool, str]:

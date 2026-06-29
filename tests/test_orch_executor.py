@@ -280,6 +280,39 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     assert resumed.summary_ref == result.summary_ref
 
 
+def test_plan_executor_fails_when_final_reviewer_marks_goal_unmet(tmp_path):
+    plan = _plan(_step("step-1"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "hi"})])
+    hooks = FakeHooks()
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "summary": "Needs final model selection.",
+                "open_items": ["select production model"],
+                "goal_doubt": False,
+                "goal_met": False,
+            }
+        )
+    )
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    summary = repo.load_plan_summary(result.summary_ref)
+    assert result.status == PlanStatus.FAILED
+    assert loaded.status == PlanStatus.FAILED
+    assert summary["goal_met"] is False
+    assert summary["llm_goal_met"] is False
+    assert summary["open_items"] == ["select production model"]
+    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
+
+
 def test_plan_executor_surfaces_llm_critique_warnings_without_blocking_step(tmp_path):
     plan = _plan(_step("step-1"))
     repo = _repo(tmp_path, plan)
