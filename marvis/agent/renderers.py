@@ -742,6 +742,14 @@ def _render_post_training_action(o: dict):
             o.get("approval_package_markdown_path") or o.get("approval_package_path"),
             "模型审批与交付证据包",
         ])
+    if o.get("monitoring_policy_path"):
+        monitoring = o.get("monitoring_policy") if isinstance(o.get("monitoring_policy"), dict) else {}
+        rows.append([
+            "监控策略",
+            monitoring.get("status") or "succeeded",
+            o.get("monitoring_policy_markdown_path") or o.get("monitoring_policy_path"),
+            monitoring.get("recommendation") or "模型监控阈值策略",
+        ])
     for item in actions:
         action = str(item.get("action") or "")
         status = str(item.get("status") or "")

@@ -255,6 +255,7 @@ function artifactList(delivery) {
     ...(delivery.approval_package_markdown_path && delivery.approval_package_path
       ? [["审批包JSON", delivery.approval_package_path]]
       : []),
+    ["监控策略", delivery.monitoring_policy_markdown_path || delivery.monitoring_policy_path],
     ["Challenger/Backtest", delivery.challenger_task_id],
     ["Challenger/Backtest包", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
     ["PMML", delivery.pmml_path],
@@ -321,9 +322,9 @@ function shortArtifact(value) {
 
 function statusKind(status) {
   const normalized = String(status || "").toLowerCase();
-  if (["succeeded", "ready", "supported"].includes(normalized)) return "ready";
-  if (["skipped", "unsupported", "missing", "partial"].includes(normalized)) return "warning";
-  if (["failed", "error"].includes(normalized)) return "error";
+  if (["succeeded", "ready", "supported", "pass"].includes(normalized)) return "ready";
+  if (["skipped", "unsupported", "missing", "partial", "warn", "needs_policy"].includes(normalized)) return "warning";
+  if (["failed", "error", "fail"].includes(normalized)) return "error";
   return "neutral";
 }
 

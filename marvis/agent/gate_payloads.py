@@ -200,6 +200,13 @@ def build_model_delivery_payload(
         "challenger_package_markdown_path": str(o.get("challenger_package_markdown_path") or ""),
         "approval_package_path": str(o.get("approval_package_path") or ""),
         "approval_package_markdown_path": str(o.get("approval_package_markdown_path") or ""),
+        "monitoring_policy_path": str(o.get("monitoring_policy_path") or ""),
+        "monitoring_policy_markdown_path": str(o.get("monitoring_policy_markdown_path") or ""),
+        "monitoring_policy": (
+            dict(o.get("monitoring_policy"))
+            if isinstance(o.get("monitoring_policy"), dict)
+            else {}
+        ),
         "report": report,
         "readiness": _delivery_readiness(
             o,
@@ -734,6 +741,9 @@ def _delivery_readiness(
     native_path = str(output.get("native_model_path") or "")
     approval_package_path = str(output.get("approval_package_path") or "")
     approval_package_markdown_path = str(output.get("approval_package_markdown_path") or "")
+    monitoring_policy_path = str(output.get("monitoring_policy_path") or "")
+    monitoring_policy_markdown_path = str(output.get("monitoring_policy_markdown_path") or "")
+    monitoring_policy = output.get("monitoring_policy") if isinstance(output.get("monitoring_policy"), dict) else {}
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
     challenger_task_id = str(output.get("challenger_task_id") or "")
@@ -801,6 +811,15 @@ def _delivery_readiness(
             "status": "ready",
             "artifact": approval_package_markdown_path or approval_package_path,
             "reason": "模型审批与交付证据已生成",
+        })
+    if monitoring_policy_path:
+        insert_at = 3 if report is not None and approval_package_path else len(readiness)
+        readiness.insert(insert_at, {
+            "id": "monitoring_policy",
+            "label": "监控策略",
+            "status": str(monitoring_policy.get("status") or "ready"),
+            "artifact": monitoring_policy_markdown_path or monitoring_policy_path,
+            "reason": str(monitoring_policy.get("recommendation") or "监控阈值策略已生成"),
         })
     if isinstance(policy_signals, dict) and policy_signals:
         decision_readiness = _policy_decision_readiness(policy_decision or {})

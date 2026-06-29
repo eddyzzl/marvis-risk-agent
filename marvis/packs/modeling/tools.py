@@ -76,6 +76,89 @@ SUPPORTED_MODELING_RECIPES = frozenset({
 BINARY_MODELING_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
 CONTINUOUS_MODELING_RECIPES = frozenset({"lgb_regressor"})
 MULTICLASS_MODELING_RECIPES = frozenset({"lgb_multiclass"})
+MONITORING_POLICY_VERSION = "model_monitoring_v1"
+DEFAULT_MONITORING_THRESHOLDS = {
+    "psi_test_vs_train": {
+        "label": "Test PSI vs Train",
+        "metric": "psi_test_vs_train",
+        "direction": "max",
+        "warn": 0.10,
+        "fail": 0.25,
+    },
+    "psi_oot_vs_train": {
+        "label": "OOT PSI vs Train",
+        "metric": "psi_oot_vs_train",
+        "direction": "max",
+        "warn": 0.10,
+        "fail": 0.25,
+    },
+    "overfit_train_test_gap": {
+        "label": "Train/Test KS gap",
+        "metric": "overfit_train_test_gap",
+        "direction": "max",
+        "warn": 0.08,
+        "fail": 0.12,
+    },
+    "overfit_train_oot_gap": {
+        "label": "Train/OOT KS gap",
+        "metric": "overfit_train_oot_gap",
+        "direction": "max",
+        "warn": 0.10,
+        "fail": 0.15,
+    },
+    "oot_ks": {
+        "label": "OOT KS",
+        "metric": "oot_ks",
+        "direction": "min",
+        "warn": 0.25,
+        "fail": 0.20,
+    },
+    "oot_auc": {
+        "label": "OOT AUC",
+        "metric": "oot_auc",
+        "direction": "min",
+        "warn": 0.65,
+        "fail": 0.60,
+    },
+    "oot_macro_auc": {
+        "label": "OOT Macro AUC",
+        "metric": "oot_macro_auc",
+        "direction": "min",
+        "warn": 0.65,
+        "fail": 0.60,
+    },
+    "oot_rmse": {
+        "label": "OOT RMSE",
+        "metric": "oot_rmse",
+        "direction": "max",
+        "warn": None,
+        "fail": None,
+    },
+}
+DEFAULT_MONITORING_CHECKS_BY_TARGET = {
+    "binary": (
+        "psi_test_vs_train",
+        "psi_oot_vs_train",
+        "overfit_train_test_gap",
+        "overfit_train_oot_gap",
+        "oot_ks",
+        "oot_auc",
+    ),
+    "continuous": (
+        "psi_test_vs_train",
+        "psi_oot_vs_train",
+        "overfit_train_test_gap",
+        "overfit_train_oot_gap",
+        "oot_rmse",
+    ),
+    "multiclass": (
+        "psi_test_vs_train",
+        "psi_oot_vs_train",
+        "overfit_train_test_gap",
+        "overfit_train_oot_gap",
+        "oot_macro_auc",
+    ),
+}
 
 
 def tool_check_data_quality(inputs: dict, ctx) -> dict:
@@ -1265,6 +1348,12 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
+    monitoring_policy = _monitoring_policy_payload(
+        experiment=experiment,
+        artifact=artifact,
+        source=inputs.get("monitoring_policy"),
+        selection_policy_decision=selection_policy_decision,
+    )
     requested_actions = [
         str(item)
         for item in (
@@ -1318,6 +1407,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 sample_dataset_id=sample_dataset_id,
                 settings=runtime.settings,
                 selection_policy_decision=selection_policy_decision,
+                monitoring_policy=monitoring_policy,
             )
             challenger_task_id = challenger["task_id"]
             challenger_package_path = challenger["package_path"]
@@ -1349,6 +1439,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         challenger_package_path=challenger_package_path,
         challenger_package_markdown_path=challenger_package_markdown_path,
         selection_policy_decision=selection_policy_decision,
+        monitoring_policy=monitoring_policy,
     )
     return {
         "experiment_id": experiment.id,
@@ -1361,6 +1452,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         "challenger_package_markdown_path": challenger_package_markdown_path,
         "approval_package_path": str(approval_package["json_path"]),
         "approval_package_markdown_path": str(approval_package["markdown_path"]),
+        "monitoring_policy_path": str(approval_package["monitoring_policy_path"]),
+        "monitoring_policy_markdown_path": str(approval_package["monitoring_policy_markdown_path"]),
+        "monitoring_policy": monitoring_policy,
         "capabilities": capabilities,
         "actions": actions,
     }
@@ -1389,6 +1483,129 @@ def _approval_policy_decision(value) -> dict:
     }
 
 
+def _monitoring_policy_payload(
+    *,
+    experiment,
+    artifact: ModelArtifact,
+    source,
+    selection_policy_decision: dict,
+) -> dict:
+    source_policy = source if isinstance(source, dict) else {}
+    target_type = str(getattr(experiment.config, "target_type", "binary") or "binary")
+    thresholds = _monitoring_thresholds(source_policy.get("thresholds"), target_type=target_type)
+    baseline_metrics = _json_safe(experiment.metrics) or {}
+    checks = [
+        _monitoring_check_payload(check_id, spec, baseline_metrics)
+        for check_id, spec in thresholds.items()
+    ]
+    overall_status = _monitoring_overall_status(checks)
+    return {
+        "schema_version": 1,
+        "policy_version": str(source_policy.get("policy_version") or MONITORING_POLICY_VERSION),
+        "created_at": datetime.now(UTC).isoformat(),
+        "status": overall_status,
+        "recommendation": _monitoring_recommendation(overall_status),
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "recipe": experiment.recipe_id,
+        "algorithm": artifact.algorithm,
+        "target_type": target_type,
+        "dataset_id": getattr(experiment.config, "dataset_id", ""),
+        "target_col": getattr(experiment.config, "target_col", ""),
+        "split_col": getattr(experiment.config, "split_col", ""),
+        "baseline_metrics": baseline_metrics,
+        "checks": checks,
+        "selection_policy_status": str(selection_policy_decision.get("status") or ""),
+        "review_cadence": str(source_policy.get("review_cadence") or "monthly"),
+        "owner": str(source_policy.get("owner") or "model_risk"),
+        "notes": str(source_policy.get("notes") or ""),
+    }
+
+
+def _monitoring_thresholds(source, *, target_type: str) -> dict:
+    default_keys = DEFAULT_MONITORING_CHECKS_BY_TARGET.get(target_type, DEFAULT_MONITORING_CHECKS_BY_TARGET["binary"])
+    thresholds = {
+        key: dict(DEFAULT_MONITORING_THRESHOLDS[key])
+        for key in default_keys
+        if key in DEFAULT_MONITORING_THRESHOLDS
+    }
+    if not isinstance(source, dict):
+        return thresholds
+    for key, override in source.items():
+        if not isinstance(override, dict):
+            continue
+        normalized_key = str(key)
+        base = thresholds.get(normalized_key, {
+            "label": normalized_key,
+            "metric": normalized_key,
+            "direction": "max",
+            "warn": None,
+            "fail": None,
+        })
+        merged = dict(base)
+        for field in ("label", "metric", "direction", "warn", "fail"):
+            if field in override:
+                merged[field] = override[field]
+        thresholds[normalized_key] = merged
+    return thresholds
+
+
+def _monitoring_check_payload(check_id: str, spec: dict, metrics: dict) -> dict:
+    metric = str(spec.get("metric") or check_id)
+    value = metrics.get(metric)
+    direction = str(spec.get("direction") or "max")
+    warn = _optional_float(spec.get("warn"))
+    fail = _optional_float(spec.get("fail"))
+    status, message = _monitoring_check_status(value, direction=direction, warn=warn, fail=fail)
+    return {
+        "id": str(check_id),
+        "label": str(spec.get("label") or check_id),
+        "metric": metric,
+        "value": value,
+        "direction": direction,
+        "warn": warn,
+        "fail": fail,
+        "status": status,
+        "message": message,
+    }
+
+
+def _monitoring_check_status(value, *, direction: str, warn: float | None, fail: float | None) -> tuple[str, str]:
+    numeric = _optional_float(value)
+    if numeric is None:
+        return "missing", "指标缺失，需在监控任务中补充基线或跳过原因"
+    if warn is None and fail is None:
+        return "needs_policy", "缺少业务阈值，需配置 warn/fail 阈值后纳入自动判断"
+    if direction == "min":
+        if fail is not None and numeric < fail:
+            return "fail", f"{_format_number_token(numeric)} 低于 fail 阈值 {_format_number_token(fail)}"
+        if warn is not None and numeric < warn:
+            return "warn", f"{_format_number_token(numeric)} 低于 warn 阈值 {_format_number_token(warn)}"
+    else:
+        if fail is not None and numeric > fail:
+            return "fail", f"{_format_number_token(numeric)} 高于 fail 阈值 {_format_number_token(fail)}"
+        if warn is not None and numeric > warn:
+            return "warn", f"{_format_number_token(numeric)} 高于 warn 阈值 {_format_number_token(warn)}"
+    return "pass", "基线指标在监控阈值内"
+
+
+def _monitoring_overall_status(checks: list[dict]) -> str:
+    statuses = {str(item.get("status") or "") for item in checks}
+    if "fail" in statuses:
+        return "fail"
+    if statuses & {"warn", "missing", "needs_policy"}:
+        return "warn"
+    return "pass"
+
+
+def _monitoring_recommendation(status: str) -> str:
+    if status == "pass":
+        return "可进入常规监控"
+    if status == "fail":
+        return "需模型风险复核后再交付"
+    return "需补充监控阈值或业务说明"
+
+
 def _write_approval_package(
     base_dir: Path,
     *,
@@ -1403,6 +1620,7 @@ def _write_approval_package(
     challenger_package_path: str,
     challenger_package_markdown_path: str,
     selection_policy_decision: dict,
+    monitoring_policy: dict,
 ) -> dict[str, Path]:
     config = experiment.config
     payload = {
@@ -1424,6 +1642,7 @@ def _write_approval_package(
         "metrics": _json_safe(experiment.metrics),
         "capabilities": _json_safe(capabilities),
         "selection_policy_decision": selection_policy_decision,
+        "monitoring_policy": _json_safe(monitoring_policy),
         "delivery_actions": _json_safe(actions),
         "artifacts": {
             "native_model_path": str(artifact.model_path or ""),
@@ -1440,6 +1659,8 @@ def _write_approval_package(
     uow = ArtifactUnitOfWork()
     json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
     markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.md")
+    monitoring_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.json")
+    monitoring_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.md")
     try:
         json_artifact.path.write_text(
             json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True),
@@ -1449,9 +1670,19 @@ def _write_approval_package(
             _approval_package_markdown(safe_payload),
             encoding="utf-8",
         )
+        monitoring_json_artifact.path.write_text(
+            json.dumps(safe_payload["monitoring_policy"], ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        monitoring_markdown_artifact.path.write_text(
+            _monitoring_policy_markdown(safe_payload["monitoring_policy"]),
+            encoding="utf-8",
+        )
         return uow.finalize(lambda: {
             "json_path": json_artifact.final_path,
             "markdown_path": markdown_artifact.final_path,
+            "monitoring_policy_path": monitoring_json_artifact.final_path,
+            "monitoring_policy_markdown_path": monitoring_markdown_artifact.final_path,
         })
     except Exception:
         uow.rollback()
@@ -1467,6 +1698,7 @@ def _approval_package_markdown(payload: dict) -> str:
     )
     artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
     actions = [item for item in (payload.get("delivery_actions") or []) if isinstance(item, dict)]
+    monitoring = payload.get("monitoring_policy") if isinstance(payload.get("monitoring_policy"), dict) else {}
     features = [str(item) for item in (payload.get("features") or []) if str(item)]
     violations = [item for item in (policy.get("violations") or []) if isinstance(item, dict)]
     lines = [
@@ -1510,6 +1742,29 @@ def _approval_package_markdown(payload: dict) -> str:
             lines.append(
                 f"| {_md_cell(item.get('code') or '-')} | {_md_cell(item.get('message') or '-')} |"
             )
+    if monitoring:
+        lines.extend([
+            "",
+            "## 监控策略",
+            "",
+            f"- 版本: `{_md_inline(monitoring.get('policy_version'))}`",
+            f"- 状态: `{_md_inline(monitoring.get('status'))}`",
+            f"- 建议: {_md_inline(monitoring.get('recommendation') or '-')}",
+        ])
+        monitor_checks = [
+            item for item in (monitoring.get("checks") or [])
+            if isinstance(item, dict)
+        ][:8]
+        if monitor_checks:
+            lines.extend(["", "| 检查项 | 状态 | 当前值 | 阈值 |", "| --- | --- | ---: | --- |"])
+            for item in monitor_checks:
+                threshold = _monitoring_threshold_display(item)
+                lines.append(
+                    f"| {_md_cell(item.get('label') or item.get('id') or '-')} | "
+                    f"{_md_cell(item.get('status') or '-')} | "
+                    f"{_md_cell(_metric_display(item.get('value')))} | "
+                    f"{_md_cell(threshold)} |"
+                )
     lines.extend([
         "",
         "## 交付产物",
@@ -1540,6 +1795,59 @@ def _approval_package_markdown(payload: dict) -> str:
     else:
         lines.append("- -")
     return "\n".join(lines) + "\n"
+
+
+def _monitoring_policy_markdown(policy: dict) -> str:
+    checks = [item for item in (policy.get("checks") or []) if isinstance(item, dict)]
+    lines = [
+        "# 模型监控策略",
+        "",
+        "## 基本信息",
+        "",
+        f"- 策略版本: `{_md_inline(policy.get('policy_version'))}`",
+        f"- 状态: `{_md_inline(policy.get('status'))}`",
+        f"- 建议: {_md_inline(policy.get('recommendation') or '-')}",
+        f"- 实验ID: `{_md_inline(policy.get('experiment_id'))}`",
+        f"- 产物ID: `{_md_inline(policy.get('artifact_id'))}`",
+        f"- 目标类型: `{_md_inline(policy.get('target_type'))}`",
+        f"- 复核频率: `{_md_inline(policy.get('review_cadence'))}`",
+        f"- Owner: `{_md_inline(policy.get('owner'))}`",
+        "",
+        "## 阈值检查",
+        "",
+        "| 检查项 | 指标 | 状态 | 当前值 | 阈值 | 说明 |",
+        "| --- | --- | --- | ---: | --- | --- |",
+    ]
+    if checks:
+        for item in checks:
+            lines.append(
+                f"| {_md_cell(item.get('label') or item.get('id') or '-')} | "
+                f"{_md_cell(item.get('metric') or '-')} | "
+                f"{_md_cell(item.get('status') or '-')} | "
+                f"{_md_cell(_metric_display(item.get('value')))} | "
+                f"{_md_cell(_monitoring_threshold_display(item))} | "
+                f"{_md_cell(item.get('message') or '-')} |"
+            )
+    else:
+        lines.append("| - | - | - | - | - | - |")
+    if policy.get("notes"):
+        lines.extend(["", "## 备注", "", str(policy.get("notes"))])
+    return "\n".join(lines) + "\n"
+
+
+def _monitoring_threshold_display(item: dict) -> str:
+    direction = str(item.get("direction") or "max")
+    warn = item.get("warn")
+    fail = item.get("fail")
+    prefix = "<=" if direction != "min" else ">="
+    if warn is None and fail is None:
+        return "需配置"
+    parts = []
+    if warn is not None:
+        parts.append(f"warn {prefix} {_metric_display(warn)}")
+    if fail is not None:
+        parts.append(f"fail {prefix} {_metric_display(fail)}")
+    return "; ".join(parts)
 
 
 def _metric_display(value) -> str:

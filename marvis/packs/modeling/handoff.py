@@ -142,6 +142,7 @@ def create_challenger_backtest_task(
     sample_dataset_id: str,
     settings,
     selection_policy_decision: dict | None = None,
+    monitoring_policy: dict | None = None,
 ) -> dict[str, str]:
     if not artifact.experiment_id:
         raise ModelingError("artifact experiment_id is required for challenger/backtest task")
@@ -191,6 +192,7 @@ def create_challenger_backtest_task(
         sample_material_name=sample_material_name,
         model_material_name=model_material_name,
         selection_policy_decision=selection_policy_decision or {},
+        monitoring_policy=monitoring_policy or {},
     )
     (staged_materials.path / CHALLENGER_BACKTEST_PLAN_JSON).write_text(
         json.dumps(plan_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
@@ -393,6 +395,7 @@ def _challenger_backtest_payload(
     sample_material_name: str,
     model_material_name: str,
     selection_policy_decision: dict,
+    monitoring_policy: dict,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -413,6 +416,7 @@ def _challenger_backtest_payload(
         "feature_count": len(artifact.feature_list),
         "metrics": asdict(experiment.metrics) if experiment.metrics else {},
         "selection_policy_decision": selection_policy_decision,
+        "monitoring_policy": monitoring_policy,
         "materials": {
             "sample_path": sample_material_name,
             "native_model_path": model_material_name,
@@ -460,6 +464,16 @@ def _challenger_backtest_markdown(payload: dict[str, Any]) -> str:
     ])
     for item in payload.get("recommended_checks") or []:
         lines.append(f"- {item}")
+    monitoring = payload.get("monitoring_policy") if isinstance(payload.get("monitoring_policy"), dict) else {}
+    if monitoring:
+        lines.extend([
+            "",
+            "## 监控策略",
+            "",
+            f"- 策略版本: `{_md_value(monitoring.get('policy_version'))}`",
+            f"- 状态: `{_md_value(monitoring.get('status'))}`",
+            f"- 建议: {_md_value(monitoring.get('recommendation'))}",
+        ])
     lines.extend(["", "## 物料", ""])
     materials = payload.get("materials") if isinstance(payload.get("materials"), dict) else {}
     for key, value in materials.items():

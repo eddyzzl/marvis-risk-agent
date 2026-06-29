@@ -767,6 +767,14 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
             "challenger_package_markdown_path": "/tmp/challenger_backtest_plan.md",
             "approval_package_path": "/tmp/art-lgb.approval_package.json",
             "approval_package_markdown_path": "/tmp/art-lgb.approval_package.md",
+            "monitoring_policy_path": "/tmp/art-lgb.monitoring_policy.json",
+            "monitoring_policy_markdown_path": "/tmp/art-lgb.monitoring_policy.md",
+            "monitoring_policy": {
+                "schema_version": 1,
+                "policy_version": "model_monitoring_v1",
+                "status": "pass",
+                "recommendation": "可进入常规监控",
+            },
             "capabilities": {
                 "pmml_supported": True,
                 "handoff_supported": True,
@@ -804,6 +812,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["challenger_package_markdown_path"] == "/tmp/challenger_backtest_plan.md"
     assert delivery["approval_package_path"] == "/tmp/art-lgb.approval_package.json"
     assert delivery["approval_package_markdown_path"] == "/tmp/art-lgb.approval_package.md"
+    assert delivery["monitoring_policy_path"] == "/tmp/art-lgb.monitoring_policy.json"
+    assert delivery["monitoring_policy_markdown_path"] == "/tmp/art-lgb.monitoring_policy.md"
+    assert delivery["monitoring_policy"]["status"] == "pass"
     assert delivery["report"]["status"] == "ready"
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
@@ -812,6 +823,7 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
         "ready",
         "ready",
         "ready",
+        "pass",
         "succeeded",
         "succeeded",
         "succeeded",
@@ -819,8 +831,10 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     ]
     assert delivery["readiness"][2]["id"] == "approval_package"
     assert delivery["readiness"][2]["artifact"] == "/tmp/art-lgb.approval_package.md"
-    assert delivery["readiness"][5]["id"] == "challenger_backtest"
-    assert delivery["readiness"][5]["artifact"] == "task-challenger"
+    assert delivery["readiness"][3]["id"] == "monitoring_policy"
+    assert delivery["readiness"][3]["artifact"] == "/tmp/art-lgb.monitoring_policy.md"
+    assert delivery["readiness"][6]["id"] == "challenger_backtest"
+    assert delivery["readiness"][6]["artifact"] == "task-challenger"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
     assert delivery["policy_signals"]["approval"] == "建议可审批"
 
@@ -1455,6 +1469,9 @@ def test_render_registry_has_modeling_renderers_and_generic_fallback():
         "post_training_action",
         {
             "native_model_path": "/tmp/model.pkl",
+            "monitoring_policy_path": "/tmp/model.monitoring_policy.json",
+            "monitoring_policy_markdown_path": "/tmp/model.monitoring_policy.md",
+            "monitoring_policy": {"status": "warn", "recommendation": "需补充监控阈值"},
             "capabilities": {"pmml_supported": False, "handoff_supported": False, "native_model_supported": True, "reason": "CatBoost 不支持 PMML"},
             "actions": [
                 {"action": "export_pmml", "status": "skipped", "reason": "CatBoost 不支持 PMML"},
@@ -1471,6 +1488,7 @@ def test_render_registry_has_modeling_renderers_and_generic_fallback():
     assert delivery_tables[0]["title"] == "训练后交付状态"
     assert any("CatBoost 不支持 PMML" in row for row in delivery_tables[0]["rows"])
     assert any("PMML-capable model is required" in row for row in delivery_tables[0]["rows"])
+    assert any("监控策略" in row for row in delivery_tables[0]["rows"])
     strategy_text, strategy_tables = render_tool_output(
         "build_strategy",
         {

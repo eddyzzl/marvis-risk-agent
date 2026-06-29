@@ -144,10 +144,14 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "model_id" in report_tool.input_schema["properties"]
     assert "llm" in report_tool.side_effects
     assert "selection_policy_decision" in post_training_tool.input_schema["properties"]
+    assert "monitoring_policy" in post_training_tool.input_schema["properties"]
     assert "challenger_task_id" in post_training_tool.output_schema["required"]
     assert "challenger_package_markdown_path" in post_training_tool.output_schema["required"]
     assert "approval_package_path" in post_training_tool.output_schema["required"]
     assert "approval_package_markdown_path" in post_training_tool.output_schema["required"]
+    assert "monitoring_policy_path" in post_training_tool.output_schema["required"]
+    assert "monitoring_policy_markdown_path" in post_training_tool.output_schema["required"]
+    assert "monitoring_policy" in post_training_tool.output_schema["required"]
 
 
 def test_modeling_tool_seed_fallback_uses_shared_default():
@@ -961,6 +965,10 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "sample_dataset_id": prepared.output["result_dataset_id"],
             "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
             "selection_policy_decision": overridden.output["policy_decision"],
+            "monitoring_policy": {
+                "owner": "model_governance",
+                "thresholds": {"oot_ks": {"warn": 100.0, "fail": 99.0}},
+            },
         },
         task_id=task.id,
     )
@@ -970,6 +978,23 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert {item["status"] for item in post_training.output["actions"]} == {"skipped"}
     assert post_training.output["challenger_task_id"] == ""
     assert post_training.output["challenger_package_markdown_path"] == ""
+    assert post_training.output["monitoring_policy"]["owner"] == "model_governance"
+    assert post_training.output["monitoring_policy"]["schema_version"] == 1
+    assert post_training.output["monitoring_policy"]["policy_version"] == "model_monitoring_v1"
+    assert {item["metric"] for item in post_training.output["monitoring_policy"]["checks"]} >= {
+        "oot_ks",
+        "psi_oot_vs_train",
+    }
+    assert "oot_rmse" not in {
+        item["metric"] for item in post_training.output["monitoring_policy"]["checks"]
+    }
+    monitoring_policy = Path(post_training.output["monitoring_policy_path"])
+    monitoring_markdown = Path(post_training.output["monitoring_policy_markdown_path"])
+    assert monitoring_policy.exists()
+    assert monitoring_markdown.exists()
+    monitoring_payload = json.loads(monitoring_policy.read_text(encoding="utf-8"))
+    assert monitoring_payload["owner"] == "model_governance"
+    assert "# 模型监控策略" in monitoring_markdown.read_text(encoding="utf-8")
     approval_package = Path(post_training.output["approval_package_path"])
     assert approval_package.exists()
     approval_payload = json.loads(approval_package.read_text(encoding="utf-8"))
@@ -978,6 +1003,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert approval_payload["artifact_id"] == artifacts["catboost"].id
     assert approval_payload["selection_policy_decision"]["status"] == "overridden"
     assert approval_payload["selection_policy_decision"]["override_reason"].startswith("业务方本轮只验收")
+    assert approval_payload["monitoring_policy"]["owner"] == "model_governance"
     assert {item["status"] for item in approval_payload["delivery_actions"]} == {"skipped"}
     assert approval_payload["artifacts"]["challenger_task_id"] == ""
     assert approval_payload["feature_count"] == 2
@@ -988,6 +1014,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "业务方本轮只验收" in markdown_text
     assert "require_pmml" in markdown_text
     assert "Challenger/Backtest任务" in markdown_text
+    assert "## 监控策略" in markdown_text
     assert "## 入模特征" in markdown_text
 
 

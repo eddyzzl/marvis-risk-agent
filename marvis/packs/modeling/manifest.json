@@ -1615,7 +1615,7 @@
     },
     {
       "name": "post_training_action",
-      "summary": "Finalize a selected modeling experiment with an approval package, native artifact status, optional PMML export, and optional validation handoff.",
+      "summary": "Finalize a selected modeling experiment with approval and monitoring packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1639,6 +1639,9 @@
             }
           },
           "selection_policy_decision": {
+            "type": "object"
+          },
+          "monitoring_policy": {
             "type": "object"
           }
         },
@@ -1680,6 +1683,15 @@
           "approval_package_markdown_path": {
             "type": "string"
           },
+          "monitoring_policy_path": {
+            "type": "string"
+          },
+          "monitoring_policy_markdown_path": {
+            "type": "string"
+          },
+          "monitoring_policy": {
+            "type": "object"
+          },
           "capabilities": {
             "type": "object"
           },
@@ -1696,6 +1708,9 @@
           "challenger_package_markdown_path",
           "approval_package_path",
           "approval_package_markdown_path",
+          "monitoring_policy_path",
+          "monitoring_policy_markdown_path",
+          "monitoring_policy",
           "capabilities",
           "actions"
         ],
