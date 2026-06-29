@@ -20,12 +20,20 @@ from typing import Any
 from marvis.agent.gates import DEFAULT_GATE_ACTIONS, extract_gate_envelope
 from marvis.agent.json_reply import load_json_object
 
+AUTO_SAFE_ADJUST_CONTROLS = frozenset({
+    "dedup_strategies",
+    "leakage_ks",
+    "max_missing_rate",
+    "sample_weight_col",
+    "selection",
+})
+
 _SYSTEM_TEMPLATE = (
     "你是信贷风控建模 Agent,正在自动执行一个分步计划。每到一个需要确认的节点,"
     "你会看到刚刚算出的结果(可能含表格)。请只在当前节点声明允许的动作内决策。\n"
     "允许动作:{allowed_actions}\n"
     "- confirm: 结果正常,继续下一步;\n"
-    "- adjust: 仅在当前节点允许且参数/选择可安全调整时使用,必须返回 params/selection/dedup_strategies;\n"
+    "- adjust: 仅在当前节点允许且低风险控件可安全调整时使用,必须返回 params/selection/dedup_strategies;\n"
     "- replan: 当前计划结构需要改变时使用,必须返回 replan_goal;\n"
     "- clarify: 需要用户补充一个明确问题时使用,必须返回 clarifying_question;\n"
     "- halt: 结果异常或动作超出权限,停下来请人工核对。\n"
@@ -259,6 +267,16 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
             return _policy_halt("AUTO 试图调整特征选择,但当前节点没有声明 selection 控件。")
         if decision.get("dedup_strategies") and "dedup_strategies" not in allowed_controls:
             return _policy_halt("AUTO 试图设置去重策略,但当前节点没有声明 dedup_strategies 控件。")
+        requested_controls = set(str(key) for key in params)
+        if decision.get("selection"):
+            requested_controls.add("selection")
+        if decision.get("dedup_strategies"):
+            requested_controls.add("dedup_strategies")
+        unsafe_controls = sorted(control for control in requested_controls if control not in AUTO_SAFE_ADJUST_CONTROLS)
+        if unsafe_controls:
+            return _policy_halt(
+                f"AUTO 请求了需人工确认的高风险控件:{', '.join(unsafe_controls)}。"
+            )
     if action == "replan" and not str(decision.get("replan_goal") or "").strip():
         return _policy_halt("AUTO 请求重规划但没有提供明确 replan_goal。")
     return decision

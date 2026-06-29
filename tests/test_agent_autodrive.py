@@ -358,6 +358,60 @@ def test_decide_gate_blocks_undeclared_auto_adjust_params():
     assert "未声明的调整参数:n_trials" in decision["reason"]
 
 
+def test_decide_gate_blocks_declared_expensive_tuning_adjustment():
+    fake = _FakeLLM(action="adjust", reason="扩大调参")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "扩大调参",
+        "params": {"n_trials": 200},
+    })
+    gate = {
+        "content": "调参配置已生成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "gate",
+                "target_step_id": "gate-tune",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [
+                    {"id": "n_trials", "kind": "number", "bounds": {"min": 1, "max": 200}},
+                ],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "高风险控件:n_trials" in decision["reason"]
+
+
+def test_decide_gate_blocks_declared_delivery_action_adjustment():
+    fake = _FakeLLM(action="adjust", reason="移交验证")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "移交验证",
+        "params": {"post_training_action": "handoff_to_validation"},
+    })
+    gate = {
+        "content": "请选择训练后动作",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "gate",
+                "target_step_id": "post-training",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [
+                    {"id": "post_training_action", "kind": "select"},
+                ],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "高风险控件:post_training_action" in decision["reason"]
+
+
 def test_decide_gate_passes_table_context_to_llm():
     fake = _FakeLLM()
     gate = {"content": "拼接诊断完成", "metadata": {"tables": [
