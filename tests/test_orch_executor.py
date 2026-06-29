@@ -15,7 +15,7 @@ from marvis.orchestrator.contracts import (
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.reviewer import Reviewer
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
 from marvis.plugins.runner import ToolResult
 
 
@@ -35,6 +35,37 @@ class FakeTools:
 
     def resolve(self, ref):
         return SimpleNamespace(failure_policy=self.policies.get(ref.tool, "fail"))
+
+
+class FakeManifestTools:
+    def __init__(self):
+        self.tool = ToolSpec(
+            name="echo",
+            summary="Echo",
+            input_schema={"type": "object"},
+            output_schema={"type": "object"},
+            determinism="deterministic",
+            timeout_seconds=5,
+            failure_policy="fail",
+            side_effects=(),
+            entrypoint="echo",
+        )
+        self.manifest = PluginManifest(
+            name="_sample",
+            version="1.2.3",
+            display_name="Sample",
+            description="",
+            module="sample",
+            python_requires="",
+            tools=(self.tool,),
+            builtin=True,
+        )
+
+    def resolve(self, ref):
+        return self.tool
+
+    def resolve_with_manifest(self, ref):
+        return self.manifest, self.tool
 
 
 class FakeRunner:
@@ -244,6 +275,37 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert evidence["input_hash"].startswith("sha256:")
     assert evidence["input_summary"] == {"message": "hi"}
     assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
+
+
+def test_plan_executor_evidence_records_tool_manifest_and_artifacts(tmp_path):
+    plan = _plan(
+        _step(
+            "step-1",
+            inputs={"dataset_id": "raw-1", "seed": 7},
+        ),
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([
+        _ok({
+            "artifact_ref": "artifact:models/model.pkl",
+            "report_path": "reports/model.xlsx",
+        })
+    ])
+    runner._tools = FakeManifestTools()
+
+    result = _executor(repo, runner).run("plan-1")
+
+    assert result.status == PlanStatus.DONE
+    evidence = repo.load_step_evidence("step-1")
+    assert evidence["tool_name"] == "_sample.echo"
+    assert evidence["tool_version"] == "1.2.3"
+    assert evidence["manifest_hash"].startswith("sha256:")
+    assert evidence["source_dataset_refs"] == ["dataset:raw-1"]
+    assert evidence["artifact_refs"] == [
+        "artifact:models/model.pkl",
+        "artifact:reports/model.xlsx",
+    ]
+    assert evidence["random_seed"] == 7
 
 
 def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):

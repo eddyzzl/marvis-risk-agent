@@ -43,10 +43,12 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_frontend_shell_static.py::test_unselected_workspace_shows_centered_welcome_only tests/test_frontend_screen_table.py tests/test_frontend_static_v2.py::test_frontend_uses_v2_task_actions_only`: `15 passed` after adding semantic visual tokens and extracting theme handling to `static/js/theme.js`.
   - `tests/test_db.py tests/test_orch_db.py tests/test_plugin_db.py tests/test_modeling_db.py tests/test_strategy_db.py tests/test_drafts_db.py`: `72 passed` after extracting schema/connection setup into `marvis/db_schema.py`.
   - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py`: `35 passed` after enriching failure envelopes with editable input defaults and explicit downstream reset step ids.
+  - `tests/test_orch_executor.py tests/test_orch_db.py`: `44 passed` after adding tool version, manifest hash, source dataset refs, and artifact refs to persisted step evidence.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the failure-envelope retry contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the evidence lineage update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
 
 ## Executive Summary
@@ -84,6 +86,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Screen gates now explicitly declare a `selection` control, so AUTO can safely return feature selections only at gates that expose that control.
   - Draft code safety scanning now includes AST checks for dangerous imports and file APIs such as `Path.read_text()`, closing a previously noted draft sandbox escape before subprocess execution.
   - Failure messages now carry a richer `FailureEnvelope`: retryability, editable input JSON schema with current defaults, stale token, and the exact failed/downstream steps that a retry will reset.
+  - Step evidence now records tool version, manifest hash, source dataset refs, artifact refs, input hash/summary, parent output refs, seed, and renderer hint in one persisted envelope.
 
 Items confirmed still not complete and therefore still part of the plan:
 
@@ -105,7 +108,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
-| 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash and parent refs; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. Tool manifest hash and richer artifact lineage still need expansion. | Add manifest hash and richer artifact refs to evidence; add a deeper DB+file `UnitOfWork`. |
+| 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash, parent refs, source dataset refs, artifact refs, tool version, manifest hash, seed, and renderer hint; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. | Add a deeper DB+file `UnitOfWork` and keep expanding domain-specific lineage where tools expose richer refs. |
 | 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the first modeling gate renders detected candidates and posts a structured `sample_weight_col` adjust that reruns `choose_modeling_spec` and downstream screening. | Add richer data-quality diagnostics for weight positivity/missingness and expose the same decision in the future extracted `ModelingSetupPanel`. |
 | 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`, and task/welcome tones use semantic tokens. `app.js` still owns create dialog, rail, transcript, and driver gates. | Extract `CreateTaskDialog`, `PlanRailController`, `DriverConversationView`, `TaskWorkspace`. |
 | 9 | PMML manifest contract | Done | Manifest now advertises `lr/lgb/xgb/scorecard`, matching current PMML-supported list. | Keep regression test. |

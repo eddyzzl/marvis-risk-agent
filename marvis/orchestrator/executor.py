@@ -17,6 +17,7 @@ from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.reviewer import FinalReview
 from marvis.orchestrator.safety import is_safety_step
+from marvis.plugins.manifest import manifest_to_dict
 from marvis.plugins.runner import ToolResult
 
 
@@ -173,7 +174,7 @@ class PlanExecutor:
             step.output_ref = self._repo.store_step_output(
                 step.id,
                 output,
-                evidence=self._step_evidence(step, resolved_inputs),
+                evidence=self._step_evidence(step, resolved_inputs, output),
             )
             self._finish_step_run(
                 run_id,
@@ -218,12 +219,17 @@ class PlanExecutor:
     def _finish_step_run(self, run_id: str, **kwargs) -> None:
         self._repo.finish_step_run(run_id, **kwargs)
 
-    def _step_evidence(self, step: PlanStep, resolved_inputs: dict) -> dict:
+    def _step_evidence(self, step: PlanStep, resolved_inputs: dict, output: dict) -> dict:
         seed = resolved_inputs.get("seed")
+        tool_version, manifest_hash = _tool_manifest_details(getattr(self._runner, "_tools", None), step.tool_ref)
         return {
             "tool_name": step.tool_ref.label(),
+            "tool_version": tool_version,
+            "manifest_hash": manifest_hash,
             "input_hash": _payload_hash(resolved_inputs),
             "input_summary": _bounded_input_summary(resolved_inputs),
+            "source_dataset_refs": _dataset_refs(resolved_inputs),
+            "artifact_refs": _artifact_refs(output),
             "parent_output_refs": _parent_output_refs(self._repo, step),
             "random_seed": seed if isinstance(seed, int) else None,
             "renderer_hint": step.tool_ref.tool,
@@ -734,6 +740,79 @@ def _bounded_input_summary(payload: dict) -> dict:
         else:
             summary[key] = {"type": type(value).__name__}
     return summary
+
+
+def _tool_manifest_details(registry, ref) -> tuple[str | None, str | None]:
+    if registry is None or not hasattr(registry, "resolve_with_manifest"):
+        return ref.version or None, None
+    try:
+        manifest, _tool = registry.resolve_with_manifest(ref)
+    except Exception:
+        return ref.version or None, None
+    version = str(getattr(manifest, "version", "") or ref.version or "").strip() or None
+    checksum = str(getattr(manifest, "checksum", "") or "").strip()
+    if checksum:
+        manifest_hash = checksum if checksum.startswith("sha256:") else f"sha256:{checksum}"
+    else:
+        manifest_hash = _payload_hash(manifest_to_dict(manifest))
+    return version, manifest_hash
+
+
+def _dataset_refs(payload: Any) -> list[str]:
+    refs: list[str] = []
+
+    def visit(value: Any, key: str = "") -> None:
+        normalized = key.lower()
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                visit(child_value, str(child_key))
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, key)
+            return
+        if not isinstance(value, str) or not value.strip():
+            return
+        text = value.strip()
+        if text.startswith("dataset:"):
+            _append_unique(refs, text)
+        elif normalized.endswith("dataset_id") or normalized.endswith("dataset_ids"):
+            _append_unique(refs, f"dataset:{text}")
+
+    visit(payload)
+    return refs
+
+
+def _artifact_refs(payload: Any) -> list[str]:
+    refs: list[str] = []
+
+    def visit(value: Any, key: str = "") -> None:
+        normalized = key.lower()
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                visit(child_value, str(child_key))
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, key)
+            return
+        if not isinstance(value, str) or not value.strip():
+            return
+        text = value.strip()
+        if text.startswith("artifact:"):
+            _append_unique(refs, text)
+        elif normalized == "path" or normalized.endswith("_path"):
+            _append_unique(refs, f"artifact:{text}")
+        elif normalized.endswith("artifact_id") or normalized.endswith("artifact_ref"):
+            _append_unique(refs, f"artifact:{text}")
+
+    visit(payload)
+    return refs
+
+
+def _append_unique(values: list[str], item: str) -> None:
+    if item not in values:
+        values.append(item)
 
 
 def _parent_output_refs(repo, step: PlanStep) -> list[str]:
