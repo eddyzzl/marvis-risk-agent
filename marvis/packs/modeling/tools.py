@@ -689,15 +689,9 @@ def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     compared = runtime.experiments.compare([str(item) for item in inputs["experiment_ids"]])
-    for row in compared.get("experiments", []):
-        artifact_id = row.get("artifact_id") if isinstance(row, dict) else None
-        artifact = runtime.modeling_repo.get_model_artifact(str(artifact_id)) if artifact_id else None
-        if artifact is not None:
-            experiment = runtime.experiments.get(artifact.experiment_id)
-            row["capabilities"] = _artifact_capabilities(
-                artifact,
-                base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
-            )
+    rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
+    _attach_capabilities_to_comparison_rows(runtime, rows)
+    _attach_policy_profile_to_comparison_rows(runtime, rows)
     return _jsonable(compared)
 
 
@@ -712,6 +706,8 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
+    _attach_policy_profile_to_comparison_rows(runtime, rows)
+    selection_policy = _normalize_selection_policy(inputs.get("selection_policy"))
     selected_id = str(inputs.get("selected_experiment_id") or "").strip()
     if selected_id:
         selected = next((row for row in rows if row.get("id") == selected_id), None)
@@ -719,10 +715,23 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
             raise ModelingError(f"selected_experiment_id is not in candidates: {selected_id}")
         selection_metric = str(inputs.get("selection_metric") or "manual")
         selection_reason = "用户指定实验。"
+        policy_decision = _selection_policy_decision(selected, selection_policy, explicit=True)
+        if policy_decision["status"] == "blocked":
+            raise ModelingError(_selection_policy_block_message(selected_id, policy_decision))
     else:
-        selected, selection_metric = _pick_best_comparison_row(rows, target_type=target_type)
+        selected, selection_metric, policy_decision = _pick_best_comparison_row_with_policy(
+            rows,
+            target_type=target_type,
+            policy=selection_policy,
+        )
         selected_id = str(selected.get("id") or "")
-        if _delivery_ready(selected):
+        if _selection_policy_requested(selection_policy) and policy_decision["status"] == "accepted":
+            selection_reason = f"按 {selection_metric} 在满足交付/审批策略的候选中自动选择。"
+            if policy_decision.get("selected_by_preference"):
+                selection_reason = f"按 {selection_metric} 在评分卡优先候选中自动选择。"
+        elif _selection_policy_requested(selection_policy) and policy_decision["status"] == "overridden":
+            selection_reason = f"按 {selection_metric} 自动选择;未满足全部交付/审批策略,已按 override_reason 放行。"
+        elif _delivery_ready(selected):
             selection_reason = f"按 {selection_metric} 在 PMML/验证移交可用候选中自动选择。"
         else:
             selection_reason = f"按 {selection_metric} 自动选择。"
@@ -744,8 +753,50 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "selection_reason": selection_reason,
         "metrics": {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None},
         "capabilities": capabilities,
+        "policy_profile": selected.get("policy_profile") or {},
+        "policy_decision": policy_decision,
+        "scorecard_table": selected.get("scorecard_table") or [],
+        "model_params": selected.get("model_params") or {},
         "experiments": rows,
     }
+
+
+def _pick_best_comparison_row_with_policy(
+    rows: list[dict],
+    *,
+    target_type: str,
+    policy: dict,
+) -> tuple[dict, str, dict]:
+    if not _selection_policy_requested(policy):
+        selected, metric = _pick_best_comparison_row(rows, target_type=target_type)
+        return selected, metric, _selection_policy_decision(selected, policy, explicit=False)
+
+    compliant = [row for row in rows if not _selection_policy_violations(row, policy)]
+    if compliant:
+        candidates = compliant
+    elif _selection_policy_has_hard_requirements(policy) and not policy.get("allow_policy_override"):
+        raise ModelingError(_no_policy_candidate_message(rows, policy))
+    else:
+        candidates = rows
+
+    selected_by_preference = False
+    if policy.get("prefer_scorecard"):
+        scorecard_candidates = [
+            row for row in candidates
+            if _row_policy_profile(row).get("scorecard")
+        ]
+        if scorecard_candidates:
+            candidates = scorecard_candidates
+            selected_by_preference = True
+
+    selected, metric = _pick_best_comparison_row(candidates, target_type=target_type)
+    decision = _selection_policy_decision(selected, policy, explicit=False)
+    decision["evaluated_candidates"] = len(rows)
+    decision["policy_candidate_count"] = len(compliant)
+    decision["selected_by_preference"] = selected_by_preference
+    if decision["status"] == "blocked":
+        raise ModelingError(_selection_policy_block_message(str(selected.get("id") or ""), decision))
+    return selected, metric, decision
 
 
 def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
@@ -780,9 +831,249 @@ def _attach_capabilities_to_comparison_rows(runtime: _Runtime, rows: list[dict])
         )
 
 
+def _attach_policy_profile_to_comparison_rows(runtime: _Runtime, rows: list[dict]) -> None:
+    for row in rows:
+        artifact_id = row.get("artifact_id")
+        if not artifact_id:
+            row["policy_profile"] = _row_policy_profile(row)
+            continue
+        artifact = runtime.modeling_repo.get_model_artifact(str(artifact_id))
+        if artifact is None:
+            row["policy_profile"] = _row_policy_profile(row)
+            continue
+        row["feature_count"] = len(artifact.feature_list)
+        row["feature_list"] = list(artifact.feature_list)
+        row["model_params"] = dict(artifact.params or {})
+        row["scorecard_table"] = _scorecard_table_rows(artifact)
+        row["policy_profile"] = _row_policy_profile(row)
+
+
 def _delivery_ready(row: dict) -> bool:
     caps = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
     return bool(caps.get("pmml_supported") and caps.get("handoff_supported"))
+
+
+def _normalize_selection_policy(raw) -> dict:
+    source = raw if isinstance(raw, dict) else {}
+    policy = {
+        "require_pmml": _policy_bool(source.get("require_pmml")),
+        "require_handoff": _policy_bool(source.get("require_handoff")),
+        "require_scorecard": _policy_bool(source.get("require_scorecard")),
+        "require_monotonicity": _policy_bool(source.get("require_monotonicity")),
+        "prefer_scorecard": _policy_bool(source.get("prefer_scorecard")),
+        "allow_policy_override": _policy_bool(source.get("allow_policy_override")),
+        "override_reason": str(source.get("override_reason") or "").strip(),
+    }
+    max_feature_count = _positive_int_or_none(source.get("max_feature_count"))
+    if max_feature_count is not None:
+        policy["max_feature_count"] = max_feature_count
+    max_oot_psi = _nonnegative_float_or_none(source.get("max_oot_psi"))
+    if max_oot_psi is not None:
+        policy["max_oot_psi"] = max_oot_psi
+    return policy
+
+
+def _policy_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _selection_policy_requested(policy: dict) -> bool:
+    return any(
+        bool(policy.get(key))
+        for key in (
+            "require_pmml",
+            "require_handoff",
+            "require_scorecard",
+            "require_monotonicity",
+            "prefer_scorecard",
+        )
+    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None
+
+
+def _selection_policy_has_hard_requirements(policy: dict) -> bool:
+    return any(
+        bool(policy.get(key))
+        for key in (
+            "require_pmml",
+            "require_handoff",
+            "require_scorecard",
+            "require_monotonicity",
+        )
+    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None
+
+
+def _selection_policy_decision(row: dict, policy: dict, *, explicit: bool) -> dict:
+    profile = _row_policy_profile(row)
+    requested = _selection_policy_requested(policy)
+    violations = _selection_policy_violations(row, policy)
+    missing_override_reason = bool(violations and policy.get("allow_policy_override") and not policy.get("override_reason"))
+    if missing_override_reason:
+        violations = [
+            *violations,
+            {
+                "code": "override_reason_required",
+                "message": "策略 override 必须填写 override_reason。",
+            },
+        ]
+    if not requested:
+        status = "not_requested"
+    elif violations and policy.get("allow_policy_override") and not missing_override_reason:
+        status = "overridden"
+    elif violations:
+        status = "blocked"
+    else:
+        status = "accepted"
+    return {
+        "status": status,
+        "explicit_selection": bool(explicit),
+        "selected_experiment_id": str(row.get("id") or ""),
+        "policy": {
+            key: value
+            for key, value in policy.items()
+            if value not in (None, "", False)
+        },
+        "profile": profile,
+        "violations": violations,
+        "override_reason": policy.get("override_reason") if status == "overridden" else "",
+    }
+
+
+def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
+    if not _selection_policy_requested(policy):
+        return []
+    profile = _row_policy_profile(row)
+    violations: list[dict] = []
+    if policy.get("require_pmml") and not profile.get("pmml_supported"):
+        violations.append({
+            "code": "require_pmml",
+            "message": "要求最终模型支持 PMML 导出,但该候选不支持。",
+        })
+    if policy.get("require_handoff") and not profile.get("handoff_supported"):
+        violations.append({
+            "code": "require_handoff",
+            "message": "要求最终模型支持验证移交,但该候选不支持。",
+        })
+    if policy.get("require_scorecard") and not profile.get("scorecard"):
+        violations.append({
+            "code": "require_scorecard",
+            "message": "要求最终模型为评分卡,但该候选不是评分卡。",
+        })
+    if policy.get("require_monotonicity") and not profile.get("monotonicity_declared"):
+        violations.append({
+            "code": "require_monotonicity",
+            "message": "要求声明单调约束,但该候选缺少单调性证据。",
+        })
+    max_feature_count = policy.get("max_feature_count")
+    feature_count = profile.get("feature_count")
+    if isinstance(max_feature_count, int) and isinstance(feature_count, int) and feature_count > max_feature_count:
+        violations.append({
+            "code": "max_feature_count",
+            "message": f"要求特征数不超过 {max_feature_count},但该候选有 {feature_count} 个特征。",
+        })
+    max_oot_psi = policy.get("max_oot_psi")
+    oot_psi = profile.get("psi_oot_vs_train")
+    if isinstance(max_oot_psi, (int, float)) and isinstance(oot_psi, (int, float)) and oot_psi > float(max_oot_psi):
+        violations.append({
+            "code": "max_oot_psi",
+            "message": (
+                f"要求 OOT PSI 不超过 {_format_number_token(float(max_oot_psi))},"
+                f"但该候选为 {_format_number_token(float(oot_psi))}。"
+            ),
+        })
+    return violations
+
+
+def _selection_policy_block_message(experiment_id: str, decision: dict) -> str:
+    reasons = "; ".join(
+        f"{item.get('code')}: {item.get('message') or ''}".strip()
+        for item in decision.get("violations", [])
+        if isinstance(item, dict)
+    )
+    suffix = f" {reasons}" if reasons else ""
+    return (
+        f"selected_experiment_id violates selection_policy: {experiment_id}.{suffix} "
+        "Set allow_policy_override=true with override_reason to keep this candidate."
+    )
+
+
+def _no_policy_candidate_message(rows: list[dict], policy: dict) -> str:
+    details = []
+    for row in rows[:5]:
+        violations = _selection_policy_violations(row, policy)
+        if not violations:
+            continue
+        details.append(
+            f"{row.get('id') or '?'}: "
+            + ", ".join(str(item.get("code") or "?") for item in violations if isinstance(item, dict))
+        )
+    suffix = f" Candidates: {'; '.join(details)}" if details else ""
+    return (
+        "no experiment satisfies selection_policy. "
+        "Relax the policy, retrain a compliant candidate, or set allow_policy_override=true "
+        f"with override_reason.{suffix}"
+    )
+
+
+def _row_policy_profile(row: dict) -> dict:
+    item = row if isinstance(row, dict) else {}
+    caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+    scorecard_rows = item.get("scorecard_table") if isinstance(item.get("scorecard_table"), list) else []
+    recipe = str(item.get("recipe") or "")
+    features = item.get("feature_list") if isinstance(item.get("feature_list"), list) else item.get("features")
+    feature_count = item.get("feature_count")
+    if not isinstance(feature_count, int) and isinstance(features, list):
+        feature_count = len(features)
+    profile = {
+        "recipe": recipe,
+        "scorecard": recipe == "scorecard" or bool(scorecard_rows),
+        "scorecard_table_rows": len(scorecard_rows),
+        "monotonicity_declared": _row_has_monotonic_policy(item, scorecard_rows),
+        "pmml_supported": bool(caps.get("pmml_supported")),
+        "handoff_supported": bool(caps.get("handoff_supported")),
+        "native_model_supported": bool(caps.get("native_model_supported")),
+        "feature_count": feature_count if isinstance(feature_count, int) else None,
+    }
+    psi_oot = item.get("psi_oot_vs_train")
+    if isinstance(psi_oot, (int, float)):
+        profile["psi_oot_vs_train"] = float(psi_oot)
+    return profile
+
+
+def _row_has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
+    for key in ("monotonic_constraints", "monotone_constraints", "monotonic_directions"):
+        value = item.get(key)
+        if isinstance(value, (dict, list, tuple)) and len(value) > 0:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    for container_key in ("params", "model_params", "fixed_params"):
+        value = item.get(container_key)
+        if isinstance(value, dict) and _row_has_monotonic_policy(value, []):
+            return True
+    for row in scorecard_rows:
+        if isinstance(row, dict) and str(row.get("monotonic_direction") or "").strip():
+            return True
+    return False
+
+
+def _positive_int_or_none(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _nonnegative_float_or_none(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _score_first(row: dict, keys: tuple[str, ...], *, minimize: bool = False) -> float:

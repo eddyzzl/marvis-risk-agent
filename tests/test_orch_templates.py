@@ -118,6 +118,7 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     delivery_step = plan.steps[8]
     assert compare_step.inputs == {"experiment_ids": [f"$ref:{train_step.id}.output.experiment_id"]}
     assert select_step.inputs["experiment_ids"] == [f"$ref:{train_step.id}.output.experiment_id"]
+    assert select_step.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
     assert report_step.inputs["experiment_id"] == f"$ref:{select_step.id}.output.selected_experiment_id"
     assert report_step.inputs["dataset_id"] == "dataset-1"
     assert report_step.inputs["business_columns"] == {"loan_month_col": "loan_month", "interest_rate_col": "rate"}
@@ -207,6 +208,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert compare.inputs == {"experiment_ids": f"$ref:{train.id}.output.experiment_ids"}
     assert select.inputs["experiment_ids"] == f"$ref:{train.id}.output.experiment_ids"
     assert select.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
+    assert select.inputs["selection_policy"] == {"require_pmml": True, "require_handoff": True}
     assert report.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
     assert report.inputs["dataset_id"] == "dataset-1"
     assert delivery.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"

@@ -130,7 +130,9 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert {"read:model", "read:dataset", "write:model"} <= set(calibrate_tool.side_effects)
     assert select_tool.input_schema["properties"]["space"]["enum"] == ["raw", "woe"]
     assert "warnings" in select_tool.output_schema["required"]
+    assert "selection_policy" in select_experiment_tool.input_schema["properties"]
     assert "selected_experiment_id" in select_experiment_tool.output_schema["required"]
+    assert "policy_decision" in select_experiment_tool.output_schema["required"]
     assert "LR modeling artifact" not in export_tool.summary
     assert "lr/lgb/xgb/scorecard" in export_tool.summary
     assert "write:task" in handoff_tool.side_effects
@@ -890,6 +892,60 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert selected.output["selected_experiment_id"] == catboost_experiment_id
     assert selected.output["artifact_id"] == artifacts["catboost"].id
     assert selected.output["selection_metric"] == "manual"
+    assert selected.output["policy_decision"]["status"] == "not_requested"
+    blocked = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": catboost_experiment_id,
+            "target_type": "binary",
+            "selection_policy": {"require_pmml": True, "require_handoff": True},
+        },
+        task_id=task.id,
+    )
+    assert blocked.ok is False
+    assert "violates selection_policy" in blocked.error
+    assert "require_pmml" in blocked.error
+    assert "require_handoff" in blocked.error
+    missing_reason = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": catboost_experiment_id,
+            "target_type": "binary",
+            "selection_policy": {
+                "require_pmml": True,
+                "require_handoff": True,
+                "allow_policy_override": True,
+            },
+        },
+        task_id=task.id,
+    )
+    assert missing_reason.ok is False
+    assert "override_reason_required" in missing_reason.error
+    overridden = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": catboost_experiment_id,
+            "target_type": "binary",
+            "selection_policy": {
+                "require_pmml": True,
+                "require_handoff": True,
+                "allow_policy_override": True,
+                "override_reason": "业务方本轮只验收原生 CatBoost pkl,不做 V1 验证移交。",
+            },
+        },
+        task_id=task.id,
+    )
+    assert overridden.ok is True, overridden.error
+    assert overridden.output["selected_experiment_id"] == catboost_experiment_id
+    assert overridden.output["policy_decision"]["status"] == "overridden"
+    assert overridden.output["policy_decision"]["override_reason"].startswith("业务方本轮只验收")
+    assert {item["code"] for item in overridden.output["policy_decision"]["violations"]} == {
+        "require_pmml",
+        "require_handoff",
+    }
     post_training = runner.invoke(
         ToolRef("modeling", "post_training_action"),
         {
@@ -947,6 +1003,73 @@ def test_pick_best_comparison_row_prefers_delivery_ready_candidate():
 
     assert best["id"] == "lgb-deliverable"
     assert metric == "oot_ks"
+
+
+def test_policy_selection_prefers_compliant_scorecard_candidate():
+    from marvis.packs.modeling.tools import _pick_best_comparison_row_with_policy
+
+    rows = [
+        {
+            "id": "lgb-higher-ks",
+            "recipe": "lgb",
+            "oot_ks": 0.55,
+            "psi_oot_vs_train": 0.04,
+            "feature_count": 18,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "model_params": {"monotone_constraints": [1, 0, -1]},
+        },
+        {
+            "id": "scorecard-compliant",
+            "recipe": "scorecard",
+            "oot_ks": 0.49,
+            "psi_oot_vs_train": 0.03,
+            "feature_count": 12,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "scorecard_table": [{"feature": "x1", "monotonic_direction": "increasing"}],
+        },
+        {
+            "id": "scorecard-no-monotonic",
+            "recipe": "scorecard",
+            "oot_ks": 0.51,
+            "psi_oot_vs_train": 0.03,
+            "feature_count": 12,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "scorecard_table": [{"feature": "x2"}],
+        },
+    ]
+
+    best, metric, decision = _pick_best_comparison_row_with_policy(
+        rows,
+        target_type="binary",
+        policy={
+            "require_pmml": True,
+            "require_handoff": True,
+            "require_monotonicity": True,
+            "prefer_scorecard": True,
+            "allow_policy_override": False,
+            "override_reason": "",
+        },
+    )
+
+    assert best["id"] == "scorecard-compliant"
+    assert metric == "oot_ks"
+    assert decision["status"] == "accepted"
+    assert decision["policy_candidate_count"] == 2
+    assert decision["selected_by_preference"] is True
+
+
+def test_selection_policy_string_false_is_not_enabled():
+    from marvis.packs.modeling.tools import _normalize_selection_policy
+
+    policy = _normalize_selection_policy({
+        "require_pmml": "false",
+        "require_handoff": "0",
+        "prefer_scorecard": "yes",
+    })
+
+    assert policy["require_pmml"] is False
+    assert policy["require_handoff"] is False
+    assert policy["prefer_scorecard"] is True
 
 
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):

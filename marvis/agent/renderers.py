@@ -328,6 +328,18 @@ def _render_select_experiment(o: dict):
     ]
     if caps.get("reason"):
         rows.append(["说明", caps.get("reason")])
+    policy = o.get("policy_decision") if isinstance(o.get("policy_decision"), dict) else {}
+    if policy:
+        rows.append(["策略门控", policy.get("status") or "not_requested"])
+        violations = [
+            str(item.get("message") or item.get("code") or "")
+            for item in (policy.get("violations") or [])
+            if isinstance(item, dict)
+        ]
+        if violations:
+            rows.append(["策略说明", "; ".join(item for item in violations if item)])
+        if policy.get("override_reason"):
+            rows.append(["Override", policy.get("override_reason")])
     tables = [{
         "title": f"最终模型交付能力({metric})",
         "columns": ["能力", "状态"],

@@ -1307,6 +1307,41 @@
           },
           "selection_metric": {
             "type": "string"
+          },
+          "selection_policy": {
+            "type": "object",
+            "properties": {
+              "require_pmml": {
+                "type": "boolean"
+              },
+              "require_handoff": {
+                "type": "boolean"
+              },
+              "require_scorecard": {
+                "type": "boolean"
+              },
+              "require_monotonicity": {
+                "type": "boolean"
+              },
+              "prefer_scorecard": {
+                "type": "boolean"
+              },
+              "max_feature_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_oot_psi": {
+                "type": "number",
+                "minimum": 0
+              },
+              "allow_policy_override": {
+                "type": "boolean"
+              },
+              "override_reason": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "required": [
@@ -1341,6 +1376,18 @@
           "capabilities": {
             "type": "object"
           },
+          "policy_profile": {
+            "type": "object"
+          },
+          "policy_decision": {
+            "type": "object"
+          },
+          "scorecard_table": {
+            "type": "array"
+          },
+          "model_params": {
+            "type": "object"
+          },
           "experiments": {
             "type": "array"
           }
@@ -1350,7 +1397,8 @@
           "artifact_id",
           "selection_metric",
           "selection_reason",
-          "capabilities"
+          "capabilities",
+          "policy_decision"
         ],
         "additionalProperties": false
       },

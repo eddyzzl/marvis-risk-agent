@@ -203,6 +203,10 @@ STANDARD_MODELING = WorkflowTemplate(
             inputs_template={
                 "experiment_ids": ["$ref:训练模型.output.experiment_id"],
                 "target_type": "binary",
+                "selection_policy": {
+                    "require_pmml": True,
+                    "require_handoff": True,
+                },
             },
             depends_on_titles=("训练模型", "对比实验"),
             post_checks=(
@@ -492,6 +496,10 @@ MODELING = WorkflowTemplate(
             inputs_template={
                 "experiment_ids": "$ref:训练模型.output.experiment_ids",
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "selection_policy": {
+                    "require_pmml": True,
+                    "require_handoff": True,
+                },
             },
             depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
             post_checks=(
@@ -736,6 +744,10 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "experiment_ids": "$ref:训练模型.output.experiment_ids",
                 "target_type": "$ref:选择建模规格.output.target_type",
+                "selection_policy": {
+                    "require_pmml": True,
+                    "require_handoff": True,
+                },
             },
             depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
             post_checks=(
