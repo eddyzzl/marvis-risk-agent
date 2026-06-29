@@ -523,6 +523,47 @@ def test_tool_runner_denies_network_for_adhoc_without_network_side_effect(tmp_pa
     assert "network access requires network:optional or llm" in result.error
 
 
+def test_tool_runner_denies_adhoc_file_read_outside_allowed_roots_at_runtime(tmp_path):
+    runner = _runner(tmp_path)
+    module_dir = tmp_path / "drafts"
+    module_dir.mkdir()
+    secret_path = tmp_path / "outside-secret.txt"
+    secret_path.write_text("raw-secret", encoding="utf-8")
+    module_path = module_dir / "reader_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    with open(inputs['path'], encoding='utf-8') as handle:\n"
+        "        return {'content': handle.read()}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"path": str(secret_path)},
+        input_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"content": {"type": "string"}},
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "file read access denied" in result.error
+    assert "outside-secret.txt" in result.error
+
+
 def test_tool_runner_allows_loopback_for_local_kernels_without_network_side_effect(tmp_path):
     runner = _runner(tmp_path)
     server = socket.socket()
@@ -570,6 +611,152 @@ def test_tool_runner_allows_loopback_for_local_kernels_without_network_side_effe
     thread.join(timeout=2)
 
     assert result.ok is True, result.error
+
+
+def test_tool_runner_denies_external_plugin_file_write_without_write_side_effect(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    plugin_root = tmp_path / "plugins"
+    package = plugin_root / "writerpack"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "from pathlib import Path\n"
+        "def run(inputs, ctx):\n"
+        "    target = Path(inputs['path'])\n"
+        "    target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    target.write_text('unsafe', encoding='utf-8')\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    manifest = PluginManifest(
+        name="writerpack",
+        version="0.1.0",
+        display_name="Writer Pack",
+        description="Writes a file",
+        module="writerpack.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="write_file",
+                summary="Writes a file",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=(),
+                entrypoint="run",
+            ),
+        ),
+        permissions=(),
+        builtin=False,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("writerpack", "write_file")
+            return manifest, manifest.tools[0]
+
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        plugin_paths=[plugin_root],
+    )
+    target = tmp_path / "workspace" / "tasks" / "task-1" / "blocked.txt"
+
+    result = runner.invoke(ToolRef("writerpack", "write_file"), {"path": str(target)}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "file write access denied" in result.error
+    assert not target.exists()
+
+
+def test_tool_runner_allows_external_plugin_file_write_with_write_side_effect(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    plugin_root = tmp_path / "plugins"
+    package = plugin_root / "writerpack_allowed"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "from pathlib import Path\n"
+        "def run(inputs, ctx):\n"
+        "    target = Path(inputs['path'])\n"
+        "    target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    target.write_text('allowed', encoding='utf-8')\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    manifest = PluginManifest(
+        name="writerpack_allowed",
+        version="0.1.0",
+        display_name="Writer Pack Allowed",
+        description="Writes a file",
+        module="writerpack_allowed.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="write_file",
+                summary="Writes a file",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=("write:artifact",),
+                entrypoint="run",
+            ),
+        ),
+        permissions=("write:artifact",),
+        builtin=False,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("writerpack_allowed", "write_file")
+            return manifest, manifest.tools[0]
+
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        plugin_paths=[plugin_root],
+    )
+    target = tmp_path / "workspace" / "tasks" / "task-1" / "allowed.txt"
+
+    result = runner.invoke(ToolRef("writerpack_allowed", "write_file"), {"path": str(target)}, task_id="task-1")
+
+    assert result.ok is True, result.error
+    assert target.read_text(encoding="utf-8") == "allowed"
 
 
 def test_tool_runner_allows_output_paths_under_workspace(tmp_path):

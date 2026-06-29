@@ -132,6 +132,7 @@ class ToolRunner:
             "file_size_limit_mb": 2048,
             "plugin_paths": [str(path) for path in self._plugin_paths],
             "side_effects": list(tool.side_effects),
+            "builtin": bool(manifest.builtin),
         }
         try:
             completed = _run_worker(
@@ -307,6 +308,7 @@ class ToolRunner:
             "file_size_limit_mb": 2048,
             "plugin_paths": [str(path) for path in self._plugin_paths],
             "side_effects": [],
+            "builtin": False,
         }
         try:
             completed = _run_worker(

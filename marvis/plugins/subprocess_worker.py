@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 from contextlib import redirect_stderr, redirect_stdout
 import errno
+import io
 from io import StringIO
 import importlib
 import importlib.util
@@ -10,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import socket
 import sys
 import traceback
@@ -74,7 +77,17 @@ def worker_main() -> None:
 
 
 def _run_tool(job: dict) -> dict:
-    _install_network_guard(job.get("side_effects") or [])
+    side_effects = [str(item) for item in (job.get("side_effects") or [])]
+    plugin_paths = [Path(str(path)) for path in (job.get("plugin_paths") or []) if str(path)]
+    _install_network_guard(side_effects)
+    if _should_install_file_guard(job):
+        _install_file_guard(
+            workspace=Path(job["workspace"]),
+            datasets_root=Path(job["datasets_root"]),
+            side_effects=side_effects,
+            module_path=Path(str(job["module_path"])) if job.get("module_path") else None,
+            plugin_paths=plugin_paths,
+        )
     for path in job.get("plugin_paths") or []:
         path_text = str(path)
         if path_text and path_text not in sys.path:
@@ -99,6 +112,285 @@ def _run_tool(job: dict) -> dict:
     if not isinstance(result, dict):
         raise TypeError(f"tool must return dict, got {type(result).__name__}")
     return result
+
+
+def _should_install_file_guard(job: dict) -> bool:
+    return bool(job.get("module_path")) or not bool(job.get("builtin"))
+
+
+def _install_file_guard(
+    *,
+    workspace: Path,
+    datasets_root: Path,
+    side_effects: list[str],
+    module_path: Path | None,
+    plugin_paths: list[Path],
+) -> None:
+    sys.dont_write_bytecode = True
+    read_roots = _guard_roots([
+        *plugin_paths,
+        *(_python_runtime_roots()),
+        _project_root(),
+        module_path.parent if module_path is not None else None,
+        workspace if _has_read_effect(side_effects) else None,
+        datasets_root if _has_read_effect(side_effects) else None,
+    ])
+    write_roots = _guard_roots([
+        workspace if _has_write_effect(side_effects) else None,
+        datasets_root if _has_write_effect(side_effects) else None,
+    ])
+    original_open = builtins.open
+    original_io_open = io.open
+    original_os_open = os.open
+    original_remove = os.remove
+    original_unlink = os.unlink
+    original_rmdir = os.rmdir
+    original_mkdir = os.mkdir
+    original_makedirs = os.makedirs
+    original_path_open = Path.open
+    original_path_read_text = Path.read_text
+    original_path_read_bytes = Path.read_bytes
+    original_path_write_text = Path.write_text
+    original_path_write_bytes = Path.write_bytes
+    original_path_touch = Path.touch
+    original_path_unlink = Path.unlink
+    original_path_mkdir = Path.mkdir
+    original_path_rmdir = Path.rmdir
+    original_path_rename = Path.rename
+    original_path_replace = Path.replace
+    original_path_glob = Path.glob
+    original_path_rglob = Path.rglob
+    original_shutil_copy = shutil.copy
+    original_shutil_copy2 = shutil.copy2
+    original_shutil_copyfile = shutil.copyfile
+    original_shutil_move = shutil.move
+    original_shutil_rmtree = shutil.rmtree
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        if _is_path_like(file):
+            _assert_file_access(file, _access_from_mode(str(mode)), read_roots, write_roots)
+        return original_open(file, mode, *args, **kwargs)
+
+    def guarded_io_open(file, mode="r", *args, **kwargs):
+        if _is_path_like(file):
+            _assert_file_access(file, _access_from_mode(str(mode)), read_roots, write_roots)
+        return original_io_open(file, mode, *args, **kwargs)
+
+    def guarded_os_open(path, flags, *args, **kwargs):
+        _assert_file_access(path, _access_from_flags(int(flags)), read_roots, write_roots)
+        return original_os_open(path, flags, *args, **kwargs)
+
+    def guarded_remove(path, *args, **kwargs):
+        _assert_file_access(path, "write", read_roots, write_roots)
+        return original_remove(path, *args, **kwargs)
+
+    def guarded_unlink(path, *args, **kwargs):
+        _assert_file_access(path, "write", read_roots, write_roots)
+        return original_unlink(path, *args, **kwargs)
+
+    def guarded_rmdir(path, *args, **kwargs):
+        _assert_file_access(path, "write", read_roots, write_roots)
+        return original_rmdir(path, *args, **kwargs)
+
+    def guarded_mkdir(path, *args, **kwargs):
+        _assert_file_access(path, "write", read_roots, write_roots)
+        return original_mkdir(path, *args, **kwargs)
+
+    def guarded_makedirs(name, *args, **kwargs):
+        _assert_file_access(name, "write", read_roots, write_roots)
+        return original_makedirs(name, *args, **kwargs)
+
+    def guarded_path_open(self, mode="r", *args, **kwargs):
+        _assert_file_access(self, _access_from_mode(str(mode)), read_roots, write_roots)
+        return original_path_open(self, mode, *args, **kwargs)
+
+    def guarded_path_read_text(self, *args, **kwargs):
+        _assert_file_access(self, "read", read_roots, write_roots)
+        return original_path_read_text(self, *args, **kwargs)
+
+    def guarded_path_read_bytes(self, *args, **kwargs):
+        _assert_file_access(self, "read", read_roots, write_roots)
+        return original_path_read_bytes(self, *args, **kwargs)
+
+    def guarded_path_write_text(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_write_text(self, *args, **kwargs)
+
+    def guarded_path_write_bytes(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_write_bytes(self, *args, **kwargs)
+
+    def guarded_path_touch(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_touch(self, *args, **kwargs)
+
+    def guarded_path_unlink(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_unlink(self, *args, **kwargs)
+
+    def guarded_path_mkdir(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_mkdir(self, *args, **kwargs)
+
+    def guarded_path_rmdir(self, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        return original_path_rmdir(self, *args, **kwargs)
+
+    def guarded_path_rename(self, target, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        _assert_file_access(target, "write", read_roots, write_roots)
+        return original_path_rename(self, target, *args, **kwargs)
+
+    def guarded_path_replace(self, target, *args, **kwargs):
+        _assert_file_access(self, "write", read_roots, write_roots)
+        _assert_file_access(target, "write", read_roots, write_roots)
+        return original_path_replace(self, target, *args, **kwargs)
+
+    def guarded_path_glob(self, *args, **kwargs):
+        _assert_file_access(self, "read", read_roots, write_roots)
+        return original_path_glob(self, *args, **kwargs)
+
+    def guarded_path_rglob(self, *args, **kwargs):
+        _assert_file_access(self, "read", read_roots, write_roots)
+        return original_path_rglob(self, *args, **kwargs)
+
+    def guarded_shutil_copy(src, dst, *args, **kwargs):
+        _assert_file_access(src, "read", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_shutil_copy(src, dst, *args, **kwargs)
+
+    def guarded_shutil_copy2(src, dst, *args, **kwargs):
+        _assert_file_access(src, "read", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_shutil_copy2(src, dst, *args, **kwargs)
+
+    def guarded_shutil_copyfile(src, dst, *args, **kwargs):
+        _assert_file_access(src, "read", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_shutil_copyfile(src, dst, *args, **kwargs)
+
+    def guarded_shutil_move(src, dst, *args, **kwargs):
+        _assert_file_access(src, "write", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_shutil_move(src, dst, *args, **kwargs)
+
+    def guarded_shutil_rmtree(path, *args, **kwargs):
+        _assert_file_access(path, "write", read_roots, write_roots)
+        return original_shutil_rmtree(path, *args, **kwargs)
+
+    builtins.open = guarded_open
+    io.open = guarded_io_open
+    os.open = guarded_os_open
+    os.remove = guarded_remove
+    os.unlink = guarded_unlink
+    os.rmdir = guarded_rmdir
+    os.mkdir = guarded_mkdir
+    os.makedirs = guarded_makedirs
+    Path.open = guarded_path_open
+    Path.read_text = guarded_path_read_text
+    Path.read_bytes = guarded_path_read_bytes
+    Path.write_text = guarded_path_write_text
+    Path.write_bytes = guarded_path_write_bytes
+    Path.touch = guarded_path_touch
+    Path.unlink = guarded_path_unlink
+    Path.mkdir = guarded_path_mkdir
+    Path.rmdir = guarded_path_rmdir
+    Path.rename = guarded_path_rename
+    Path.replace = guarded_path_replace
+    Path.glob = guarded_path_glob
+    Path.rglob = guarded_path_rglob
+    shutil.copy = guarded_shutil_copy
+    shutil.copy2 = guarded_shutil_copy2
+    shutil.copyfile = guarded_shutil_copyfile
+    shutil.move = guarded_shutil_move
+    shutil.rmtree = guarded_shutil_rmtree
+
+
+def _has_read_effect(side_effects: list[str]) -> bool:
+    return any(item.startswith("read:") for item in side_effects)
+
+
+def _has_write_effect(side_effects: list[str]) -> bool:
+    return any(item.startswith("write:") for item in side_effects)
+
+
+def _guard_roots(paths) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            resolved = Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        key = str(resolved)
+        if key and key not in seen:
+            roots.append(resolved)
+            seen.add(key)
+    return tuple(roots)
+
+
+def _python_runtime_roots() -> list[Path]:
+    roots = [
+        Path(sys.prefix),
+        Path(sys.base_prefix),
+        Path(getattr(sys, "exec_prefix", sys.prefix)),
+        Path(sys.executable).resolve().parent,
+    ]
+    return roots
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _is_path_like(value) -> bool:
+    return isinstance(value, (str, bytes, os.PathLike))
+
+
+def _access_from_mode(mode: str) -> str:
+    return "write" if any(flag in mode for flag in ("w", "a", "x", "+")) else "read"
+
+
+def _access_from_flags(flags: int) -> str:
+    write_flags = [
+        getattr(os, "O_WRONLY", 0),
+        getattr(os, "O_RDWR", 0),
+        getattr(os, "O_CREAT", 0),
+        getattr(os, "O_TRUNC", 0),
+        getattr(os, "O_APPEND", 0),
+    ]
+    return "write" if any(flags & flag for flag in write_flags if flag) else "read"
+
+
+def _assert_file_access(path, access: str, read_roots: tuple[Path, ...], write_roots: tuple[Path, ...]) -> None:
+    if not _is_path_like(path):
+        return
+    allowed_roots = write_roots if access == "write" else read_roots
+    resolved = _coerce_path(path).expanduser().resolve(strict=False)
+    if _is_under_any(resolved, allowed_roots):
+        return
+    if access == "write":
+        raise PermissionError(
+            f"file write access denied for {resolved}; declare write:* side_effect and use workspace/datasets paths"
+        )
+    raise PermissionError(
+        f"file read access denied for {resolved}; declare read:* side_effect and use workspace/datasets paths"
+    )
+
+
+def _is_under_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        if path == root or root in path.parents:
+            return True
+    return False
+
+
+def _coerce_path(path) -> Path:
+    if isinstance(path, bytes):
+        return Path(os.fsdecode(path))
+    return Path(path)
 
 
 def _install_network_guard(side_effects: list[str]) -> None:
