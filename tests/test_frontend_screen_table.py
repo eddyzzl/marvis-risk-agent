@@ -89,9 +89,12 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert "data-modeling-gate-step-id" in app_js
     assert "function submitModelingWeightAdjust(button)" in app_js
     assert "sample_weight_col: sampleWeightCol" in app_js
+    assert "sample_weight_diagnostics" in app_js
+    assert "modeling-weight-diagnostic" in app_js
     assert "handleModelingWeightAdjustClick" in app_js
     assert ".modeling-setup-panel" in css
     assert ".modeling-weight-options" in css
+    assert ".modeling-weight-diagnostics" in css
 
 
 def test_modeling_setup_weight_picker_renders_candidates():
@@ -112,6 +115,17 @@ def test_modeling_setup_weight_picker_renders_candidates():
               recipes: ["lgb", "xgb"],
               sample_weight_col: "weight",
               sample_weight_candidates: ["weight", "sample_weight"],
+              sample_weight_diagnostics: [
+                {{
+                  column: "weight",
+                  valid: true,
+                  missing_rate: 0,
+                  min: 1,
+                  max: 2,
+                  mean: 1.25,
+                  reason: "",
+                }},
+              ],
             }},
           }},
         }});
@@ -119,6 +133,10 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes('value="weight" checked'), true);
         assert.equal(html.includes("sample_weight"), true);
         assert.equal(html.includes("lgb/xgb"), true);
+        assert.equal(html.includes("modeling-weight-diagnostic"), true);
+        assert.equal(html.includes("缺失 0.0%"), true);
+        assert.equal(html.includes("范围 1-2"), true);
+        assert.equal(html.includes("均值 1.25"), true);
         const readonly = agentMessageModelingSetupHtml({{
           id: "m2",
           metadata: {{ step_id: "gate-2", modeling_setup: {{ sample_weight_candidates: ["weight"] }} }},

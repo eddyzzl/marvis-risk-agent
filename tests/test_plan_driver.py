@@ -324,6 +324,17 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
             "recipes": ["lgb"],
             "sample_weight_col": "",
             "sample_weight_candidates": ["weight", "sample_weight"],
+            "sample_weight_diagnostics": [
+                {
+                    "column": "weight",
+                    "valid": True,
+                    "missing_rate": 0.0,
+                    "min": 1.0,
+                    "max": 2.0,
+                    "mean": 1.2,
+                    "reason": "",
+                }
+            ],
         },
         {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
     ])
@@ -341,6 +352,17 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
         "recipes": ["lgb"],
         "sample_weight_col": "",
         "sample_weight_candidates": ["weight", "sample_weight"],
+        "sample_weight_diagnostics": [
+            {
+                "column": "weight",
+                "valid": True,
+                "missing_rate": 0.0,
+                "min": 1.0,
+                "max": 2.0,
+                "mean": 1.2,
+                "reason": "",
+            }
+        ],
     }
     envelope = turn.messages[0].metadata["gate_envelope"]
     assert "adjust" in envelope["allowed_actions"]

@@ -445,6 +445,37 @@ def test_decide_gate_injects_screen_red_flags_into_prompt():
     assert "不可用特征" in prompt
 
 
+def test_decide_gate_injects_sample_weight_diagnostics_into_prompt():
+    fake = _FakeLLM()
+    gate = {
+        "content": "建模规格完成",
+        "metadata": {
+            "modeling_setup": {
+                "target_type": "binary",
+                "recipes": ["lgb"],
+                "sample_weight_candidates": ["weight"],
+                "sample_weight_diagnostics": [
+                    {
+                        "column": "weight",
+                        "valid": True,
+                        "missing_rate": 0.0,
+                        "min": 1.0,
+                        "max": 2.0,
+                        "reason": "",
+                    }
+                ],
+            }
+        },
+    }
+
+    decide_gate(fake, gate=gate)
+
+    prompt = fake.calls[0]["user_prompt"]
+    assert "sample_weight_diagnostic" in prompt
+    assert "weight valid" in prompt
+    assert "missing_rate=0.0" in prompt
+
+
 def test_decide_gate_injects_join_red_flags_from_tables_into_prompt():
     fake = _FakeLLM()
     gate = {

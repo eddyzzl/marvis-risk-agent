@@ -46,6 +46,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_orch_executor.py tests/test_orch_db.py`: `44 passed` after adding tool version, manifest hash, source dataset refs, and artifact refs to persisted step evidence.
   - `tests/test_agent_autodrive.py`: `24 passed` after adding a deterministic AUTO low-risk control allowlist for declared-but-expensive tuning and delivery actions.
   - `tests/test_orch_api.py tests/test_frontend_v2_plan.py tests/test_frontend_static_v2.py`: `238 passed` after exposing failure envelopes on plan step API payloads and rendering retry defaults/reset scope in both V2 plan views.
+  - `tests/test_modeling_recipes.py tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `116 passed, 2 warnings` after adding sample-weight quality diagnostics to modeling setup, gate metadata, frontend controls, and AUTO prompts.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
@@ -53,6 +54,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the evidence lineage update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO high-risk control guard update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the frontend failure retry contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight diagnostics update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
 
 ## Executive Summary
@@ -93,6 +95,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Step evidence now records tool version, manifest hash, source dataset refs, artifact refs, input hash/summary, parent output refs, seed, and renderer hint in one persisted envelope.
   - AUTO adjust now has a deterministic low-risk control allowlist: undeclared controls still halt, and declared high-risk controls such as expensive tuning budgets or post-training handoff/export actions also halt for human review.
   - Failed plan steps returned by the plan API now include `failure_envelope`; the main right rail and modular V2 plan view both use its editable input defaults and reset-scope metadata in retry panels.
+  - Modeling setup now diagnoses sample-weight candidates for numeric validity, missingness, range, mean, feature exclusion, and exposes those diagnostics in gate metadata, front-end controls, renderer tables, and AUTO prompts.
 
 Items confirmed still not complete and therefore still part of the plan:
 
@@ -115,7 +118,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
 | 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash, parent refs, source dataset refs, artifact refs, tool version, manifest hash, seed, and renderer hint; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. | Add a deeper DB+file `UnitOfWork` and keep expanding domain-specific lineage where tools expose richer refs. |
-| 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the first modeling gate renders detected candidates and posts a structured `sample_weight_col` adjust that reruns `choose_modeling_spec` and downstream screening. | Add richer data-quality diagnostics for weight positivity/missingness and expose the same decision in the future extracted `ModelingSetupPanel`. |
+| 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the first modeling gate renders detected candidates and posts a structured `sample_weight_col` adjust that reruns `choose_modeling_spec` and downstream screening. Candidate diagnostics now expose numeric validity, missingness, range, mean, and feature exclusion in gate/UI/AUTO context. | Expose the same decision in the future extracted `ModelingSetupPanel` with richer target/split/tuning controls. |
 | 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`, and task/welcome tones use semantic tokens. `app.js` still owns create dialog, rail, transcript, and driver gates. | Extract `CreateTaskDialog`, `PlanRailController`, `DriverConversationView`, `TaskWorkspace`. |
 | 9 | PMML manifest contract | Done | Manifest now advertises `lr/lgb/xgb/scorecard`, matching current PMML-supported list. | Keep regression test. |
 | 10 | CI gate | Done | `.github/workflows/ci.yml` and `scripts/check` exist; `docs/versioning.md` references the local gate. | Keep full CI green after remaining refactors. |

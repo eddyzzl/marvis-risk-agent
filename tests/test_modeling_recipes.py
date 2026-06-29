@@ -774,9 +774,14 @@ def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature
 
     assert proposal.sample_weight_col == ""
     assert proposal.sample_weight_candidates == ["sample_weight"]
+    assert proposal.sample_weight_diagnostics[0]["column"] == "sample_weight"
+    assert proposal.sample_weight_diagnostics[0]["valid"] is True
+    assert proposal.sample_weight_diagnostics[0]["missing_rate"] == 0.0
+    assert proposal.sample_weight_diagnostics[0]["excluded_from_features"] is True
     assert "sample_weight" not in proposal.feature_cols
     slots = proposal.template_slots()
     assert slots["sample_weight_col"] == ""
+    assert slots["sample_weight_diagnostics"][0]["column"] == "sample_weight"
     assert slots["passthrough_cols"] == ["sample_weight"]
     assert any("检测到样本权重候选列" in note for note in proposal.notes)
 

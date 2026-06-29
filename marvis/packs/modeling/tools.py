@@ -409,6 +409,11 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         sample_weight_col,
         *(inputs.get("sample_weight_candidates") or []),
     ])
+    sample_weight_diagnostics = [
+        dict(item)
+        for item in (inputs.get("sample_weight_diagnostics") or [])
+        if isinstance(item, dict)
+    ]
     target_col = str(inputs.get("target_col") or "").strip()
     features = _unique_strings(inputs.get("features") or [])
     warnings: list[str] = []
@@ -432,6 +437,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         "feature_count": len(features),
         "sample_weight_col": sample_weight_col,
         "sample_weight_candidates": sample_weight_candidates,
+        "sample_weight_diagnostics": _jsonable(sample_weight_diagnostics),
         "seed": _effective_seed(inputs, ctx),
         "n_trials": n_trials,
         "params": _jsonable(params),

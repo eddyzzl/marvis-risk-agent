@@ -6959,12 +6959,37 @@ function agentMessageModelingSetupHtml(message, options = {}) {
   const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
     ? setup.recipes.map((recipe) => String(recipe)).join("/")
     : "-";
+  const diagnostics = Array.isArray(setup.sample_weight_diagnostics)
+    ? setup.sample_weight_diagnostics.filter((item) => item && typeof item === "object")
+    : [];
+  const diagnosticsByColumn = new Map(diagnostics.map((item) => [String(item.column || ""), item]));
+  const diagnosticsHtml = uniqueCandidates
+    .map((column) => {
+      const item = diagnosticsByColumn.get(column);
+      if (!item) return "";
+      const missing = Number.isFinite(Number(item.missing_rate))
+        ? `${(Number(item.missing_rate) * 100).toFixed(1)}%`
+        : "n/a";
+      const min = item.min ?? "n/a";
+      const max = item.max ?? "n/a";
+      const mean = item.mean ?? "n/a";
+      const state = item.valid ? "可用" : "需检查";
+      const reason = item.reason || "已排除出入模特征";
+      return `<div class="modeling-weight-diagnostic" data-valid="${item.valid ? "true" : "false"}">
+        <strong>${escapeHtml(column)}</strong>
+        <span>${escapeHtml(state)} · 缺失 ${escapeHtml(missing)} · 范围 ${escapeHtml(min)}-${escapeHtml(max)} · 均值 ${escapeHtml(mean)}</span>
+        <small>${escapeHtml(reason)}</small>
+      </div>`;
+    })
+    .filter(Boolean)
+    .join("");
   return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}"${interactive ? "" : ' data-modeling-readonly="true"'}>
     <div class="modeling-setup-head">
       <span>建模规格</span>
       <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
     </div>
     <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
+    ${diagnosticsHtml ? `<div class="modeling-weight-diagnostics">${diagnosticsHtml}</div>` : ""}
     <div class="modeling-setup-foot">
       <span>权重列不进入特征。</span>
       <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用权重设置" : "历史规格"}</button>

@@ -690,6 +690,12 @@
               "type": "string"
             }
           },
+          "sample_weight_diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
           "n_trials": {
             "type": "integer",
             "minimum": 1
@@ -740,6 +746,12 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "sample_weight_diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object"
             }
           },
           "seed": {

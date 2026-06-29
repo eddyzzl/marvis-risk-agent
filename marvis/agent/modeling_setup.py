@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pandas as pd
+
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
@@ -49,6 +51,7 @@ class ModelingProposal:
     join_feature_ids: list[str] = field(default_factory=list)
     sample_weight_col: str = ""
     sample_weight_candidates: list[str] = field(default_factory=list)
+    sample_weight_diagnostics: list[dict] = field(default_factory=list)
 
     def template_slots(self) -> dict:
         if self.template_id == "modeling_with_join":
@@ -68,6 +71,7 @@ class ModelingProposal:
                 "split_config": {},
                 "sample_weight_col": self.sample_weight_col,
                 "sample_weight_candidates": list(self.sample_weight_candidates),
+                "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
                 "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
             }
         return {
@@ -86,6 +90,7 @@ class ModelingProposal:
             "split_config": {},
             "sample_weight_col": self.sample_weight_col,
             "sample_weight_candidates": list(self.sample_weight_candidates),
+            "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
             "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
         }
 
@@ -157,16 +162,31 @@ def build_modeling_proposal(
     # it is among the chosen recipes, else the first one (tuning is skipped for it).
     primary_recipe = "lgb" if "lgb" in recipe_list else recipe_list[0]
     notes = list(setup.notes)
-    weight_candidates = _detect_sample_weight_candidates(
+    weight_diagnostics = _sample_weight_diagnostics(
         backend,
         path,
         target_col=setup.target_col,
         split_col=setup.split_col,
     )
+    weight_candidates = [item["column"] for item in weight_diagnostics if item.get("valid")]
     selected_weight_col = _normalize_sample_weight_col(
         sample_weight_col,
         available_columns=backend.column_names(path),
     )
+    if selected_weight_col:
+        if selected_weight_col == setup.target_col or selected_weight_col == str(setup.split_col or ""):
+            raise ModelingSetupError("样本权重列不能是目标列或切分列。")
+        selected_diag = _sample_weight_diagnostics(
+            backend,
+            path,
+            target_col=setup.target_col,
+            split_col=setup.split_col,
+            explicit_columns=[selected_weight_col],
+        )
+        if not selected_diag or not selected_diag[0].get("valid"):
+            reason = selected_diag[0].get("reason") if selected_diag else "不是数值型权重列"
+            raise ModelingSetupError(f"样本权重列 `{selected_weight_col}` 不可用:{reason}。")
+        weight_diagnostics = _merge_weight_diagnostics(selected_diag, weight_diagnostics)
     if selected_weight_col:
         notes.append(f"样本权重列:`{selected_weight_col}`(仅作为 sample_weight,不作为入模特征)。")
         weight_candidates = _unique([selected_weight_col, *weight_candidates])
@@ -223,6 +243,7 @@ def build_modeling_proposal(
         join_feature_ids=join_feature_ids,
         sample_weight_col=selected_weight_col,
         sample_weight_candidates=weight_candidates,
+        sample_weight_diagnostics=weight_diagnostics,
     )
 
 
@@ -267,29 +288,76 @@ def _default_recipe_for_target_type(target_type: str) -> str:
     return "lgb"
 
 
-def _detect_sample_weight_candidates(
+def _sample_weight_diagnostics(
     backend,
     path: Path,
     *,
     target_col: str,
     split_col: str | None,
+    explicit_columns: list[str] | None = None,
     sample_rows: int = 4000,
-) -> list[str]:
+) -> list[dict]:
     probe = backend.sample_rows(path, sample_rows, seed=0)
     excluded = {str(target_col), str(split_col or "")}
-    candidates: list[str] = []
-    for column in probe.select_dtypes("number").columns:
+    columns = explicit_columns or [
+        str(column)
+        for column in probe.columns
+        if any(hint in str(column).lower() or hint in str(column) for hint in _WEIGHT_NAME_HINTS)
+    ]
+    diagnostics: list[dict] = []
+    for column in columns:
         name = str(column)
-        low = name.lower()
-        if name in excluded or not any(hint in low or hint in name for hint in _WEIGHT_NAME_HINTS):
+        if name in excluded:
             continue
-        values = probe[column].dropna()
-        if values.empty:
+        if name not in probe.columns:
             continue
-        if (values < 0).any() or float(values.sum()) <= 0:
-            continue
-        candidates.append(name)
-    return candidates
+        numeric = pd.to_numeric(probe[name], errors="coerce")
+        non_missing = numeric.dropna()
+        missing_count = int(numeric.isna().sum())
+        reason = ""
+        valid = True
+        if non_missing.empty:
+            valid = False
+            reason = "全为空或非数值"
+        elif missing_count:
+            valid = False
+            reason = "存在空值或非数值"
+        elif (non_missing < 0).any():
+            valid = False
+            reason = "存在负权重"
+        elif float(non_missing.sum()) <= 0:
+            valid = False
+            reason = "总权重不为正"
+        diagnostics.append({
+            "column": name,
+            "valid": valid,
+            "reason": reason,
+            "rows_sampled": int(len(probe)),
+            "non_missing": int(non_missing.shape[0]),
+            "missing_rate": float(missing_count / len(probe)) if len(probe) else 0.0,
+            "min": _maybe_float(non_missing.min()) if not non_missing.empty else None,
+            "max": _maybe_float(non_missing.max()) if not non_missing.empty else None,
+            "mean": _maybe_float(non_missing.mean()) if not non_missing.empty else None,
+            "excluded_from_features": True,
+            "leakage_risk": "low",
+        })
+    return diagnostics
+
+
+def _merge_weight_diagnostics(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    by_column: dict[str, dict] = {}
+    for item in [*primary, *secondary]:
+        column = str(item.get("column") or "")
+        if column and column not in by_column:
+            by_column[column] = dict(item)
+    return list(by_column.values())
+
+
+def _maybe_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_sample_weight_col(value: str | None, *, available_columns: list[str]) -> str:

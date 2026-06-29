@@ -39,6 +39,12 @@ def _pct(value):
         return "n/a"
 
 
+def _range_text(minimum, maximum) -> str:
+    if minimum is None and maximum is None:
+        return "n/a"
+    return f"{_fmt(minimum)} - {_fmt(maximum)}"
+
+
 def _triple(item):
     """A (feature, ks, reason) row from a leakage/suspected entry, tolerant of shape."""
     if isinstance(item, (list, tuple)):
@@ -126,6 +132,23 @@ def _render_choose_modeling_spec(o: dict):
                 [[str(recipe), "可用", ""] for recipe in eligible]
                 + [[str(item.get("recipe", "")), "不可用", str(item.get("reason", ""))] for item in disabled]
             ),
+        })
+    diagnostics = [item for item in (o.get("sample_weight_diagnostics") or []) if isinstance(item, dict)]
+    if diagnostics:
+        tables.append({
+            "title": "样本权重候选诊断",
+            "columns": ["列", "状态", "缺失率", "范围", "均值", "说明"],
+            "rows": [
+                [
+                    str(item.get("column") or ""),
+                    "可用" if item.get("valid") else "需检查",
+                    _pct(item.get("missing_rate")),
+                    _range_text(item.get("min"), item.get("max")),
+                    _fmt(item.get("mean")),
+                    str(item.get("reason") or "已排除出入模特征"),
+                ]
+                for item in diagnostics
+            ],
         })
     warnings = [str(item) for item in (o.get("warnings") or [])]
     if warnings:

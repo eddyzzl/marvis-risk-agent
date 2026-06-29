@@ -700,6 +700,17 @@ def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
             "target_type": "binary",
             "sample_weight_col": "weight",
             "sample_weight_candidates": ["weight", "sample_weight"],
+            "sample_weight_diagnostics": [
+                {
+                    "column": "weight",
+                    "valid": True,
+                    "missing_rate": 0.0,
+                    "min": 1.0,
+                    "max": 2.0,
+                    "mean": 1.4,
+                    "reason": "",
+                }
+            ],
             "n_trials": 9,
             "params": {"learning_rate": 0.03},
             "seed": 17,
@@ -711,6 +722,8 @@ def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
     assert out["recipes"] == ["lgb", "catboost"]
     assert out["target_type"] == "binary"
     assert out["sample_weight_col"] == "weight"
+    assert out["sample_weight_diagnostics"][0]["column"] == "weight"
+    assert out["sample_weight_diagnostics"][0]["valid"] is True
     assert out["feature_cols"] == ["x1", "x2"]
     assert out["params"]["sample_weight_col"] == "weight"
     assert out["params"]["learning_rate"] == 0.03

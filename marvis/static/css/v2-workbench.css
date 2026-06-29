@@ -1260,6 +1260,30 @@
 .modeling-weight-option input {
   accent-color: var(--button-primary-bg);
 }
+.modeling-weight-diagnostics {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+.modeling-weight-diagnostic {
+  display: grid;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface-soft, #f9fafb);
+  font-size: 12px;
+}
+.modeling-weight-diagnostic strong {
+  color: var(--text, #111827);
+}
+.modeling-weight-diagnostic span,
+.modeling-weight-diagnostic small {
+  color: var(--text-muted, #6b7280);
+}
+.modeling-weight-diagnostic[data-valid="false"] {
+  border-color: var(--warning, #f59e0b);
+}
 .modeling-setup-panel[data-modeling-readonly="true"] {
   opacity: 0.78;
 }

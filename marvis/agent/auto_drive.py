@@ -105,6 +105,20 @@ def _format_gate(gate: dict) -> str:
         lines.append(f"- sample_weight_col: {selected_weight or '不使用'}")
         if candidates:
             lines.append(f"- sample_weight_candidates: {', '.join(candidates)}")
+        diagnostics = [
+            item for item in (modeling_setup.get("sample_weight_diagnostics") or [])
+            if isinstance(item, dict)
+        ]
+        for item in diagnostics[:5]:
+            column = str(item.get("column") or "")
+            if not column:
+                continue
+            status = "valid" if item.get("valid") else "invalid"
+            lines.append(
+                "- sample_weight_diagnostic: "
+                f"{column} {status}, missing_rate={item.get('missing_rate')}, "
+                f"min={item.get('min')}, max={item.get('max')}, reason={item.get('reason') or ''}"
+            )
     for table in meta.get("tables") or []:
         lines.append("")
         lines.append(f"表:{table.get('title', '')}")

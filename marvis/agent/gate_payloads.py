@@ -107,6 +107,11 @@ def build_modeling_setup_payload(output: dict, dep) -> dict | None:
         "recipes": [str(item) for item in (o.get("recipes") or [])],
         "sample_weight_col": selected,
         "sample_weight_candidates": candidates,
+        "sample_weight_diagnostics": [
+            dict(item)
+            for item in (o.get("sample_weight_diagnostics") or [])
+            if isinstance(item, dict)
+        ],
     }
 
 
