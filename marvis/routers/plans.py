@@ -174,6 +174,9 @@ def confirm_step(
     except KeyError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConflictError as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(
         _run_plan_job,
         job_id,

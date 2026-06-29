@@ -781,11 +781,24 @@ class PlanRepository:
     def confirm_step(self, step_id: str) -> None:
         with connect(self.db_path) as conn:
             cursor = conn.execute(
-                "UPDATE plan_steps SET confirmed = 1 WHERE id = ?",
-                (step_id,),
+                """
+                UPDATE plan_steps
+                   SET confirmed = 1
+                 WHERE id = ?
+                   AND status = ?
+                """,
+                (step_id, StepStatus.AWAITING_CONFIRM.value),
             )
             if cursor.rowcount == 0:
-                raise KeyError(step_id)
+                row = conn.execute(
+                    "SELECT status FROM plan_steps WHERE id = ?",
+                    (step_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(step_id)
+                raise ConflictError(
+                    f"step is not awaiting confirmation: {row['status']}"
+                )
             _write_audit_row(
                 conn,
                 kind="plan.step.confirm",

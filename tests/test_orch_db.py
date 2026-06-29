@@ -120,6 +120,18 @@ def test_plan_repository_updates_step_and_confirmation(tmp_path):
     assert repo.is_step_confirmed("step-1") is True
 
 
+def test_plan_repository_confirm_step_rejects_non_awaiting_step(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_plan())
+
+    with pytest.raises(ConflictError, match="step is not awaiting confirmation"):
+        repo.confirm_step("step-1")
+
+    assert repo.is_step_confirmed("step-1") is False
+
+
 def test_plan_repository_stores_and_loads_step_output(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -257,6 +269,11 @@ def test_plan_repository_reset_step_clears_stale_execution_state(tmp_path):
     repo.create_plan(_plan())
     plan = repo.load_plan("plan-1")
     step = plan.steps[0]
+    step.status = StepStatus.AWAITING_CONFIRM
+    repo.update_step(step)
+    repo.confirm_step("step-1")
+
+    step = repo.load_plan("plan-1").steps[0]
     step.status = StepStatus.FAILED
     step.output_ref = repo.store_step_output("step-1", {"echoed": "old"})
     step.review_verdicts = [
@@ -264,7 +281,6 @@ def test_plan_repository_reset_step_clears_stale_execution_state(tmp_path):
     ]
     step.error = "old failure"
     repo.update_step(step)
-    repo.confirm_step("step-1")
 
     repo.reset_step("step-1")
 
@@ -281,18 +297,40 @@ def test_plan_repository_retry_failed_step_resets_downstream_and_reopens_plan(tm
     init_db(db_path)
     repo = PlanRepository(db_path)
     plan = _plan()
-    plan.status = PlanStatus.FAILED
-    plan.steps[0].status = StepStatus.FAILED
+    plan.status = PlanStatus.RUNNING
+    plan.steps[0].status = StepStatus.AWAITING_CONFIRM
     plan.steps[0].sub_agent_id = "sub-1"
     plan.steps[0].output_ref = "metrics:step-1:v1"
-    plan.steps[0].review_verdicts = [
-        ReviewVerdict("deterministic", False, ["old failure"], "2026-06-19T00:00:00+00:00")
-    ]
-    plan.steps[0].error = "old failure"
     plan.steps[1].status = StepStatus.DONE
     plan.steps[1].output_ref = "metrics:step-2:v1"
     repo.create_plan(plan)
     repo.confirm_step("step-1")
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plans SET status = 'failed' WHERE id = 'plan-1'"
+        )
+        conn.execute(
+            """
+            UPDATE plan_steps
+               SET status = 'failed',
+                   review_json = ?,
+                   error = 'old failure'
+             WHERE id = 'step-1'
+            """,
+            (
+                json.dumps(
+                    [
+                        {
+                            "reviewer": "deterministic",
+                            "passed": False,
+                            "reasons": ["old failure"],
+                            "at": "2026-06-19T00:00:00+00:00",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+            ),
+        )
 
     reset_step_ids = repo.retry_failed_step("plan-1", "step-1")
 

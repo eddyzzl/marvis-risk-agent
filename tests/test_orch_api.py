@@ -265,6 +265,9 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     assert client.app.state.plan_executor.calls == ["plan-1"]
     assert _job_statuses(repo.db_path) == ["succeeded"]
 
+    step = repo.load_plan("plan-1").steps[0]
+    step.status = StepStatus.AWAITING_CONFIRM
+    repo.update_step(step)
     step_confirm = client.post("/api/plans/plan-1/steps/step-1/confirm")
     assert step_confirm.status_code == 202
     assert step_confirm.json()["job_id"]
@@ -279,6 +282,21 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     cancelled = cancel_client.post("/api/plans/plan-1/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["plan"]["status"] == "cancelled"
+
+
+def test_plan_step_confirm_endpoint_rejects_non_awaiting_step(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=task_id))
+
+    response = client.post("/api/plans/plan-1/steps/step-1/confirm")
+
+    assert response.status_code == 409
+    assert "not awaiting confirmation" in response.json()["detail"]
+    assert client.app.state.plan_executor.calls == []
+    assert repo.is_step_confirmed("step-1") is False
+    assert _job_statuses(repo.db_path) == ["failed"]
 
 
 def test_plan_retry_failed_step_endpoint_reopens_plan_and_runs(tmp_path):
