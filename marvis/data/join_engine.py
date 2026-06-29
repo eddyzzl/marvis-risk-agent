@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import (
@@ -372,14 +372,16 @@ class JoinEngine:
         final_artifact = staged_artifacts[-1] if staged_artifacts else None
         if final_artifact is None:
             raise DataBackendError("join plan contains no confirmed feature joins")
-        final_path = final_artifact.promote()
         for intermediate in staged_artifacts[:-1]:
             intermediate.rollback()
+        uow = ArtifactUnitOfWork()
+        uow.track(final_artifact)
 
-        register_join_result = getattr(self._registry, "register_join_result_with_audit", None)
-        if callable(register_join_result):
-            try:
-                result = register_join_result(
+        def register_result() -> Dataset:
+            final_path = final_artifact.final_path
+            register_join_result = getattr(self._registry, "register_join_result_with_audit", None)
+            if callable(register_join_result):
+                return register_join_result(
                     final_path,
                     join_plan_id=join_plan_id,
                     audit_factory=audit_for,
@@ -387,10 +389,6 @@ class JoinEngine:
                     role="derived",
                     anchor_target=plan.anchor_dataset_id,
                 )
-            except Exception:
-                final_artifact.rollback()
-                raise
-        else:
             result = self._registry.register_existing(
                 final_path,
                 task_id=plan.task_id,
@@ -404,7 +402,9 @@ class JoinEngine:
             else:
                 self._repo.set_join_plan_executed(join_plan_id, result.id)
                 self._write_audit(**audit)
-        final_artifact.commit()
+            return result
+
+        result = uow.finalize(register_result)
         plan.status = "executed"
         plan.result_dataset_id = result.id
         return result

@@ -1,6 +1,7 @@
 """Artifact persistence helpers."""
 
 from marvis.artifacts.transactional import (
+    ArtifactUnitOfWork,
     StagedArtifact,
     StagedDirectory,
     TransactionalArtifactStore,
@@ -8,6 +9,7 @@ from marvis.artifacts.transactional import (
 )
 
 __all__ = [
+    "ArtifactUnitOfWork",
     "StagedArtifact",
     "StagedDirectory",
     "TransactionalArtifactStore",

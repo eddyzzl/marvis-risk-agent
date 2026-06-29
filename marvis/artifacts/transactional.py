@@ -201,6 +201,63 @@ class TransactionalDirectoryStore:
         return candidate
 
 
+class ArtifactUnitOfWork:
+    """Coordinate promoted artifact files/directories with a later DB/audit write.
+
+    This does not replace repository-owned SQLite transactions. It gives callers a
+    single boundary for the common tool pattern: write staged artifact(s), promote
+    them, run the DB/audit write, then either commit artifact backups or roll the
+    promoted artifacts back when the DB/audit write raises.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[StagedArtifact | StagedDirectory] = []
+        self._closed = False
+
+    def stage_file(self, root: Path, final_name: str | Path) -> StagedArtifact:
+        artifact = TransactionalArtifactStore(root).stage(final_name)
+        self.track(artifact)
+        return artifact
+
+    def stage_directory(self, root: Path, final_name: str | Path) -> StagedDirectory:
+        directory = TransactionalDirectoryStore(root).stage(final_name)
+        self.track(directory)
+        return directory
+
+    def track(self, item: StagedArtifact | StagedDirectory):
+        if self._closed:
+            raise ArtifactTransactionError("artifact unit of work is already closed")
+        self._items.append(item)
+        return item
+
+    def promote_all(self) -> None:
+        for item in self._items:
+            if isinstance(item, StagedDirectory):
+                item.activate()
+            else:
+                item.promote()
+
+    def commit(self) -> None:
+        for item in self._items:
+            item.commit()
+        self._closed = True
+
+    def rollback(self) -> None:
+        for item in reversed(self._items):
+            item.rollback()
+        self._closed = True
+
+    def finalize(self, callback):
+        self.promote_all()
+        try:
+            result = callback()
+        except Exception:
+            self.rollback()
+            raise
+        self.commit()
+        return result
+
+
 def _remove_empty_parents(path: Path) -> None:
     current = Path(path)
     while current.name == ".staging" or current.parent.name == ".staging":
@@ -220,6 +277,7 @@ def _remove_path(path: Path) -> None:
 
 __all__ = [
     "ArtifactTransactionError",
+    "ArtifactUnitOfWork",
     "StagedArtifact",
     "StagedDirectory",
     "TransactionalArtifactStore",
