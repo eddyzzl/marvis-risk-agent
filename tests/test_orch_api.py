@@ -301,6 +301,41 @@ def test_plan_retry_failed_step_endpoint_reopens_plan_and_runs(tmp_path):
     assert _job_statuses(repo.db_path) == ["succeeded"]
 
 
+def test_plan_payload_includes_failure_envelope_for_failed_steps(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.FAILED, task_id=task_id)
+    plan.steps[0].status = StepStatus.FAILED
+    plan.steps[0].error = "bad threshold"
+    plan.steps.append(
+        PlanStep(
+            id="step-2",
+            plan_id="plan-1",
+            index=1,
+            title="Train",
+            tool_ref=ToolRef("_sample", "train"),
+            inputs={"message": "$ref:step-1.output.echoed"},
+            depends_on=["step-1"],
+            post_checks=[],
+        )
+    )
+    repo.create_plan(plan)
+
+    response = client.get("/api/plans/plan-1")
+
+    assert response.status_code == 200
+    step = response.json()["plan"]["steps"][0]
+    envelope = step["failure_envelope"]
+    assert envelope["schema_version"] == "failure.v1"
+    assert envelope["failed_step_id"] == "step-1"
+    assert envelope["editable_input_schema"]["properties"]["message"] == {
+        "default": "hi",
+        "type": "string",
+    }
+    assert envelope["downstream_reset_steps"] == ["step-1", "step-2"]
+
+
 def test_plan_retry_failed_step_endpoint_accepts_replacement_inputs(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo

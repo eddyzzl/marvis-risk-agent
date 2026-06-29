@@ -220,6 +220,15 @@ def test_plan_html_renders_failed_step_retry_action():
               status: "failed",
               tool_ref: { plugin: "_sample", tool: "echo" },
               inputs: { message: "try again <safe>" },
+              failure_envelope: {
+                editable_input_schema: {
+                  type: "object",
+                  properties: {
+                    message: { type: "string", default: "retry from envelope <safe>" },
+                  },
+                },
+                downstream_reset_steps: ["step-1", "step-2"],
+              },
               depends_on: [],
               review_verdicts: [],
             },
@@ -228,7 +237,11 @@ def test_plan_html_renders_failed_step_retry_action():
 
         assert.ok(html.includes('data-retry-step="step-1"'));
         assert.ok(html.includes('data-retry-inputs-for="step-1"'));
-        assert.ok(html.includes('&quot;message&quot;: &quot;try again &lt;safe&gt;&quot;'));
+        assert.equal(html.includes("try again &lt;safe&gt;"), false);
+        assert.ok(html.includes('&quot;message&quot;: &quot;retry from envelope &lt;safe&gt;&quot;'));
+        assert.ok(html.includes("将重置"));
+        assert.ok(html.includes("<code>step-1</code>"));
+        assert.ok(html.includes("<code>step-2</code>"));
         assert.ok(html.includes("重试步骤"));
         assert.equal(html.includes('data-confirm-step="step-1"'), false);
         """

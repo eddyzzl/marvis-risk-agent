@@ -123,11 +123,39 @@ function outputRefHtml(step) {
   return `<button type="button" class="step-output-button" data-artifact="${escapeHtml(outputRef)}">查看输出</button>`;
 }
 
+function retryInputText(step) {
+  const schema = step?.failure_envelope?.editable_input_schema;
+  const properties = schema && typeof schema === "object" ? schema.properties : null;
+  if (properties && typeof properties === "object") {
+    const inputs = {};
+    Object.entries(properties).forEach(([key, spec]) => {
+      if (spec && typeof spec === "object" && Object.prototype.hasOwnProperty.call(spec, "default")) {
+        inputs[key] = spec.default;
+      }
+    });
+    if (Object.keys(inputs).length) {
+      return JSON.stringify(inputs, null, 2);
+    }
+  }
+  return JSON.stringify(step?.inputs || {}, null, 2);
+}
+
+function retryScopeHtml(step) {
+  const resetSteps = Array.isArray(step?.failure_envelope?.downstream_reset_steps)
+    ? step.failure_envelope.downstream_reset_steps.filter(Boolean)
+    : [];
+  if (!resetSteps.length) {
+    return "";
+  }
+  return `<p class="retry-step-scope">将重置 ${resetSteps.map((item) => `<code>${escapeHtml(item)}</code>`).join("、")}</p>`;
+}
+
 function retryPanelHtml(step) {
   const stepId = String(step?.id || "");
-  const inputText = JSON.stringify(step?.inputs || {}, null, 2);
+  const inputText = retryInputText(step);
   return `<details class="retry-step-panel" data-retry-panel="${escapeHtml(stepId)}">
     <summary>重试步骤</summary>
+    ${retryScopeHtml(step)}
     <label>
       参数 JSON
       <textarea data-retry-inputs-for="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(inputText)}</textarea>

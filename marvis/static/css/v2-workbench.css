@@ -216,6 +216,12 @@
   font-weight: 650;
 }
 
+.retry-step-scope {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .retry-step-panel label {
   display: grid;
   gap: 6px;
@@ -946,6 +952,11 @@
   color: var(--text);
   font-size: 12px;
   font-weight: 650;
+}
+.plan-retry-scope {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 .plan-step-retry label {
   display: grid;

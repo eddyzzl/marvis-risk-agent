@@ -4088,6 +4088,23 @@ function planPhaseHint(phase, steps = []) {
 }
 
 function planRetryInputsText(step) {
+  const schema = step?.failure_envelope?.editable_input_schema;
+  const properties = schema && typeof schema === "object" ? schema.properties : null;
+  if (properties && typeof properties === "object") {
+    const inputs = {};
+    Object.entries(properties).forEach(([key, spec]) => {
+      if (spec && typeof spec === "object" && Object.prototype.hasOwnProperty.call(spec, "default")) {
+        inputs[key] = spec.default;
+      }
+    });
+    if (Object.keys(inputs).length) {
+      try {
+        return JSON.stringify(inputs, null, 2);
+      } catch (_) {
+        return "{}";
+      }
+    }
+  }
   try {
     return JSON.stringify(step?.inputs || {}, null, 2);
   } catch (_) {
@@ -4095,10 +4112,20 @@ function planRetryInputsText(step) {
   }
 }
 
+function planRetryScopeHtml(step) {
+  const envelope = step?.failure_envelope;
+  const resetSteps = Array.isArray(envelope?.downstream_reset_steps)
+    ? envelope.downstream_reset_steps.filter(Boolean)
+    : [];
+  if (!resetSteps.length) return "";
+  return `<p class="plan-retry-scope">将重置 ${resetSteps.map((item) => `<code>${escapeHtml(item)}</code>`).join("、")}</p>`;
+}
+
 function planRetryControlHtml(step) {
   const stepId = String(step?.id || "");
   return `<details class="plan-step-retry" data-plan-step-retry="${escapeHtml(stepId)}">
     <summary>编辑参数后重试</summary>
+    ${planRetryScopeHtml(step)}
     <label>
       参数 JSON
       <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>

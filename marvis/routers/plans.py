@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 from marvis.db import TaskRepository
 from marvis.orchestrator.capability import TIERS, resolve_tier, tier_from_settings
-from marvis.orchestrator.contracts import PlanStatus, plan_to_dict
+from marvis.agent.gates import build_failure_envelope
+from marvis.orchestrator.contracts import PlanStatus, StepStatus, plan_to_dict
 from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
 from marvis.orchestrator.planner import PlanningError
 from marvis.orchestrator.templates import get_template
@@ -246,11 +247,52 @@ def _load_plan(request: Request, plan_id: str):
 
 def _plan_payload(request: Request, plan) -> dict:
     payload = plan_to_dict(plan)
+    _attach_failure_envelopes(payload)
     payload["sub_agents"] = [
         _sub_agent_payload(sub)
         for sub in request.app.state.plan_repo.list_sub_agents_for_plan(plan.id)
     ]
     return {"plan": payload}
+
+
+def _attach_failure_envelopes(payload: dict) -> None:
+    steps = payload.get("steps") or []
+    for step in steps:
+        if step.get("status") != StepStatus.FAILED.value:
+            continue
+        reset_steps = _downstream_step_ids(steps, str(step.get("id") or ""))
+        detail = f"「{step.get('title') or step.get('id') or '步骤'}」失败:{step.get('error') or '执行中断。'}"
+        step["failure_envelope"] = build_failure_envelope(
+            plan_id=str(payload.get("id") or ""),
+            step_id=str(step.get("id") or "") or None,
+            run_seq=0,
+            message=detail,
+            step_inputs=step.get("inputs") if isinstance(step.get("inputs"), dict) else None,
+            downstream_reset_steps=tuple(reset_steps),
+            retryable=True,
+        ).to_dict()
+
+
+def _downstream_step_ids(steps: list[dict], root_id: str) -> list[str]:
+    if not root_id:
+        return []
+    reset_ids = {root_id}
+    changed = True
+    while changed:
+        changed = False
+        for step in steps:
+            step_id = str(step.get("id") or "")
+            if not step_id or step_id in reset_ids:
+                continue
+            depends_on = {str(item) for item in step.get("depends_on") or []}
+            if depends_on.intersection(reset_ids):
+                reset_ids.add(step_id)
+                changed = True
+    return [
+        str(step.get("id"))
+        for step in sorted(steps, key=lambda item: (int(item.get("index") or 0), str(item.get("id") or "")))
+        if str(step.get("id") or "") in reset_ids
+    ]
 
 
 def _sub_agent_payload(sub) -> dict:

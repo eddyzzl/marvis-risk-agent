@@ -488,10 +488,19 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
 
 def test_plan_rail_retry_step_posts_edited_inputs():
     app_js = _read_static("app.js")
+    v2_css = _read_static("css/v2-workbench.css")
 
+    retry_text_body = _slice_function(app_js, "function planRetryInputsText")
+    retry_scope_body = _slice_function(app_js, "function planRetryScopeHtml")
     retry_body = _slice_function(app_js, "async function retryV2PlanStep")
     click_body = _slice_function(app_js, "function handleWorkflowStepperClick")
 
+    assert "step?.failure_envelope?.editable_input_schema" in retry_text_body
+    assert 'Object.prototype.hasOwnProperty.call(spec, "default")' in retry_text_body
+    assert "step?.failure_envelope" in retry_scope_body
+    assert "downstream_reset_steps" in retry_scope_body
+    assert "plan-retry-scope" in retry_scope_body
+    assert "color: var(--text-muted)" in _css_rule(v2_css, ".plan-retry-scope")
     assert 'button?.dataset?.planRetryStep || ""' in retry_body
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
     assert "JSON.stringify({ inputs })" in retry_body
