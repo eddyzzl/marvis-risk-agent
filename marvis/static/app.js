@@ -4,6 +4,7 @@ import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
 import { createThemeController } from "./js/theme.js";
+import { attachArtifactHandlers, renderArtifact } from "./js/v2/artifact_view.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
@@ -4106,6 +4107,46 @@ function planRetryControlHtml(step) {
   </details>`;
 }
 
+function planOutputButtonHtml(step) {
+  const outputRef = String(step?.output_ref || "");
+  if (!outputRef) return "";
+  return `<button type="button" class="button compact secondary plan-step-output" data-artifact="${escapeHtml(outputRef)}">查看输出</button>`;
+}
+
+function setArtifactPanelVisible(visible) {
+  const panel = $("artifactPanel");
+  if (!panel) return null;
+  panel.hidden = !visible;
+  panel.classList.toggle("hidden", !visible);
+  return panel;
+}
+
+function clearArtifactPanel() {
+  const body = $("artifactPanelBody");
+  if (body) body.innerHTML = "";
+  setArtifactPanelVisible(false);
+}
+
+function artifactPreviewContainer() {
+  setArtifactPanelVisible(true);
+  return $("artifactPanelBody") || $("artifactPanel");
+}
+
+async function renderRightRailArtifact(container, artifactRef) {
+  const target = artifactPreviewContainer() || container;
+  if (target) {
+    target.innerHTML = '<div class="artifact-loading">正在加载输出...</div>';
+  }
+  return renderArtifact(target, artifactRef);
+}
+
+function handleArtifactPanelCloseClick(event) {
+  const button = event.target?.closest?.("[data-artifact-panel-close]");
+  if (!button) return;
+  event.preventDefault();
+  clearArtifactPanel();
+}
+
 function planSubstepGroupHtml(steps = [], parentNumber = "") {
   if (!steps.length) return "";
   return [
@@ -4133,6 +4174,7 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
       const download = isReportDone
         ? '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>'
         : "";
+      const output = planOutputButtonHtml(step);
       const retry = status === "failed" ? planRetryControlHtml(step) : "";
       const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
       return [
@@ -4145,6 +4187,7 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
         "</span>",
         awaiting,
         download,
+        output,
         retry,
         "</div>",
       ].join("");
@@ -4344,6 +4387,7 @@ function renderWorkflowStepper({ force = false } = {}) {
     return;
   }
   progressRail?.setAttribute("aria-label", "验证步骤");
+  clearArtifactPanel();
   if (railTitle) railTitle.textContent = "验证步骤";
   const nextSignature = workflowStepperSignature(selectedTask);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
@@ -7359,6 +7403,11 @@ function handleDriverReportDownloadClick(event) {
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDriverReportDownloadClick);
+  document.addEventListener("click", handleArtifactPanelCloseClick);
+  attachArtifactHandlers(document, artifactPreviewContainer, {
+    renderArtifact: renderRightRailArtifact,
+    showError: (message) => setActionStatus(message, "error"),
+  });
 }
 
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {

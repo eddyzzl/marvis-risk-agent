@@ -76,15 +76,20 @@ The follow-up review confirmed several earlier concerns were still real and fixe
 - Create-task tier values now match backend capability tiers (`autonomous`, not the stale `aggressive` value), and the create dialog follows the globally selected tier by default.
 - CI now installs from `uv.lock`, uses a real diff range, and `scripts/check` falls back to checking `HEAD` when the configured diff base is unavailable.
 - `scripts/release_push.py` now accepts supported prerelease tags such as `V2.0.0-alpha.1` and writes Python metadata in PEP 440 form such as `2.0.0a1`.
+- Continuation update after commit `0b54507b`:
+  - The real `app.js` workspace shell now imports and mounts `artifact_view.js`; right-rail plan steps with `output_ref` render a `查看输出` action into `#artifactPanel`, so dataset/metrics/artifact refs are no longer only covered by isolated module tests.
+  - AUTO decisions now pass a deterministic safety policy before reaching `PlanDriver`: `adjust` may only operate controls explicitly declared by the current `GateEnvelope`; undeclared parameters such as expensive tuning changes are converted to `halt`.
+  - Screen gates now explicitly declare a `selection` control, so AUTO can safely return feature selections only at gates that expose that control.
+  - Draft code safety scanning now includes AST checks for dangerous imports and file APIs such as `Path.read_text()`, closing a previously noted draft sandbox escape before subprocess execution.
 
 Items confirmed still not complete and therefore still part of the plan:
 
 - OS-level sandboxing is not complete. Plugin/draft tools and ordinary notebook execution have subprocess/resource-limit isolation, but the live keep-alive notebook path still needs either worker RPC redesign or removal from safety-critical flows.
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths, but there is still no single cross-resource `UnitOfWork` that makes SQLite state and file promotion atomic as one unit.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
-- The frontend still lacks a dedicated modeling setup panel, full model comparison/delivery surface, right-rail artifact preview integration, and Playwright desktop/mobile visual smoke.
+- The frontend still lacks a dedicated modeling setup panel, full model comparison/delivery surface, and Playwright desktop/mobile visual smoke. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
-- Broader AUTO safety fixtures are still needed for destructive actions, expensive tuning, export/handoff, and wide downstream resets.
+- Broader AUTO safety fixtures are still needed for destructive actions, export/handoff, and wide downstream resets. Expensive/undeclared tuning adjustments now have a deterministic halt guard.
 
 Current merge stance: this branch is not "V2 complete" yet. It can become an intermediate PR only after full `scripts/check`, manual smoke, and a PR description that explicitly lists the remaining items above. Direct merge to `main` as a finished V2 release is still too risky.
 

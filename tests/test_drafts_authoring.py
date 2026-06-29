@@ -123,8 +123,14 @@ def test_draft_script_rejects_dangerous_code_and_invalid_json():
         "    Path('/tmp/marvis-draft').write_text('bad')\n"
         "    return {'margin': 0}\n",
         "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    secret = Path('/tmp/marvis-draft').read_text()\n"
+        "    return {'margin': len(secret)}\n",
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
         "    os.remove('/tmp/marvis-draft')\n"
         "    return {'margin': 0}\n",
+        "import os\n"
+        "def calc_margin(inputs: dict, ctx) -> dict:\n"
+        "    return {'margin': len(os.environ)}\n",
     ],
 )
 def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):

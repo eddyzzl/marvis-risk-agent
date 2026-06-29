@@ -52,6 +52,7 @@ def decide_gate(client, *, gate: dict) -> dict:
         stream=False,
     )
     decision, ok = _parse_decision(raw, allowed_actions=allowed_actions)
+    decision = _apply_safety_policy(decision, envelope)
     if ok:
         return decision
     retry_prompt = (
@@ -66,7 +67,7 @@ def decide_gate(client, *, gate: dict) -> dict:
         response_format={"type": "json_object"},
         stream=False,
     )
-    return parse_decision(raw, allowed_actions=allowed_actions)
+    return _apply_safety_policy(parse_decision(raw, allowed_actions=allowed_actions), envelope)
 
 
 def _system_prompt(allowed_actions: tuple[str, ...]) -> str:
@@ -235,6 +236,36 @@ def _parse_decision(raw, *, allowed_actions: tuple[str, ...] = DEFAULT_GATE_ACTI
     if confidence is not None:
         decision["confidence"] = confidence
     return decision, error is None
+
+
+def _apply_safety_policy(decision: dict, envelope) -> dict:
+    """Final deterministic guard before an AUTO decision reaches PlanDriver.
+
+    The LLM may only operate controls explicitly declared by the current
+    GateEnvelope. This keeps AUTO bounded to low-risk, typed controls and turns
+    unlisted actions such as expensive tuning, algorithm swaps, export/handoff, or
+    arbitrary downstream resets into a halt for human review.
+    """
+    action = decision.get("action")
+    if action == "adjust":
+        allowed_controls = {str(control.id) for control in getattr(envelope, "controls", ())}
+        params = _object_or_empty(decision.get("params"))
+        unknown_params = sorted(str(key) for key in params if str(key) not in allowed_controls)
+        if unknown_params:
+            return _policy_halt(
+                f"AUTO 返回了当前节点未声明的调整参数:{', '.join(unknown_params)}。"
+            )
+        if decision.get("selection") and "selection" not in allowed_controls:
+            return _policy_halt("AUTO 试图调整特征选择,但当前节点没有声明 selection 控件。")
+        if decision.get("dedup_strategies") and "dedup_strategies" not in allowed_controls:
+            return _policy_halt("AUTO 试图设置去重策略,但当前节点没有声明 dedup_strategies 控件。")
+    if action == "replan" and not str(decision.get("replan_goal") or "").strip():
+        return _policy_halt("AUTO 请求重规划但没有提供明确 replan_goal。")
+    return decision
+
+
+def _policy_halt(reason: str) -> dict:
+    return {"action": "halt", "reason": f"{reason} 已转人工确认。"}
 
 
 def _normalize_allowed_actions(actions: tuple[str, ...]) -> tuple[str, ...]:

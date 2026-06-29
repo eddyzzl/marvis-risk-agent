@@ -126,6 +126,27 @@ def test_draft_sandbox_rejects_unsafe_draft_code_before_execution(tmp_path, monk
     assert run_audit["detail"]["run_id"] == run.id
 
 
+def test_draft_sandbox_rejects_path_read_text_before_execution(tmp_path, monkeypatch):
+    sandbox, drafts, repo, _audit_repo, _tool_registry = _runtime(tmp_path)
+    draft = _draft(
+        "def calc_margin(inputs, ctx):\n"
+        "    secret = Path('/tmp/secret.txt').read_text()\n"
+        "    return {'margin': len(secret)}\n"
+    )
+    drafts.add(draft)
+    monkeypatch.setattr(
+        sandbox._runner,
+        "invoke_adhoc",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe draft should not execute")),
+    )
+
+    run = sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")
+
+    assert run.ok is False
+    assert ".read_text(" in run.error
+    assert repo.list_runs(draft.id) == [run]
+
+
 def test_draft_sandbox_rolls_back_run_and_tested_status_when_record_audit_fails(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

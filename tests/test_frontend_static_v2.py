@@ -1242,6 +1242,22 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
     assert "#reportSection {\n  display: none;" not in styles_css
 
 
+def test_plan_rail_artifact_preview_is_wired_to_real_app_shell():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="artifactPanel"' in index_html
+    assert 'id="artifactPanelBody"' in index_html
+    assert 'import { attachArtifactHandlers, renderArtifact } from "./js/v2/artifact_view.js";' in app_js
+    assert 'function planOutputButtonHtml(step)' in app_js
+    assert 'data-artifact="${escapeHtml(outputRef)}"' in app_js
+    assert "attachArtifactHandlers(document, artifactPreviewContainer" in app_js
+    assert "renderArtifact(target, artifactRef)" in app_js
+    assert ".artifact-panel {" in styles_css
+    assert ".artifact-panel-body" in styles_css
+
+
 def test_report_editor_form_and_summary_are_removed_from_frontend():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")

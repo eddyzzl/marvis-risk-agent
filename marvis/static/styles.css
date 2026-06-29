@@ -4228,6 +4228,112 @@ body[data-theme="dark"] .progress-rail {
   font-size: 15px;
 }
 
+.artifact-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  min-height: 0;
+}
+
+.artifact-panel.hidden,
+.artifact-panel[hidden] {
+  display: none;
+}
+
+.artifact-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.artifact-panel-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.artifact-panel-close {
+  flex: none;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--button-outline-border);
+  border-radius: var(--radius-control);
+  background: var(--button-outline-bg);
+  color: var(--button-outline-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.artifact-panel-close:hover,
+.artifact-panel-close:focus-visible {
+  background: var(--button-outline-hover-bg);
+  color: var(--button-outline-hover-text);
+}
+
+.artifact-panel-body {
+  min-width: 0;
+  max-height: min(42dvh, 420px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.artifact-loading,
+.artifact-panel-body .value-preview {
+  margin: 0;
+  padding: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.artifact-panel-body .dataset-preview {
+  min-width: max-content;
+}
+
+.artifact-panel-body :is(.metrics-preview, .dataset-preview table) {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+}
+
+.artifact-panel-body :is(.metrics-preview th, .metrics-preview td, .dataset-preview th, .dataset-preview td) {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  vertical-align: top;
+}
+
+.artifact-panel-body :is(.metrics-preview th, .dataset-preview th) {
+  color: var(--text-muted);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.artifact-panel-body .artifact-file {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  font-size: 12px;
+}
+
+.artifact-panel-body .artifact-file a {
+  width: max-content;
+}
+
+.artifact-panel-body .artifact-image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-control);
+}
+
 .progress-panel {
   display: grid;
   gap: 10px;

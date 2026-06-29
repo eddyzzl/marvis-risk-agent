@@ -49,7 +49,7 @@ def test_legacy_screen_metadata_infers_adjustable_gate_envelope():
     assert envelope.target_step_id == "gate-screen"
     assert envelope.stale_token == "plan-1:gate-screen:2"
     assert envelope.allowed_actions == ("confirm", "adjust", "replan", "clarify", "halt")
-    assert [control.id for control in envelope.controls] == ["leakage_ks", "max_missing_rate"]
+    assert [control.id for control in envelope.controls] == ["leakage_ks", "max_missing_rate", "selection"]
 
 
 def test_failure_envelope_round_trips_retry_contract():

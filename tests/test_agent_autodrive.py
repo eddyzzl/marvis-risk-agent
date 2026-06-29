@@ -308,6 +308,7 @@ def test_decide_gate_uses_gate_envelope_allowed_actions():
         "action": "adjust",
         "reason": "泄漏阈值偏保守,重算",
         "params": {"leakage_ks": 0.35},
+        "selection": ["x1", "x2"],
     })
     gate = {
         "content": "特征筛选完成",
@@ -316,6 +317,10 @@ def test_decide_gate_uses_gate_envelope_allowed_actions():
                 "kind": "screen",
                 "target_step_id": "gate-screen",
                 "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [
+                    {"id": "leakage_ks", "kind": "number", "bounds": {"min": 0, "max": 1}},
+                    {"id": "selection", "kind": "list"},
+                ],
             }
         },
     }
@@ -324,7 +329,33 @@ def test_decide_gate_uses_gate_envelope_allowed_actions():
 
     assert decision["action"] == "adjust"
     assert decision["params"] == {"leakage_ks": 0.35}
+    assert decision["selection"] == ["x1", "x2"]
     assert "confirm, adjust, halt" in fake.calls[0]["system_prompt"]
+
+
+def test_decide_gate_blocks_undeclared_auto_adjust_params():
+    fake = _FakeLLM(action="adjust", reason="扩大调参")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "扩大调参",
+        "params": {"n_trials": 200},
+    })
+    gate = {
+        "content": "调参配置已生成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "gate",
+                "target_step_id": "gate-tune",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "未声明的调整参数:n_trials" in decision["reason"]
 
 
 def test_decide_gate_passes_table_context_to_llm():

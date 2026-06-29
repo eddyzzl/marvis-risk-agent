@@ -286,6 +286,12 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
                 default=thresholds.get(name),
                 bounds={"min": 0, "max": 1},
             ))
+        controls.append(GateControl(
+            id="selection",
+            kind="list",
+            label="Selected features",
+            schema={"items": "string"},
+        ))
         render_blocks.append(GateRenderBlock(kind="screen_table", title="Feature screening"))
     elif isinstance(meta.get("dedup"), Mapping):
         allowed = ["confirm", "adjust", "clarify", "halt"]

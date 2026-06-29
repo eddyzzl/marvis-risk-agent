@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime
 import json
 import re
@@ -44,12 +45,41 @@ _BANNED_SNIPPETS = (
     "urllib.",
     "urlopen(",
     "open(",
+    ".read_text(",
+    ".read_bytes(",
     ".write_text(",
     ".write_bytes(",
     "os.remove",
     "os.unlink",
     "os.rmdir",
 )
+_BANNED_IMPORT_ROOTS = {
+    "httpx",
+    "os",
+    "pathlib",
+    "requests",
+    "shutil",
+    "socket",
+    "subprocess",
+    "urllib",
+}
+_BANNED_CALL_NAMES = {"eval", "exec", "open", "__import__"}
+_BANNED_ATTR_CALLS = {
+    "glob",
+    "mkdir",
+    "open",
+    "read_bytes",
+    "read_text",
+    "remove",
+    "rename",
+    "replace",
+    "rglob",
+    "rmdir",
+    "touch",
+    "unlink",
+    "write_bytes",
+    "write_text",
+}
 
 
 def draft_script(
@@ -95,8 +125,34 @@ def draft_script(
 
 def assert_draft_code_safe(code: str) -> None:
     hits = [snippet for snippet in _BANNED_SNIPPETS if snippet in code]
+    hits.extend(_ast_safety_hits(code))
     if hits:
-        raise AuthoringError(f"draft code contains banned calls: {', '.join(hits)}")
+        ordered_hits = list(dict.fromkeys(hits))
+        raise AuthoringError(f"draft code contains banned calls: {', '.join(ordered_hits)}")
+
+
+def _ast_safety_hits(code: str) -> list[str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise AuthoringError(f"draft code is not valid Python: {exc.msg}") from exc
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = str(alias.name).split(".", 1)[0]
+                if root in _BANNED_IMPORT_ROOTS:
+                    hits.append(f"import {root}")
+        elif isinstance(node, ast.ImportFrom):
+            root = str(node.module or "").split(".", 1)[0]
+            if root in _BANNED_IMPORT_ROOTS:
+                hits.append(f"from {root} import")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _BANNED_CALL_NAMES:
+                hits.append(f"{node.func.id}(")
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in _BANNED_ATTR_CALLS:
+                hits.append(f".{node.func.attr}(")
+    return hits
 
 
 def _authoring_prompt(goal: str, learning_note: LearningNote | None) -> str:
