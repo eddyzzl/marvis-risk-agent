@@ -195,6 +195,9 @@ def build_model_delivery_payload(
         "native_model_path": str(o.get("native_model_path") or ""),
         "pmml_path": str(o.get("pmml_path") or ""),
         "validation_task_id": str(o.get("validation_task_id") or ""),
+        "challenger_task_id": str(o.get("challenger_task_id") or ""),
+        "challenger_package_path": str(o.get("challenger_package_path") or ""),
+        "challenger_package_markdown_path": str(o.get("challenger_package_markdown_path") or ""),
         "approval_package_path": str(o.get("approval_package_path") or ""),
         "approval_package_markdown_path": str(o.get("approval_package_markdown_path") or ""),
         "report": report,
@@ -666,6 +669,9 @@ def _delivery_actions(value) -> list[dict]:
             "status": str(item.get("status") or ""),
             "pmml_path": str(item.get("pmml_path") or ""),
             "validation_task_id": str(item.get("validation_task_id") or ""),
+            "challenger_task_id": str(item.get("challenger_task_id") or ""),
+            "package_path": str(item.get("package_path") or ""),
+            "markdown_path": str(item.get("markdown_path") or ""),
             "reason": str(item.get("reason") or ""),
         })
     return actions
@@ -730,8 +736,12 @@ def _delivery_readiness(
     approval_package_markdown_path = str(output.get("approval_package_markdown_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
+    challenger_task_id = str(output.get("challenger_task_id") or "")
+    challenger_package_markdown_path = str(output.get("challenger_package_markdown_path") or "")
+    challenger_package_path = str(output.get("challenger_package_path") or "")
     pmml_action = _action(actions, "export_pmml")
     handoff_action = _action(actions, "handoff_to_validation")
+    challenger_action = _action(actions, "create_challenger_backtest")
     readiness = [
         {
             "id": "native_model",
@@ -757,6 +767,22 @@ def _delivery_readiness(
             "reason": handoff_action.get("reason") or capabilities.get("reason", ""),
         },
     ]
+    if challenger_action or challenger_task_id or challenger_package_markdown_path or challenger_package_path:
+        readiness.append({
+            "id": "challenger_backtest",
+            "label": "Challenger/Backtest",
+            "status": challenger_action.get("status")
+            or ("ready" if capabilities.get("handoff_supported") else "unsupported"),
+            "artifact": (
+                challenger_task_id
+                or challenger_action.get("challenger_task_id", "")
+                or challenger_package_markdown_path
+                or challenger_package_path
+                or challenger_action.get("markdown_path", "")
+                or challenger_action.get("package_path", "")
+            ),
+            "reason": challenger_action.get("reason") or capabilities.get("reason", ""),
+        })
     if report is not None:
         total = int(report.get("total_sections") or 0)
         available = int(report.get("available_sections") or 0)

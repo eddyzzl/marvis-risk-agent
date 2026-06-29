@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from marvis.packs.modeling.artifact import save_model
 from marvis.packs.modeling.contracts import ModelMetrics, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.handoff import (
+    create_challenger_backtest_task,
     handoff_to_validation,
     mark_validated_from_validation_task,
 )
@@ -198,6 +200,89 @@ def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_f
         settings.tasks_dir
         / source_task.id
         / "validation_handoff"
+        / ".staging"
+    ).exists()
+
+
+def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_path):
+    settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+
+    result = create_challenger_backtest_task(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+        selection_policy_decision={"status": "ready"},
+    )
+
+    task = TaskRepository(settings.db_path).get_task(result["task_id"])
+    material_dir = Path(task.source_dir)
+    assert task.task_type == TASK_TYPE_VALIDATION
+    assert task.model_name == source_task.model_name
+    assert task.model_version == f"{artifact.id}-challenger-backtest"
+    assert task.validator == "MARVIS Challenger Backtest"
+    assert task.notebook_path == "scoring_notebook.ipynb"
+    assert task.sample_path == "sample.parquet"
+    assert task.pmml_path == "model.pmml"
+    assert task.dictionary_path == "dictionary.csv"
+    assert task.report_values_revision == 0
+    assert (material_dir / "sample.parquet").exists()
+    assert (material_dir / "model.pmml").exists()
+    assert (material_dir / "model.joblib").exists()
+    assert (material_dir / "dictionary.csv").exists()
+    assert Path(result["package_path"]).exists()
+    assert Path(result["markdown_path"]).exists()
+    payload = json.loads(Path(result["package_path"]).read_text(encoding="utf-8"))
+    assert payload["kind"] == "modeling_challenger_backtest"
+    assert payload["experiment_id"] == artifact.experiment_id
+    assert payload["selection_policy_decision"]["status"] == "ready"
+    assert "compare selected model" in payload["recommended_checks"][0]
+    markdown = Path(result["markdown_path"]).read_text(encoding="utf-8")
+    assert "# Challenger / Backtest 任务包" in markdown
+    assert "建议检查" in markdown
+    precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
+    audit = db_module.PluginRepository(settings.db_path).list_audit(
+        kind="modeling.challenger_backtest.create",
+    )[0]
+    assert audit["target_ref"] == result["task_id"]
+    assert audit["detail"]["artifact_id"] == artifact.id
+    assert store.get(artifact.experiment_id).status == "trained"
+
+
+def test_create_challenger_backtest_task_rolls_back_materials_when_audit_fails(
+    tmp_path,
+    monkeypatch,
+):
+    settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+    original_write_audit = db_module._write_audit_row
+
+    def fail_challenger_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.challenger_backtest.create":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_challenger_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        create_challenger_backtest_task(
+            store,
+            artifact,
+            sample_dataset_id=dataset.id,
+            settings=settings,
+        )
+
+    task_repo = TaskRepository(settings.db_path)
+    assert [task.id for task in task_repo.list_tasks()] == [source_task.id]
+    assert not (
+        settings.tasks_dir
+        / source_task.id
+        / "challenger_backtest"
+        / artifact.id
+    ).exists()
+    assert not (
+        settings.tasks_dir
+        / source_task.id
+        / "challenger_backtest"
         / ".staging"
     ).exists()
 

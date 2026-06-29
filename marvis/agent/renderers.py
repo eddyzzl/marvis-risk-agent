@@ -745,7 +745,14 @@ def _render_post_training_action(o: dict):
     for item in actions:
         action = str(item.get("action") or "")
         status = str(item.get("status") or "")
-        artifact = item.get("pmml_path") or item.get("validation_task_id") or ""
+        artifact = (
+            item.get("pmml_path")
+            or item.get("validation_task_id")
+            or item.get("challenger_task_id")
+            or item.get("markdown_path")
+            or item.get("package_path")
+            or ""
+        )
         rows.append([action, status, artifact, str(item.get("reason") or "")])
     tables = [{
         "title": "训练后交付状态",

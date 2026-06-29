@@ -89,6 +89,14 @@ class TaskRepository:
             _insert_task_record_row(conn, record, report_values=payload.report_values)
         return record
 
+    def create_task_with_audit(self, payload: TaskCreate, *, audit_factory) -> TaskRecord:
+        record = _task_record_from_create(payload)
+        audit = audit_factory(record)
+        with connect(self.db_path) as conn:
+            _insert_task_record_row(conn, record, report_values=payload.report_values)
+            _write_audit_row(conn, **audit)
+        return record
+
     def create_validation_handoff_with_audit(
         self,
         payload: TaskCreate,

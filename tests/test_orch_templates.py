@@ -127,7 +127,11 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     assert report_step.needs_confirmation is True
     assert delivery_step.inputs["experiment_id"] == f"$ref:{select_step.id}.output.selected_experiment_id"
     assert delivery_step.inputs["sample_dataset_id"] == "dataset-1"
-    assert delivery_step.inputs["actions"] == ["export_pmml", "handoff_to_validation"]
+    assert delivery_step.inputs["actions"] == [
+        "export_pmml",
+        "handoff_to_validation",
+        "create_challenger_backtest",
+    ]
     assert delivery_step.inputs["selection_policy_decision"] == f"$ref:{select_step.id}.output.policy_decision"
     assert delivery_step.needs_confirmation is True
     assert plan.success_criteria == []

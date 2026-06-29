@@ -1633,7 +1633,8 @@
               "type": "string",
               "enum": [
                 "export_pmml",
-                "handoff_to_validation"
+                "handoff_to_validation",
+                "create_challenger_backtest"
               ]
             }
           },
@@ -1664,6 +1665,15 @@
           "validation_task_id": {
             "type": "string"
           },
+          "challenger_task_id": {
+            "type": "string"
+          },
+          "challenger_package_path": {
+            "type": "string"
+          },
+          "challenger_package_markdown_path": {
+            "type": "string"
+          },
           "approval_package_path": {
             "type": "string"
           },
@@ -1681,6 +1691,9 @@
           "experiment_id",
           "artifact_id",
           "native_model_path",
+          "challenger_task_id",
+          "challenger_package_path",
+          "challenger_package_markdown_path",
           "approval_package_path",
           "approval_package_markdown_path",
           "capabilities",

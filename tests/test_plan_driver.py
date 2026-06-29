@@ -762,6 +762,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
             "native_model_path": "/tmp/model.pkl",
             "pmml_path": "/tmp/model.pmml",
             "validation_task_id": "task-validation",
+            "challenger_task_id": "task-challenger",
+            "challenger_package_path": "/tmp/challenger_backtest_plan.json",
+            "challenger_package_markdown_path": "/tmp/challenger_backtest_plan.md",
             "approval_package_path": "/tmp/art-lgb.approval_package.json",
             "approval_package_markdown_path": "/tmp/art-lgb.approval_package.md",
             "capabilities": {
@@ -775,6 +778,12 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
                     "action": "handoff_to_validation",
                     "status": "succeeded",
                     "validation_task_id": "task-validation",
+                },
+                {
+                    "action": "create_challenger_backtest",
+                    "status": "succeeded",
+                    "challenger_task_id": "task-challenger",
+                    "markdown_path": "/tmp/challenger_backtest_plan.md",
                 },
             ],
         }
@@ -791,22 +800,27 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["native_model_path"] == "/tmp/model.pkl"
     assert delivery["pmml_path"] == "/tmp/model.pmml"
     assert delivery["validation_task_id"] == "task-validation"
+    assert delivery["challenger_task_id"] == "task-challenger"
+    assert delivery["challenger_package_markdown_path"] == "/tmp/challenger_backtest_plan.md"
     assert delivery["approval_package_path"] == "/tmp/art-lgb.approval_package.json"
     assert delivery["approval_package_markdown_path"] == "/tmp/art-lgb.approval_package.md"
     assert delivery["report"]["status"] == "ready"
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
-    assert [item["status"] for item in delivery["actions"]] == ["succeeded", "succeeded"]
+    assert [item["status"] for item in delivery["actions"]] == ["succeeded", "succeeded", "succeeded"]
     assert [item["status"] for item in delivery["readiness"]] == [
         "ready",
         "ready",
         "ready",
         "succeeded",
         "succeeded",
+        "succeeded",
         "ready",
     ]
     assert delivery["readiness"][2]["id"] == "approval_package"
     assert delivery["readiness"][2]["artifact"] == "/tmp/art-lgb.approval_package.md"
+    assert delivery["readiness"][5]["id"] == "challenger_backtest"
+    assert delivery["readiness"][5]["artifact"] == "task-challenger"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
     assert delivery["policy_signals"]["approval"] == "建议可审批"
 
@@ -1445,12 +1459,18 @@ def test_render_registry_has_modeling_renderers_and_generic_fallback():
             "actions": [
                 {"action": "export_pmml", "status": "skipped", "reason": "CatBoost 不支持 PMML"},
                 {"action": "handoff_to_validation", "status": "skipped", "reason": "sample_dataset_id is required"},
+                {
+                    "action": "create_challenger_backtest",
+                    "status": "skipped",
+                    "reason": "PMML-capable model is required",
+                },
             ],
         },
     )
-    assert "跳过 2 个" in delivery_text
+    assert "跳过 3 个" in delivery_text
     assert delivery_tables[0]["title"] == "训练后交付状态"
     assert any("CatBoost 不支持 PMML" in row for row in delivery_tables[0]["rows"])
+    assert any("PMML-capable model is required" in row for row in delivery_tables[0]["rows"])
     strategy_text, strategy_tables = render_tool_output(
         "build_strategy",
         {

@@ -219,9 +219,16 @@ function actionTable(actions) {
     <table class="model-delivery-table">
       <thead><tr><th>动作</th><th>状态</th><th>产物/任务</th><th>说明</th></tr></thead>
       <tbody>${rows.map((row) => {
-        const artifact = String(row.pmml_path || row.validation_task_id || "");
+        const artifact = String(
+          row.pmml_path
+          || row.validation_task_id
+          || row.challenger_task_id
+          || row.markdown_path
+          || row.package_path
+          || ""
+        );
         return `<tr>
-          <td>${escapeHtml(String(row.action || "-"))}</td>
+          <td>${escapeHtml(actionLabel(row.action))}</td>
           <td><span class="model-delivery-status" data-readiness-kind="${escapeHtml(statusKind(row.status))}">${escapeHtml(statusLabel(row.status))}</span></td>
           <td>${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : "-"}</td>
           <td>${escapeHtml(String(row.reason || ""))}</td>
@@ -229,6 +236,15 @@ function actionTable(actions) {
       }).join("")}</tbody>
     </table>
   </div>`;
+}
+
+function actionLabel(action) {
+  const key = String(action || "");
+  return {
+    export_pmml: "导出PMML",
+    handoff_to_validation: "移交验证",
+    create_challenger_backtest: "创建Challenger/Backtest",
+  }[key] || key || "-";
 }
 
 function artifactList(delivery) {
@@ -239,6 +255,8 @@ function artifactList(delivery) {
     ...(delivery.approval_package_markdown_path && delivery.approval_package_path
       ? [["审批包JSON", delivery.approval_package_path]]
       : []),
+    ["Challenger/Backtest", delivery.challenger_task_id],
+    ["Challenger/Backtest包", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
     ["PMML", delivery.pmml_path],
     ["验证任务", delivery.validation_task_id],
   ].filter(([, value]) => String(value || ""));

@@ -301,6 +301,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                 {{ id: "model_report", label: "模型报告", status: "partial", artifact: "/tmp/model_report.xlsx", reason: "报告章节 1/2 可生成" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
                 {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
+                {{ id: "challenger_backtest", label: "Challenger/Backtest", status: "succeeded", artifact: "task-challenger" }},
                 {{ id: "approval_policy", label: "审批策略", status: "ready", reason: "建议可审批" }},
               ],
               candidates: [
@@ -326,10 +327,19 @@ def test_model_delivery_panel_renders_selection_and_actions():
               actions: [
                 {{ action: "export_pmml", status: "succeeded", pmml_path: "/tmp/model.pmml" }},
                 {{ action: "handoff_to_validation", status: "succeeded", validation_task_id: "task-validation" }},
+                {{
+                  action: "create_challenger_backtest",
+                  status: "succeeded",
+                  challenger_task_id: "task-challenger",
+                  markdown_path: "/tmp/challenger_backtest_plan.md",
+                }},
               ],
               native_model_path: "/tmp/model.pkl",
               pmml_path: "/tmp/model.pmml",
               validation_task_id: "task-validation",
+              challenger_task_id: "task-challenger",
+              challenger_package_path: "/tmp/challenger_backtest_plan.json",
+              challenger_package_markdown_path: "/tmp/challenger_backtest_plan.md",
               approval_package_path: "/tmp/art-lgb.approval_package.json",
               approval_package_markdown_path: "/tmp/art-lgb.approval_package.md",
               report: {{
@@ -373,7 +383,11 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("120.00"), true);
         assert.equal(html.includes("PMML"), true);
         assert.equal(html.includes("验证移交"), true);
+        assert.equal(html.includes("Challenger/Backtest"), true);
+        assert.equal(html.includes("创建Challenger/Backtest"), true);
         assert.equal(html.includes("model.pmml"), true);
+        assert.equal(html.includes("task-challenger"), true);
+        assert.equal(html.includes("challenger_backtest_plan.md"), true);
         assert.equal(html.includes("审批包"), true);
         assert.equal(html.includes("approval_package.md"), true);
         assert.equal(html.includes("审批包JSON"), true);
@@ -461,6 +475,8 @@ def test_modeling_panels_combined_dom_smoke_contract():
                 }},
               ],
               pmml_path: longPath,
+              challenger_task_id: "task-challenger",
+              challenger_package_markdown_path: "/tmp/challenger_backtest_plan.md",
               approval_package_path: "/tmp/art-lgb.approval_package.json",
               approval_package_markdown_path: "/tmp/art-lgb.approval_package.md",
             }},

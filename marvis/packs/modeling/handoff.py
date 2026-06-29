@@ -3,7 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import shutil
-from dataclasses import replace
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +19,12 @@ from marvis.packs.modeling.errors import ModelingError
 
 
 HANDOFF_DIR_NAME = "validation_handoff"
+CHALLENGER_BACKTEST_DIR_NAME = "challenger_backtest"
 MODELING_ARTIFACTS_DIR_NAME = "modeling_artifacts"
 SCORING_NOTEBOOK_NAME = "scoring_notebook.ipynb"
 DICTIONARY_NAME = "dictionary.csv"
+CHALLENGER_BACKTEST_PLAN_JSON = "challenger_backtest_plan.json"
+CHALLENGER_BACKTEST_PLAN_MD = "challenger_backtest_plan.md"
 
 
 def handoff_to_validation(
@@ -131,6 +135,126 @@ def mark_validated_from_validation_task(
     return True
 
 
+def create_challenger_backtest_task(
+    experiment_store,
+    artifact: ModelArtifact,
+    *,
+    sample_dataset_id: str,
+    settings,
+    selection_policy_decision: dict | None = None,
+) -> dict[str, str]:
+    if not artifact.experiment_id:
+        raise ModelingError("artifact experiment_id is required for challenger/backtest task")
+    experiment = experiment_store.get(artifact.experiment_id)
+    if experiment.artifact_id and experiment.artifact_id != artifact.id:
+        raise ModelingError(
+            f"artifact {artifact.id} is not attached to experiment {experiment.id}"
+        )
+    sample_path = _sample_dataset_path(settings, sample_dataset_id)
+    artifact_base_dir = _artifact_base_dir(settings, experiment)
+    model_path = _resolve_artifact_path(artifact.model_path, base_dir=artifact_base_dir)
+    if not model_path.exists():
+        raise ModelingError(f"model file does not exist: {model_path}")
+    pmml_path = _ensure_pmml_path(
+        experiment_store,
+        artifact,
+        experiment=experiment,
+        sample_path=sample_path,
+        artifact_base_dir=artifact_base_dir,
+    )
+
+    material_dir = _challenger_backtest_dir(settings, experiment, artifact)
+    staged_materials = TransactionalDirectoryStore(material_dir.parent).stage(material_dir.name)
+    staged_materials.path.mkdir(parents=True, exist_ok=True)
+    sample_material_name = f"sample{sample_path.suffix or '.parquet'}"
+    model_material_name = f"model{model_path.suffix or '.joblib'}"
+    shutil.copy2(sample_path, staged_materials.path / sample_material_name)
+    shutil.copy2(pmml_path, staged_materials.path / "model.pmml")
+    shutil.copy2(model_path, staged_materials.path / model_material_name)
+    calibration_material_name = _copy_calibration_payload(
+        artifact,
+        artifact_base_dir=artifact_base_dir,
+        material_dir=staged_materials.path,
+    )
+    _write_dictionary(staged_materials.path / DICTIONARY_NAME, artifact.feature_list)
+    _write_scoring_notebook(
+        staged_materials.path / SCORING_NOTEBOOK_NAME,
+        artifact=artifact,
+        experiment=experiment,
+        model_filename=model_material_name,
+        calibration_filename=calibration_material_name,
+    )
+    plan_payload = _challenger_backtest_payload(
+        experiment=experiment,
+        artifact=artifact,
+        sample_dataset_id=sample_dataset_id,
+        sample_material_name=sample_material_name,
+        model_material_name=model_material_name,
+        selection_policy_decision=selection_policy_decision or {},
+    )
+    (staged_materials.path / CHALLENGER_BACKTEST_PLAN_JSON).write_text(
+        json.dumps(plan_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (staged_materials.path / CHALLENGER_BACKTEST_PLAN_MD).write_text(
+        _challenger_backtest_markdown(plan_payload),
+        encoding="utf-8",
+    )
+
+    source_task = _source_task(settings, experiment.task_id)
+    payload = TaskCreate(
+        task_type=TASK_TYPE_VALIDATION,
+        model_name=source_task.model_name if source_task else f"{experiment.recipe_id} model",
+        model_version=f"{artifact.id}-challenger-backtest",
+        validator="MARVIS Challenger Backtest",
+        source_dir=str(material_dir.resolve()),
+        algorithm=artifact.algorithm,
+        run_mode="agent",
+        target_col=experiment.config.target_col,
+        score_col=_score_col(experiment.config.params),
+        split_col=experiment.config.split_col,
+        time_col=_time_col(experiment.config.params),
+        feature_columns=list(artifact.feature_list),
+        notebook_path=SCORING_NOTEBOOK_NAME,
+        sample_path=sample_material_name,
+        pmml_path="model.pmml",
+        dictionary_path=DICTIONARY_NAME,
+        report_values={
+            "TEXT:task_kind": "modeling_challenger_backtest",
+            "TEXT:source_experiment_id": artifact.experiment_id,
+            "TEXT:source_artifact_id": artifact.id,
+            "TEXT:sample_dataset_id": sample_dataset_id,
+            "TEXT:plan_path": CHALLENGER_BACKTEST_PLAN_JSON,
+        },
+    )
+    try:
+        staged_materials.activate()
+        task = TaskRepository(settings.db_path).create_task_with_audit(
+            payload,
+            audit_factory=lambda record: {
+                "kind": "modeling.challenger_backtest.create",
+                "target_ref": record.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "experiment_id": artifact.experiment_id,
+                    "artifact_id": artifact.id,
+                    "sample_dataset_id": sample_dataset_id,
+                    "source_dir": str(material_dir.resolve()),
+                    "plan_path": CHALLENGER_BACKTEST_PLAN_JSON,
+                },
+            },
+        )
+        staged_materials.commit()
+    except Exception:
+        staged_materials.rollback()
+        raise
+    return {
+        "task_id": task.id,
+        "package_path": str((material_dir / CHALLENGER_BACKTEST_PLAN_JSON).resolve()),
+        "markdown_path": str((material_dir / CHALLENGER_BACKTEST_PLAN_MD).resolve()),
+    }
+
+
 def _sample_dataset_path(settings, dataset_id: str) -> Path:
     dataset = DatasetRepository(settings.db_path).get_dataset(dataset_id)
     if dataset is None:
@@ -147,6 +271,10 @@ def _artifact_base_dir(settings, experiment: Experiment) -> Path:
 
 def _material_dir(settings, experiment: Experiment, artifact: ModelArtifact) -> Path:
     return Path(settings.tasks_dir) / experiment.task_id / HANDOFF_DIR_NAME / artifact.id
+
+
+def _challenger_backtest_dir(settings, experiment: Experiment, artifact: ModelArtifact) -> Path:
+    return Path(settings.tasks_dir) / experiment.task_id / CHALLENGER_BACKTEST_DIR_NAME / artifact.id
 
 
 def _resolve_artifact_path(value: str, *, base_dir: Path) -> Path:
@@ -257,6 +385,96 @@ def _write_scoring_notebook(
     nbformat.write(notebook, path)
 
 
+def _challenger_backtest_payload(
+    *,
+    experiment: Experiment,
+    artifact: ModelArtifact,
+    sample_dataset_id: str,
+    sample_material_name: str,
+    model_material_name: str,
+    selection_policy_decision: dict,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "kind": "modeling_challenger_backtest",
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "algorithm": artifact.algorithm,
+        "recipe": experiment.recipe_id,
+        "target_type": experiment.config.target_type,
+        "dataset_id": experiment.config.dataset_id,
+        "sample_dataset_id": sample_dataset_id,
+        "target_col": experiment.config.target_col,
+        "split_col": experiment.config.split_col,
+        "time_col": _time_col(experiment.config.params),
+        "score_col": _score_col(experiment.config.params),
+        "features": list(artifact.feature_list),
+        "feature_count": len(artifact.feature_list),
+        "metrics": asdict(experiment.metrics) if experiment.metrics else {},
+        "selection_policy_decision": selection_policy_decision,
+        "materials": {
+            "sample_path": sample_material_name,
+            "native_model_path": model_material_name,
+            "pmml_path": "model.pmml",
+            "notebook_path": SCORING_NOTEBOOK_NAME,
+            "dictionary_path": DICTIONARY_NAME,
+        },
+        "recommended_checks": [
+            "compare selected model against current champion or prior production model",
+            "run OOT/backtest by split and time bucket",
+            "review PSI, KS/AUC drift, calibration, and reject/fairness slices",
+            "record business override reason when selecting a non-recommended challenger",
+        ],
+    }
+
+
+def _challenger_backtest_markdown(payload: dict[str, Any]) -> str:
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    lines = [
+        "# Challenger / Backtest 任务包",
+        "",
+        "## 模型",
+        "",
+        f"- 实验ID: `{_md_value(payload.get('experiment_id'))}`",
+        f"- 产物ID: `{_md_value(payload.get('artifact_id'))}`",
+        f"- 算法: `{_md_value(payload.get('algorithm'))}`",
+        f"- 样本集: `{_md_value(payload.get('sample_dataset_id'))}`",
+        f"- 目标列: `{_md_value(payload.get('target_col'))}`",
+        f"- 分割列: `{_md_value(payload.get('split_col'))}`",
+        f"- 时间列: `{_md_value(payload.get('time_col'))}`",
+        "",
+        "## 关键指标",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | ---: |",
+    ]
+    for key in sorted(k for k in metrics if k.startswith(("test_", "oot_", "psi_"))):
+        lines.append(f"| {_md_cell(key)} | {_md_cell(metrics.get(key))} |")
+    if len(lines) >= 2 and lines[-1] == "| --- | ---: |":
+        lines.append("| - | - |")
+    lines.extend([
+        "",
+        "## 建议检查",
+        "",
+    ])
+    for item in payload.get("recommended_checks") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## 物料", ""])
+    materials = payload.get("materials") if isinstance(payload.get("materials"), dict) else {}
+    for key, value in materials.items():
+        lines.append(f"- {key}: `{_md_value(value)}`")
+    return "\n".join(lines) + "\n"
+
+
+def _md_value(value: Any) -> str:
+    return str(value if value is not None else "-").replace("`", "'")
+
+
+def _md_cell(value: Any) -> str:
+    return _md_value(value).replace("|", "\\|").replace("\n", " ")
+
+
 def _scoring_notebook_source(
     *,
     artifact: ModelArtifact,
@@ -340,4 +558,8 @@ def _scoring_notebook_source(
     )
 
 
-__all__ = ["handoff_to_validation", "mark_validated_from_validation_task"]
+__all__ = [
+    "create_challenger_backtest_task",
+    "handoff_to_validation",
+    "mark_validated_from_validation_task",
+]

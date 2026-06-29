@@ -26,7 +26,7 @@ from marvis.packs.modeling.artifact import export_pmml, load_model, persist_mode
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.experiment import ExperimentStore
-from marvis.packs.modeling.handoff import handoff_to_validation
+from marvis.packs.modeling.handoff import create_challenger_backtest_task, handoff_to_validation
 from marvis.packs.modeling.report_compute import (
     BusinessColumns,
     build_feature_dictionary,
@@ -1267,12 +1267,18 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
     requested_actions = [
         str(item)
-        for item in (inputs.get("actions") or ["export_pmml", "handoff_to_validation"])
+        for item in (
+            inputs.get("actions")
+            or ["export_pmml", "handoff_to_validation", "create_challenger_backtest"]
+        )
         if str(item).strip()
     ]
     actions: list[dict] = []
     pmml_path = ""
     validation_task_id = ""
+    challenger_task_id = ""
+    challenger_package_path = ""
+    challenger_package_markdown_path = ""
     reason = str(capabilities.get("reason") or "")
 
     if "export_pmml" in requested_actions:
@@ -1303,6 +1309,33 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 "reason": reason or "sample_dataset_id is required for validation handoff",
             })
 
+    if "create_challenger_backtest" in requested_actions:
+        sample_dataset_id = str(inputs.get("sample_dataset_id") or "").strip()
+        if capabilities.get("handoff_supported") and sample_dataset_id:
+            challenger = create_challenger_backtest_task(
+                runtime.experiments,
+                artifact,
+                sample_dataset_id=sample_dataset_id,
+                settings=runtime.settings,
+                selection_policy_decision=selection_policy_decision,
+            )
+            challenger_task_id = challenger["task_id"]
+            challenger_package_path = challenger["package_path"]
+            challenger_package_markdown_path = challenger["markdown_path"]
+            actions.append({
+                "action": "create_challenger_backtest",
+                "status": "succeeded",
+                "challenger_task_id": challenger_task_id,
+                "package_path": challenger_package_path,
+                "markdown_path": challenger_package_markdown_path,
+            })
+        else:
+            actions.append({
+                "action": "create_challenger_backtest",
+                "status": "skipped",
+                "reason": reason or "sample_dataset_id and PMML-capable model are required",
+            })
+
     approval_package = _write_approval_package(
         base_dir,
         experiment=experiment,
@@ -1312,6 +1345,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         sample_dataset_id=str(inputs.get("sample_dataset_id") or ""),
         pmml_path=pmml_path,
         validation_task_id=validation_task_id,
+        challenger_task_id=challenger_task_id,
+        challenger_package_path=challenger_package_path,
+        challenger_package_markdown_path=challenger_package_markdown_path,
         selection_policy_decision=selection_policy_decision,
     )
     return {
@@ -1320,6 +1356,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         "native_model_path": str(artifact.model_path),
         "pmml_path": pmml_path,
         "validation_task_id": validation_task_id,
+        "challenger_task_id": challenger_task_id,
+        "challenger_package_path": challenger_package_path,
+        "challenger_package_markdown_path": challenger_package_markdown_path,
         "approval_package_path": str(approval_package["json_path"]),
         "approval_package_markdown_path": str(approval_package["markdown_path"]),
         "capabilities": capabilities,
@@ -1360,6 +1399,9 @@ def _write_approval_package(
     sample_dataset_id: str,
     pmml_path: str,
     validation_task_id: str,
+    challenger_task_id: str,
+    challenger_package_path: str,
+    challenger_package_markdown_path: str,
     selection_policy_decision: dict,
 ) -> dict[str, Path]:
     config = experiment.config
@@ -1387,6 +1429,9 @@ def _write_approval_package(
             "native_model_path": str(artifact.model_path or ""),
             "pmml_path": str(pmml_path or ""),
             "validation_task_id": str(validation_task_id or ""),
+            "challenger_task_id": str(challenger_task_id or ""),
+            "challenger_package_path": str(challenger_package_path or ""),
+            "challenger_package_markdown_path": str(challenger_package_markdown_path or ""),
         },
         "scorecard_table": _json_safe(_scorecard_table_rows(artifact)),
         "model_params": _json_safe(artifact.params),
@@ -1474,6 +1519,8 @@ def _approval_package_markdown(payload: dict) -> str:
         f"| 原生模型 | `{_md_cell(artifacts.get('native_model_path') or '-')}` |",
         f"| PMML | `{_md_cell(artifacts.get('pmml_path') or '-')}` |",
         f"| 验证任务 | `{_md_cell(artifacts.get('validation_task_id') or '-')}` |",
+        f"| Challenger/Backtest任务 | `{_md_cell(artifacts.get('challenger_task_id') or '-')}` |",
+        f"| Challenger/Backtest包 | `{_md_cell(artifacts.get('challenger_package_markdown_path') or artifacts.get('challenger_package_path') or '-')}` |",
     ])
     if actions:
         lines.extend(["", "## 交付动作", "", "| 动作 | 状态 | 说明 |", "| --- | --- | --- |"])
@@ -1481,7 +1528,7 @@ def _approval_package_markdown(payload: dict) -> str:
             lines.append(
                 f"| {_md_cell(item.get('action') or '-')} | "
                 f"{_md_cell(item.get('status') or '-')} | "
-                f"{_md_cell(item.get('reason') or item.get('pmml_path') or item.get('validation_task_id') or '-')} |"
+                f"{_md_cell(item.get('reason') or item.get('pmml_path') or item.get('validation_task_id') or item.get('challenger_task_id') or '-')} |"
             )
     lines.extend(["", "## 入模特征", ""])
     preview = features[:50]

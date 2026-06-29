@@ -72,6 +72,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `5 passed` after adding the human-readable Markdown approval package and exposing it through delivery metadata/readiness/front-end artifacts while keeping the JSON evidence package.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `84 passed` after the Markdown approval package update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Markdown approval package update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_orch_templates.py::test_standard_modeling_template_instantiates_valid_report_plan tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_plan_driver.py::test_render_registry_has_modeling_renderers_and_generic_fallback tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `13 passed` after adding the post-training challenger/backtest task package and delivery-panel wiring.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after fixing select-experiment readiness so challenger/backtest readiness appears only once the G5 action/outputs exist.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the challenger/backtest task package update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `96 passed` after the approval-package update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py::test_live_notebook_session_reuses_kernel_for_appended_cells tests/test_notebooks.py::test_live_notebook_session_rejects_appended_cells_by_default tests/test_pipeline_v2.py::test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook tests/test_pipeline_v2.py::test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed -q`: `4 passed` after making live notebook appended-cell execution opt-in per session.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py -q`: `22 passed` after the live notebook appended-cell safety update.
@@ -107,7 +110,7 @@ It is not ready to call "complete" yet. The main remaining gap is not one isolat
 
 1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels; richer schema-to-form controls remain.
 2. Broaden AUTO coverage and safety tests around the new structured `confirm|adjust|replan|clarify|halt` path.
-3. Finish modeling productization with real-task browser/manual smoke, challenger/backtest handoff, and final approval export polish. JSON and Markdown approval packages now carry selected-model, policy, metric, feature, and delivery evidence.
+3. Finish modeling productization with real-task browser/manual smoke, monitoring threshold policy, and final approval export polish. JSON and Markdown approval packages now carry selected-model, policy, metric, feature, and delivery evidence, and G5 can now create a PMML-backed challenger/backtest validation task package.
 4. Add a deeper DB+file `UnitOfWork` over the staged artifact stores and recovered `StepRunLedger`.
 5. Continue deeper `api.py`, `db.py`, and `app.js` decomposition after the first stable splits.
 6. Keep CI and local `scripts/check` green while making the remaining large refactors.
@@ -148,7 +151,7 @@ Items confirmed still not complete and therefore still part of the plan:
 - OS-level sandboxing is not complete. Plugin/draft tools and ordinary notebook execution have subprocess/resource-limit isolation; live keep-alive notebook appended-cell execution is now disabled by default and must be explicitly enabled by the V1 validation pipeline, but that live path still needs either worker RPC redesign or removal from safety-critical flows.
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths. A first reusable `ArtifactUnitOfWork` now binds promoted files/directories to a later DB/audit callback and join result registration uses it; a full SQLite-connection-owning cross-resource `UnitOfWork` is still not complete across all tool execution.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
-- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, and light/dark startup paths. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons, and `post_training_action` writes both JSON evidence and human-readable Markdown approval packages with selected-model, policy, metric, feature, and delivery evidence. The remaining gap is real-task browser/manual smoke plus richer final export/challenger/backtest workflow polish.
+- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, and light/dark startup paths. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons. `post_training_action` writes both JSON evidence and human-readable Markdown approval packages with selected-model, policy, metric, feature, and delivery evidence, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. The remaining gap is real-task browser/manual smoke plus richer monitoring threshold/final export workflow polish.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff risk flags and wide downstream resets. More domain fixtures are still useful for strategy, vintage, and future extracted modeling setup panels.
 
@@ -159,7 +162,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | # | Item | Status | Evidence / Gap | Next Action |
 |---|---|---|---|---|
 | 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. | Add more fixtures for destructive domain gates and frontend stale-control paths. |
-| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons, target/algorithm family guards, and risk guidance for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage, stability/calibration/feature-count/delivery signals, scorecard/monotonicity/approval policy signals, executable policy-decision status, violations, and override reasons. `select_experiment.selection_policy` now makes those final-model policy signals executable: default delivery templates require PMML and validation handoff, hard policy can require scorecard/monotonicity/feature-count/PSI limits, and override requires a reason. `post_training_action` now writes JSON evidence and human-readable Markdown approval packages carrying selected-model, policy, metric, feature, and delivery evidence, and exposes the Markdown package first in readiness/artifact lists while preserving JSON for machines. Lightweight DOM smoke plus optional Playwright smoke cover setup/delivery, welcome/create, plan rail, and screen table surfaces. | Add end-to-end real-task smoke plus challenger/backtest/final export workflow polish before calling the workflow complete. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons, target/algorithm family guards, and risk guidance for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage, stability/calibration/feature-count/delivery signals, scorecard/monotonicity/approval policy signals, executable policy-decision status, violations, and override reasons. `select_experiment.selection_policy` now makes those final-model policy signals executable: default delivery templates require PMML and validation handoff, hard policy can require scorecard/monotonicity/feature-count/PSI limits, and override requires a reason. `post_training_action` now writes JSON evidence and human-readable Markdown approval packages carrying selected-model, policy, metric, feature, and delivery evidence, exposes the Markdown package first in readiness/artifact lists while preserving JSON for machines, and can create a PMML-backed challenger/backtest validation task package with copied sample/model/PMML/notebook/dictionary material plus JSON/Markdown plan evidence. Lightweight DOM smoke plus optional Playwright smoke cover setup/delivery, welcome/create, plan rail, and screen table surfaces. | Add end-to-end real-task smoke plus monitoring threshold/final export workflow polish before calling the workflow complete. |
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
@@ -298,7 +301,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: add `select_experiment` tool/gate and structured delivery panel.
      - Done: surface stability, calibration, feature count, and delivery readiness in comparison/selection panels.
      - Done: enforce PMML/handoff, scorecard preference, monotonicity, feature-count, OOT PSI, and override-reason requirements in `selection_policy`.
-     - Remaining: add challenger/backtest policy dimensions and real-task manual smoke.
+     - Remaining: add monitoring-threshold policy dimensions and real-task manual smoke.
 
 4. G5 post-training closure is not a workflow.
    - Current behavior: report generation and `post_training_action` are workflow steps; PMML/handoff success, skip, and reason states are now visible in a dedicated delivery panel.
@@ -309,9 +312,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
        - generate model report.
        - hand off to validation.
        - generate JSON and Markdown approval packages.
+       - create PMML-backed challenger/backtest validation task packages with JSON and Markdown plans.
      - Remaining:
-       - generate richer model card / challenger / backtest package.
-       - create challenger/backtest task.
+       - generate richer monitoring/model-card threshold policy.
+       - run real-task browser/manual smoke.
      - Show unsupported PMML states and calibrated-score limitations clearly.
 
 5. `TrainingDataset` adapter is missing.
@@ -433,8 +437,8 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Contents: selected experiment, metrics by split, stability, calibration, reject inference status, excluded features and reasons, sample-weight choice, PMML/native artifact state, validation handoff link, monitoring plan.
 
 2. Add challenger and monitoring workflows.
-   - Generate challenger comparison from previous selected experiments.
-   - Create validation/monitoring tasks directly from G5.
+   - Done: create PMML-backed challenger/backtest validation tasks directly from G5, with copied model/sample/PMML/notebook/dictionary material and JSON/Markdown plan evidence.
+   - Remaining: generate challenger comparison from previous selected experiments.
    - Store monitoring thresholds and drift checks as versioned policy.
 
 3. Improve Agent recommendations.
@@ -491,13 +495,14 @@ Tasks:
 - Done: add G3 tuning configuration gate.
 - Done: add `select_experiment`.
 - Done: add G5 `post_training_action` gate.
+- Done: add G5 challenger/backtest task package creation for PMML-capable final models.
 - Mostly done for modeling setup gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, detected-candidate gate adjust/rerun, target/algorithm/tuning/split/PMML display, editable setup controls with override reasons, AUTO context, extracted setup renderer/controller, setup override guidance, lightweight DOM smoke, and optional Playwright smoke for setup/delivery plus workspace surfaces; real-task browser smoke and model-policy dimensions still remain.
 - Done for `train_models`: add `TrainingDataset` adapter and read-count tests.
 - Done: remove hard-coded `oot_ks >= 0.3331` as a universal success gate.
 - Done for chat renderer: improve report renderer with section status and missing inputs; broader report content remains.
 
 Acceptance:
-- A user can create a modeling task, confirm algorithms/weights, tune/train, select an experiment, export `.pkl` and `.pmml` when supported, generate report, and hand off to validation.
+- A user can create a modeling task, confirm algorithms/weights, tune/train, select an experiment, export `.pkl` and `.pmml` when supported, generate report, hand off to validation, and create a PMML-backed challenger/backtest validation task package.
 - Tests cover PMML support boundaries, report missing-section visibility, sample-weight propagation, and read-count regression.
 
 ### Phase D: Transactional Runtime Hardening
@@ -620,7 +625,7 @@ The highest risks before a production-style merge are:
 
 - CI gate exists, but full CI/full pytest still must pass from the final committed tree.
 - AUTO can apply structured decisions, but broader safe-remediation policy fixtures are still needed.
-- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards and risk guidance, and delivery readiness has a dedicated UI with core business signals, scorecard/monotonicity/approval policy signals, lightweight DOM smoke, and optional Playwright smoke across the key workspace surfaces; enforceable real-scorecard policy and end-to-end real-task browser smoke still remain.
+- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards and risk guidance, and delivery readiness has a dedicated UI with core business signals, scorecard/monotonicity/approval policy signals, validation handoff, approval packages, and challenger/backtest task packages; enforceable monitoring threshold policy and end-to-end real-task browser smoke still remain.
 - Runtime crash windows are recoverable for staged artifacts and running step attempts, but the DB+filesystem boundary is not yet a true atomic unit of work.
 - `api.py`, `db.py`, and `app.js` are still large, but the first stable splits have landed (`turn_handlers`, `db_schema`, `theme.js`); remaining risk is deeper router/repository/workspace-controller extraction.
 - OS-level sandboxing for notebook/plugin execution is not complete.
