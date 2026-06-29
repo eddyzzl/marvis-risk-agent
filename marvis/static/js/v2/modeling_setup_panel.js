@@ -1,0 +1,125 @@
+import { escapeHtml } from "../ui-utils.js";
+
+export function renderModelingSetupPanel(message, options = {}) {
+  const setup = message?.metadata?.modeling_setup;
+  if (!setup || typeof setup !== "object") return "";
+  const messageId = message?.id ? String(message.id) : "";
+  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const candidates = Array.isArray(setup.sample_weight_candidates)
+    ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
+    : [];
+  const selected = String(setup.sample_weight_col || "");
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
+  const uniqueCandidates = [...new Set(selected ? [selected, ...candidates] : candidates)];
+  const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
+    ? setup.recipes.map((recipe) => String(recipe)).join("/")
+    : "-";
+  const primaryRecipe = String(setup.recipe || (Array.isArray(setup.recipes) ? setup.recipes[0] : "") || "-");
+  const featureCount = Number.isFinite(Number(setup.feature_count)) ? String(Number(setup.feature_count)) : "-";
+  const nTrials = Number.isFinite(Number(setup.n_trials)) ? String(Number(setup.n_trials)) : "-";
+  const metricPolicy = String(setup.metric_policy || "-");
+  const supportedPmml = new Set(Array.isArray(setup.pmml_supported_algorithms)
+    ? setup.pmml_supported_algorithms.map((item) => String(item))
+    : []);
+  const setupWarnings = Array.isArray(setup.warnings)
+    ? setup.warnings.map((item) => String(item)).filter(Boolean)
+    : [];
+  const splitSummary = setup.split_summary && typeof setup.split_summary === "object" ? setup.split_summary : null;
+  const splitCounts = splitSummary && splitSummary.split_counts && typeof splitSummary.split_counts === "object"
+    ? Object.entries(splitSummary.split_counts)
+    : [];
+  const splitWarnings = splitSummary && Array.isArray(splitSummary.warnings)
+    ? splitSummary.warnings.map((item) => String(item)).filter(Boolean)
+    : [];
+  const specChips = [
+    ["目标", String(setup.target_type || "binary")],
+    ["算法", recipeText],
+    ["主调参", primaryRecipe],
+    ["候选特征", featureCount],
+    ["调参轮数", nTrials],
+    ["选择指标", metricPolicy],
+  ].map(([label, value]) => `<div class="modeling-spec-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const eligibleAlgorithms = Array.isArray(setup.eligible_algorithms)
+    ? setup.eligible_algorithms.map((item) => String(item)).filter(Boolean)
+    : [];
+  const disabledAlgorithms = Array.isArray(setup.disabled_algorithms)
+    ? setup.disabled_algorithms.filter((item) => item && typeof item === "object")
+    : [];
+  const algorithmHtml = [...eligibleAlgorithms.map((recipe) => ({
+    recipe,
+    state: "可用",
+    reason: supportedPmml.has(recipe) ? "PMML 可导出" : "仅原生模型",
+    enabled: true,
+  })), ...disabledAlgorithms.map((item) => ({
+    recipe: String(item.recipe || ""),
+    state: "不可用",
+    reason: String(item.reason || ""),
+    enabled: false,
+  }))].filter((item) => item.recipe).map((item) => `<div class="modeling-algorithm-chip" data-enabled="${item.enabled ? "true" : "false"}">
+      <strong>${escapeHtml(item.recipe)}</strong>
+      <span>${escapeHtml(item.state)} · ${escapeHtml(item.reason || "-")}</span>
+    </div>`).join("");
+  const splitCountsHtml = splitCounts.map(([split, count]) => {
+    const total = Number(splitSummary?.total_rows || 0);
+    const n = Number(count);
+    const pct = total > 0 && Number.isFinite(n) ? `${((n / total) * 100).toFixed(1)}%` : "n/a";
+    return `<div class="modeling-split-chip"><span>${escapeHtml(String(split).toUpperCase())}</span><strong>${escapeHtml(String(count))}</strong><small>${escapeHtml(pct)}</small></div>`;
+  }).join("");
+  const warningHtml = [...setupWarnings, ...splitWarnings].map((warning) => (
+    `<div class="modeling-setup-warning">${escapeHtml(warning)}</div>`
+  )).join("");
+  const optionRows = [
+    { value: "", label: "不使用权重" },
+    ...uniqueCandidates.map((value) => ({ value, label: value })),
+  ].map((option) => {
+    const checked = option.value === selected || (!selected && option.value === "");
+    return `<label class="modeling-weight-option">
+      <input type="radio" name="modelingWeight-${escapeHtml(messageId)}" class="modeling-weight-pick" value="${escapeHtml(option.value)}"${checked ? " checked" : ""}${disabledAttr} />
+      <span>${escapeHtml(option.label)}</span>
+    </label>`;
+  }).join("");
+  const diagnostics = Array.isArray(setup.sample_weight_diagnostics)
+    ? setup.sample_weight_diagnostics.filter((item) => item && typeof item === "object")
+    : [];
+  const diagnosticsByColumn = new Map(diagnostics.map((item) => [String(item.column || ""), item]));
+  const diagnosticsHtml = uniqueCandidates
+    .map((column) => {
+      const item = diagnosticsByColumn.get(column);
+      if (!item) return "";
+      const missing = Number.isFinite(Number(item.missing_rate))
+        ? `${(Number(item.missing_rate) * 100).toFixed(1)}%`
+        : "n/a";
+      const min = item.min ?? "n/a";
+      const max = item.max ?? "n/a";
+      const mean = item.mean ?? "n/a";
+      const state = item.valid ? "可用" : "需检查";
+      const reason = item.reason || "已排除出入模特征";
+      return `<div class="modeling-weight-diagnostic" data-valid="${item.valid ? "true" : "false"}">
+        <strong>${escapeHtml(column)}</strong>
+        <span>${escapeHtml(state)} · 缺失 ${escapeHtml(missing)} · 范围 ${escapeHtml(min)}-${escapeHtml(max)} · 均值 ${escapeHtml(mean)}</span>
+        <small>${escapeHtml(reason)}</small>
+      </div>`;
+    })
+    .filter(Boolean)
+    .join("");
+  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}"${interactive ? "" : ' data-modeling-readonly="true"'}>
+    <div class="modeling-setup-head">
+      <span>建模规格</span>
+      <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
+    </div>
+    <div class="modeling-spec-grid">${specChips}</div>
+    ${algorithmHtml ? `<div class="modeling-algorithm-grid">${algorithmHtml}</div>` : ""}
+    ${splitCountsHtml ? `<div class="modeling-split-summary">
+      <div class="modeling-section-label">样本切分 · ${escapeHtml(String(splitSummary?.split_col || "split"))}</div>
+      <div class="modeling-split-grid">${splitCountsHtml}</div>
+    </div>` : ""}
+    ${warningHtml ? `<div class="modeling-setup-warnings">${warningHtml}</div>` : ""}
+    <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
+    ${diagnosticsHtml ? `<div class="modeling-weight-diagnostics">${diagnosticsHtml}</div>` : ""}
+    <div class="modeling-setup-foot">
+      <span>权重列不进入特征。</span>
+      <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用权重设置" : "历史规格"}</button>
+    </div>
+  </div>`;
+}
