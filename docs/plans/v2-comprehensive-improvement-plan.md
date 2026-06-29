@@ -53,6 +53,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules`: `23 passed` after extracting `renderModelingSetupPanel` into `static/js/v2/modeling_setup_panel.js`.
   - `tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules`: `23 passed` after moving the modeling sample-weight adjust controller into `static/js/v2/modeling_setup_panel.js`.
   - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `58 passed` after adding structured model comparison/delivery readiness metadata and the `ModelDeliveryPanel` frontend module.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `59 passed` after merging model-report path and section readiness into the delivery panel for both final gates and done messages.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
@@ -67,6 +68,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` renderer extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` controller extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelDeliveryPanel` metadata/rendering update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the model-report readiness merge into delivery metadata.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
 
 ## Executive Summary
@@ -111,7 +113,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
   - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
   - The modeling setup gate now renders a real setup panel rather than only a weight picker: it stays visible without weight candidates, shows target type, selected algorithms, primary tuning recipe, candidate feature count, tuning trials, metric policy, algorithm/PMML support, split/OOT counts and warnings, feeds the same context into AUTO prompts, and its renderer plus sample-weight adjust controller are extracted to `static/js/v2/modeling_setup_panel.js`.
-  - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
+  - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, model-report readiness/section coverage, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
 
 Items confirmed still not complete and therefore still part of the plan:
 
@@ -129,7 +131,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | # | Item | Status | Evidence / Gap | Next Action |
 |---|---|---|---|---|
 | 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. | Add more fixtures for destructive domain gates and frontend stale-control paths. |
-| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows target type, algorithms, tuning budget, PMML support, split/OOT diagnostics, warnings, and sample-weight controls. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel. | Add broader schema-driven setup/edit controls and browser smoke coverage before enabling more human overrides. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows target type, algorithms, tuning budget, PMML support, split/OOT diagnostics, warnings, and sample-weight controls. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage. | Add broader schema-driven setup/edit controls and browser smoke coverage before enabling more human overrides. |
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
@@ -263,7 +265,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Problem: production credit/risk modeling usually needs richer business choice controls, not only metric max or automatic delivery-aware selection.
    - Fix:
      - Done: add `select_experiment` tool/gate and structured delivery panel.
-     - Remaining: rank candidates by stability, calibration, feature count, monotonicity/scorecard constraints, report readiness, and require explicit override reasons for non-recommended picks.
+     - Remaining: rank candidates by stability, calibration, feature count, monotonicity/scorecard constraints, and require explicit override reasons for non-recommended picks.
 
 4. G5 post-training closure is not a workflow.
    - Current behavior: report generation and `post_training_action` are workflow steps; PMML/handoff success, skip, and reason states are now visible in a dedicated delivery panel.
@@ -349,7 +351,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: `ModelingSetupPanel` with target/split counts, target type, algorithm choices, detected sample weights, split/OOT warnings.
      - Done: `ModelDeliveryPanel` with selected experiment, candidate metrics, PMML/native/handoff readiness, action state, artifact refs, and unsupported/skip reasons.
      - Screen table as a real modeling selector: threshold sliders plus numeric inputs, `top_k`, sort/filter chips, selected-count summary, leakage override reason, reset-to-proposal.
-     - Remaining: extend model comparison with stability/calibration/report-readiness dimensions and add browser visual smoke.
+     - Remaining: extend model comparison with stability/calibration/business-constraint dimensions and add browser visual smoke.
 
 3. Visual tokens are partial, not a system.
    - Current state: semantic task tones, surface/border/status tokens, and welcome/task icon palettes are centralized. KPI/ROC/modeling report areas still contain local palette constants.
@@ -362,7 +364,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 4. UX should communicate business readiness, not just execution progress.
    - Fix:
      - Plan rail statuses: "needs decision", "running", "blocked", "ready for handoff", "needs business input".
-     - Modeling report card: sections complete/missing, PMML support, validation handoff state, selected experiment.
+     - Done: modeling delivery card shows report section coverage, PMML support, validation handoff state, and selected experiment.
      - Clear stale-gate warnings and retry contracts.
 
 5. Accessibility and visual smoke should become test gates.

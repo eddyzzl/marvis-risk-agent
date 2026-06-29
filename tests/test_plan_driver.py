@@ -549,6 +549,81 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
     assert delivery["candidates"][1]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
 
 
+def test_post_training_gate_merges_report_readiness(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("select", index=0, tool="select_experiment", phase="建模"),
+            _step("report", index=1, tool="generate_model_report", depends_on=["select"], phase="报告"),
+            _step(
+                "post",
+                index=2,
+                tool="post_training_action",
+                depends_on=["select", "report"],
+                needs_confirmation=True,
+                phase="交付",
+            ),
+        ],
+    )
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "selected_experiment_id": "exp-lgb",
+            "artifact_id": "art-lgb",
+            "recipe": "lgb",
+            "target_type": "binary",
+            "selection_metric": "oot_ks",
+            "metrics": {"oot_ks": 0.31},
+            "capabilities": {
+                "pmml_supported": True,
+                "handoff_supported": True,
+                "native_model_supported": True,
+            },
+        },
+        {
+            "report_path": "/tmp/model_report.xlsx",
+            "section_status": [
+                {"section": "汇总", "available": True},
+                {"section": "Vintage", "available": False, "reason": "缺少 MOB 列"},
+            ],
+        },
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    delivery = turn.messages[0].metadata["model_delivery"]
+    assert delivery["source_tool"] == "select_experiment"
+    assert delivery["report"] == {
+        "step_id": "report",
+        "step_title": "report",
+        "report_path": "/tmp/model_report.xlsx",
+        "available_sections": 1,
+        "total_sections": 2,
+        "skipped_sections": 1,
+        "status": "partial",
+        "sections": [
+            {"section": "汇总", "available": True, "reason": ""},
+            {"section": "Vintage", "available": False, "reason": "缺少 MOB 列"},
+        ],
+    }
+    report_readiness = next(item for item in delivery["readiness"] if item["id"] == "model_report")
+    assert report_readiness["status"] == "partial"
+    assert report_readiness["artifact"] == "/tmp/model_report.xlsx"
+    assert report_readiness["reason"] == "报告章节 1/2 可生成"
+
+
 def test_done_message_carries_post_training_delivery_payload(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -561,10 +636,20 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
         template_id="modeling",
         autonomy_level=1,
         status=PlanStatus.VALIDATED,
-        steps=[_step("post", index=0, tool="post_training_action", phase="交付")],
+        steps=[
+            _step("report", index=0, tool="generate_model_report", phase="报告"),
+            _step("post", index=1, tool="post_training_action", depends_on=["report"], phase="交付"),
+        ],
     )
     repo.create_plan(plan)
     runner = FakeRunner([
+        {
+            "report_path": "/tmp/model_report.xlsx",
+            "section_status": [
+                {"section": "汇总", "status": "ok"},
+                {"section": "模型指标", "status": "ok"},
+            ],
+        },
         {
             "experiment_id": "exp-lgb",
             "artifact_id": "art-lgb",
@@ -598,8 +683,11 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["native_model_path"] == "/tmp/model.pkl"
     assert delivery["pmml_path"] == "/tmp/model.pmml"
     assert delivery["validation_task_id"] == "task-validation"
+    assert delivery["report"]["status"] == "ready"
+    assert delivery["report"]["available_sections"] == 2
+    assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
     assert [item["status"] for item in delivery["actions"]] == ["succeeded", "succeeded"]
-    assert [item["status"] for item in delivery["readiness"]] == ["ready", "succeeded", "succeeded"]
+    assert [item["status"] for item in delivery["readiness"]] == ["ready", "ready", "succeeded", "succeeded"]
 
 
 def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(tmp_path):

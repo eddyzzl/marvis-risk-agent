@@ -215,10 +215,12 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert "model-delivery-readiness-grid" in module_js
     assert "candidateTable(delivery.candidates)" in module_js
     assert "actionTable(delivery.actions)" in module_js
+    assert "reportSummary(delivery.report)" in module_js
     assert ".model-delivery-panel" in css
     assert ".model-delivery-readiness-grid" in css
     assert ".model-delivery-table" in css
     assert ".model-delivery-status" in css
+    assert ".model-delivery-report-summary" in css
 
 
 def test_model_delivery_panel_renders_selection_and_actions():
@@ -241,6 +243,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
               metrics: {{ oot_ks: 0.3123, test_ks: 0.2876, oot_auc: 0.721 }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
+                {{ id: "model_report", label: "模型报告", status: "partial", artifact: "/tmp/model_report.xlsx", reason: "报告章节 1/2 可生成" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
                 {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
               ],
@@ -267,17 +270,32 @@ def test_model_delivery_panel_renders_selection_and_actions():
               native_model_path: "/tmp/model.pkl",
               pmml_path: "/tmp/model.pmml",
               validation_task_id: "task-validation",
+              report: {{
+                report_path: "/tmp/model_report.xlsx",
+                available_sections: 1,
+                total_sections: 2,
+                skipped_sections: 1,
+                status: "partial",
+                sections: [
+                  {{ section: "汇总", available: true }},
+                  {{ section: "Vintage", available: false, reason: "缺少 MOB 列" }},
+                ],
+              }},
             }},
           }},
         }});
         assert.equal(html.includes("训练后交付"), true);
-        assert.equal(html.includes("交付项已就绪"), true);
+        assert.equal(html.includes("1 项需处理/不支持"), true);
         assert.equal(html.includes("exp-lgb"), true);
         assert.equal(html.includes("已选"), true);
         assert.equal(html.includes("0.3123"), true);
         assert.equal(html.includes("PMML"), true);
         assert.equal(html.includes("验证移交"), true);
         assert.equal(html.includes("model.pmml"), true);
+        assert.equal(html.includes("model_report.xlsx"), true);
+        assert.equal(html.includes("报告就绪度"), true);
+        assert.equal(html.includes("1/2 章节可生成"), true);
+        assert.equal(html.includes("缺少 MOB 列"), true);
         assert.equal(html.includes("task-validation"), true);
         assert.equal(renderModelDeliveryPanel({{ metadata: {{}} }}), "");
         process.stdout.write("ok");

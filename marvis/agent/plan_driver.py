@@ -534,10 +534,25 @@ class PlanDriver:
                     parts.append(text)
         meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
         if terminal is not None and output is not None:
-            delivery = build_model_delivery_payload(output, terminal)
+            report_output, report_step = self._report_dependency_output(plan, terminal)
+            delivery = build_model_delivery_payload(
+                output,
+                terminal,
+                report_output=report_output,
+                report_step=report_step,
+            )
             if delivery is not None:
                 meta["model_delivery"] = delivery
         return DriverMessage("done", "\n\n".join(parts), meta)
+
+    def _report_dependency_output(self, plan: Plan, step: PlanStep) -> tuple[dict | None, PlanStep | None]:
+        for dep_id in step.depends_on or []:
+            dep = _find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "generate_model_report":
+                continue
+            output = self._safe_output(dep.id)
+            return (output if isinstance(output, dict) else None), dep
+        return None, None
 
     def _compose_review_message(self, plan: Plan, *, run_seq) -> DriverMessage:
         return DriverMessage(

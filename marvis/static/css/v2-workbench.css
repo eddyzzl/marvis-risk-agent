@@ -1502,6 +1502,47 @@
   gap: 6px;
   padding: 0 12px 12px;
 }
+.model-delivery-report-summary {
+  padding-top: 10px;
+}
+.model-delivery-report-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 12px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface-soft, #f9fafb);
+  font-size: 12px;
+}
+.model-delivery-report-status span {
+  color: var(--text-muted, #6b7280);
+}
+.model-delivery-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+.model-delivery-report-section {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface, #fff);
+  font-size: 12px;
+}
+.model-delivery-report-section[data-available="false"] {
+  border-color: var(--warning, #f59e0b);
+  background: color-mix(in srgb, var(--warning, #f59e0b) 7%, var(--surface, #fff));
+}
+.model-delivery-report-section span,
+.model-delivery-report-section small {
+  color: var(--text-muted, #6b7280);
+}
 .model-delivery-artifacts div {
   display: grid;
   gap: 3px;

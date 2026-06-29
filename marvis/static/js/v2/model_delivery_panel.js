@@ -50,6 +50,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
   const metricsHtml = metricsGrid(delivery.metrics);
   const candidatesHtml = candidateTable(delivery.candidates);
   const actionsHtml = actionTable(delivery.actions);
+  const reportHtml = reportSummary(delivery.report);
   const artifactsHtml = artifactList(delivery);
   return `<div class="model-delivery-panel" data-model-delivery-source="${escapeHtml(sourceTool)}">
     <div class="model-delivery-head">
@@ -62,6 +63,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
     ${metricsHtml}
     ${candidatesHtml}
     ${actionsHtml}
+    ${reportHtml}
     ${artifactsHtml}
   </div>`;
 }
@@ -144,6 +146,7 @@ function actionTable(actions) {
 function artifactList(delivery) {
   const artifacts = [
     ["原生模型", delivery.native_model_path],
+    ["模型报告", delivery.report?.report_path],
     ["PMML", delivery.pmml_path],
     ["验证任务", delivery.validation_task_id],
   ].filter(([, value]) => String(value || ""));
@@ -153,10 +156,35 @@ function artifactList(delivery) {
   )).join("")}</div>`;
 }
 
+function reportSummary(report) {
+  if (!report || typeof report !== "object") return "";
+  const total = Number(report.total_sections || 0);
+  const available = Number(report.available_sections || 0);
+  const skipped = Number(report.skipped_sections || 0);
+  const sections = Array.isArray(report.sections)
+    ? report.sections.filter((item) => item && typeof item === "object").slice(0, 8)
+    : [];
+  const sectionHtml = sections.map((item) => (
+    `<div class="model-delivery-report-section" data-available="${item.available ? "true" : "false"}">
+      <span>${escapeHtml(String(item.section || "未命名章节"))}</span>
+      <strong>${item.available ? "可生成" : "缺输入/跳过"}</strong>
+      ${item.reason ? `<small>${escapeHtml(String(item.reason))}</small>` : ""}
+    </div>`
+  )).join("");
+  return `<div class="model-delivery-report-summary">
+    <div class="modeling-section-label">报告就绪度</div>
+    <div class="model-delivery-report-status">
+      <strong>${escapeHtml(`${available}/${total || available} 章节可生成`)}</strong>
+      <span>${skipped ? `${skipped} 个章节缺输入/跳过` : "报告章节完整"}</span>
+    </div>
+    ${sectionHtml ? `<div class="model-delivery-report-grid">${sectionHtml}</div>` : ""}
+  </div>`;
+}
+
 function readinessHeadline(items) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return "等待交付状态";
-  const bad = rows.filter((item) => ["unsupported", "skipped", "missing", "failed"].includes(String(item?.status || ""))).length;
+  const bad = rows.filter((item) => ["unsupported", "skipped", "missing", "failed", "partial"].includes(String(item?.status || ""))).length;
   return bad ? `${bad} 项需处理/不支持` : "交付项已就绪";
 }
 
@@ -184,7 +212,7 @@ function shortArtifact(value) {
 function statusKind(status) {
   const normalized = String(status || "").toLowerCase();
   if (["succeeded", "ready", "supported"].includes(normalized)) return "ready";
-  if (["skipped", "unsupported", "missing"].includes(normalized)) return "warning";
+  if (["skipped", "unsupported", "missing", "partial"].includes(normalized)) return "warning";
   if (["failed", "error"].includes(normalized)) return "error";
   return "neutral";
 }
@@ -197,6 +225,7 @@ function statusLabel(status) {
     supported: "支持",
     skipped: "已跳过",
     unsupported: "不支持",
+    partial: "部分完成",
     missing: "缺失",
     failed: "失败",
     error: "失败",

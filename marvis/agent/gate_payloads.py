@@ -136,7 +136,13 @@ def build_modeling_setup_payload(
     }
 
 
-def build_model_delivery_payload(output: dict, dep) -> dict | None:
+def build_model_delivery_payload(
+    output: dict,
+    dep,
+    *,
+    report_output: dict | None = None,
+    report_step=None,
+) -> dict | None:
     """Structured modeling comparison/delivery payload for late-stage gates."""
     o = output if isinstance(output, dict) else {}
     if not o:
@@ -148,6 +154,7 @@ def build_model_delivery_payload(output: dict, dep) -> dict | None:
     actions = _delivery_actions(o.get("actions"))
     candidates = _experiment_candidates(o.get("experiments"))
     selected_id = str(o.get("selected_experiment_id") or o.get("experiment_id") or "")
+    report = _report_summary(report_output, report_step)
     if selected_id:
         candidates = _mark_selected_candidate(candidates, selected_id)
     return {
@@ -167,7 +174,8 @@ def build_model_delivery_payload(output: dict, dep) -> dict | None:
         "native_model_path": str(o.get("native_model_path") or ""),
         "pmml_path": str(o.get("pmml_path") or ""),
         "validation_task_id": str(o.get("validation_task_id") or ""),
-        "readiness": _delivery_readiness(o, capabilities, actions),
+        "report": report,
+        "readiness": _delivery_readiness(o, capabilities, actions, report=report),
     }
 
 
@@ -285,7 +293,54 @@ def _action(actions: list[dict], name: str) -> dict:
     return next((item for item in actions if item.get("action") == name), {})
 
 
-def _delivery_readiness(output: dict, capabilities: dict, actions: list[dict]) -> list[dict]:
+def _report_summary(output: dict | None, dep=None) -> dict | None:
+    if not isinstance(output, dict):
+        return None
+    sections = []
+    for item in output.get("section_status") or []:
+        if not isinstance(item, dict):
+            continue
+        available = _report_section_available(item)
+        sections.append({
+            "section": str(item.get("section") or ""),
+            "available": available,
+            "reason": str(item.get("reason") or ""),
+        })
+    total = len(sections)
+    available_count = sum(1 for item in sections if item.get("available"))
+    report_path = str(output.get("report_path") or "")
+    if not report_path:
+        status = "missing"
+    elif total and available_count < total:
+        status = "partial"
+    else:
+        status = "ready"
+    return {
+        "step_id": getattr(dep, "id", None),
+        "step_title": getattr(dep, "title", None),
+        "report_path": report_path,
+        "available_sections": available_count,
+        "total_sections": total,
+        "skipped_sections": max(total - available_count, 0),
+        "status": status,
+        "sections": sections,
+    }
+
+
+def _report_section_available(section: dict) -> bool:
+    if section.get("available") is True:
+        return True
+    status = str(section.get("status") or "").strip().lower()
+    return status in {"ok", "ready", "available", "generated", "succeeded"}
+
+
+def _delivery_readiness(
+    output: dict,
+    capabilities: dict,
+    actions: list[dict],
+    *,
+    report: dict | None = None,
+) -> list[dict]:
     native_path = str(output.get("native_model_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
@@ -316,6 +371,16 @@ def _delivery_readiness(output: dict, capabilities: dict, actions: list[dict]) -
             "reason": handoff_action.get("reason") or capabilities.get("reason", ""),
         },
     ]
+    if report is not None:
+        total = int(report.get("total_sections") or 0)
+        available = int(report.get("available_sections") or 0)
+        readiness.insert(1, {
+            "id": "model_report",
+            "label": "模型报告",
+            "status": str(report.get("status") or "missing"),
+            "artifact": str(report.get("report_path") or ""),
+            "reason": f"报告章节 {available}/{total} 可生成" if total else "",
+        })
     return readiness
 
 

@@ -43,6 +43,10 @@ def render_gate_dependencies(
     split_o: dict | None = None
     modeling_spec_o: dict | None = None
     modeling_spec_step: PlanStep | None = None
+    model_delivery_o: dict | None = None
+    model_delivery_step: PlanStep | None = None
+    report_o: dict | None = None
+    report_step: PlanStep | None = None
     for dep_id in gate.depends_on if gate else []:
         dep = _find_step(plan, dep_id)
         if dep is None:
@@ -68,12 +72,23 @@ def render_gate_dependencies(
             modeling_spec_o = output if isinstance(output, dict) else None
             modeling_spec_step = dep
         elif dep.tool_ref.tool in {"compare_experiments", "select_experiment", "post_training_action"}:
-            result.model_delivery = build_model_delivery_payload(output, dep)
+            model_delivery_o = output if isinstance(output, dict) else None
+            model_delivery_step = dep
+        elif dep.tool_ref.tool == "generate_model_report":
+            report_o = output if isinstance(output, dict) else None
+            report_step = dep
     if modeling_spec_o is not None and modeling_spec_step is not None:
         result.modeling_setup = build_modeling_setup_payload(
             modeling_spec_o,
             modeling_spec_step,
             split_output=split_o,
+        )
+    if model_delivery_o is not None and model_delivery_step is not None:
+        result.model_delivery = build_model_delivery_payload(
+            model_delivery_o,
+            model_delivery_step,
+            report_output=report_o,
+            report_step=report_step,
         )
     result.dedup = build_dedup_payload(confirm_join_o, propose_join_o)
     return result
