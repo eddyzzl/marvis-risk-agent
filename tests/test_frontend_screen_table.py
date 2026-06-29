@@ -83,16 +83,20 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/modeling_setup_panel.js")
     css = _read("css/v2-workbench.css")
-    assert 'import { renderModelingSetupPanel } from "./js/v2/modeling_setup_panel.js";' in app_js
+    assert "submitModelingWeightAdjustController" in app_js
+    assert "handleModelingWeightAdjustClickController" in app_js
     assert "function agentMessageModelingSetupHtml(message, options = {})" in app_js
     assert "return renderModelingSetupPanel(message, options);" in app_js
+    assert "modelingSetupControllerContext()" in app_js
     assert "if (meta.modeling_setup)" in app_js
     assert "agentMessageModelingSetupHtml(message, { interactive })" in app_js
     assert "export function renderModelingSetupPanel(message, options = {})" in module_js
+    assert "export async function submitModelingWeightAdjust(button, context = {})" in module_js
+    assert "export function handleModelingWeightAdjustClick(event, context = {})" in module_js
     assert 'class="modeling-weight-pick"' in module_js
     assert "data-modeling-gate-step-id" in module_js
     assert "function submitModelingWeightAdjust(button)" in app_js
-    assert "sample_weight_col: sampleWeightCol" in app_js
+    assert "sample_weight_col: sampleWeightCol" in module_js
     assert "sample_weight_diagnostics" in module_js
     assert "modeling-weight-diagnostic" in module_js
     assert "modeling-spec-grid" in module_js
@@ -199,36 +203,65 @@ def test_modeling_setup_weight_picker_renders_candidates():
 
 
 def test_modeling_setup_weight_adjust_posts_structured_params():
-    adjust_slice = _app_slice("async function submitModelingWeightAdjust", "function handleModelingWeightAdjustClick")
     output = _run_node(
         f"""
+        {""}
         import assert from "node:assert/strict";
-        let selectedTaskId = "task-1";
         let agentMessages = [];
+        let rendered = 0;
         const statuses = [];
         const calls = [];
-        function setActionStatus(message, kind) {{ statuses.push([message, kind]); }}
-        function agentAcceptanceModeValue() {{ return "manual"; }}
-        function renderAgentConversation() {{}}
-        async function api(url, options) {{
-          calls.push([url, JSON.parse(options.body)]);
-          return {{ messages: [{{ id: "m2" }}] }};
-        }}
-        {adjust_slice}
+        import {{
+          handleModelingWeightAdjustClick,
+          submitModelingWeightAdjust,
+        }} from "./marvis/static/js/v2/modeling_setup_panel.js";
+        const context = {{
+          getSelectedTaskId: () => "task-1",
+          agentAcceptanceModeValue: () => "manual",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: (messages) => {{ agentMessages = messages || agentMessages; }},
+          renderAgentConversation: () => {{ rendered += 1; }},
+          api: async (url, options) => {{
+            calls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [{{ id: "m2" }}] }};
+          }},
+        }};
         await submitModelingWeightAdjust({{ disabled: false, closest: () => ({{
           dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
           querySelector: () => ({{ value: "weight" }}),
-        }}) }});
+        }}) }}, context);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1].adjust_params, {{ sample_weight_col: "weight" }});
         assert.equal(calls[0][1].expected_step_id, "gate-modeling");
         assert.equal(calls[0][1].acceptance_mode, "manual");
+        assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
+        assert.equal(rendered, 1);
 
         await submitModelingWeightAdjust({{ disabled: false, closest: () => ({{
           dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "weight" }},
           querySelector: () => ({{ value: "weight" }}),
-        }}) }});
+        }}) }}, context);
         assert.deepEqual(statuses.at(-1), ["样本权重设置未变化。", "info"]);
+        const eventCalls = [];
+        const eventContext = {{ ...context, api: async (url, options) => {{
+          eventCalls.push([url, JSON.parse(options.body)]);
+          return {{ messages: [] }};
+        }} }};
+        const eventForm = {{
+          dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
+          querySelector: () => ({{ value: "sample_weight" }}),
+        }};
+        await handleModelingWeightAdjustClick({{
+          target: {{
+            closest: () => ({{
+              disabled: false,
+              closest: () => eventForm,
+            }}),
+          }},
+          preventDefault: () => statuses.push(["prevented", "event"]),
+        }}, eventContext);
+        assert.deepEqual(statuses.at(-1), ["prevented", "event"]);
+        assert.deepEqual(eventCalls[0][1].adjust_params, {{ sample_weight_col: "sample_weight" }});
         process.stdout.write("ok");
         """
     )

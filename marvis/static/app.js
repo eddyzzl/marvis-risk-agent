@@ -7,7 +7,11 @@ import { createThemeController } from "./js/theme.js";
 import { attachArtifactHandlers, renderArtifact } from "./js/v2/artifact_view.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
-import { renderModelingSetupPanel } from "./js/v2/modeling_setup_panel.js";
+import {
+  handleModelingWeightAdjustClick as handleModelingWeightAdjustClickController,
+  renderModelingSetupPanel,
+  submitModelingWeightAdjust as submitModelingWeightAdjustController,
+} from "./js/v2/modeling_setup_panel.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
@@ -6939,49 +6943,24 @@ function agentMessageModelingSetupHtml(message, options = {}) {
 }
 
 async function submitModelingWeightAdjust(button) {
-  const form = button.closest(".modeling-setup-panel");
-  const taskId = selectedTaskId;
-  if (!form || !taskId) return;
-  if (form.dataset.modelingReadonly === "true") {
-    setActionStatus("这是历史建模规格,请使用最新待确认步骤调整。", "error");
-    return;
-  }
-  const picked = form.querySelector(".modeling-weight-pick:checked");
-  const sampleWeightCol = picked ? String(picked.value || "").trim() : "";
-  const current = String(form.dataset.modelingCurrentWeight || "").trim();
-  if (sampleWeightCol === current) {
-    setActionStatus("样本权重设置未变化。", "info");
-    return;
-  }
-  const expectedStepId = form.dataset.modelingGateStepId || "";
-  if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
-    return;
-  }
-  button.disabled = true;
-  try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "调整样本权重",
-        adjust_params: { sample_weight_col: sampleWeightCol },
-        expected_step_id: expectedStepId,
-        acceptance_mode: agentAcceptanceModeValue(),
-      }),
-    });
-    agentMessages = result.messages || agentMessages;
-    renderAgentConversation();
-  } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "调整样本权重失败", "error");
-  }
+  return submitModelingWeightAdjustController(button, modelingSetupControllerContext());
 }
 
 function handleModelingWeightAdjustClick(event) {
-  const button = event.target?.closest?.("[data-modeling-weight-adjust]");
-  if (!button) return;
-  event.preventDefault();
-  void submitModelingWeightAdjust(button);
+  return handleModelingWeightAdjustClickController(event, modelingSetupControllerContext());
+}
+
+function modelingSetupControllerContext() {
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    agentAcceptanceModeValue,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+  };
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);

@@ -123,3 +123,59 @@ export function renderModelingSetupPanel(message, options = {}) {
     </div>
   </div>`;
 }
+
+export async function submitModelingWeightAdjust(button, context = {}) {
+  const form = button.closest(".modeling-setup-panel");
+  const taskId = typeof context.getSelectedTaskId === "function"
+    ? context.getSelectedTaskId()
+    : context.selectedTaskId;
+  const api = context.api;
+  const setActionStatus = context.setActionStatus || (() => {});
+  if (!form || !taskId || typeof api !== "function") return;
+  if (form.dataset.modelingReadonly === "true") {
+    setActionStatus("这是历史建模规格,请使用最新待确认步骤调整。", "error");
+    return;
+  }
+  const picked = form.querySelector(".modeling-weight-pick:checked");
+  const sampleWeightCol = picked ? String(picked.value || "").trim() : "";
+  const current = String(form.dataset.modelingCurrentWeight || "").trim();
+  if (sampleWeightCol === current) {
+    setActionStatus("样本权重设置未变化。", "info");
+    return;
+  }
+  const expectedStepId = form.dataset.modelingGateStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: "调整样本权重",
+        adjust_params: { sample_weight_col: sampleWeightCol },
+        expected_step_id: expectedStepId,
+        acceptance_mode: typeof context.agentAcceptanceModeValue === "function"
+          ? context.agentAcceptanceModeValue()
+          : "manual",
+      }),
+    });
+    if (typeof context.setAgentMessages === "function") {
+      context.setAgentMessages(result.messages);
+    }
+    if (typeof context.renderAgentConversation === "function") {
+      context.renderAgentConversation();
+    }
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "调整样本权重失败", "error");
+  }
+}
+
+export function handleModelingWeightAdjustClick(event, context = {}) {
+  const button = event.target?.closest?.("[data-modeling-weight-adjust]");
+  if (!button) return;
+  event.preventDefault();
+  return submitModelingWeightAdjust(button, context);
+}
