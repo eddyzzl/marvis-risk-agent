@@ -27,6 +27,31 @@ AUTO_SAFE_ADJUST_CONTROLS = frozenset({
     "sample_weight_col",
     "selection",
 })
+AUTO_HIGH_RISK_FLAG_TOKENS = frozenset({
+    "destructive",
+    "delivery",
+    "export",
+    "external",
+    "handoff",
+    "high-risk",
+    "high_risk",
+    "irreversible",
+    "requires-human",
+    "requires_human",
+    "side-effect",
+    "side_effect",
+    "wide-reset",
+    "wide_reset",
+})
+AUTO_HIGH_RISK_RESET_SCOPES = frozenset({
+    "all",
+    "all_steps",
+    "broad",
+    "entire_plan",
+    "full_plan",
+    "wide",
+})
+AUTO_MAX_AUTO_RESET_STEPS = 2
 
 _SYSTEM_TEMPLATE = (
     "你是信贷风控建模 Agent,正在自动执行一个分步计划。每到一个需要确认的节点,"
@@ -93,6 +118,19 @@ def _format_gate(gate: dict) -> str:
         for flag in red_flags[:12]:
             lines.append(f"- {flag}")
     modeling_setup = meta.get("modeling_setup") if isinstance(meta.get("modeling_setup"), dict) else {}
+    envelope = extract_gate_envelope(gate)
+    if envelope.risk_flags:
+        lines.append("")
+        lines.append("【Gate 风险标记】")
+        for flag in envelope.risk_flags[:8]:
+            lines.append(f"- {flag}")
+    reset_policy = envelope.downstream_reset_policy or {}
+    if reset_policy:
+        lines.append("")
+        lines.append("【下游重置策略】")
+        for key in ("scope", "count", "step_count", "step_ids"):
+            if key in reset_policy:
+                lines.append(f"- {key}: {reset_policy[key]}")
     if modeling_setup:
         lines.append("")
         lines.append("【建模规格控件】")
@@ -269,6 +307,10 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
     arbitrary downstream resets into a halt for human review.
     """
     action = decision.get("action")
+    if action in {"adjust", "replan"}:
+        gate_risk = _gate_risk_reason(envelope)
+        if gate_risk:
+            return _policy_halt(gate_risk)
     if action == "adjust":
         allowed_controls = {str(control.id) for control in getattr(envelope, "controls", ())}
         params = _object_or_empty(decision.get("params"))
@@ -294,6 +336,40 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
     if action == "replan" and not str(decision.get("replan_goal") or "").strip():
         return _policy_halt("AUTO 请求重规划但没有提供明确 replan_goal。")
     return decision
+
+
+def _gate_risk_reason(envelope) -> str:
+    for flag in getattr(envelope, "risk_flags", ()) or ():
+        text = str(flag or "").strip()
+        normalized = text.lower().replace(" ", "_")
+        if any(token in normalized for token in AUTO_HIGH_RISK_FLAG_TOKENS):
+            return f"当前节点带有需人工确认的风险标记:{text}。"
+    reset_policy = getattr(envelope, "downstream_reset_policy", {}) or {}
+    scope = str(
+        reset_policy.get("scope")
+        or reset_policy.get("mode")
+        or reset_policy.get("downstream_reset")
+        or getattr(getattr(envelope, "retry_policy", None), "downstream_reset", "")
+        or ""
+    ).strip().lower()
+    if scope in AUTO_HIGH_RISK_RESET_SCOPES:
+        return f"当前节点声明了大范围下游重置策略:{scope}。"
+    reset_count = _reset_step_count(reset_policy)
+    if reset_count is not None and reset_count > AUTO_MAX_AUTO_RESET_STEPS:
+        return f"当前节点会重置 {reset_count} 个下游步骤,超出 AUTO 自动调整上限。"
+    return ""
+
+
+def _reset_step_count(reset_policy: dict[str, Any]) -> int | None:
+    for key in ("count", "step_count", "affected_step_count"):
+        try:
+            return int(reset_policy[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    step_ids = reset_policy.get("step_ids") or reset_policy.get("steps") or reset_policy.get("reset_step_ids")
+    if isinstance(step_ids, list):
+        return len(step_ids)
+    return None
 
 
 def _policy_halt(reason: str) -> dict:

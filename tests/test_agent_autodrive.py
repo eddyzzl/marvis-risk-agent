@@ -412,6 +412,91 @@ def test_decide_gate_blocks_declared_delivery_action_adjustment():
     assert "高风险控件:post_training_action" in decision["reason"]
 
 
+def test_decide_gate_blocks_adjust_when_gate_has_high_risk_flag():
+    fake = _FakeLLM(action="adjust", reason="自动移交验证")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "自动移交验证",
+        "params": {"sample_weight_col": "weight"},
+    })
+    gate = {
+        "content": "建模规格完成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "modeling_setup",
+                "target_step_id": "choose-modeling-spec",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "risk_flags": ["delivery_handoff_requires_human"],
+                "controls": [
+                    {"id": "sample_weight_col", "kind": "select"},
+                ],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "风险标记:delivery_handoff_requires_human" in decision["reason"]
+    assert "Gate 风险标记" in fake.calls[0]["user_prompt"]
+
+
+def test_decide_gate_blocks_replan_when_gate_declares_wide_reset_scope():
+    fake = _FakeLLM(action="replan", reason="换一套流程")
+    fake._payload = json.dumps({
+        "action": "replan",
+        "reason": "换一套流程",
+        "replan_goal": "改成重新建模",
+    })
+    gate = {
+        "content": "当前计划需要调整",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "plan_overview",
+                "target_step_id": "plan",
+                "allowed_actions": ["confirm", "replan", "halt"],
+                "downstream_reset_policy": {"scope": "all"},
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "大范围下游重置策略:all" in decision["reason"]
+    assert "下游重置策略" in fake.calls[0]["user_prompt"]
+
+
+def test_decide_gate_blocks_safe_control_when_reset_step_count_is_large():
+    fake = _FakeLLM(action="adjust", reason="调低泄漏阈值")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "调低泄漏阈值",
+        "params": {"leakage_ks": 0.35},
+    })
+    gate = {
+        "content": "特征筛选完成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "screen",
+                "target_step_id": "screen",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [
+                    {"id": "leakage_ks", "kind": "number"},
+                ],
+                "downstream_reset_policy": {
+                    "step_ids": ["screen", "train", "compare", "report"],
+                },
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "会重置 4 个下游步骤" in decision["reason"]
+
+
 def test_decide_gate_passes_table_context_to_llm():
     fake = _FakeLLM()
     gate = {"content": "拼接诊断完成", "metadata": {"tables": [

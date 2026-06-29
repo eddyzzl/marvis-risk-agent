@@ -48,6 +48,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_orch_api.py tests/test_frontend_v2_plan.py tests/test_frontend_static_v2.py`: `238 passed` after exposing failure envelopes on plan step API payloads and rendering retry defaults/reset scope in both V2 plan views.
   - `tests/test_modeling_recipes.py tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `116 passed, 2 warnings` after adding sample-weight quality diagnostics to modeling setup, gate metadata, frontend controls, and AUTO prompts.
   - `tests/test_orch_db.py tests/test_orch_api.py tests/test_orch_executor.py tests/test_plan_driver.py`: `96 passed` after making step confirmation require the persisted step to still be `awaiting_confirm`.
+  - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py tests/test_agent_autodrive.py`: `63 passed` after making AUTO halt on gate-level high-risk flags and wide downstream reset policies.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
@@ -57,6 +58,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the frontend failure retry contract update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight diagnostics update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step confirmation state guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO gate-risk policy update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
 
 ## Executive Summary
@@ -99,6 +101,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Failed plan steps returned by the plan API now include `failure_envelope`; the main right rail and modular V2 plan view both use its editable input defaults and reset-scope metadata in retry panels.
   - Modeling setup now diagnoses sample-weight candidates for numeric validity, missingness, range, mean, feature exclusion, and exposes those diagnostics in gate metadata, front-end controls, renderer tables, and AUTO prompts.
   - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
+  - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
 
 Items confirmed still not complete and therefore still part of the plan:
 
@@ -107,7 +110,7 @@ Items confirmed still not complete and therefore still part of the plan:
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
 - The frontend still lacks a dedicated modeling setup panel, full model comparison/delivery surface, and Playwright desktop/mobile visual smoke. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
-- Broader AUTO safety fixtures are still needed for destructive actions, export/handoff, and wide downstream resets. Expensive/undeclared tuning adjustments now have a deterministic halt guard.
+- Broader AUTO safety fixtures now cover declared destructive/export/handoff risk flags and wide downstream resets. More domain fixtures are still useful for strategy, vintage, and future extracted modeling setup panels.
 
 Current merge stance: this branch is not "V2 complete" yet. It can become an intermediate PR only after full `scripts/check`, manual smoke, and a PR description that explicitly lists the remaining items above. Direct merge to `main` as a finished V2 release is still too risky.
 
