@@ -48,6 +48,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
   )).join("");
   const readinessHtml = readinessCards(delivery.readiness);
   const businessHtml = businessSignalSummary(delivery.business_signals);
+  const policyHtml = policySignalSummary(delivery.policy_signals);
   const metricsHtml = metricsGrid(delivery.metrics);
   const candidatesHtml = candidateTable(delivery.candidates);
   const actionsHtml = actionTable(delivery.actions);
@@ -62,6 +63,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
     ${reason ? `<div class="model-delivery-reason">${escapeHtml(reason)}</div>` : ""}
     ${readinessHtml}
     ${businessHtml}
+    ${policyHtml}
     ${metricsHtml}
     ${candidatesHtml}
     ${actionsHtml}
@@ -104,7 +106,7 @@ function candidateTable(candidates) {
   const metricKeys = sortedMetricKeys([
     ...new Set(rows.flatMap((row) => Object.keys(row.metrics && typeof row.metrics === "object" ? row.metrics : {}))),
   ]).slice(0, 6);
-  const headers = ["算法", "实验", ...metricKeys, "稳定性", "特征数", "校准", "交付"];
+  const headers = ["算法", "实验", ...metricKeys, "稳定性", "特征数", "校准", "交付", "单调性", "审批"];
   return `<div class="model-delivery-table-wrap">
     <div class="modeling-section-label">候选实验</div>
     <table class="model-delivery-table">
@@ -113,6 +115,7 @@ function candidateTable(candidates) {
         const caps = row.capabilities && typeof row.capabilities === "object" ? row.capabilities : {};
         const metrics = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
         const signals = row.business_signals && typeof row.business_signals === "object" ? row.business_signals : {};
+        const policy = row.policy_signals && typeof row.policy_signals === "object" ? row.policy_signals : {};
         const selected = row.selected === true;
         return `<tr${selected ? ' class="is-selected"' : ""}>
           <td>${escapeHtml(String(row.recipe || "-"))}${selected ? ' <span class="model-delivery-selected">已选</span>' : ""}</td>
@@ -122,6 +125,8 @@ function candidateTable(candidates) {
           <td class="model-delivery-num">${escapeHtml(formatMetric(signals.feature_count))}</td>
           <td>${escapeHtml(String(signals.calibration || "-"))}</td>
           <td>${escapeHtml(String(signals.delivery || (caps.pmml_supported && caps.handoff_supported ? "可移交" : "仅原生")))}</td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.monotonicity_status || policy.monotonicity))}">${escapeHtml(String(policy.monotonicity || "-"))}</span></td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.approval_status || policy.approval))}">${escapeHtml(String(policy.approval || "-"))}</span></td>
         </tr>`;
       }).join("")}</tbody>
     </table>
@@ -142,6 +147,29 @@ function businessSignalSummary(signals) {
       <strong>${escapeHtml(String(value))}</strong>
     </div>`
   )).join("")}</div>`;
+}
+
+function policySignalSummary(signals) {
+  const data = signals && typeof signals === "object" ? signals : {};
+  if (!Object.keys(data).length) return "";
+  const items = [
+    ["评分卡", data.scorecard || "待评估", signalKind(data.scorecard_status || data.scorecard)],
+    ["单调性", data.monotonicity || "待评估", signalKind(data.monotonicity_status || data.monotonicity)],
+    ["审批建议", data.approval || "待评估", signalKind(data.approval_status || data.approval)],
+  ];
+  const reasons = Array.isArray(data.reasons)
+    ? data.reasons.map((item) => String(item)).filter(Boolean).slice(0, 3)
+    : [];
+  return `<div class="model-delivery-policy">
+    <div class="modeling-section-label">模型策略</div>
+    <div class="model-delivery-policy-grid">${items.map(([label, value, kind]) => (
+      `<div class="model-delivery-policy-card" data-signal-kind="${escapeHtml(kind)}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(String(value))}</strong>
+      </div>`
+    )).join("")}</div>
+    ${reasons.length ? `<div class="model-delivery-policy-reasons">${reasons.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+  </div>`;
 }
 
 function actionTable(actions) {
@@ -240,8 +268,11 @@ function statusKind(status) {
 
 function signalKind(value) {
   const text = String(value || "").toLowerCase();
+  if (["ready", "supported"].includes(text)) return "ready";
+  if (["warning", "partial", "missing", "unsupported"].includes(text)) return "warning";
+  if (["error", "failed"].includes(text)) return "error";
   if (["稳定", "可移交"].includes(String(value || ""))) return "ready";
-  if (["关注", "需复核", "高风险", "需说明", "仅原生", "不可交付"].includes(String(value || ""))) return "warning";
+  if (["关注", "需复核", "高风险", "需说明", "仅原生", "不可交付", "需确认", "仅实验候选"].includes(String(value || ""))) return "warning";
   if (text.includes("risk") || text.includes("高")) return "warning";
   return "neutral";
 }

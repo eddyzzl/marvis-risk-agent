@@ -239,10 +239,14 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert "actionTable(delivery.actions)" in module_js
     assert "reportSummary(delivery.report)" in module_js
     assert "businessSignalSummary(delivery.business_signals)" in module_js
+    assert "policySignalSummary(delivery.policy_signals)" in module_js
     assert "business_signals" in module_js
+    assert "policy_signals" in module_js
     assert ".model-delivery-panel" in css
     assert ".model-delivery-readiness-grid" in css
     assert ".model-delivery-business-grid" in css
+    assert ".model-delivery-policy-grid" in css
+    assert ".model-delivery-policy-card" in css
     assert ".model-delivery-table" in css
     assert ".model-delivery-status" in css
     assert ".model-delivery-report-summary" in css
@@ -272,11 +276,21 @@ def test_model_delivery_panel_renders_selection_and_actions():
                 calibration: "已校准(PMML不含)",
                 delivery: "可移交",
               }},
+              policy_signals: {{
+                scorecard: "评分卡",
+                scorecard_status: "ready",
+                monotonicity: "已约束",
+                monotonicity_status: "ready",
+                approval: "建议可审批",
+                approval_status: "ready",
+                reasons: ["评分卡表 12 行"],
+              }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
                 {{ id: "model_report", label: "模型报告", status: "partial", artifact: "/tmp/model_report.xlsx", reason: "报告章节 1/2 可生成" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
                 {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
+                {{ id: "approval_policy", label: "审批策略", status: "ready", reason: "建议可审批" }},
               ],
               candidates: [
                 {{
@@ -285,6 +299,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                   selected: true,
                   metrics: {{ oot_ks: 0.3123, test_ks: 0.2876 }},
                   business_signals: {{ stability: "稳定", feature_count: 18, calibration: "已校准(PMML不含)", delivery: "可移交" }},
+                  policy_signals: {{ scorecard: "评分卡", monotonicity: "已约束", approval: "建议可审批" }},
                   capabilities: {{ pmml_supported: true, handoff_supported: true, native_model_supported: true }},
                 }},
                 {{
@@ -293,6 +308,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                   selected: false,
                   metrics: {{ oot_ks: 0.3321 }},
                   business_signals: {{ stability: "高风险", feature_count: 120, calibration: "未校准", delivery: "仅原生" }},
+                  policy_signals: {{ scorecard: "非评分卡", monotonicity: "未声明", approval: "需业务复核", approval_status: "warning" }},
                   capabilities: {{ pmml_supported: false, handoff_supported: false, native_model_supported: true, reason: "仅原生模型" }},
                 }},
               ],
@@ -325,6 +341,13 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("稳定性"), true);
         assert.equal(html.includes("特征数"), true);
         assert.equal(html.includes("校准"), true);
+        assert.equal(html.includes("模型策略"), true);
+        assert.equal(html.includes("评分卡"), true);
+        assert.equal(html.includes("单调性"), true);
+        assert.equal(html.includes("审批建议"), true);
+        assert.equal(html.includes("建议可审批"), true);
+        assert.equal(html.includes("评分卡表 12 行"), true);
+        assert.equal(html.includes("需业务复核"), true);
         assert.equal(html.includes("稳定"), true);
         assert.equal(html.includes("高风险"), true);
         assert.equal(html.includes("已校准(PMML不含)"), true);
@@ -392,6 +415,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
               target_type: "binary",
               selection_metric: "oot_ks",
               business_signals: {{ stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" }},
+              policy_signals: {{ scorecard: "非评分卡", monotonicity: "未声明", approval: "仅实验候选" }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: longPath }},
@@ -404,6 +428,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
                   selected: true,
                   metrics: {{ oot_ks: 0.31, test_ks: 0.29, psi_oot_vs_train: 0.12 }},
                   business_signals: {{ stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" }},
+                  policy_signals: {{ scorecard: "非评分卡", monotonicity: "未声明", approval: "仅实验候选" }},
                   capabilities: {{ pmml_supported: true, handoff_supported: true, native_model_supported: true }},
                 }},
               ],
@@ -420,6 +445,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
           "modeling-override-reason-input",
           "model-delivery-panel",
           "model-delivery-business-grid",
+          "model-delivery-policy-grid",
           "model-delivery-table-wrap",
           "model-delivery-artifacts",
         ]) {{

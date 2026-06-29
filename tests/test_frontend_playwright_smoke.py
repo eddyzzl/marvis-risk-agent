@@ -174,9 +174,11 @@ def _smoke_html() -> str:
           target_type: "binary",
           selection_metric: "oot_ks",
           business_signals: { stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" },
+          policy_signals: { scorecard: "非评分卡", monotonicity: "未声明", approval: "仅实验候选" },
           readiness: [
             { id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" },
             { id: "pmml", label: "PMML", status: "succeeded", artifact: longPath },
+            { id: "approval_policy", label: "审批策略", status: "warning", reason: "仅实验候选" },
           ],
           metrics: { oot_ks: 0.31, test_ks: 0.29, psi_oot_vs_train: 0.12 },
           candidates: [
@@ -186,6 +188,7 @@ def _smoke_html() -> str:
               selected: true,
               metrics: { oot_ks: 0.31, test_ks: 0.29, psi_oot_vs_train: 0.12 },
               business_signals: { stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" },
+              policy_signals: { scorecard: "非评分卡", monotonicity: "未声明", approval: "仅实验候选" },
               capabilities: { pmml_supported: true, handoff_supported: true, native_model_supported: true },
             },
           ],
@@ -351,6 +354,7 @@ def _assert_panel_smoke(page, url: str) -> None:
             deliveryHeight: delivery.height,
             guidance: document.querySelectorAll(".modeling-guidance-item").length,
             readiness: document.querySelectorAll(".model-delivery-readiness-grid > *").length,
+            policy: document.querySelectorAll(".model-delivery-policy-card").length,
             badText,
             overflow,
           };
@@ -363,6 +367,7 @@ def _assert_panel_smoke(page, url: str) -> None:
     assert metrics["deliveryHeight"] > 180
     assert metrics["guidance"] >= 3
     assert metrics["readiness"] >= 2
+    assert metrics["policy"] >= 3
     assert metrics["badText"] is False
     assert metrics["overflow"] <= 1
 

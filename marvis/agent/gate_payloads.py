@@ -165,6 +165,11 @@ def build_model_delivery_payload(
     if selected_id:
         candidates = _mark_selected_candidate(candidates, selected_id)
     selected_candidate = next((item for item in candidates if item.get("selected")), None)
+    policy_signals = (
+        dict(selected_candidate.get("policy_signals"))
+        if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("policy_signals"), dict)
+        else _policy_signals(o)
+    )
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
@@ -181,6 +186,7 @@ def build_model_delivery_payload(
             if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("business_signals"), dict)
             else _business_signals(o)
         ),
+        "policy_signals": policy_signals,
         "capabilities": capabilities,
         "candidates": candidates,
         "actions": actions,
@@ -188,7 +194,13 @@ def build_model_delivery_payload(
         "pmml_path": str(o.get("pmml_path") or ""),
         "validation_task_id": str(o.get("validation_task_id") or ""),
         "report": report,
-        "readiness": _delivery_readiness(o, capabilities, actions, report=report),
+        "readiness": _delivery_readiness(
+            o,
+            capabilities,
+            actions,
+            report=report,
+            policy_signals=policy_signals,
+        ),
     }
 
 
@@ -406,6 +418,7 @@ def _experiment_candidates(value) -> list[dict]:
             "metrics": _metrics(item),
             "capabilities": _capabilities(item.get("capabilities")),
             "business_signals": _business_signals(item),
+            "policy_signals": _policy_signals(item),
             "selected": False,
         })
     return rows
@@ -496,6 +509,85 @@ def _delivery_label(caps: dict) -> str:
     return "不可交付"
 
 
+def _policy_signals(row: dict | None) -> dict:
+    item = row if isinstance(row, dict) else {}
+    caps = _capabilities(item.get("capabilities"))
+    business = _business_signals(item)
+    recipe = str(item.get("recipe") or "")
+    scorecard_rows = item.get("scorecard_table") if isinstance(item.get("scorecard_table"), list) else []
+    scorecard_like = recipe == "scorecard" or bool(scorecard_rows)
+    monotonic_declared = _has_monotonic_policy(item, scorecard_rows)
+    stability = str(business.get("stability") or "")
+    delivery = str(business.get("delivery") or "")
+    reasons: list[str] = []
+
+    if scorecard_like:
+        scorecard = "评分卡"
+        scorecard_status = "ready"
+        if scorecard_rows:
+            reasons.append(f"评分卡表 {len(scorecard_rows)} 行")
+    else:
+        scorecard = "非评分卡"
+        scorecard_status = "neutral"
+
+    if monotonic_declared:
+        monotonicity = "已约束"
+        monotonicity_status = "ready"
+    elif scorecard_like:
+        monotonicity = "需确认"
+        monotonicity_status = "warning"
+        reasons.append("评分卡缺少单调性方向证据")
+    else:
+        monotonicity = "未声明"
+        monotonicity_status = "neutral"
+
+    if stability in {"高风险", "需复核"}:
+        approval = "需业务复核"
+        approval_status = "warning"
+        reasons.append("稳定性或过拟合信号需要复核")
+    elif delivery == "不可交付":
+        approval = "不可审批"
+        approval_status = "error"
+        reasons.append("缺少可交付模型产物")
+    elif caps.get("handoff_supported") and delivery == "可移交" and monotonicity_status != "warning":
+        approval = "建议可审批"
+        approval_status = "ready"
+    elif caps.get("native_model_supported"):
+        approval = "仅实验候选"
+        approval_status = "warning"
+        reasons.append("交付或验证移交能力受限")
+    else:
+        approval = "待评估"
+        approval_status = "neutral"
+
+    return {
+        "scorecard": scorecard,
+        "scorecard_status": scorecard_status,
+        "monotonicity": monotonicity,
+        "monotonicity_status": monotonicity_status,
+        "approval": approval,
+        "approval_status": approval_status,
+        "reasons": reasons,
+    }
+
+
+def _has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
+    for key in ("monotonic_constraints", "monotone_constraints", "monotonic_directions"):
+        value = item.get(key)
+        if isinstance(value, (dict, list, tuple)) and len(value) > 0:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    for container_key in ("params", "model_params", "fixed_params"):
+        value = item.get(container_key)
+        if isinstance(value, dict) and _has_monotonic_policy(value, []):
+            return True
+    for row in scorecard_rows:
+        if isinstance(row, dict) and str(row.get("monotonic_direction") or "").strip():
+            return True
+    return False
+
+
 def _mark_selected_candidate(candidates: list[dict], selected_id: str) -> list[dict]:
     marked = []
     for item in candidates:
@@ -571,6 +663,7 @@ def _delivery_readiness(
     actions: list[dict],
     *,
     report: dict | None = None,
+    policy_signals: dict | None = None,
 ) -> list[dict]:
     native_path = str(output.get("native_model_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
@@ -611,6 +704,14 @@ def _delivery_readiness(
             "status": str(report.get("status") or "missing"),
             "artifact": str(report.get("report_path") or ""),
             "reason": f"报告章节 {available}/{total} 可生成" if total else "",
+        })
+    if isinstance(policy_signals, dict) and policy_signals:
+        readiness.append({
+            "id": "approval_policy",
+            "label": "审批策略",
+            "status": str(policy_signals.get("approval_status") or "neutral"),
+            "artifact": "",
+            "reason": str(policy_signals.get("approval") or "待评估"),
         })
     return readiness
 

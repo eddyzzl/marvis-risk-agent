@@ -535,7 +535,25 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
                     "test_ks": 0.29,
                     "psi_oot_vs_train": 0.06,
                     "feature_count": 18,
+                    "monotonic_constraints": {"age": 1},
                     "calibration": {"method": "sigmoid", "pmml_includes_calibration": False},
+                    "capabilities": {
+                        "pmml_supported": True,
+                        "handoff_supported": True,
+                        "native_model_supported": True,
+                    },
+                },
+                {
+                    "id": "exp-scorecard",
+                    "recipe": "scorecard",
+                    "artifact_id": "art-scorecard",
+                    "oot_ks": 0.30,
+                    "test_ks": 0.28,
+                    "psi_oot_vs_train": 0.08,
+                    "feature_count": 12,
+                    "scorecard_table": [
+                        {"feature": "age", "bin_label": "[20,30)", "points": 12, "monotonic_direction": "increasing"},
+                    ],
                     "capabilities": {
                         "pmml_supported": True,
                         "handoff_supported": True,
@@ -580,14 +598,35 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
         "calibration": "已校准(PMML不含)",
         "delivery": "可移交",
     }
+    assert delivery["policy_signals"] == {
+        "scorecard": "非评分卡",
+        "scorecard_status": "neutral",
+        "monotonicity": "已约束",
+        "monotonicity_status": "ready",
+        "approval": "建议可审批",
+        "approval_status": "ready",
+        "reasons": [],
+    }
     assert delivery["readiness"][0]["status"] == "ready"
     assert delivery["readiness"][1]["status"] == "ready"
     assert delivery["readiness"][2]["status"] == "ready"
-    assert [row["selected"] for row in delivery["candidates"]] == [True, False]
+    assert delivery["readiness"][3] == {
+        "id": "approval_policy",
+        "label": "审批策略",
+        "status": "ready",
+        "artifact": "",
+        "reason": "建议可审批",
+    }
+    assert [row["selected"] for row in delivery["candidates"]] == [True, False, False]
     assert delivery["candidates"][0]["business_signals"]["calibration"] == "已校准(PMML不含)"
-    assert delivery["candidates"][1]["business_signals"]["stability"] == "高风险"
-    assert delivery["candidates"][1]["business_signals"]["delivery"] == "仅原生"
-    assert delivery["candidates"][1]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
+    assert delivery["candidates"][0]["policy_signals"]["monotonicity"] == "已约束"
+    assert delivery["candidates"][1]["policy_signals"]["scorecard"] == "评分卡"
+    assert delivery["candidates"][1]["policy_signals"]["monotonicity"] == "已约束"
+    assert delivery["candidates"][1]["policy_signals"]["approval"] == "建议可审批"
+    assert delivery["candidates"][2]["business_signals"]["stability"] == "高风险"
+    assert delivery["candidates"][2]["business_signals"]["delivery"] == "仅原生"
+    assert delivery["candidates"][2]["policy_signals"]["approval"] == "需业务复核"
+    assert delivery["candidates"][2]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
 
 
 def test_post_training_gate_merges_report_readiness(tmp_path):
@@ -728,7 +767,15 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
     assert [item["status"] for item in delivery["actions"]] == ["succeeded", "succeeded"]
-    assert [item["status"] for item in delivery["readiness"]] == ["ready", "ready", "succeeded", "succeeded"]
+    assert [item["status"] for item in delivery["readiness"]] == [
+        "ready",
+        "ready",
+        "succeeded",
+        "succeeded",
+        "ready",
+    ]
+    assert delivery["readiness"][-1]["id"] == "approval_policy"
+    assert delivery["policy_signals"]["approval"] == "建议可审批"
 
 
 def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(tmp_path):
