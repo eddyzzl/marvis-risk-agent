@@ -767,6 +767,13 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
             "challenger_package_markdown_path": "/tmp/challenger_backtest_plan.md",
             "approval_package_path": "/tmp/art-lgb.approval_package.json",
             "approval_package_markdown_path": "/tmp/art-lgb.approval_package.md",
+            "model_card_path": "/tmp/art-lgb.model_card.json",
+            "model_card_markdown_path": "/tmp/art-lgb.model_card.md",
+            "model_card": {
+                "schema_version": 1,
+                "card_version": "model_card_v1",
+                "artifact_id": "art-lgb",
+            },
             "monitoring_policy_path": "/tmp/art-lgb.monitoring_policy.json",
             "monitoring_policy_markdown_path": "/tmp/art-lgb.monitoring_policy.md",
             "monitoring_policy": {
@@ -821,6 +828,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["challenger_package_markdown_path"] == "/tmp/challenger_backtest_plan.md"
     assert delivery["approval_package_path"] == "/tmp/art-lgb.approval_package.json"
     assert delivery["approval_package_markdown_path"] == "/tmp/art-lgb.approval_package.md"
+    assert delivery["model_card_path"] == "/tmp/art-lgb.model_card.json"
+    assert delivery["model_card_markdown_path"] == "/tmp/art-lgb.model_card.md"
+    assert delivery["model_card"]["card_version"] == "model_card_v1"
     assert delivery["monitoring_policy_path"] == "/tmp/art-lgb.monitoring_policy.json"
     assert delivery["monitoring_policy_markdown_path"] == "/tmp/art-lgb.monitoring_policy.md"
     assert delivery["monitoring_policy"]["status"] == "pass"
@@ -835,6 +845,7 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
         "ready",
         "ready",
         "ready",
+        "ready",
         "pass",
         "warn",
         "succeeded",
@@ -844,12 +855,14 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     ]
     assert delivery["readiness"][2]["id"] == "approval_package"
     assert delivery["readiness"][2]["artifact"] == "/tmp/art-lgb.approval_package.md"
-    assert delivery["readiness"][3]["id"] == "monitoring_policy"
-    assert delivery["readiness"][3]["artifact"] == "/tmp/art-lgb.monitoring_policy.md"
-    assert delivery["readiness"][4]["id"] == "challenger_comparison"
-    assert delivery["readiness"][4]["artifact"] == "/tmp/art-lgb.champion_comparison.md"
-    assert delivery["readiness"][7]["id"] == "challenger_backtest"
-    assert delivery["readiness"][7]["artifact"] == "task-challenger"
+    assert delivery["readiness"][3]["id"] == "model_card"
+    assert delivery["readiness"][3]["artifact"] == "/tmp/art-lgb.model_card.md"
+    assert delivery["readiness"][4]["id"] == "monitoring_policy"
+    assert delivery["readiness"][4]["artifact"] == "/tmp/art-lgb.monitoring_policy.md"
+    assert delivery["readiness"][5]["id"] == "challenger_comparison"
+    assert delivery["readiness"][5]["artifact"] == "/tmp/art-lgb.champion_comparison.md"
+    assert delivery["readiness"][8]["id"] == "challenger_backtest"
+    assert delivery["readiness"][8]["artifact"] == "task-challenger"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
     assert delivery["policy_signals"]["approval"] == "建议可审批"
 

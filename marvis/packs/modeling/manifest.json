@@ -1616,7 +1616,7 @@
     },
     {
       "name": "post_training_action",
-      "summary": "Finalize a selected modeling experiment with approval, monitoring, and Champion/Challenger comparison packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
+      "summary": "Finalize a selected modeling experiment with model-card, approval, monitoring, and Champion/Challenger comparison packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1697,6 +1697,15 @@
           "monitoring_policy": {
             "type": "object"
           },
+          "model_card_path": {
+            "type": "string"
+          },
+          "model_card_markdown_path": {
+            "type": "string"
+          },
+          "model_card": {
+            "type": "object"
+          },
           "challenger_comparison_path": {
             "type": "string"
           },
@@ -1725,6 +1734,9 @@
           "monitoring_policy_path",
           "monitoring_policy_markdown_path",
           "monitoring_policy",
+          "model_card_path",
+          "model_card_markdown_path",
+          "model_card",
           "challenger_comparison_path",
           "challenger_comparison_markdown_path",
           "challenger_comparison",

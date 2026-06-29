@@ -31,8 +31,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class _SmokeHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, smoke_html: str, **kwargs):
+    def __init__(
+        self,
+        *args,
+        smoke_html: str,
+        tasks: list[dict] | None = None,
+        messages_by_task: dict[str, list[dict]] | None = None,
+        plans_by_task: dict[str, list[dict]] | None = None,
+        **kwargs,
+    ):
         self._smoke_html = smoke_html
+        self._tasks = tasks or []
+        self._messages_by_task = messages_by_task or {}
+        self._plans_by_task = plans_by_task or {}
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def log_message(self, format, *args):  # noqa: A002
@@ -51,7 +62,23 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
             self._send_json({})
             return
         if path == "/api/tasks":
-            self._send_json([])
+            self._send_json(self._tasks)
+            return
+        task_id = _task_api_id(path, "/api/tasks/", "/agent/messages")
+        if task_id is not None:
+            self._send_json({"messages": self._messages_by_task.get(task_id, []), "incremental": False})
+            return
+        task_id = _task_api_id(path, "/api/tasks/", "/plans")
+        if task_id is not None:
+            self._send_json({"plans": self._plans_by_task.get(task_id, [])})
+            return
+        task_id = _task_api_id(path, "/api/tasks/", "/evidence")
+        if task_id is not None:
+            self._send_json({})
+            return
+        task_id = _task_api_id(path, "/api/tasks/", "/report-fields")
+        if task_id is not None:
+            self._send_json({"metric_values": {}, "workbook_source": "", "metric_table_sections": []})
             return
         if path == "/api/settings/execution-environment/options":
             self._send_json({"settings": {}, "options": [], "validation": None})
@@ -94,8 +121,20 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def _serve_smoke_page(smoke_html: str):
-    handler = partial(_SmokeHandler, smoke_html=smoke_html)
+def _serve_smoke_page(
+    smoke_html: str,
+    *,
+    tasks: list[dict] | None = None,
+    messages_by_task: dict[str, list[dict]] | None = None,
+    plans_by_task: dict[str, list[dict]] | None = None,
+):
+    handler = partial(
+        _SmokeHandler,
+        smoke_html=smoke_html,
+        tasks=tasks,
+        messages_by_task=messages_by_task,
+        plans_by_task=plans_by_task,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -105,6 +144,13 @@ def _serve_smoke_page(smoke_html: str):
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+def _task_api_id(path: str, prefix: str, suffix: str) -> str | None:
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return None
+    task_id = path[len(prefix):-len(suffix)]
+    return task_id or None
 
 
 def _smoke_html() -> str:
@@ -289,6 +335,170 @@ def _workspace_smoke_html() -> str:
 """
 
 
+def _real_modeling_task() -> dict:
+    return {
+        "id": "task-modeling-smoke",
+        "task_type": "modeling",
+        "model_name": "A卡模型开发",
+        "model_version": "v1",
+        "validator": "MARVIS",
+        "source_dir": "/tmp/modeling-smoke",
+        "algorithm": "lgb",
+        "recipes": ["lgb", "xgb"],
+        "run_mode": "manual",
+        "target_type": "binary",
+        "target_col": "bad_flag",
+        "score_col": "score",
+        "split_col": "split",
+        "sample_path": "sample.csv",
+        "pmml_path": "model.pmml",
+        "status": "review_required",
+        "status_message": "",
+        "created_at": "2026-06-30T00:00:00Z",
+        "updated_at": "2026-06-30T00:01:00Z",
+        "status_reason_code": "",
+        "sample_weight_col": "",
+        "metrics": [],
+        "capability_tier": "guarded",
+        "report_available": True,
+    }
+
+
+def _real_modeling_messages() -> list[dict]:
+    return [
+        {
+            "id": "msg-delivery",
+            "role": "assistant",
+            "stage": "done",
+            "content": "训练后交付动作完成，已生成最终模型卡、审批包和 Champion 对比。",
+            "created_at": "2026-06-30T00:01:00Z",
+            "metadata": {
+                "kind": "result",
+                "step_id": "post_training_action",
+                "phase": "G5 交付",
+                "step_title": "训练后交付动作",
+                "model_delivery": {
+                    "source_tool": "post_training_action",
+                    "selected_experiment_id": "exp-lgb",
+                    "artifact_id": "art-lgb",
+                    "recipe": "lgb",
+                    "target_type": "binary",
+                    "selection_metric": "oot_ks",
+                    "pmml_path": "/tmp/modeling-smoke/art-lgb.pmml",
+                    "model_report_path": "/tmp/modeling-smoke/model_report.xlsx",
+                    "validation_task_id": "task-validation",
+                    "approval_package_path": "/tmp/modeling-smoke/art-lgb.approval_package.md",
+                    "monitoring_policy_path": "/tmp/modeling-smoke/art-lgb.monitoring_policy.md",
+                    "champion_comparison_path": "/tmp/modeling-smoke/art-lgb.champion_comparison.md",
+                    "model_card_path": "/tmp/modeling-smoke/art-lgb.model_card.json",
+                    "model_card_markdown_path": "/tmp/modeling-smoke/art-lgb.model_card.md",
+                    "model_card": {
+                        "version": "model_card_v1",
+                        "artifact_id": "art-lgb",
+                        "recipe": "lgb",
+                        "target_type": "binary",
+                        "selection_metric": "oot_ks",
+                        "key_metrics": {"oot_ks": 0.31, "test_ks": 0.29, "psi_oot_vs_train": 0.12},
+                        "limitations": ["需业务复核校准与稳定性。"],
+                        "next_review_actions": ["审批前复核 Champion 差异。"],
+                    },
+                    "metrics": {"oot_ks": 0.31, "test_ks": 0.29, "psi_oot_vs_train": 0.12},
+                    "business_signals": {
+                        "stability": "关注",
+                        "feature_count": 128,
+                        "calibration": "需说明",
+                        "delivery": "可移交",
+                    },
+                    "policy_signals": {
+                        "scorecard": "非评分卡",
+                        "monotonicity": "未声明",
+                        "approval": "仅实验候选",
+                    },
+                    "readiness": [
+                        {"id": "native_model", "label": "原生模型", "status": "ready", "artifact": "/tmp/modeling-smoke/art-lgb.pkl"},
+                        {"id": "pmml", "label": "PMML", "status": "succeeded", "artifact": "/tmp/modeling-smoke/art-lgb.pmml"},
+                        {"id": "approval_package", "label": "审批包", "status": "ready", "artifact": "/tmp/modeling-smoke/art-lgb.approval_package.md"},
+                        {"id": "model_card", "label": "模型卡", "status": "ready", "artifact": "/tmp/modeling-smoke/art-lgb.model_card.md"},
+                        {"id": "monitoring_policy", "label": "监控策略", "status": "pass", "artifact": "/tmp/modeling-smoke/art-lgb.monitoring_policy.md"},
+                        {"id": "challenger_comparison", "label": "Champion对比", "status": "warn", "artifact": "/tmp/modeling-smoke/art-lgb.champion_comparison.md"},
+                    ],
+                    "actions": {
+                        "export_pmml": {"status": "succeeded", "path": "/tmp/modeling-smoke/art-lgb.pmml"},
+                        "handoff_validation": {"status": "succeeded", "task_id": "task-validation"},
+                        "approval_package": {"status": "succeeded", "path": "/tmp/modeling-smoke/art-lgb.approval_package.md"},
+                    },
+                    "candidates": [
+                        {
+                            "id": "exp-lgb",
+                            "recipe": "lgb",
+                            "selected": True,
+                            "metrics": {"oot_ks": 0.31, "test_ks": 0.29, "psi_oot_vs_train": 0.12},
+                            "business_signals": {
+                                "stability": "关注",
+                                "feature_count": 128,
+                                "calibration": "需说明",
+                                "delivery": "可移交",
+                            },
+                            "policy_signals": {
+                                "scorecard": "非评分卡",
+                                "monotonicity": "未声明",
+                                "approval": "仅实验候选",
+                            },
+                            "capabilities": {
+                                "pmml_supported": True,
+                                "handoff_supported": True,
+                                "native_model_supported": True,
+                            },
+                        }
+                    ],
+                },
+            },
+        }
+    ]
+
+
+def _real_modeling_plan() -> dict:
+    return {
+        "id": "plan-real-smoke",
+        "task_id": "task-modeling-smoke",
+        "goal": "模型开发 smoke",
+        "status": "done",
+        "tier": "guarded",
+        "novel_mode": "plan_ahead",
+        "created_at": "2026-06-30T00:00:00Z",
+        "updated_at": "2026-06-30T00:01:00Z",
+        "steps": [
+            {
+                "id": "choose_modeling_spec",
+                "index": 0,
+                "phase": "G1 规格",
+                "title": "确认建模规格",
+                "status": "done",
+                "tool_ref": {"plugin": "modeling", "tool": "choose_modeling_spec"},
+            },
+            {
+                "id": "train_models",
+                "index": 1,
+                "phase": "G4 训练",
+                "title": "训练候选模型",
+                "status": "done",
+                "tool_ref": {"plugin": "modeling", "tool": "train_models"},
+                "depends_on": ["choose_modeling_spec"],
+            },
+            {
+                "id": "post_training_action",
+                "index": 2,
+                "phase": "G5 交付",
+                "title": "训练后交付动作",
+                "status": "done",
+                "tool_ref": {"plugin": "modeling", "tool": "post_training_action"},
+                "depends_on": ["train_models"],
+                "output_ref": "artifact://modeling/art-lgb/model_card",
+            },
+        ],
+    }
+
+
 def test_modeling_setup_and_delivery_panels_render_in_real_browser():
     playwright = pytest.importorskip("playwright.sync_api")
     with _serve_smoke_page(_smoke_html()) as url, playwright.sync_playwright() as p:
@@ -317,6 +527,29 @@ def test_app_shell_welcome_and_create_dialog_render_in_real_browser():
                     f"localStorage.clear(); localStorage.setItem('marvis_theme', {json.dumps(theme)});",
                 )
                 _assert_app_shell_smoke(page, url.rsplit("/", 1)[0] + "/", expected_theme=theme)
+        finally:
+            browser.close()
+
+
+def test_real_modeling_task_delivery_workspace_renders_in_real_browser():
+    playwright = pytest.importorskip("playwright.sync_api")
+    task = _real_modeling_task()
+    with _serve_smoke_page(
+        _smoke_html(),
+        tasks=[task],
+        messages_by_task={task["id"]: _real_modeling_messages()},
+        plans_by_task={task["id"]: [_real_modeling_plan()]},
+    ) as url, playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 1366, "height": 900})
+            page.add_init_script(
+                """
+                localStorage.clear();
+                localStorage.setItem("marvis_selected_task_id", "task-modeling-smoke");
+                """
+            )
+            _assert_real_modeling_workspace_smoke(page, url.rsplit("/", 1)[0] + "/")
         finally:
             browser.close()
 
@@ -453,6 +686,63 @@ def _assert_app_shell_smoke(page, url: str, *, expected_theme: str) -> None:
     assert dialog_metrics["agentTierVisible"] is True
     assert dialog_metrics["tierValue"] in {"", "guarded", "balanced", "explorer", "autonomous"}
     assert dialog_metrics["overflow"] <= 1
+    assert not page_errors
+    assert not console_errors
+
+
+def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    page.on(
+        "console",
+        lambda message: console_errors.append(message.text)
+        if message.type == "error" and not message.text.startswith("Failed to load resource:")
+        else None,
+    )
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.goto(url)
+    page.wait_for_selector("body:not(.app-booting)", timeout=10_000)
+    page.wait_for_selector("#taskList .task-row.selected")
+    page.wait_for_selector("#workflowStepper .plan-rail-step")
+    page.wait_for_selector(".driver-analysis-section .model-delivery-panel")
+    metrics = page.evaluate(
+        """
+        () => {
+          const delivery = document.querySelector(".model-delivery-panel").getBoundingClientRect();
+          const plan = document.querySelector("#workflowStepper").getBoundingClientRect();
+          const analysis = document.querySelector("#agentConversationPanel").getBoundingClientRect();
+          const text = document.body.innerText;
+          return {
+            selectedRows: document.querySelectorAll("#taskList .task-row.selected").length,
+            planSteps: document.querySelectorAll("#workflowStepper .plan-rail-step").length,
+            outputButtons: document.querySelectorAll(".step-output-button, .plan-step-output").length,
+            deliveryWidth: delivery.width,
+            deliveryHeight: delivery.height,
+            analysisWidth: analysis.width,
+            planWidth: plan.width,
+            hasModelCard: text.includes("模型卡") && text.includes("art-lgb.model_card.md"),
+            hasChampionComparison: text.includes("Champion对比") && text.includes("art-lgb.champion_comparison.md"),
+            hasApprovalPackage: text.includes("审批包") && text.includes("art-lgb.approval_package.md"),
+            hasTaskTitle: text.includes("A卡模型开发"),
+            badText: text.includes("undefined") || text.includes("NaN"),
+            overflow: document.documentElement.scrollWidth - window.innerWidth,
+          };
+        }
+        """
+    )
+    assert metrics["selectedRows"] == 1
+    assert metrics["planSteps"] == 3
+    assert metrics["outputButtons"] >= 1
+    assert metrics["deliveryWidth"] > 320
+    assert metrics["deliveryHeight"] > 180
+    assert metrics["analysisWidth"] > 320
+    assert metrics["planWidth"] > 240
+    assert metrics["hasModelCard"] is True
+    assert metrics["hasChampionComparison"] is True
+    assert metrics["hasApprovalPackage"] is True
+    assert metrics["hasTaskTitle"] is True
+    assert metrics["badText"] is False
+    assert metrics["overflow"] <= 1
     assert not page_errors
     assert not console_errors
 

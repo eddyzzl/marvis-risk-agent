@@ -64,6 +64,7 @@ SCORECARD_POINTS_COL = "__scorecard_points__"
 PMML_SUPPORTED_ALGORITHMS = frozenset({"lr", "lgb", "xgb", "scorecard"})
 CALIBRATION_PARAMS_KEY = "calibration"
 CHALLENGER_COMPARISON_VERSION = "champion_challenger_v1"
+MODEL_CARD_VERSION = "model_card_v1"
 SUPPORTED_MODELING_RECIPES = frozenset({
     "lgb",
     "xgb",
@@ -1435,6 +1436,21 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 "reason": reason or "sample_dataset_id and PMML-capable model are required",
             })
 
+    model_card = _model_card_payload(
+        experiment=experiment,
+        artifact=artifact,
+        capabilities=capabilities,
+        actions=actions,
+        sample_dataset_id=str(inputs.get("sample_dataset_id") or ""),
+        pmml_path=pmml_path,
+        validation_task_id=validation_task_id,
+        challenger_task_id=challenger_task_id,
+        challenger_package_path=challenger_package_path,
+        challenger_package_markdown_path=challenger_package_markdown_path,
+        selection_policy_decision=selection_policy_decision,
+        monitoring_policy=monitoring_policy,
+        challenger_comparison=challenger_comparison,
+    )
     approval_package = _write_approval_package(
         base_dir,
         experiment=experiment,
@@ -1450,6 +1466,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         selection_policy_decision=selection_policy_decision,
         monitoring_policy=monitoring_policy,
         challenger_comparison=challenger_comparison,
+        model_card=model_card,
     )
     return {
         "experiment_id": experiment.id,
@@ -1470,6 +1487,9 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
             approval_package.get("challenger_comparison_markdown_path") or ""
         ),
         "challenger_comparison": challenger_comparison,
+        "model_card_path": str(approval_package["model_card_path"]),
+        "model_card_markdown_path": str(approval_package["model_card_markdown_path"]),
+        "model_card": model_card,
         "capabilities": capabilities,
         "actions": actions,
     }
@@ -1864,6 +1884,154 @@ def _challenger_comparison_recommendation(status: str, summary: dict) -> str:
     return "缺少可比较的 Champion/Challenger 指标, 需补充生产模型基线"
 
 
+def _model_card_payload(
+    *,
+    experiment,
+    artifact: ModelArtifact,
+    capabilities: dict,
+    actions: list[dict],
+    sample_dataset_id: str,
+    pmml_path: str,
+    validation_task_id: str,
+    challenger_task_id: str,
+    challenger_package_path: str,
+    challenger_package_markdown_path: str,
+    selection_policy_decision: dict,
+    monitoring_policy: dict,
+    challenger_comparison: dict,
+) -> dict:
+    config = experiment.config
+    metrics = _json_safe(experiment.metrics) or {}
+    limitations = _model_card_limitations(
+        capabilities=capabilities,
+        selection_policy_decision=selection_policy_decision,
+        monitoring_policy=monitoring_policy,
+        challenger_comparison=challenger_comparison,
+    )
+    return _json_safe({
+        "schema_version": 1,
+        "card_version": MODEL_CARD_VERSION,
+        "created_at": datetime.now(UTC).isoformat(),
+        "title": f"{artifact.algorithm} model card",
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "recipe": experiment.recipe_id,
+        "algorithm": artifact.algorithm,
+        "target_type": getattr(config, "target_type", "binary"),
+        "dataset_id": getattr(config, "dataset_id", ""),
+        "sample_dataset_id": sample_dataset_id,
+        "target_col": getattr(config, "target_col", ""),
+        "split_col": getattr(config, "split_col", ""),
+        "split_values": _json_safe(getattr(config, "split_values", {})),
+        "seed": getattr(config, "seed", None),
+        "feature_count": len(artifact.feature_list),
+        "feature_preview": list(artifact.feature_list[:30]),
+        "sample_weight_col": str(artifact.params.get("sample_weight_col") or ""),
+        "key_metrics": _model_card_key_metrics(metrics),
+        "governance": {
+            "selection_policy_status": str(selection_policy_decision.get("status") or "not_requested"),
+            "monitoring_status": str(monitoring_policy.get("status") or "not_configured"),
+            "monitoring_recommendation": str(monitoring_policy.get("recommendation") or ""),
+            "champion_comparison_status": str(challenger_comparison.get("status") or "not_configured"),
+            "champion_comparison_recommendation": str(challenger_comparison.get("recommendation") or ""),
+        },
+        "delivery": {
+            "native_model_path": str(artifact.model_path or ""),
+            "pmml_path": str(pmml_path or ""),
+            "validation_task_id": str(validation_task_id or ""),
+            "challenger_task_id": str(challenger_task_id or ""),
+            "challenger_package_path": str(challenger_package_path or ""),
+            "challenger_package_markdown_path": str(challenger_package_markdown_path or ""),
+            "export_pmml_status": _model_card_action_status(actions, "export_pmml"),
+            "validation_handoff_status": _model_card_action_status(actions, "handoff_to_validation"),
+            "challenger_backtest_status": _model_card_action_status(actions, "create_challenger_backtest"),
+        },
+        "capabilities": _json_safe(capabilities),
+        "limitations": limitations,
+        "next_review_actions": _model_card_next_review_actions(limitations, monitoring_policy, challenger_comparison),
+    })
+
+
+def _model_card_key_metrics(metrics: dict) -> list[dict]:
+    rows = []
+    for metric in [
+        "oot_ks",
+        "test_ks",
+        "train_ks",
+        "oot_auc",
+        "test_auc",
+        "oot_macro_auc",
+        "test_macro_auc",
+        "oot_accuracy",
+        "test_accuracy",
+        "oot_rmse",
+        "test_rmse",
+        "oot_mae",
+        "test_mae",
+        "oot_logloss",
+        "test_logloss",
+        "psi_oot_vs_train",
+        "psi_test_vs_train",
+        "overfit_flag",
+    ]:
+        if metric in metrics and metrics.get(metric) is not None:
+            rows.append({"metric": metric, "value": metrics.get(metric)})
+    return rows
+
+
+def _model_card_action_status(actions: list[dict], action: str) -> str:
+    for item in actions:
+        if isinstance(item, dict) and item.get("action") == action:
+            return str(item.get("status") or "")
+    return "not_requested"
+
+
+def _model_card_limitations(
+    *,
+    capabilities: dict,
+    selection_policy_decision: dict,
+    monitoring_policy: dict,
+    challenger_comparison: dict,
+) -> list[str]:
+    limitations: list[str] = []
+    if not capabilities.get("pmml_supported"):
+        reason = str(capabilities.get("reason") or "PMML export is not supported for this artifact.")
+        limitations.append(reason)
+    policy_status = str(selection_policy_decision.get("status") or "")
+    if policy_status in {"blocked", "overridden"}:
+        limitations.append(f"Selection policy status is {policy_status}.")
+    violations = [
+        str(item.get("message") or item.get("code") or "")
+        for item in (selection_policy_decision.get("violations") or [])
+        if isinstance(item, dict)
+    ]
+    limitations.extend(item for item in violations if item)
+    monitoring_status = str(monitoring_policy.get("status") or "")
+    if monitoring_status in {"warn", "fail", "missing", "needs_policy"}:
+        limitations.append(str(monitoring_policy.get("recommendation") or "Monitoring policy needs review."))
+    comparison_status = str(challenger_comparison.get("status") or "")
+    if comparison_status in {"warn", "missing"}:
+        limitations.append(
+            str(challenger_comparison.get("recommendation") or "Champion comparison needs review.")
+        )
+    return _unique_strings([item for item in limitations if item])
+
+
+def _model_card_next_review_actions(
+    limitations: list[str],
+    monitoring_policy: dict,
+    challenger_comparison: dict,
+) -> list[str]:
+    actions = ["确认模型卡、审批包、监控策略与交付产物路径一致。"]
+    if limitations:
+        actions.append("逐项复核模型限制与放行说明。")
+    if monitoring_policy:
+        actions.append("按监控策略配置上线后的漂移/稳定性复核。")
+    if challenger_comparison:
+        actions.append("结合 Champion 对比结论确认是否接受 Challenger。")
+    return actions
+
+
 def _write_approval_package(
     base_dir: Path,
     *,
@@ -1880,12 +2048,15 @@ def _write_approval_package(
     selection_policy_decision: dict,
     monitoring_policy: dict,
     challenger_comparison: dict,
+    model_card: dict,
 ) -> dict[str, Path | None]:
     uow = ArtifactUnitOfWork()
     json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
     markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.md")
     monitoring_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.json")
     monitoring_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.md")
+    model_card_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.model_card.json")
+    model_card_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.model_card.md")
     comparison_json_artifact = None
     comparison_markdown_artifact = None
     if challenger_comparison:
@@ -1913,6 +2084,7 @@ def _write_approval_package(
         "selection_policy_decision": selection_policy_decision,
         "monitoring_policy": _json_safe(monitoring_policy),
         "challenger_comparison": _json_safe(challenger_comparison),
+        "model_card": _json_safe(model_card),
         "delivery_actions": _json_safe(actions),
         "artifacts": {
             "native_model_path": str(artifact.model_path or ""),
@@ -1921,6 +2093,8 @@ def _write_approval_package(
             "challenger_task_id": str(challenger_task_id or ""),
             "challenger_package_path": str(challenger_package_path or ""),
             "challenger_package_markdown_path": str(challenger_package_markdown_path or ""),
+            "model_card_path": str(model_card_json_artifact.final_path),
+            "model_card_markdown_path": str(model_card_markdown_artifact.final_path),
             "challenger_comparison_path": (
                 str(comparison_json_artifact.final_path) if comparison_json_artifact else ""
             ),
@@ -1949,6 +2123,14 @@ def _write_approval_package(
             _monitoring_policy_markdown(safe_payload["monitoring_policy"]),
             encoding="utf-8",
         )
+        model_card_json_artifact.path.write_text(
+            json.dumps(safe_payload["model_card"], ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        model_card_markdown_artifact.path.write_text(
+            _model_card_markdown(safe_payload["model_card"]),
+            encoding="utf-8",
+        )
         if comparison_json_artifact and comparison_markdown_artifact:
             comparison_json_artifact.path.write_text(
                 json.dumps(
@@ -1968,6 +2150,8 @@ def _write_approval_package(
             "markdown_path": markdown_artifact.final_path,
             "monitoring_policy_path": monitoring_json_artifact.final_path,
             "monitoring_policy_markdown_path": monitoring_markdown_artifact.final_path,
+            "model_card_path": model_card_json_artifact.final_path,
+            "model_card_markdown_path": model_card_markdown_artifact.final_path,
             "challenger_comparison_path": (
                 comparison_json_artifact.final_path if comparison_json_artifact else None
             ),
@@ -2105,6 +2289,7 @@ def _approval_package_markdown(payload: dict) -> str:
         f"| 验证任务 | `{_md_cell(artifacts.get('validation_task_id') or '-')}` |",
         f"| Challenger/Backtest任务 | `{_md_cell(artifacts.get('challenger_task_id') or '-')}` |",
         f"| Challenger/Backtest包 | `{_md_cell(artifacts.get('challenger_package_markdown_path') or artifacts.get('challenger_package_path') or '-')}` |",
+        f"| 模型卡 | `{_md_cell(artifacts.get('model_card_markdown_path') or artifacts.get('model_card_path') or '-')}` |",
         f"| Champion对比 | `{_md_cell(artifacts.get('challenger_comparison_markdown_path') or artifacts.get('challenger_comparison_path') or '-')}` |",
     ])
     if actions:
@@ -2162,6 +2347,84 @@ def _monitoring_policy_markdown(policy: dict) -> str:
         lines.append("| - | - | - | - | - | - |")
     if policy.get("notes"):
         lines.extend(["", "## 备注", "", str(policy.get("notes"))])
+    return "\n".join(lines) + "\n"
+
+
+def _model_card_markdown(card: dict) -> str:
+    key_metrics = [
+        item for item in (card.get("key_metrics") or [])
+        if isinstance(item, dict)
+    ]
+    governance = card.get("governance") if isinstance(card.get("governance"), dict) else {}
+    delivery = card.get("delivery") if isinstance(card.get("delivery"), dict) else {}
+    limitations = [str(item) for item in (card.get("limitations") or []) if str(item)]
+    review_actions = [str(item) for item in (card.get("next_review_actions") or []) if str(item)]
+    feature_preview = [str(item) for item in (card.get("feature_preview") or []) if str(item)]
+    lines = [
+        "# 模型卡",
+        "",
+        "## 基本信息",
+        "",
+        f"- 模型卡版本: `{_md_inline(card.get('card_version'))}`",
+        f"- 实验ID: `{_md_inline(card.get('experiment_id'))}`",
+        f"- 产物ID: `{_md_inline(card.get('artifact_id'))}`",
+        f"- 算法: `{_md_inline(card.get('algorithm'))}`",
+        f"- 目标类型: `{_md_inline(card.get('target_type'))}`",
+        f"- 目标列: `{_md_inline(card.get('target_col'))}`",
+        f"- 样本集: `{_md_inline(card.get('sample_dataset_id') or card.get('dataset_id'))}`",
+        f"- 特征数: {_md_inline(card.get('feature_count'))}",
+        f"- 样本权重: `{_md_inline(card.get('sample_weight_col') or '未使用')}`",
+        "",
+        "## 关键指标",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | ---: |",
+    ]
+    if key_metrics:
+        for item in key_metrics:
+            lines.append(
+                f"| {_md_cell(item.get('metric') or '-')} | "
+                f"{_md_cell(_metric_display(item.get('value')))} |"
+            )
+    else:
+        lines.append("| - | - |")
+    lines.extend([
+        "",
+        "## 治理状态",
+        "",
+        f"- 选择策略: `{_md_inline(governance.get('selection_policy_status') or 'not_requested')}`",
+        f"- 监控策略: `{_md_inline(governance.get('monitoring_status') or 'not_configured')}`",
+        f"- Champion对比: `{_md_inline(governance.get('champion_comparison_status') or 'not_configured')}`",
+        f"- 监控建议: {_md_inline(governance.get('monitoring_recommendation') or '-')}",
+        f"- 对比建议: {_md_inline(governance.get('champion_comparison_recommendation') or '-')}",
+        "",
+        "## 交付状态",
+        "",
+        "| 产物/动作 | 状态或路径 |",
+        "| --- | --- |",
+        f"| 原生模型 | `{_md_cell(delivery.get('native_model_path') or '-')}` |",
+        f"| PMML | `{_md_cell(delivery.get('pmml_path') or delivery.get('export_pmml_status') or '-')}` |",
+        f"| 验证移交 | `{_md_cell(delivery.get('validation_task_id') or delivery.get('validation_handoff_status') or '-')}` |",
+        f"| Challenger/Backtest | `{_md_cell(delivery.get('challenger_task_id') or delivery.get('challenger_backtest_status') or '-')}` |",
+    ])
+    lines.extend(["", "## 限制与复核", ""])
+    if limitations:
+        for item in limitations:
+            lines.append(f"- {_md_inline(item)}")
+    else:
+        lines.append("- 暂无已记录限制")
+    lines.extend(["", "## 后续动作", ""])
+    if review_actions:
+        for item in review_actions:
+            lines.append(f"- {_md_inline(item)}")
+    else:
+        lines.append("- -")
+    lines.extend(["", "## 特征预览", ""])
+    if feature_preview:
+        for feature in feature_preview:
+            lines.append(f"- `{_md_inline(feature)}`")
+    else:
+        lines.append("- -")
     return "\n".join(lines) + "\n"
 
 

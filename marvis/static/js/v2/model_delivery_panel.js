@@ -251,6 +251,7 @@ function artifactList(delivery) {
   const artifacts = [
     ["原生模型", delivery.native_model_path],
     ["模型报告", delivery.report?.report_path],
+    ["模型卡", delivery.model_card_markdown_path || delivery.model_card_path],
     ["审批包", delivery.approval_package_markdown_path || delivery.approval_package_path],
     ...(delivery.approval_package_markdown_path && delivery.approval_package_path
       ? [["审批包JSON", delivery.approval_package_path]]

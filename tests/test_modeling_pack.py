@@ -154,6 +154,9 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "monitoring_policy_path" in post_training_tool.output_schema["required"]
     assert "monitoring_policy_markdown_path" in post_training_tool.output_schema["required"]
     assert "monitoring_policy" in post_training_tool.output_schema["required"]
+    assert "model_card_path" in post_training_tool.output_schema["required"]
+    assert "model_card_markdown_path" in post_training_tool.output_schema["required"]
+    assert "model_card" in post_training_tool.output_schema["required"]
     assert "challenger_comparison_path" in post_training_tool.output_schema["required"]
     assert "challenger_comparison_markdown_path" in post_training_tool.output_schema["required"]
     assert "challenger_comparison" in post_training_tool.output_schema["required"]
@@ -1003,6 +1006,9 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert post_training.output["monitoring_policy"]["owner"] == "model_governance"
     assert post_training.output["monitoring_policy"]["schema_version"] == 1
     assert post_training.output["monitoring_policy"]["policy_version"] == "model_monitoring_v1"
+    assert post_training.output["model_card"]["card_version"] == "model_card_v1"
+    assert post_training.output["model_card"]["artifact_id"] == artifacts["catboost"].id
+    assert post_training.output["model_card"]["delivery"]["export_pmml_status"] == "skipped"
     assert post_training.output["challenger_comparison"]["status"] in {"pass", "warn"}
     assert post_training.output["challenger_comparison"]["champion"]["label"] == "previous_selected_experiment"
     assert post_training.output["challenger_comparison"]["champion"]["experiment_id"] == lgb_experiment_id
@@ -1021,6 +1027,14 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     monitoring_payload = json.loads(monitoring_policy.read_text(encoding="utf-8"))
     assert monitoring_payload["owner"] == "model_governance"
     assert "# 模型监控策略" in monitoring_markdown.read_text(encoding="utf-8")
+    model_card_path = Path(post_training.output["model_card_path"])
+    model_card_markdown = Path(post_training.output["model_card_markdown_path"])
+    assert model_card_path.exists()
+    assert model_card_markdown.exists()
+    model_card_payload = json.loads(model_card_path.read_text(encoding="utf-8"))
+    assert model_card_payload["card_version"] == "model_card_v1"
+    assert model_card_payload["governance"]["monitoring_status"] == post_training.output["monitoring_policy"]["status"]
+    assert "# 模型卡" in model_card_markdown.read_text(encoding="utf-8")
     comparison_path = Path(post_training.output["challenger_comparison_path"])
     comparison_markdown = Path(post_training.output["challenger_comparison_markdown_path"])
     assert comparison_path.exists()
@@ -1038,6 +1052,8 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert approval_payload["selection_policy_decision"]["status"] == "overridden"
     assert approval_payload["selection_policy_decision"]["override_reason"].startswith("业务方本轮只验收")
     assert approval_payload["monitoring_policy"]["owner"] == "model_governance"
+    assert approval_payload["model_card"]["card_version"] == "model_card_v1"
+    assert approval_payload["artifacts"]["model_card_markdown_path"].endswith(".model_card.md")
     assert approval_payload["challenger_comparison"]["champion"]["experiment_id"] == lgb_experiment_id
     assert {item["status"] for item in approval_payload["delivery_actions"]} == {"skipped"}
     assert approval_payload["artifacts"]["challenger_task_id"] == ""
@@ -1052,6 +1068,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "业务方本轮只验收" in markdown_text
     assert "require_pmml" in markdown_text
     assert "Challenger/Backtest任务" in markdown_text
+    assert "模型卡" in markdown_text
     assert "## 监控策略" in markdown_text
     assert "## Champion对比" in markdown_text
     assert "## 入模特征" in markdown_text

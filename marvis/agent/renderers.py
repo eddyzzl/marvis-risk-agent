@@ -742,6 +742,13 @@ def _render_post_training_action(o: dict):
             o.get("approval_package_markdown_path") or o.get("approval_package_path"),
             "模型审批与交付证据包",
         ])
+    if o.get("model_card_path"):
+        rows.append([
+            "模型卡",
+            "succeeded",
+            o.get("model_card_markdown_path") or o.get("model_card_path"),
+            "最终模型卡",
+        ])
     if o.get("monitoring_policy_path"):
         monitoring = o.get("monitoring_policy") if isinstance(o.get("monitoring_policy"), dict) else {}
         rows.append([

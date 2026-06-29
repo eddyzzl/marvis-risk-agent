@@ -207,6 +207,13 @@ def build_model_delivery_payload(
             if isinstance(o.get("monitoring_policy"), dict)
             else {}
         ),
+        "model_card_path": str(o.get("model_card_path") or ""),
+        "model_card_markdown_path": str(o.get("model_card_markdown_path") or ""),
+        "model_card": (
+            dict(o.get("model_card"))
+            if isinstance(o.get("model_card"), dict)
+            else {}
+        ),
         "challenger_comparison_path": str(o.get("challenger_comparison_path") or ""),
         "challenger_comparison_markdown_path": str(
             o.get("challenger_comparison_markdown_path") or ""
@@ -753,6 +760,9 @@ def _delivery_readiness(
     monitoring_policy_path = str(output.get("monitoring_policy_path") or "")
     monitoring_policy_markdown_path = str(output.get("monitoring_policy_markdown_path") or "")
     monitoring_policy = output.get("monitoring_policy") if isinstance(output.get("monitoring_policy"), dict) else {}
+    model_card_path = str(output.get("model_card_path") or "")
+    model_card_markdown_path = str(output.get("model_card_markdown_path") or "")
+    model_card = output.get("model_card") if isinstance(output.get("model_card"), dict) else {}
     challenger_comparison_path = str(output.get("challenger_comparison_path") or "")
     challenger_comparison_markdown_path = str(
         output.get("challenger_comparison_markdown_path") or ""
@@ -830,8 +840,24 @@ def _delivery_readiness(
             "artifact": approval_package_markdown_path or approval_package_path,
             "reason": "模型审批与交付证据已生成",
         })
+    if model_card_path:
+        insert_at = next(
+            (idx + 1 for idx, item in enumerate(readiness) if item.get("id") == "approval_package"),
+            len(readiness),
+        )
+        readiness.insert(insert_at, {
+            "id": "model_card",
+            "label": "模型卡",
+            "status": str(model_card.get("status") or "ready"),
+            "artifact": model_card_markdown_path or model_card_path,
+            "reason": "最终模型卡已生成",
+        })
     if monitoring_policy_path:
-        insert_at = 3 if report is not None and approval_package_path else len(readiness)
+        insert_after = "model_card" if model_card_path else "approval_package"
+        insert_at = next(
+            (idx + 1 for idx, item in enumerate(readiness) if item.get("id") == insert_after),
+            len(readiness),
+        )
         readiness.insert(insert_at, {
             "id": "monitoring_policy",
             "label": "监控策略",
@@ -840,7 +866,17 @@ def _delivery_readiness(
             "reason": str(monitoring_policy.get("recommendation") or "监控阈值策略已生成"),
         })
     if challenger_comparison_path:
-        insert_at = 4 if report is not None and approval_package_path and monitoring_policy_path else len(readiness)
+        insert_after = (
+            "monitoring_policy"
+            if monitoring_policy_path
+            else "model_card"
+            if model_card_path
+            else "approval_package"
+        )
+        insert_at = next(
+            (idx + 1 for idx, item in enumerate(readiness) if item.get("id") == insert_after),
+            len(readiness),
+        )
         readiness.insert(insert_at, {
             "id": "challenger_comparison",
             "label": "Champion对比",

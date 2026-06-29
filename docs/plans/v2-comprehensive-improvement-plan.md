@@ -107,6 +107,10 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the broader browser smoke update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after adding executable model-selection policy gates.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions -q`: `4 passed` after adding JSON/Markdown model-card artifacts to G5 delivery.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after adding a real app-shell modeling-task smoke that loads `index.html`, task list, plan rail, and model-delivery message metadata in Chromium.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after the model-card and real-task smoke update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the model-card and real-task smoke update.
 
 ## Executive Summary
 
@@ -116,7 +120,7 @@ It is not ready to call "complete" yet. The main remaining gap is not one isolat
 
 1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels; richer schema-to-form controls remain.
 2. Broaden AUTO coverage and safety tests around the new structured `confirm|adjust|replan|clarify|halt` path.
-3. Finish modeling productization with real-task browser/manual smoke and final model-card/export polish. JSON and Markdown approval packages now carry selected-model, selection policy, monitoring policy, prior Champion comparison, metric, feature, and delivery evidence, and G5 can create a PMML-backed challenger/backtest validation task package.
+3. Finish the remaining modeling productization with manual business smoke and deeper scorecard/monotonicity policy fixtures. JSON and Markdown model cards, approval packages, monitoring policies, prior Champion comparison, PMML/native delivery metadata, and PMML-backed challenger/backtest packages now exist and have browser smoke coverage.
 4. Add a deeper DB+file `UnitOfWork` over the staged artifact stores and recovered `StepRunLedger`.
 5. Continue deeper `api.py`, `db.py`, and `app.js` decomposition after the first stable splits.
 6. Keep CI and local `scripts/check` green while making the remaining large refactors.
@@ -157,7 +161,7 @@ Items confirmed still not complete and therefore still part of the plan:
 - OS-level sandboxing is not complete. Plugin/draft tools and ordinary notebook execution have subprocess/resource-limit isolation; live keep-alive notebook appended-cell execution is now disabled by default and must be explicitly enabled by the V1 validation pipeline, but that live path still needs either worker RPC redesign or removal from safety-critical flows.
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths. A first reusable `ArtifactUnitOfWork` now binds promoted files/directories to a later DB/audit callback and join result registration uses it; a full SQLite-connection-owning cross-resource `UnitOfWork` is still not complete across all tool execution.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
-- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, and light/dark startup paths. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons. `post_training_action` writes JSON evidence and human-readable Markdown approval packages, versioned monitoring-policy JSON/Markdown artifacts, prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. The remaining gap is real-task browser/manual smoke plus final model-card/export polish.
+- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, light/dark startup paths, and a real app-shell modeling task with task list, plan rail, and delivery metadata. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons. `post_training_action` writes JSON evidence, human-readable Markdown approval packages, JSON/Markdown model cards, versioned monitoring-policy JSON/Markdown artifacts, prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. The remaining gap is manual business smoke plus deeper policy fixtures and export edge-case coverage.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff risk flags and wide downstream resets. More domain fixtures are still useful for strategy, vintage, and future extracted modeling setup panels.
 
@@ -168,7 +172,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | # | Item | Status | Evidence / Gap | Next Action |
 |---|---|---|---|---|
 | 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. | Add more fixtures for destructive domain gates and frontend stale-control paths. |
-| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons, target/algorithm family guards, and risk guidance for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage, stability/calibration/feature-count/delivery signals, scorecard/monotonicity/approval policy signals, executable policy-decision status, violations, override reasons, and prior Champion comparison status. `select_experiment.selection_policy` now makes those final-model policy signals executable and marks the selected experiment for later Champion resolution: default delivery templates require PMML and validation handoff, hard policy can require scorecard/monotonicity/feature-count/PSI limits, and override requires a reason. `post_training_action` now writes JSON evidence and human-readable Markdown approval packages, versioned monitoring-policy JSON/Markdown artifacts with target-type-aware threshold checks, optional prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, exposes the Markdown artifacts in readiness/artifact lists while preserving JSON for machines, and can create a PMML-backed challenger/backtest validation task package with copied sample/model/PMML/notebook/dictionary material plus JSON/Markdown plan evidence. Lightweight DOM smoke plus optional Playwright smoke cover setup/delivery, welcome/create, plan rail, and screen table surfaces. | Add end-to-end real-task smoke plus final model-card export polish before calling the workflow complete. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons, target/algorithm family guards, and risk guidance for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage, stability/calibration/feature-count/delivery signals, scorecard/monotonicity/approval policy signals, executable policy-decision status, violations, override reasons, and prior Champion comparison status. `select_experiment.selection_policy` now makes those final-model policy signals executable and marks the selected experiment for later Champion resolution: default delivery templates require PMML and validation handoff, hard policy can require scorecard/monotonicity/feature-count/PSI limits, and override requires a reason. `post_training_action` now writes JSON evidence, human-readable Markdown approval packages, JSON/Markdown model cards, versioned monitoring-policy JSON/Markdown artifacts with target-type-aware threshold checks, optional prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, exposes the Markdown artifacts in readiness/artifact lists while preserving JSON for machines, and can create a PMML-backed challenger/backtest validation task package with copied sample/model/PMML/notebook/dictionary material plus JSON/Markdown plan evidence. Lightweight DOM smoke plus optional Playwright smoke cover setup/delivery, welcome/create, plan rail, screen table, and a real app-shell modeling task with delivery metadata. | Run manual business smoke and expand policy/export edge-case fixtures before calling the workflow complete. |
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
@@ -287,10 +291,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Current behavior: `choose_modeling_spec` normalizes target type, recipe family, eligible/disabled algorithms, metric policy, sample-weight policy, tuning budget, fixed params, and exposes a rendered gate table before feature screening.
    - Current update: sample-weight candidates now render inside a fuller setup panel; changing the selected candidate posts structured `adjust_params.sample_weight_col` and reruns the modeling spec plus downstream screening. The panel also shows target type, split/OOT diagnostics, algorithm family, PMML support, tuning budget, metric policy, and warnings. The create dialog also distinguishes "no weight" from an explicit column.
    - Current update: the same panel now lets users change target type, algorithm set, and tuning trials through structured controls. Target/algorithm/trial changes require an explicit reason, post `adjust_params`, and rerun `choose_modeling_spec` plus downstream screening under the current gate token. Target/algorithm family mismatches are blocked in the UI while still exposing regression/multiclass recipes when switching target type.
-   - Current update: model comparison, final selection, and post-training delivery now share a structured delivery-readiness panel for candidate metrics, selected experiment, PMML/native/handoff support, action status, artifacts, and unsupported/skip reasons.
-   - Remaining problem: the new setup controls have lightweight DOM smoke plus optional Playwright smoke for setup/delivery, welcome/create, plan rail, and screen table surfaces; they still need real-task browser smoke and deeper model-policy enforcement against actual scorecard constraints.
+   - Current update: model comparison, final selection, and post-training delivery now share a structured delivery-readiness panel for candidate metrics, selected experiment, PMML/native/handoff support, model-card/approval/monitoring artifacts, action status, artifacts, and unsupported/skip reasons.
+   - Current update: the new setup/delivery surfaces have lightweight DOM smoke plus optional Playwright smoke for setup/delivery, welcome/create, plan rail, screen table, and a real app-shell modeling task that loads task list, plan, and delivery metadata.
+   - Remaining problem: deeper model-policy enforcement against actual scorecard constraints and manual business smoke still need coverage.
    - Remaining fix:
-     - Add end-to-end Playwright smoke against a real modeling task once a stable fixture workspace is available.
      - Expand the current scorecard/monotonicity/approval signals into enforceable scorecard policy gates.
      - Keep the typed modeling spec as the single downstream contract.
 
@@ -308,6 +312,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: surface stability, calibration, feature count, and delivery readiness in comparison/selection panels.
      - Done: enforce PMML/handoff, scorecard preference, monotonicity, feature-count, OOT PSI, and override-reason requirements in `selection_policy`.
      - Done: add versioned monitoring-threshold policy artifacts with target-type-aware checks and configurable thresholds.
+     - Done: add real app-shell Playwright smoke for a modeling task with plan rail and delivery metadata.
      - Remaining: run real-task manual smoke.
 
 4. G5 post-training closure is not a workflow.
@@ -319,11 +324,12 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
        - generate model report.
        - hand off to validation.
        - generate JSON and Markdown approval packages.
+       - generate JSON and Markdown model cards.
        - create PMML-backed challenger/backtest validation task packages with JSON and Markdown plans.
        - generate versioned monitoring-policy JSON and Markdown artifacts.
      - Remaining:
-       - generate richer model-card export polish.
-       - run real-task browser/manual smoke.
+       - run real-task manual smoke.
+       - expand export edge-case coverage for unsupported or calibrated-score PMML paths.
      - Show unsupported PMML states and calibrated-score limitations clearly.
 
 5. `TrainingDataset` adapter is missing.
@@ -398,7 +404,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: `ModelDeliveryPanel` with selected experiment, candidate metrics, PMML/native/handoff readiness, action state, artifact refs, and unsupported/skip reasons.
      - Screen table as a real modeling selector: threshold sliders plus numeric inputs, `top_k`, sort/filter chips, selected-count summary, leakage override reason, reset-to-proposal.
      - Done: extend model comparison with stability, calibration, feature count, and delivery-readiness business signals.
-     - Remaining: make scorecard/monotonicity policy enforceable and add end-to-end real-task browser smoke.
+     - Remaining: deepen scorecard/monotonicity policy enforcement and manual smoke coverage.
 
 3. Visual tokens are partial, not a system.
    - Current state: semantic task tones, surface/border/status tokens, and welcome/task icon palettes are centralized. KPI/ROC/modeling report areas still contain local palette constants.
@@ -418,7 +424,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Tests:
      - `node --check` for extracted modules.
      - Static tests for required controls and stale tokens.
-     - Optional Playwright smoke now exists for setup/delivery panels, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, and light/dark startup paths; still add full real-task browser smoke.
+     - Optional Playwright smoke now exists for setup/delivery panels, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, light/dark startup paths, and a real app-shell modeling task with delivery metadata.
 
 ### P2: Performance And Data Scale
 
@@ -505,7 +511,7 @@ Tasks:
 - Done: add G5 `post_training_action` gate.
 - Done: add G5 challenger/backtest task package creation for PMML-capable final models.
 - Done: add G5 versioned monitoring-policy artifact generation and delivery readiness.
-- Mostly done for modeling setup gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, detected-candidate gate adjust/rerun, target/algorithm/tuning/split/PMML display, editable setup controls with override reasons, AUTO context, extracted setup renderer/controller, setup override guidance, lightweight DOM smoke, and optional Playwright smoke for setup/delivery plus workspace surfaces; real-task browser smoke and model-policy dimensions still remain.
+- Mostly done for modeling setup gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, detected-candidate gate adjust/rerun, target/algorithm/tuning/split/PMML display, editable setup controls with override reasons, AUTO context, extracted setup renderer/controller, setup override guidance, lightweight DOM smoke, and optional Playwright smoke for setup/delivery plus workspace surfaces; deeper model-policy dimensions and manual business smoke still remain.
 - Done for `train_models`: add `TrainingDataset` adapter and read-count tests.
 - Done: remove hard-coded `oot_ks >= 0.3331` as a universal success gate.
 - Done for chat renderer: improve report renderer with section status and missing inputs; broader report content remains.
@@ -569,7 +575,7 @@ Tasks:
 Acceptance:
 - `app.js` shrinks materially and no longer owns all task responsibilities.
 - Frontend tests cover extracted modules and modeling gate controls.
-- Playwright smoke verifies setup/delivery, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, and light/dark startup paths; still extend it to end-to-end real task execution.
+- Playwright smoke verifies setup/delivery, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, light/dark startup paths, and a real app-shell modeling task with task list, plan, and delivery metadata.
 
 ### Phase G: Business Deliverables And Agent Quality
 
@@ -634,7 +640,7 @@ The highest risks before a production-style merge are:
 
 - CI gate exists, but full CI/full pytest still must pass from the final committed tree.
 - AUTO can apply structured decisions, but broader safe-remediation policy fixtures are still needed.
-- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards and risk guidance, and delivery readiness has a dedicated UI with core business signals, scorecard/monotonicity/approval policy signals, validation handoff, approval packages, monitoring-policy artifacts, prior Champion comparison artifacts, and challenger/backtest task packages; end-to-end real-task browser smoke still remains.
+- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards and risk guidance, and delivery readiness has a dedicated UI with core business signals, scorecard/monotonicity/approval policy signals, validation handoff, model cards, approval packages, monitoring-policy artifacts, prior Champion comparison artifacts, and challenger/backtest task packages; manual business smoke and deeper policy/export edge-case fixtures still remain.
 - Runtime crash windows are recoverable for staged artifacts and running step attempts, but the DB+filesystem boundary is not yet a true atomic unit of work.
 - `api.py`, `db.py`, and `app.js` are still large, but the first stable splits have landed (`turn_handlers`, `db_schema`, `theme.js`); remaining risk is deeper router/repository/workspace-controller extraction.
 - OS-level sandboxing for notebook/plugin execution is not complete.

@@ -301,6 +301,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                 {{ id: "model_report", label: "模型报告", status: "partial", artifact: "/tmp/model_report.xlsx", reason: "报告章节 1/2 可生成" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
                 {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
+                {{ id: "model_card", label: "模型卡", status: "ready", artifact: "/tmp/art-lgb.model_card.md", reason: "最终模型卡已生成" }},
                 {{ id: "monitoring_policy", label: "监控策略", status: "pass", artifact: "/tmp/model.monitoring_policy.md", reason: "可进入常规监控" }},
                 {{ id: "challenger_comparison", label: "Champion对比", status: "warn", artifact: "/tmp/art-lgb.champion_comparison.md", reason: "需业务复核差异" }},
                 {{ id: "challenger_backtest", label: "Challenger/Backtest", status: "succeeded", artifact: "task-challenger" }},
@@ -344,6 +345,9 @@ def test_model_delivery_panel_renders_selection_and_actions():
               challenger_package_markdown_path: "/tmp/challenger_backtest_plan.md",
               approval_package_path: "/tmp/art-lgb.approval_package.json",
               approval_package_markdown_path: "/tmp/art-lgb.approval_package.md",
+              model_card_path: "/tmp/art-lgb.model_card.json",
+              model_card_markdown_path: "/tmp/art-lgb.model_card.md",
+              model_card: {{ card_version: "model_card_v1" }},
               monitoring_policy_path: "/tmp/model.monitoring_policy.json",
               monitoring_policy_markdown_path: "/tmp/model.monitoring_policy.md",
               monitoring_policy: {{ status: "pass", recommendation: "可进入常规监控" }},
@@ -393,6 +397,8 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("验证移交"), true);
         assert.equal(html.includes("Challenger/Backtest"), true);
         assert.equal(html.includes("创建Challenger/Backtest"), true);
+        assert.equal(html.includes("模型卡"), true);
+        assert.equal(html.includes("art-lgb.model_card.md"), true);
         assert.equal(html.includes("监控策略"), true);
         assert.equal(html.includes("model.monitoring_policy.md"), true);
         assert.equal(html.includes("可进入常规监控"), true);
