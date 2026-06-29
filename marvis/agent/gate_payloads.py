@@ -207,6 +207,15 @@ def build_model_delivery_payload(
             if isinstance(o.get("monitoring_policy"), dict)
             else {}
         ),
+        "challenger_comparison_path": str(o.get("challenger_comparison_path") or ""),
+        "challenger_comparison_markdown_path": str(
+            o.get("challenger_comparison_markdown_path") or ""
+        ),
+        "challenger_comparison": (
+            dict(o.get("challenger_comparison"))
+            if isinstance(o.get("challenger_comparison"), dict)
+            else {}
+        ),
         "report": report,
         "readiness": _delivery_readiness(
             o,
@@ -744,6 +753,15 @@ def _delivery_readiness(
     monitoring_policy_path = str(output.get("monitoring_policy_path") or "")
     monitoring_policy_markdown_path = str(output.get("monitoring_policy_markdown_path") or "")
     monitoring_policy = output.get("monitoring_policy") if isinstance(output.get("monitoring_policy"), dict) else {}
+    challenger_comparison_path = str(output.get("challenger_comparison_path") or "")
+    challenger_comparison_markdown_path = str(
+        output.get("challenger_comparison_markdown_path") or ""
+    )
+    challenger_comparison = (
+        output.get("challenger_comparison")
+        if isinstance(output.get("challenger_comparison"), dict)
+        else {}
+    )
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
     challenger_task_id = str(output.get("challenger_task_id") or "")
@@ -820,6 +838,15 @@ def _delivery_readiness(
             "status": str(monitoring_policy.get("status") or "ready"),
             "artifact": monitoring_policy_markdown_path or monitoring_policy_path,
             "reason": str(monitoring_policy.get("recommendation") or "监控阈值策略已生成"),
+        })
+    if challenger_comparison_path:
+        insert_at = 4 if report is not None and approval_package_path and monitoring_policy_path else len(readiness)
+        readiness.insert(insert_at, {
+            "id": "challenger_comparison",
+            "label": "Champion对比",
+            "status": str(challenger_comparison.get("status") or "ready"),
+            "artifact": challenger_comparison_markdown_path or challenger_comparison_path,
+            "reason": str(challenger_comparison.get("recommendation") or "Champion/Challenger 对比已生成"),
         })
     if isinstance(policy_signals, dict) and policy_signals:
         decision_readiness = _policy_decision_readiness(policy_decision or {})

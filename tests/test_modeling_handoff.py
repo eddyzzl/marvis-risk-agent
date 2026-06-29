@@ -214,6 +214,12 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
         settings=settings,
         selection_policy_decision={"status": "ready"},
         monitoring_policy={"policy_version": "model_monitoring_v1", "status": "pass"},
+        challenger_comparison={
+            "status": "warn",
+            "recommendation": "需复核 Champion 差异",
+            "champion": {"label": "current_champion"},
+            "summary": {"comparable_metric_count": 2, "metric_count": 2, "declined_count": 1},
+        },
     )
 
     task = TaskRepository(settings.db_path).get_task(result["task_id"])
@@ -238,11 +244,13 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
     assert payload["experiment_id"] == artifact.experiment_id
     assert payload["selection_policy_decision"]["status"] == "ready"
     assert payload["monitoring_policy"]["status"] == "pass"
+    assert payload["challenger_comparison"]["status"] == "warn"
     assert "compare selected model" in payload["recommended_checks"][0]
     markdown = Path(result["markdown_path"]).read_text(encoding="utf-8")
     assert "# Challenger / Backtest 任务包" in markdown
     assert "建议检查" in markdown
     assert "监控策略" in markdown
+    assert "Champion对比" in markdown
     precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
     audit = db_module.PluginRepository(settings.db_path).list_audit(
         kind="modeling.challenger_backtest.create",

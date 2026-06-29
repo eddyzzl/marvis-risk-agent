@@ -143,6 +143,7 @@ def create_challenger_backtest_task(
     settings,
     selection_policy_decision: dict | None = None,
     monitoring_policy: dict | None = None,
+    challenger_comparison: dict | None = None,
 ) -> dict[str, str]:
     if not artifact.experiment_id:
         raise ModelingError("artifact experiment_id is required for challenger/backtest task")
@@ -193,6 +194,7 @@ def create_challenger_backtest_task(
         model_material_name=model_material_name,
         selection_policy_decision=selection_policy_decision or {},
         monitoring_policy=monitoring_policy or {},
+        challenger_comparison=challenger_comparison or {},
     )
     (staged_materials.path / CHALLENGER_BACKTEST_PLAN_JSON).write_text(
         json.dumps(plan_payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
@@ -396,6 +398,7 @@ def _challenger_backtest_payload(
     model_material_name: str,
     selection_policy_decision: dict,
     monitoring_policy: dict,
+    challenger_comparison: dict,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -417,6 +420,7 @@ def _challenger_backtest_payload(
         "metrics": asdict(experiment.metrics) if experiment.metrics else {},
         "selection_policy_decision": selection_policy_decision,
         "monitoring_policy": monitoring_policy,
+        "challenger_comparison": challenger_comparison,
         "materials": {
             "sample_path": sample_material_name,
             "native_model_path": model_material_name,
@@ -473,6 +477,24 @@ def _challenger_backtest_markdown(payload: dict[str, Any]) -> str:
             f"- 策略版本: `{_md_value(monitoring.get('policy_version'))}`",
             f"- 状态: `{_md_value(monitoring.get('status'))}`",
             f"- 建议: {_md_value(monitoring.get('recommendation'))}",
+        ])
+    comparison = (
+        payload.get("challenger_comparison")
+        if isinstance(payload.get("challenger_comparison"), dict)
+        else {}
+    )
+    if comparison:
+        champion = comparison.get("champion") if isinstance(comparison.get("champion"), dict) else {}
+        summary = comparison.get("summary") if isinstance(comparison.get("summary"), dict) else {}
+        lines.extend([
+            "",
+            "## Champion对比",
+            "",
+            f"- 状态: `{_md_value(comparison.get('status'))}`",
+            f"- 建议: {_md_value(comparison.get('recommendation'))}",
+            f"- Champion: `{_md_value(champion.get('label') or 'prior_champion')}`",
+            f"- 可比指标: {_md_value(summary.get('comparable_metric_count') or 0)}/{_md_value(summary.get('metric_count') or 0)}",
+            f"- 弱于Champion: {_md_value(summary.get('declined_count') or 0)}",
         ])
     lines.extend(["", "## 物料", ""])
     materials = payload.get("materials") if isinstance(payload.get("materials"), dict) else {}

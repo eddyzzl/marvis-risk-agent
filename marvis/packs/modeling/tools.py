@@ -63,6 +63,7 @@ MODEL_REPORT_SCORE_COL = "__model_score__"
 SCORECARD_POINTS_COL = "__scorecard_points__"
 PMML_SUPPORTED_ALGORITHMS = frozenset({"lr", "lgb", "xgb", "scorecard"})
 CALIBRATION_PARAMS_KEY = "calibration"
+CHALLENGER_COMPARISON_VERSION = "champion_challenger_v1"
 SUPPORTED_MODELING_RECIPES = frozenset({
     "lgb",
     "xgb",
@@ -827,6 +828,7 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         artifact,
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
     )
+    runtime.experiments.set_status(selected_id, "selected")
     return {
         "selected_experiment_id": selected_id,
         "artifact_id": artifact_id,
@@ -1354,6 +1356,12 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         source=inputs.get("monitoring_policy"),
         selection_policy_decision=selection_policy_decision,
     )
+    challenger_comparison = _challenger_comparison_payload(
+        runtime=runtime,
+        experiment=experiment,
+        artifact=artifact,
+        source=inputs.get("champion_reference"),
+    )
     requested_actions = [
         str(item)
         for item in (
@@ -1408,6 +1416,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 settings=runtime.settings,
                 selection_policy_decision=selection_policy_decision,
                 monitoring_policy=monitoring_policy,
+                challenger_comparison=challenger_comparison,
             )
             challenger_task_id = challenger["task_id"]
             challenger_package_path = challenger["package_path"]
@@ -1440,6 +1449,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         challenger_package_markdown_path=challenger_package_markdown_path,
         selection_policy_decision=selection_policy_decision,
         monitoring_policy=monitoring_policy,
+        challenger_comparison=challenger_comparison,
     )
     return {
         "experiment_id": experiment.id,
@@ -1455,6 +1465,11 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         "monitoring_policy_path": str(approval_package["monitoring_policy_path"]),
         "monitoring_policy_markdown_path": str(approval_package["monitoring_policy_markdown_path"]),
         "monitoring_policy": monitoring_policy,
+        "challenger_comparison_path": str(approval_package.get("challenger_comparison_path") or ""),
+        "challenger_comparison_markdown_path": str(
+            approval_package.get("challenger_comparison_markdown_path") or ""
+        ),
+        "challenger_comparison": challenger_comparison,
         "capabilities": capabilities,
         "actions": actions,
     }
@@ -1606,6 +1621,249 @@ def _monitoring_recommendation(status: str) -> str:
     return "需补充监控阈值或业务说明"
 
 
+def _challenger_comparison_payload(
+    *,
+    runtime: _Runtime,
+    experiment,
+    artifact: ModelArtifact,
+    source,
+) -> dict:
+    champion = _resolve_champion_reference(runtime, source)
+    if not champion and source is None:
+        champion = _previous_selected_champion_reference(
+            runtime=runtime,
+            experiment=experiment,
+            artifact=artifact,
+        )
+    if not champion:
+        return {}
+    challenger_metrics = _json_safe(experiment.metrics) or {}
+    rows = _challenger_metric_comparisons(
+        champion.get("metrics") if isinstance(champion.get("metrics"), dict) else {},
+        challenger_metrics if isinstance(challenger_metrics, dict) else {},
+    )
+    summary = _challenger_comparison_summary(rows)
+    status = _challenger_comparison_status(summary)
+    return _json_safe({
+        "schema_version": 1,
+        "comparison_version": CHALLENGER_COMPARISON_VERSION,
+        "created_at": datetime.now(UTC).isoformat(),
+        "status": status,
+        "recommendation": _challenger_comparison_recommendation(status, summary),
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "target_type": getattr(experiment.config, "target_type", "binary"),
+        "dataset_id": getattr(experiment.config, "dataset_id", ""),
+        "challenger": {
+            "label": "challenger",
+            "experiment_id": experiment.id,
+            "artifact_id": artifact.id,
+            "recipe": experiment.recipe_id,
+            "algorithm": artifact.algorithm,
+            "metrics": challenger_metrics,
+        },
+        "champion": champion,
+        "metric_comparisons": rows,
+        "summary": summary,
+    })
+
+
+def _resolve_champion_reference(runtime: _Runtime, source) -> dict:
+    if not isinstance(source, dict) or source.get("enabled") is False:
+        return {}
+    experiment_id = str(source.get("experiment_id") or "").strip()
+    explicit_metrics = source.get("metrics") if isinstance(source.get("metrics"), dict) else {}
+    label = str(source.get("label") or "prior_champion").strip() or "prior_champion"
+    champion_experiment = None
+    champion_artifact = None
+    if experiment_id:
+        try:
+            champion_experiment = runtime.experiments.get(experiment_id)
+        except KeyError as exc:
+            raise ModelingError(f"champion_reference experiment_id not found: {experiment_id}") from exc
+        if champion_experiment.artifact_id:
+            champion_artifact = _artifact(runtime, champion_experiment.artifact_id)
+    if not experiment_id and not explicit_metrics and not str(source.get("artifact_id") or "").strip():
+        return {}
+    metrics = explicit_metrics or (
+        _json_safe(champion_experiment.metrics) if champion_experiment is not None else {}
+    )
+    return _json_safe({
+        "label": label,
+        "experiment_id": experiment_id,
+        "artifact_id": str(
+            source.get("artifact_id")
+            or getattr(champion_experiment, "artifact_id", "")
+            or ""
+        ),
+        "recipe": str(source.get("recipe") or getattr(champion_experiment, "recipe_id", "") or ""),
+        "algorithm": str(source.get("algorithm") or getattr(champion_artifact, "algorithm", "") or ""),
+        "metrics": metrics if isinstance(metrics, dict) else {},
+        "notes": str(source.get("notes") or ""),
+    })
+
+
+def _previous_selected_champion_reference(
+    *,
+    runtime: _Runtime,
+    experiment,
+    artifact: ModelArtifact,
+) -> dict:
+    statuses = {"selected", "validated", "delivered", "approved", "champion"}
+    current_created_at = str(getattr(experiment, "created_at", "") or "")
+    candidates = []
+    for candidate in runtime.experiments.list_for_task(experiment.task_id):
+        if candidate.id == experiment.id or candidate.artifact_id == artifact.id:
+            continue
+        if candidate.metrics is None or str(candidate.status or "") not in statuses:
+            continue
+        candidate_created_at = str(getattr(candidate, "created_at", "") or "")
+        if current_created_at and candidate_created_at and candidate_created_at >= current_created_at:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return {}
+    champion_experiment = max(
+        candidates,
+        key=lambda item: (str(getattr(item, "created_at", "") or ""), item.id),
+    )
+    champion_artifact = (
+        _artifact(runtime, champion_experiment.artifact_id)
+        if champion_experiment.artifact_id
+        else None
+    )
+    return _json_safe({
+        "label": "previous_selected_experiment",
+        "experiment_id": champion_experiment.id,
+        "artifact_id": str(champion_experiment.artifact_id or ""),
+        "recipe": champion_experiment.recipe_id,
+        "algorithm": str(getattr(champion_artifact, "algorithm", "") or ""),
+        "metrics": _json_safe(champion_experiment.metrics) or {},
+        "notes": "Auto-resolved from an earlier selected experiment in the same task.",
+    })
+
+
+def _challenger_metric_comparisons(champion_metrics: dict, challenger_metrics: dict) -> list[dict]:
+    metric_keys = sorted(
+        {
+            key
+            for key in set(champion_metrics) | set(challenger_metrics)
+            if _is_metric_key(str(key))
+        },
+        key=_challenger_metric_sort_key,
+    )
+    rows: list[dict] = []
+    for key in metric_keys:
+        metric = str(key)
+        champion_value = _numeric_metric(champion_metrics.get(metric))
+        challenger_value = _numeric_metric(challenger_metrics.get(metric))
+        direction = _metric_better_direction(metric)
+        verdict = "missing"
+        delta = None
+        if champion_value is not None and challenger_value is not None:
+            delta = challenger_value - champion_value
+            verdict = _metric_verdict(delta, direction)
+        rows.append({
+            "metric": metric,
+            "champion_value": champion_value,
+            "challenger_value": challenger_value,
+            "delta": delta,
+            "direction": direction,
+            "verdict": verdict,
+        })
+    return rows
+
+
+def _challenger_metric_sort_key(metric: str) -> tuple[int, str]:
+    preferred = [
+        "oot_ks",
+        "test_ks",
+        "oot_auc",
+        "test_auc",
+        "oot_macro_auc",
+        "test_macro_auc",
+        "oot_accuracy",
+        "test_accuracy",
+        "oot_r2",
+        "test_r2",
+        "oot_rmse",
+        "test_rmse",
+        "oot_mae",
+        "test_mae",
+        "oot_logloss",
+        "test_logloss",
+        "psi_oot_vs_train",
+        "psi_test_vs_train",
+    ]
+    try:
+        return (preferred.index(metric), metric)
+    except ValueError:
+        return (len(preferred), metric)
+
+
+def _numeric_metric(value) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float, np.number)) and np.isfinite(float(value)):
+        return float(value)
+    return None
+
+
+def _metric_better_direction(metric: str) -> str:
+    lowered = metric.lower()
+    if (
+        lowered.startswith("psi_")
+        or "rmse" in lowered
+        or "mae" in lowered
+        or "logloss" in lowered
+        or "loss" in lowered
+        or "brier" in lowered
+        or "ece" in lowered
+        or "gap" in lowered
+    ):
+        return "lower"
+    return "higher"
+
+
+def _metric_verdict(delta: float, direction: str) -> str:
+    if abs(delta) <= 1e-12:
+        return "same"
+    if direction == "lower":
+        return "improved" if delta < 0 else "declined"
+    return "improved" if delta > 0 else "declined"
+
+
+def _challenger_comparison_summary(rows: list[dict]) -> dict:
+    comparable = [item for item in rows if item.get("verdict") != "missing"]
+    return {
+        "metric_count": len(rows),
+        "comparable_metric_count": len(comparable),
+        "improved_count": sum(1 for item in comparable if item.get("verdict") == "improved"),
+        "declined_count": sum(1 for item in comparable if item.get("verdict") == "declined"),
+        "same_count": sum(1 for item in comparable if item.get("verdict") == "same"),
+        "missing_count": sum(1 for item in rows if item.get("verdict") == "missing"),
+    }
+
+
+def _challenger_comparison_status(summary: dict) -> str:
+    if int(summary.get("comparable_metric_count") or 0) <= 0:
+        return "missing"
+    if int(summary.get("declined_count") or 0) > 0:
+        return "warn"
+    return "pass"
+
+
+def _challenger_comparison_recommendation(status: str, summary: dict) -> str:
+    if status == "pass":
+        return "Challenger 不弱于 Champion 的已配置指标"
+    if status == "warn":
+        return (
+            "Challenger 有指标弱于 Champion, 需业务复核差异 "
+            f"({summary.get('declined_count', 0)} 项下降)"
+        )
+    return "缺少可比较的 Champion/Challenger 指标, 需补充生产模型基线"
+
+
 def _write_approval_package(
     base_dir: Path,
     *,
@@ -1621,7 +1879,18 @@ def _write_approval_package(
     challenger_package_markdown_path: str,
     selection_policy_decision: dict,
     monitoring_policy: dict,
-) -> dict[str, Path]:
+    challenger_comparison: dict,
+) -> dict[str, Path | None]:
+    uow = ArtifactUnitOfWork()
+    json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
+    markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.md")
+    monitoring_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.json")
+    monitoring_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.md")
+    comparison_json_artifact = None
+    comparison_markdown_artifact = None
+    if challenger_comparison:
+        comparison_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.champion_comparison.json")
+        comparison_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.champion_comparison.md")
     config = experiment.config
     payload = {
         "schema_version": 1,
@@ -1643,6 +1912,7 @@ def _write_approval_package(
         "capabilities": _json_safe(capabilities),
         "selection_policy_decision": selection_policy_decision,
         "monitoring_policy": _json_safe(monitoring_policy),
+        "challenger_comparison": _json_safe(challenger_comparison),
         "delivery_actions": _json_safe(actions),
         "artifacts": {
             "native_model_path": str(artifact.model_path or ""),
@@ -1651,16 +1921,17 @@ def _write_approval_package(
             "challenger_task_id": str(challenger_task_id or ""),
             "challenger_package_path": str(challenger_package_path or ""),
             "challenger_package_markdown_path": str(challenger_package_markdown_path or ""),
+            "challenger_comparison_path": (
+                str(comparison_json_artifact.final_path) if comparison_json_artifact else ""
+            ),
+            "challenger_comparison_markdown_path": (
+                str(comparison_markdown_artifact.final_path) if comparison_markdown_artifact else ""
+            ),
         },
         "scorecard_table": _json_safe(_scorecard_table_rows(artifact)),
         "model_params": _json_safe(artifact.params),
     }
     safe_payload = _json_safe(payload)
-    uow = ArtifactUnitOfWork()
-    json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
-    markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.md")
-    monitoring_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.json")
-    monitoring_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.monitoring_policy.md")
     try:
         json_artifact.path.write_text(
             json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True),
@@ -1678,11 +1949,31 @@ def _write_approval_package(
             _monitoring_policy_markdown(safe_payload["monitoring_policy"]),
             encoding="utf-8",
         )
+        if comparison_json_artifact and comparison_markdown_artifact:
+            comparison_json_artifact.path.write_text(
+                json.dumps(
+                    safe_payload["challenger_comparison"],
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            comparison_markdown_artifact.path.write_text(
+                _challenger_comparison_markdown(safe_payload["challenger_comparison"]),
+                encoding="utf-8",
+            )
         return uow.finalize(lambda: {
             "json_path": json_artifact.final_path,
             "markdown_path": markdown_artifact.final_path,
             "monitoring_policy_path": monitoring_json_artifact.final_path,
             "monitoring_policy_markdown_path": monitoring_markdown_artifact.final_path,
+            "challenger_comparison_path": (
+                comparison_json_artifact.final_path if comparison_json_artifact else None
+            ),
+            "challenger_comparison_markdown_path": (
+                comparison_markdown_artifact.final_path if comparison_markdown_artifact else None
+            ),
         })
     except Exception:
         uow.rollback()
@@ -1699,6 +1990,11 @@ def _approval_package_markdown(payload: dict) -> str:
     artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
     actions = [item for item in (payload.get("delivery_actions") or []) if isinstance(item, dict)]
     monitoring = payload.get("monitoring_policy") if isinstance(payload.get("monitoring_policy"), dict) else {}
+    comparison = (
+        payload.get("challenger_comparison")
+        if isinstance(payload.get("challenger_comparison"), dict)
+        else {}
+    )
     features = [str(item) for item in (payload.get("features") or []) if str(item)]
     violations = [item for item in (policy.get("violations") or []) if isinstance(item, dict)]
     lines = [
@@ -1765,6 +2061,39 @@ def _approval_package_markdown(payload: dict) -> str:
                     f"{_md_cell(_metric_display(item.get('value')))} | "
                     f"{_md_cell(threshold)} |"
                 )
+    if comparison:
+        lines.extend([
+            "",
+            "## Champion对比",
+            "",
+            f"- 状态: `{_md_inline(comparison.get('status'))}`",
+            f"- 建议: {_md_inline(comparison.get('recommendation') or '-')}",
+        ])
+        champion = comparison.get("champion") if isinstance(comparison.get("champion"), dict) else {}
+        if champion:
+            lines.extend([
+                f"- Champion: `{_md_inline(champion.get('label') or 'prior_champion')}`",
+                f"- Champion实验: `{_md_inline(champion.get('experiment_id') or '-')}`",
+            ])
+        rows = [
+            item for item in (comparison.get("metric_comparisons") or [])
+            if isinstance(item, dict)
+        ][:12]
+        if rows:
+            lines.extend([
+                "",
+                "| 指标 | Champion | Challenger | 差异 | 方向 | 结论 |",
+                "| --- | ---: | ---: | ---: | --- | --- |",
+            ])
+            for item in rows:
+                lines.append(
+                    f"| {_md_cell(item.get('metric') or '-')} | "
+                    f"{_md_cell(_metric_display(item.get('champion_value')))} | "
+                    f"{_md_cell(_metric_display(item.get('challenger_value')))} | "
+                    f"{_md_cell(_metric_display(item.get('delta')))} | "
+                    f"{_md_cell(item.get('direction') or '-')} | "
+                    f"{_md_cell(item.get('verdict') or '-')} |"
+                )
     lines.extend([
         "",
         "## 交付产物",
@@ -1776,6 +2105,7 @@ def _approval_package_markdown(payload: dict) -> str:
         f"| 验证任务 | `{_md_cell(artifacts.get('validation_task_id') or '-')}` |",
         f"| Challenger/Backtest任务 | `{_md_cell(artifacts.get('challenger_task_id') or '-')}` |",
         f"| Challenger/Backtest包 | `{_md_cell(artifacts.get('challenger_package_markdown_path') or artifacts.get('challenger_package_path') or '-')}` |",
+        f"| Champion对比 | `{_md_cell(artifacts.get('challenger_comparison_markdown_path') or artifacts.get('challenger_comparison_path') or '-')}` |",
     ])
     if actions:
         lines.extend(["", "## 交付动作", "", "| 动作 | 状态 | 说明 |", "| --- | --- | --- |"])
@@ -1832,6 +2162,60 @@ def _monitoring_policy_markdown(policy: dict) -> str:
         lines.append("| - | - | - | - | - | - |")
     if policy.get("notes"):
         lines.extend(["", "## 备注", "", str(policy.get("notes"))])
+    return "\n".join(lines) + "\n"
+
+
+def _challenger_comparison_markdown(comparison: dict) -> str:
+    champion = comparison.get("champion") if isinstance(comparison.get("champion"), dict) else {}
+    challenger = (
+        comparison.get("challenger")
+        if isinstance(comparison.get("challenger"), dict)
+        else {}
+    )
+    summary = comparison.get("summary") if isinstance(comparison.get("summary"), dict) else {}
+    rows = [
+        item for item in (comparison.get("metric_comparisons") or [])
+        if isinstance(item, dict)
+    ]
+    lines = [
+        "# Champion / Challenger 对比",
+        "",
+        "## 基本信息",
+        "",
+        f"- 对比版本: `{_md_inline(comparison.get('comparison_version'))}`",
+        f"- 状态: `{_md_inline(comparison.get('status'))}`",
+        f"- 建议: {_md_inline(comparison.get('recommendation') or '-')}",
+        f"- Champion: `{_md_inline(champion.get('label') or 'prior_champion')}`",
+        f"- Champion实验: `{_md_inline(champion.get('experiment_id') or '-')}`",
+        f"- Challenger实验: `{_md_inline(challenger.get('experiment_id') or comparison.get('experiment_id'))}`",
+        f"- Challenger产物: `{_md_inline(challenger.get('artifact_id') or comparison.get('artifact_id'))}`",
+        "",
+        "## 汇总",
+        "",
+        f"- 可比指标: {_md_inline(summary.get('comparable_metric_count') or 0)}/{_md_inline(summary.get('metric_count') or 0)}",
+        f"- 优于Champion: {_md_inline(summary.get('improved_count') or 0)}",
+        f"- 弱于Champion: {_md_inline(summary.get('declined_count') or 0)}",
+        f"- 持平: {_md_inline(summary.get('same_count') or 0)}",
+        "",
+        "## 指标差异",
+        "",
+        "| 指标 | Champion | Challenger | 差异 | 趋势 | 结论 |",
+        "| --- | ---: | ---: | ---: | --- | --- |",
+    ]
+    if rows:
+        for item in rows:
+            lines.append(
+                f"| {_md_cell(item.get('metric') or '-')} | "
+                f"{_md_cell(_metric_display(item.get('champion_value')))} | "
+                f"{_md_cell(_metric_display(item.get('challenger_value')))} | "
+                f"{_md_cell(_metric_display(item.get('delta')))} | "
+                f"{_md_cell(item.get('direction') or '-')} | "
+                f"{_md_cell(item.get('verdict') or '-')} |"
+            )
+    else:
+        lines.append("| - | - | - | - | - | - |")
+    if champion.get("notes"):
+        lines.extend(["", "## Champion备注", "", _md_inline(champion.get("notes"))])
     return "\n".join(lines) + "\n"
 
 

@@ -72,6 +72,8 @@ def test_load_builtin_templates_registers_sample_echo_idempotently():
     assert standard_modeling.steps[-2].tool_ref == ToolRef("modeling", "generate_model_report")
     assert standard_modeling.steps[-1].tool_ref == ToolRef("modeling", "post_training_action")
     assert standard_modeling.steps[-1].needs_confirmation is True
+    for template_id in ("standard_modeling", "modeling", "modeling_with_join"):
+        assert "champion_reference" in {slot.name for slot in get_template(template_id).slots}
     assert not any(step.decision_point for step in standard_modeling.steps)
     assert standard_modeling.success_criteria == ()
     assert "standard_modeling" in builtin_template_ids()
@@ -95,6 +97,7 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
             "business_columns": {"loan_month_col": "loan_month", "interest_rate_col": "rate"},
             "feature_dictionary_id": "dict-1",
             "project_meta": {"项目名称": "A卡模型"},
+            "champion_reference": {"experiment_id": "exp-current-champion"},
         },
         task_id="task-1",
     )
@@ -133,6 +136,7 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
         "create_challenger_backtest",
     ]
     assert delivery_step.inputs["selection_policy_decision"] == f"$ref:{select_step.id}.output.policy_decision"
+    assert delivery_step.inputs["champion_reference"] == {"experiment_id": "exp-current-champion"}
     assert delivery_step.needs_confirmation is True
     assert plan.success_criteria == []
 

@@ -114,6 +114,7 @@ STANDARD_MODELING = WorkflowTemplate(
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
         SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
+        SlotSpec("champion_reference", False, "task_context", "Optional prior Champion reference for post-training comparison"),
     ),
     steps=(
         StepTemplate(
@@ -240,6 +241,7 @@ STANDARD_MODELING = WorkflowTemplate(
                 "sample_dataset_id": "{slot:dataset_id}",
                 "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
                 "selection_policy_decision": "$ref:选择实验.output.policy_decision",
+                "champion_reference": "{slot:champion_reference}",
             },
             depends_on_titles=("选择实验", "生成模型开发报告"),
             post_checks=(
@@ -354,6 +356,7 @@ MODELING = WorkflowTemplate(
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
         SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
+        SlotSpec("champion_reference", False, "task_context", "Optional prior Champion reference for post-training comparison"),
     ),
     steps=(
         StepTemplate(
@@ -539,6 +542,7 @@ MODELING = WorkflowTemplate(
                 "sample_dataset_id": "{slot:dataset_id}",
                 "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
                 "selection_policy_decision": "$ref:选择实验.output.policy_decision",
+                "champion_reference": "{slot:champion_reference}",
             },
             depends_on_titles=("选择实验", "生成模型开发报告"),
             post_checks=(
@@ -579,6 +583,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
         SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
+        SlotSpec("champion_reference", False, "task_context", "Optional prior Champion reference for post-training comparison"),
         SlotSpec("dedup_strategies", False, "task_context", "Optional per-feature dedup strategy map"),
     ),
     steps=(
@@ -785,6 +790,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "sample_dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
                 "selection_policy_decision": "$ref:选择实验.output.policy_decision",
+                "champion_reference": "{slot:champion_reference}",
             },
             depends_on_titles=("切分样本", "选择实验", "生成模型开发报告"),
             post_checks=(

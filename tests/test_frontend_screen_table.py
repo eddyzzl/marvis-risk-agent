@@ -302,6 +302,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
                 {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
                 {{ id: "monitoring_policy", label: "监控策略", status: "pass", artifact: "/tmp/model.monitoring_policy.md", reason: "可进入常规监控" }},
+                {{ id: "challenger_comparison", label: "Champion对比", status: "warn", artifact: "/tmp/art-lgb.champion_comparison.md", reason: "需业务复核差异" }},
                 {{ id: "challenger_backtest", label: "Challenger/Backtest", status: "succeeded", artifact: "task-challenger" }},
                 {{ id: "approval_policy", label: "审批策略", status: "ready", reason: "建议可审批" }},
               ],
@@ -346,6 +347,9 @@ def test_model_delivery_panel_renders_selection_and_actions():
               monitoring_policy_path: "/tmp/model.monitoring_policy.json",
               monitoring_policy_markdown_path: "/tmp/model.monitoring_policy.md",
               monitoring_policy: {{ status: "pass", recommendation: "可进入常规监控" }},
+              challenger_comparison_path: "/tmp/art-lgb.champion_comparison.json",
+              challenger_comparison_markdown_path: "/tmp/art-lgb.champion_comparison.md",
+              challenger_comparison: {{ status: "warn", recommendation: "需业务复核差异" }},
               report: {{
                 report_path: "/tmp/model_report.xlsx",
                 available_sections: 1,
@@ -361,7 +365,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
           }},
         }});
         assert.equal(html.includes("训练后交付"), true);
-        assert.equal(html.includes("1 项需处理/不支持"), true);
+        assert.equal(html.includes("2 项需处理/不支持"), true);
         assert.equal(html.includes("exp-lgb"), true);
         assert.equal(html.includes("已选"), true);
         assert.equal(html.includes("0.3123"), true);
@@ -392,6 +396,9 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("监控策略"), true);
         assert.equal(html.includes("model.monitoring_policy.md"), true);
         assert.equal(html.includes("可进入常规监控"), true);
+        assert.equal(html.includes("Champion对比"), true);
+        assert.equal(html.includes("art-lgb.champion_comparison.md"), true);
+        assert.equal(html.includes("需复核"), true);
         assert.equal(html.includes("model.pmml"), true);
         assert.equal(html.includes("task-challenger"), true);
         assert.equal(html.includes("challenger_backtest_plan.md"), true);

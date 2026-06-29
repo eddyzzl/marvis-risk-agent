@@ -775,6 +775,15 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
                 "status": "pass",
                 "recommendation": "可进入常规监控",
             },
+            "challenger_comparison_path": "/tmp/art-lgb.champion_comparison.json",
+            "challenger_comparison_markdown_path": "/tmp/art-lgb.champion_comparison.md",
+            "challenger_comparison": {
+                "schema_version": 1,
+                "comparison_version": "champion_challenger_v1",
+                "status": "warn",
+                "recommendation": "Challenger 有指标弱于 Champion, 需业务复核差异 (1 项下降)",
+                "summary": {"declined_count": 1, "comparable_metric_count": 3},
+            },
             "capabilities": {
                 "pmml_supported": True,
                 "handoff_supported": True,
@@ -815,6 +824,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["monitoring_policy_path"] == "/tmp/art-lgb.monitoring_policy.json"
     assert delivery["monitoring_policy_markdown_path"] == "/tmp/art-lgb.monitoring_policy.md"
     assert delivery["monitoring_policy"]["status"] == "pass"
+    assert delivery["challenger_comparison_path"] == "/tmp/art-lgb.champion_comparison.json"
+    assert delivery["challenger_comparison_markdown_path"] == "/tmp/art-lgb.champion_comparison.md"
+    assert delivery["challenger_comparison"]["status"] == "warn"
     assert delivery["report"]["status"] == "ready"
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
@@ -824,6 +836,7 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
         "ready",
         "ready",
         "pass",
+        "warn",
         "succeeded",
         "succeeded",
         "succeeded",
@@ -833,8 +846,10 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["readiness"][2]["artifact"] == "/tmp/art-lgb.approval_package.md"
     assert delivery["readiness"][3]["id"] == "monitoring_policy"
     assert delivery["readiness"][3]["artifact"] == "/tmp/art-lgb.monitoring_policy.md"
-    assert delivery["readiness"][6]["id"] == "challenger_backtest"
-    assert delivery["readiness"][6]["artifact"] == "task-challenger"
+    assert delivery["readiness"][4]["id"] == "challenger_comparison"
+    assert delivery["readiness"][4]["artifact"] == "/tmp/art-lgb.champion_comparison.md"
+    assert delivery["readiness"][7]["id"] == "challenger_backtest"
+    assert delivery["readiness"][7]["artifact"] == "task-challenger"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
     assert delivery["policy_signals"]["approval"] == "建议可审批"
 

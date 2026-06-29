@@ -256,6 +256,7 @@ function artifactList(delivery) {
       ? [["审批包JSON", delivery.approval_package_path]]
       : []),
     ["监控策略", delivery.monitoring_policy_markdown_path || delivery.monitoring_policy_path],
+    ["Champion对比", delivery.challenger_comparison_markdown_path || delivery.challenger_comparison_path],
     ["Challenger/Backtest", delivery.challenger_task_id],
     ["Challenger/Backtest包", delivery.challenger_package_markdown_path || delivery.challenger_package_path],
     ["PMML", delivery.pmml_path],
@@ -295,7 +296,9 @@ function reportSummary(report) {
 function readinessHeadline(items) {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return "等待交付状态";
-  const bad = rows.filter((item) => ["unsupported", "skipped", "missing", "failed", "partial"].includes(String(item?.status || ""))).length;
+  const bad = rows.filter((item) => (
+    ["unsupported", "skipped", "missing", "failed", "partial", "warn", "fail", "error"].includes(String(item?.status || "").toLowerCase())
+  )).length;
   return bad ? `${bad} 项需处理/不支持` : "交付项已就绪";
 }
 
@@ -363,6 +366,8 @@ function statusLabel(status) {
     succeeded: "已完成",
     ready: "可交付",
     supported: "支持",
+    pass: "通过",
+    warn: "需复核",
     skipped: "已跳过",
     unsupported: "不支持",
     partial: "部分完成",

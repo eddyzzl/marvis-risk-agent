@@ -1287,7 +1287,7 @@
     },
     {
       "name": "select_experiment",
-      "summary": "Select the final modeling experiment from compared candidates using target-aware metrics or a user-specified experiment id.",
+      "summary": "Select the final modeling experiment from compared candidates using target-aware metrics or a user-specified experiment id, and mark it as selected for later Champion comparison.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1408,7 +1408,8 @@
       "entrypoint": "tool_select_experiment",
       "side_effects": [
         "read:experiment",
-        "read:model"
+        "read:model",
+        "write:experiment"
       ],
       "memory_limit_mb": 2048
     },
@@ -1615,7 +1616,7 @@
     },
     {
       "name": "post_training_action",
-      "summary": "Finalize a selected modeling experiment with approval and monitoring packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
+      "summary": "Finalize a selected modeling experiment with approval, monitoring, and Champion/Challenger comparison packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1643,6 +1644,10 @@
           },
           "monitoring_policy": {
             "type": "object"
+          },
+          "champion_reference": {
+            "type": "object",
+            "description": "Optional prior champion or production model baseline. Provide experiment_id to resolve an existing modeling experiment, or explicit metrics/artifact metadata for an external champion."
           }
         },
         "required": [
@@ -1692,6 +1697,15 @@
           "monitoring_policy": {
             "type": "object"
           },
+          "challenger_comparison_path": {
+            "type": "string"
+          },
+          "challenger_comparison_markdown_path": {
+            "type": "string"
+          },
+          "challenger_comparison": {
+            "type": "object"
+          },
           "capabilities": {
             "type": "object"
           },
@@ -1711,6 +1725,9 @@
           "monitoring_policy_path",
           "monitoring_policy_markdown_path",
           "monitoring_policy",
+          "challenger_comparison_path",
+          "challenger_comparison_markdown_path",
+          "challenger_comparison",
           "capabilities",
           "actions"
         ],

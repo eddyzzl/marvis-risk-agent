@@ -133,6 +133,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "selection_policy" in select_experiment_tool.input_schema["properties"]
     assert "selected_experiment_id" in select_experiment_tool.output_schema["required"]
     assert "policy_decision" in select_experiment_tool.output_schema["required"]
+    assert "write:experiment" in select_experiment_tool.side_effects
     assert "LR modeling artifact" not in export_tool.summary
     assert "lr/lgb/xgb/scorecard" in export_tool.summary
     assert "write:task" in handoff_tool.side_effects
@@ -145,6 +146,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "llm" in report_tool.side_effects
     assert "selection_policy_decision" in post_training_tool.input_schema["properties"]
     assert "monitoring_policy" in post_training_tool.input_schema["properties"]
+    assert "champion_reference" in post_training_tool.input_schema["properties"]
     assert "challenger_task_id" in post_training_tool.output_schema["required"]
     assert "challenger_package_markdown_path" in post_training_tool.output_schema["required"]
     assert "approval_package_path" in post_training_tool.output_schema["required"]
@@ -152,6 +154,9 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "monitoring_policy_path" in post_training_tool.output_schema["required"]
     assert "monitoring_policy_markdown_path" in post_training_tool.output_schema["required"]
     assert "monitoring_policy" in post_training_tool.output_schema["required"]
+    assert "challenger_comparison_path" in post_training_tool.output_schema["required"]
+    assert "challenger_comparison_markdown_path" in post_training_tool.output_schema["required"]
+    assert "challenger_comparison" in post_training_tool.output_schema["required"]
 
 
 def test_modeling_tool_seed_fallback_uses_shared_default():
@@ -891,6 +896,22 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
         for exp_id in trained.output["experiment_ids"]
         if store.get(exp_id).recipe_id == "catboost"
     )
+    lgb_experiment_id = next(
+        exp_id
+        for exp_id in trained.output["experiment_ids"]
+        if store.get(exp_id).recipe_id == "lgb"
+    )
+    prior_selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": lgb_experiment_id,
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+    assert prior_selected.ok is True, prior_selected.error
+    assert store.get(lgb_experiment_id).status == "selected"
     selected = runner.invoke(
         ToolRef("modeling", "select_experiment"),
         {
@@ -905,6 +926,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert selected.output["artifact_id"] == artifacts["catboost"].id
     assert selected.output["selection_metric"] == "manual"
     assert selected.output["policy_decision"]["status"] == "not_requested"
+    assert store.get(catboost_experiment_id).status == "selected"
     blocked = runner.invoke(
         ToolRef("modeling", "select_experiment"),
         {
@@ -981,6 +1003,10 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert post_training.output["monitoring_policy"]["owner"] == "model_governance"
     assert post_training.output["monitoring_policy"]["schema_version"] == 1
     assert post_training.output["monitoring_policy"]["policy_version"] == "model_monitoring_v1"
+    assert post_training.output["challenger_comparison"]["status"] in {"pass", "warn"}
+    assert post_training.output["challenger_comparison"]["champion"]["label"] == "previous_selected_experiment"
+    assert post_training.output["challenger_comparison"]["champion"]["experiment_id"] == lgb_experiment_id
+    assert post_training.output["challenger_comparison"]["summary"]["comparable_metric_count"] >= 1
     assert {item["metric"] for item in post_training.output["monitoring_policy"]["checks"]} >= {
         "oot_ks",
         "psi_oot_vs_train",
@@ -995,6 +1021,14 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     monitoring_payload = json.loads(monitoring_policy.read_text(encoding="utf-8"))
     assert monitoring_payload["owner"] == "model_governance"
     assert "# 模型监控策略" in monitoring_markdown.read_text(encoding="utf-8")
+    comparison_path = Path(post_training.output["challenger_comparison_path"])
+    comparison_markdown = Path(post_training.output["challenger_comparison_markdown_path"])
+    assert comparison_path.exists()
+    assert comparison_markdown.exists()
+    comparison_payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+    assert comparison_payload["comparison_version"] == "champion_challenger_v1"
+    assert comparison_payload["champion"]["experiment_id"] == lgb_experiment_id
+    assert "# Champion / Challenger 对比" in comparison_markdown.read_text(encoding="utf-8")
     approval_package = Path(post_training.output["approval_package_path"])
     assert approval_package.exists()
     approval_payload = json.loads(approval_package.read_text(encoding="utf-8"))
@@ -1004,8 +1038,12 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert approval_payload["selection_policy_decision"]["status"] == "overridden"
     assert approval_payload["selection_policy_decision"]["override_reason"].startswith("业务方本轮只验收")
     assert approval_payload["monitoring_policy"]["owner"] == "model_governance"
+    assert approval_payload["challenger_comparison"]["champion"]["experiment_id"] == lgb_experiment_id
     assert {item["status"] for item in approval_payload["delivery_actions"]} == {"skipped"}
     assert approval_payload["artifacts"]["challenger_task_id"] == ""
+    assert approval_payload["artifacts"]["challenger_comparison_markdown_path"].endswith(
+        ".champion_comparison.md"
+    )
     assert approval_payload["feature_count"] == 2
     approval_markdown = Path(post_training.output["approval_package_markdown_path"])
     assert approval_markdown.exists()
@@ -1015,6 +1053,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "require_pmml" in markdown_text
     assert "Challenger/Backtest任务" in markdown_text
     assert "## 监控策略" in markdown_text
+    assert "## Champion对比" in markdown_text
     assert "## 入模特征" in markdown_text
 
 
