@@ -735,6 +735,8 @@ def _render_post_training_action(o: dict):
     rows = [
         ["原生模型", "succeeded" if o.get("native_model_path") else "missing", o.get("native_model_path") or "", ""],
     ]
+    if o.get("approval_package_path"):
+        rows.append(["审批包", "succeeded", o.get("approval_package_path"), "模型审批与交付证据包"])
     for item in actions:
         action = str(item.get("action") or "")
         status = str(item.get("status") or "")

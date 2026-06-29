@@ -239,6 +239,7 @@ STANDARD_MODELING = WorkflowTemplate(
                 "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "sample_dataset_id": "{slot:dataset_id}",
                 "actions": ["export_pmml", "handoff_to_validation"],
+                "selection_policy_decision": "$ref:选择实验.output.policy_decision",
             },
             depends_on_titles=("选择实验", "生成模型开发报告"),
             post_checks=(
@@ -537,6 +538,7 @@ MODELING = WorkflowTemplate(
                 "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "sample_dataset_id": "{slot:dataset_id}",
                 "actions": ["export_pmml", "handoff_to_validation"],
+                "selection_policy_decision": "$ref:选择实验.output.policy_decision",
             },
             depends_on_titles=("选择实验", "生成模型开发报告"),
             post_checks=(
@@ -782,6 +784,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "sample_dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "actions": ["export_pmml", "handoff_to_validation"],
+                "selection_policy_decision": "$ref:选择实验.output.policy_decision",
             },
             depends_on_titles=("切分样本", "选择实验", "生成模型开发报告"),
             post_checks=(

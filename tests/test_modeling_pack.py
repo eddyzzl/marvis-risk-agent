@@ -140,6 +140,8 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "actions" in post_training_tool.output_schema["required"]
     assert "model_id" in report_tool.input_schema["properties"]
     assert "llm" in report_tool.side_effects
+    assert "selection_policy_decision" in post_training_tool.input_schema["properties"]
+    assert "approval_package_path" in post_training_tool.output_schema["required"]
 
 
 def test_modeling_tool_seed_fallback_uses_shared_default():
@@ -952,6 +954,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_id": selected.output["selected_experiment_id"],
             "sample_dataset_id": prepared.output["result_dataset_id"],
             "actions": ["export_pmml", "handoff_to_validation"],
+            "selection_policy_decision": overridden.output["policy_decision"],
         },
         task_id=task.id,
     )
@@ -959,6 +962,16 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert post_training.output["artifact_id"] == artifacts["catboost"].id
     assert post_training.output["capabilities"]["native_model_supported"] is True
     assert {item["status"] for item in post_training.output["actions"]} == {"skipped"}
+    approval_package = Path(post_training.output["approval_package_path"])
+    assert approval_package.exists()
+    approval_payload = json.loads(approval_package.read_text(encoding="utf-8"))
+    assert approval_payload["schema_version"] == 1
+    assert approval_payload["experiment_id"] == catboost_experiment_id
+    assert approval_payload["artifact_id"] == artifacts["catboost"].id
+    assert approval_payload["selection_policy_decision"]["status"] == "overridden"
+    assert approval_payload["selection_policy_decision"]["override_reason"].startswith("业务方本轮只验收")
+    assert {item["status"] for item in approval_payload["delivery_actions"]} == {"skipped"}
+    assert approval_payload["feature_count"] == 2
 
 
 def test_pick_best_experiment_is_target_type_aware():

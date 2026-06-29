@@ -1615,7 +1615,7 @@
     },
     {
       "name": "post_training_action",
-      "summary": "Finalize a selected modeling experiment with native artifact status, optional PMML export, and optional validation handoff.",
+      "summary": "Finalize a selected modeling experiment with an approval package, native artifact status, optional PMML export, and optional validation handoff.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1636,6 +1636,9 @@
                 "handoff_to_validation"
               ]
             }
+          },
+          "selection_policy_decision": {
+            "type": "object"
           }
         },
         "required": [
@@ -1661,6 +1664,9 @@
           "validation_task_id": {
             "type": "string"
           },
+          "approval_package_path": {
+            "type": "string"
+          },
           "capabilities": {
             "type": "object"
           },
@@ -1672,6 +1678,7 @@
           "experiment_id",
           "artifact_id",
           "native_model_path",
+          "approval_package_path",
           "capabilities",
           "actions"
         ],

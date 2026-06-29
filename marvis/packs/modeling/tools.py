@@ -1264,6 +1264,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     artifact = _artifact(runtime, experiment.artifact_id)
     base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
     capabilities = _artifact_capabilities(artifact, base_dir=base_dir)
+    selection_policy_decision = _approval_policy_decision(inputs.get("selection_policy_decision"))
     requested_actions = [
         str(item)
         for item in (inputs.get("actions") or ["export_pmml", "handoff_to_validation"])
@@ -1302,15 +1303,102 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 "reason": reason or "sample_dataset_id is required for validation handoff",
             })
 
+    approval_package_path = str(_write_approval_package(
+        base_dir,
+        experiment=experiment,
+        artifact=artifact,
+        capabilities=capabilities,
+        actions=actions,
+        sample_dataset_id=str(inputs.get("sample_dataset_id") or ""),
+        pmml_path=pmml_path,
+        validation_task_id=validation_task_id,
+        selection_policy_decision=selection_policy_decision,
+    ))
     return {
         "experiment_id": experiment.id,
         "artifact_id": artifact.id,
         "native_model_path": str(artifact.model_path),
         "pmml_path": pmml_path,
         "validation_task_id": validation_task_id,
+        "approval_package_path": approval_package_path,
         "capabilities": capabilities,
         "actions": actions,
     }
+
+
+def _approval_policy_decision(value) -> dict:
+    decision = value if isinstance(value, dict) else {}
+    if not decision:
+        return {}
+    violations = []
+    for item in decision.get("violations") or []:
+        if not isinstance(item, dict):
+            continue
+        violations.append({
+            "code": str(item.get("code") or ""),
+            "message": str(item.get("message") or ""),
+        })
+    return {
+        "status": str(decision.get("status") or ""),
+        "explicit_selection": bool(decision.get("explicit_selection")),
+        "selected_experiment_id": str(decision.get("selected_experiment_id") or ""),
+        "policy": _json_safe(decision.get("policy") if isinstance(decision.get("policy"), dict) else {}),
+        "profile": _json_safe(decision.get("profile") if isinstance(decision.get("profile"), dict) else {}),
+        "violations": violations,
+        "override_reason": str(decision.get("override_reason") or ""),
+    }
+
+
+def _write_approval_package(
+    base_dir: Path,
+    *,
+    experiment,
+    artifact: ModelArtifact,
+    capabilities: dict,
+    actions: list[dict],
+    sample_dataset_id: str,
+    pmml_path: str,
+    validation_task_id: str,
+    selection_policy_decision: dict,
+) -> Path:
+    config = experiment.config
+    payload = {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "recipe": experiment.recipe_id,
+        "algorithm": artifact.algorithm,
+        "target_type": getattr(config, "target_type", "binary"),
+        "dataset_id": getattr(config, "dataset_id", ""),
+        "sample_dataset_id": sample_dataset_id,
+        "target_col": getattr(config, "target_col", ""),
+        "split_col": getattr(config, "split_col", ""),
+        "split_values": _json_safe(getattr(config, "split_values", {})),
+        "seed": getattr(config, "seed", None),
+        "features": list(artifact.feature_list),
+        "feature_count": len(artifact.feature_list),
+        "metrics": _json_safe(experiment.metrics),
+        "capabilities": _json_safe(capabilities),
+        "selection_policy_decision": selection_policy_decision,
+        "delivery_actions": _json_safe(actions),
+        "artifacts": {
+            "native_model_path": artifact.model_path,
+            "pmml_path": pmml_path,
+            "validation_task_id": validation_task_id,
+        },
+        "scorecard_table": _json_safe(_scorecard_table_rows(artifact)),
+        "model_params": _json_safe(artifact.params),
+    }
+    filename = f"{artifact.id}.approval_package.json"
+    return write_artifact_file(
+        base_dir,
+        filename,
+        lambda path: path.write_text(
+            json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        ),
+    )
 
 
 def tool_generate_model_report(inputs: dict, ctx) -> dict:

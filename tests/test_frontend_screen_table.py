@@ -330,6 +330,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
               native_model_path: "/tmp/model.pkl",
               pmml_path: "/tmp/model.pmml",
               validation_task_id: "task-validation",
+              approval_package_path: "/tmp/art-lgb.approval_package.json",
               report: {{
                 report_path: "/tmp/model_report.xlsx",
                 available_sections: 1,
@@ -372,6 +373,8 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("PMML"), true);
         assert.equal(html.includes("验证移交"), true);
         assert.equal(html.includes("model.pmml"), true);
+        assert.equal(html.includes("审批包"), true);
+        assert.equal(html.includes("approval_package.json"), true);
         assert.equal(html.includes("model_report.xlsx"), true);
         assert.equal(html.includes("报告就绪度"), true);
         assert.equal(html.includes("1/2 章节可生成"), true);
@@ -455,6 +458,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
                 }},
               ],
               pmml_path: longPath,
+              approval_package_path: "/tmp/art-lgb.approval_package.json",
             }},
           }},
         }});

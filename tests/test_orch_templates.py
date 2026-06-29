@@ -128,6 +128,7 @@ def test_standard_modeling_template_instantiates_valid_report_plan(tmp_path):
     assert delivery_step.inputs["experiment_id"] == f"$ref:{select_step.id}.output.selected_experiment_id"
     assert delivery_step.inputs["sample_dataset_id"] == "dataset-1"
     assert delivery_step.inputs["actions"] == ["export_pmml", "handoff_to_validation"]
+    assert delivery_step.inputs["selection_policy_decision"] == f"$ref:{select_step.id}.output.policy_decision"
     assert delivery_step.needs_confirmation is True
     assert plan.success_criteria == []
 
@@ -213,6 +214,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert report.inputs["dataset_id"] == "dataset-1"
     assert delivery.inputs["experiment_id"] == f"$ref:{select.id}.output.selected_experiment_id"
     assert delivery.inputs["sample_dataset_id"] == "dataset-1"
+    assert delivery.inputs["selection_policy_decision"] == f"$ref:{select.id}.output.policy_decision"
     assert plan.success_criteria == []
     assert "modeling" in builtin_template_ids()
 

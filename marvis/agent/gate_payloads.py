@@ -195,6 +195,7 @@ def build_model_delivery_payload(
         "native_model_path": str(o.get("native_model_path") or ""),
         "pmml_path": str(o.get("pmml_path") or ""),
         "validation_task_id": str(o.get("validation_task_id") or ""),
+        "approval_package_path": str(o.get("approval_package_path") or ""),
         "report": report,
         "readiness": _delivery_readiness(
             o,
@@ -724,6 +725,7 @@ def _delivery_readiness(
     policy_decision: dict | None = None,
 ) -> list[dict]:
     native_path = str(output.get("native_model_path") or "")
+    approval_package_path = str(output.get("approval_package_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
     pmml_action = _action(actions, "export_pmml")
@@ -762,6 +764,15 @@ def _delivery_readiness(
             "status": str(report.get("status") or "missing"),
             "artifact": str(report.get("report_path") or ""),
             "reason": f"报告章节 {available}/{total} 可生成" if total else "",
+        })
+    if approval_package_path:
+        insert_at = 2 if report is not None else 1
+        readiness.insert(insert_at, {
+            "id": "approval_package",
+            "label": "审批包",
+            "status": "ready",
+            "artifact": approval_package_path,
+            "reason": "模型审批与交付证据已生成",
         })
     if isinstance(policy_signals, dict) and policy_signals:
         decision_readiness = _policy_decision_readiness(policy_decision or {})

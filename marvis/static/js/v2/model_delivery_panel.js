@@ -235,6 +235,7 @@ function artifactList(delivery) {
   const artifacts = [
     ["原生模型", delivery.native_model_path],
     ["模型报告", delivery.report?.report_path],
+    ["审批包", delivery.approval_package_path],
     ["PMML", delivery.pmml_path],
     ["验证任务", delivery.validation_task_id],
   ].filter(([, value]) => String(value || ""));

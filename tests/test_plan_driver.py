@@ -762,6 +762,7 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
             "native_model_path": "/tmp/model.pkl",
             "pmml_path": "/tmp/model.pmml",
             "validation_task_id": "task-validation",
+            "approval_package_path": "/tmp/art-lgb.approval_package.json",
             "capabilities": {
                 "pmml_supported": True,
                 "handoff_supported": True,
@@ -789,6 +790,7 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["native_model_path"] == "/tmp/model.pkl"
     assert delivery["pmml_path"] == "/tmp/model.pmml"
     assert delivery["validation_task_id"] == "task-validation"
+    assert delivery["approval_package_path"] == "/tmp/art-lgb.approval_package.json"
     assert delivery["report"]["status"] == "ready"
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
@@ -796,10 +798,12 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert [item["status"] for item in delivery["readiness"]] == [
         "ready",
         "ready",
+        "ready",
         "succeeded",
         "succeeded",
         "ready",
     ]
+    assert delivery["readiness"][2]["id"] == "approval_package"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
     assert delivery["policy_signals"]["approval"] == "建议可审批"
 
