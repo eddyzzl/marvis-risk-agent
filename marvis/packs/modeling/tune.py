@@ -110,7 +110,7 @@ def tune_hyperparameters(
     dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
     dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
     rng = np.random.RandomState(seed)
-    fixed_params = _lgb_base_params(base_params)
+    fixed_params = _lgb_base_params(base_params, pos_weight_hint=pos_weight_hint)
     trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
 
     best = None
@@ -205,13 +205,16 @@ def _sample_weight(frame: pd.DataFrame, column: str) -> np.ndarray | None:
     return weights.to_numpy(dtype=float)
 
 
-def _lgb_base_params(params: dict | None) -> dict:
+def _lgb_base_params(params: dict | None, *, pos_weight_hint: float) -> dict:
     blocked = {"sample_weight_col", "sample_weight_column", "weight_col"}
-    return {
+    out = {
         str(key): value
         for key, value in dict(params or {}).items()
         if str(key) not in blocked and value not in (None, "")
     }
+    if str(out.get("scale_pos_weight") or "").strip().lower() == "auto":
+        out["scale_pos_weight"] = float(pos_weight_hint)
+    return out
 
 
 def _weighted_count(labels: np.ndarray, weights: np.ndarray | None, value: float) -> float:

@@ -16,6 +16,7 @@ from marvis.packs.modeling.recipes.common import (
     compute_model_metrics,
     model_params,
     normalized_monotone_constraints,
+    resolve_auto_scale_pos_weight,
     sample_weight_values,
     split_modeling_frame,
 )
@@ -34,6 +35,7 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         "n_jobs": 1,
         "deterministic": True,
     }
+    params = resolve_auto_scale_pos_weight(params, train, config)
     constraints = normalized_monotone_constraints(config)
     params.pop("monotone_constraints", None)
     params.pop("monotonic_constraints", None)

@@ -17,6 +17,7 @@ from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import (
     compute_model_metrics,
     compute_multiclass_metrics,
+    resolve_auto_scale_pos_weight,
     sample_weight_values,
     split_modeling_frame,
 )
@@ -28,7 +29,7 @@ from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.packs.modeling.tools import _ModelArtifactScorer
-from marvis.packs.modeling.tune import _trial_score
+from marvis.packs.modeling.tune import _lgb_base_params, _trial_score
 from marvis.settings import build_settings
 
 
@@ -173,6 +174,31 @@ def test_weighted_binary_metrics_have_formula_level_values_and_weight_validation
         sample_weight_values(bad_weights, config)
 
 
+def test_auto_scale_pos_weight_uses_effective_train_weights():
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.8, 0.9, 0.3],
+        "y": [0, 0, 0, 1, 1],
+        "weight": [1.0, 2.0, 3.0, 2.0, 4.0],
+        "split": ["train", "train", "train", "train", "test"],
+    })
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test"},
+        params={"scale_pos_weight": "auto", "sample_weight_col": "weight"},
+        seed=13,
+        early_stopping_rounds=None,
+    )
+    train, _test, _oot = split_modeling_frame(frame, config)
+
+    params = resolve_auto_scale_pos_weight({"scale_pos_weight": "auto"}, train, config)
+
+    assert params["scale_pos_weight"] == pytest.approx(3.0)
+    assert _lgb_base_params({"scale_pos_weight": "auto"}, pos_weight_hint=7.5)["scale_pos_weight"] == 7.5
+
+
 def test_tune_trial_score_does_not_use_oot_holdout_for_selection():
     stable = _trial_score(
         train_ks=0.45,
@@ -312,6 +338,33 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
     assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
+
+
+def test_train_lgb_resolves_auto_scale_pos_weight_before_fit(tmp_path):
+    rows = 180
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 9 == 0 else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "lgb_auto_weight.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 3, "learning_rate": 0.1, "num_leaves": 4, "scale_pos_weight": "auto"},
+        seed=31,
+        early_stopping_rounds=None,
+    )
+
+    result = train_lgb(DataBackend(tmp_path), path, config, out_dir=tmp_path / "lgb_auto")
+
+    assert result.artifact.params["scale_pos_weight"] == pytest.approx(88 / 12)
+    assert result.artifact.params["num_boost_round"] == 3
 
 
 def test_train_lgb_uses_shared_nan_label_gate(tmp_path):

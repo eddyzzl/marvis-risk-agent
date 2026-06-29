@@ -58,6 +58,25 @@ def model_params(params: dict | None) -> dict:
     }
 
 
+def resolve_auto_scale_pos_weight(params: dict, train: pd.DataFrame, config: TrainConfig) -> dict:
+    """Resolve ``scale_pos_weight='auto'`` using the effective training split.
+
+    Scenario templates can request automatic class-imbalance handling, but
+    LightGBM/XGBoost require a numeric ratio. Use the same sample-weight column
+    as fitting when present so reject-inference / business weights are reflected.
+    """
+    out = dict(params)
+    raw = out.get("scale_pos_weight")
+    if not isinstance(raw, str) or raw.strip().lower() != "auto":
+        return out
+    target = pd.to_numeric(train[config.target_col], errors="coerce").to_numpy(dtype=float)
+    weights = sample_weight_values(train, config)
+    pos = _weighted_label_count(target, weights, 1.0)
+    neg = _weighted_label_count(target, weights, 0.0)
+    out["scale_pos_weight"] = float(neg / pos) if pos > 0 and neg > 0 else 1.0
+    return out
+
+
 def normalized_monotone_constraints(config: TrainConfig) -> tuple[int, ...] | None:
     raw = None
     for key in _MONOTONE_CONSTRAINT_KEYS:
@@ -126,6 +145,13 @@ def sample_weight_values(frame: pd.DataFrame, config: TrainConfig) -> np.ndarray
     if float(weights.sum()) <= 0:
         raise ModelingError(f"sample weight column `{column}` must have a positive total weight")
     return weights.to_numpy(dtype=float)
+
+
+def _weighted_label_count(labels: np.ndarray, weights: np.ndarray | None, value: float) -> float:
+    mask = labels == value
+    if weights is None:
+        return float(mask.sum())
+    return float(weights[mask].sum())
 
 
 def compute_model_metrics(
