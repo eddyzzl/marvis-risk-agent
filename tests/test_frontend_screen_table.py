@@ -334,6 +334,90 @@ def test_model_delivery_panel_renders_selection_and_actions():
     assert output == "ok"
 
 
+def test_modeling_panels_combined_dom_smoke_contract():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{ renderModelingSetupPanel }} from "./marvis/static/js/v2/modeling_setup_panel.js";
+        import {{ renderModelDeliveryPanel }} from "./marvis/static/js/v2/model_delivery_panel.js";
+        const longPath = "/tmp/" + "very-long-artifact-name-".repeat(12) + "model.pmml";
+        const setupHtml = renderModelingSetupPanel({{
+          id: "setup-smoke",
+          metadata: {{
+            step_id: "gate-setup",
+            modeling_setup: {{
+              target_type: "binary",
+              recipe: "lgb",
+              recipes: ["lgb", "xgb"],
+              feature_count: 128,
+              n_trials: 32,
+              metric_policy: "oot_ks",
+              eligible_algorithms: ["lgb", "xgb", "lr"],
+              disabled_algorithms: [
+                {{ recipe: "lgb_regressor", reason: "recipe target family does not match `binary`" }},
+                {{ recipe: "lgb_multiclass", reason: "recipe target family does not match `binary`" }},
+              ],
+              pmml_supported_algorithms: ["lgb", "xgb", "lr"],
+              sample_weight_col: "",
+              sample_weight_candidates: ["weight"],
+              sample_weight_diagnostics: [
+                {{ column: "weight", valid: true, missing_rate: 0, min: 0.5, max: 2.0, mean: 1.0 }},
+              ],
+            }},
+          }},
+        }});
+        const deliveryHtml = renderModelDeliveryPanel({{
+          metadata: {{
+            model_delivery: {{
+              source_tool: "select_experiment",
+              selected_experiment_id: "exp-lgb",
+              artifact_id: "art-lgb",
+              recipe: "lgb",
+              target_type: "binary",
+              selection_metric: "oot_ks",
+              business_signals: {{ stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" }},
+              readiness: [
+                {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
+                {{ id: "pmml", label: "PMML", status: "succeeded", artifact: longPath }},
+              ],
+              metrics: {{ oot_ks: 0.31, test_ks: 0.29, psi_oot_vs_train: 0.12 }},
+              candidates: [
+                {{
+                  id: "exp-lgb",
+                  recipe: "lgb",
+                  selected: true,
+                  metrics: {{ oot_ks: 0.31, test_ks: 0.29, psi_oot_vs_train: 0.12 }},
+                  business_signals: {{ stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" }},
+                  capabilities: {{ pmml_supported: true, handoff_supported: true, native_model_supported: true }},
+                }},
+              ],
+              pmml_path: longPath,
+            }},
+          }},
+        }});
+        const html = setupHtml + deliveryHtml;
+        for (const fragment of [
+          "modeling-setup-panel",
+          "modeling-target-select",
+          "modeling-recipe-pick",
+          "modeling-override-reason-input",
+          "model-delivery-panel",
+          "model-delivery-business-grid",
+          "model-delivery-table-wrap",
+          "model-delivery-artifacts",
+        ]) {{
+          assert.equal(html.includes(fragment), true, fragment);
+        }}
+        assert.equal(html.includes("undefined"), false);
+        assert.equal(html.includes("NaN"), false);
+        assert.equal(html.includes(longPath.slice(-69)), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_modeling_setup_weight_adjust_posts_structured_params():
     output = _run_node(
         f"""
