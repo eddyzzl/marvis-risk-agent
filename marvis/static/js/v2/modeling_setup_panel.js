@@ -9,6 +9,7 @@ export function renderModelingSetupPanel(message, options = {}) {
     ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
     : [];
   const selected = String(setup.sample_weight_col || "");
+  const currentTargetType = String(setup.target_type || "binary");
   const interactive = options.interactive !== false;
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const uniqueCandidates = [...new Set(selected ? [selected, ...candidates] : candidates)];
@@ -43,6 +44,9 @@ export function renderModelingSetupPanel(message, options = {}) {
   const eligibleAlgorithms = Array.isArray(setup.eligible_algorithms)
     ? setup.eligible_algorithms.map((item) => String(item)).filter(Boolean)
     : [];
+  const selectedRecipes = Array.isArray(setup.recipes)
+    ? setup.recipes.map((item) => String(item)).filter(Boolean)
+    : [];
   const disabledAlgorithms = Array.isArray(setup.disabled_algorithms)
     ? setup.disabled_algorithms.filter((item) => item && typeof item === "object")
     : [];
@@ -69,6 +73,33 @@ export function renderModelingSetupPanel(message, options = {}) {
   const warningHtml = [...setupWarnings, ...splitWarnings].map((warning) => (
     `<div class="modeling-setup-warning">${escapeHtml(warning)}</div>`
   )).join("");
+  const targetOptions = ["binary", "continuous", "multiclass"].map((value) => (
+    `<option value="${escapeHtml(value)}"${value === currentTargetType ? " selected" : ""}>${escapeHtml(value)}</option>`
+  )).join("");
+  const recipeOptions = eligibleAlgorithms.map((recipe) => {
+    const checked = selectedRecipes.includes(recipe);
+    const pmmlText = supportedPmml.has(recipe) ? "PMML" : "原生";
+    return `<label class="modeling-recipe-option">
+      <input type="checkbox" class="modeling-recipe-pick" value="${escapeHtml(recipe)}"${checked ? " checked" : ""}${disabledAttr} />
+      <span>${escapeHtml(recipe)}</span>
+      <small>${escapeHtml(pmmlText)}</small>
+    </label>`;
+  }).join("");
+  const setupControlsHtml = `<div class="modeling-setup-controls">
+    <label>目标类型
+      <select class="modeling-target-select"${disabledAttr} data-current-target-type="${escapeHtml(currentTargetType)}">${targetOptions}</select>
+    </label>
+    <label>调参轮数
+      <input type="number" class="modeling-n-trials-input" min="1" max="200" step="1" value="${escapeHtml(nTrials === "-" ? "" : nTrials)}"${disabledAttr} data-current-n-trials="${escapeHtml(nTrials === "-" ? "" : nTrials)}" />
+    </label>
+    ${recipeOptions ? `<div class="modeling-recipe-control" data-current-recipes="${escapeHtml(selectedRecipes.join(","))}">
+      <span>训练算法</span>
+      <div class="modeling-recipe-options">${recipeOptions}</div>
+    </div>` : ""}
+    <label class="modeling-override-reason">变更原因
+      <textarea class="modeling-override-reason-input" rows="2" placeholder="调整目标类型、算法或调参轮数时必填"${disabledAttr}></textarea>
+    </label>
+  </div>`;
   const optionRows = [
     { value: "", label: "不使用权重" },
     ...uniqueCandidates.map((value) => ({ value, label: value })),
@@ -109,6 +140,7 @@ export function renderModelingSetupPanel(message, options = {}) {
       <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
     </div>
     <div class="modeling-spec-grid">${specChips}</div>
+    ${setupControlsHtml}
     ${algorithmHtml ? `<div class="modeling-algorithm-grid">${algorithmHtml}</div>` : ""}
     ${splitCountsHtml ? `<div class="modeling-split-summary">
       <div class="modeling-section-label">样本切分 · ${escapeHtml(String(splitSummary?.split_col || "split"))}</div>
@@ -118,8 +150,8 @@ export function renderModelingSetupPanel(message, options = {}) {
     <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
     ${diagnosticsHtml ? `<div class="modeling-weight-diagnostics">${diagnosticsHtml}</div>` : ""}
     <div class="modeling-setup-foot">
-      <span>权重列不进入特征。</span>
-      <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用权重设置" : "历史规格"}</button>
+      <span>权重列不进入特征;目标/算法/调参调整会重算后续步骤。</span>
+      <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用建模设置" : "历史规格"}</button>
     </div>
   </div>`;
 }
@@ -136,11 +168,19 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     setActionStatus("这是历史建模规格,请使用最新待确认步骤调整。", "error");
     return;
   }
-  const picked = form.querySelector(".modeling-weight-pick:checked");
-  const sampleWeightCol = picked ? String(picked.value || "").trim() : "";
-  const current = String(form.dataset.modelingCurrentWeight || "").trim();
-  if (sampleWeightCol === current) {
-    setActionStatus("样本权重设置未变化。", "info");
+  const adjustParams = collectModelingSetupAdjustParams(form);
+  if (!Object.keys(adjustParams).length) {
+    setActionStatus("建模设置未变化。", "info");
+    return;
+  }
+  const reason = String(form.querySelector(".modeling-override-reason-input")?.value || "").trim();
+  const structuralKeys = ["target_type", "recipes", "n_trials"];
+  if (Array.isArray(adjustParams.recipes) && !adjustParams.recipes.length) {
+    setActionStatus("请至少选择一个训练算法。", "error");
+    return;
+  }
+  if (structuralKeys.some((key) => Object.prototype.hasOwnProperty.call(adjustParams, key)) && reason.length < 4) {
+    setActionStatus("调整目标类型、算法或调参轮数时请填写变更原因。", "error");
     return;
   }
   const expectedStepId = form.dataset.modelingGateStepId || "";
@@ -153,8 +193,8 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     const result = await api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
       body: JSON.stringify({
-        content: "调整样本权重",
-        adjust_params: { sample_weight_col: sampleWeightCol },
+        content: reason ? `调整建模规格：${reason}` : "调整建模规格",
+        adjust_params: adjustParams,
         expected_step_id: expectedStepId,
         acceptance_mode: typeof context.agentAcceptanceModeValue === "function"
           ? context.agentAcceptanceModeValue()
@@ -171,6 +211,38 @@ export async function submitModelingWeightAdjust(button, context = {}) {
     button.disabled = false;
     setActionStatus(error?.message || "调整样本权重失败", "error");
   }
+}
+
+function collectModelingSetupAdjustParams(form) {
+  const params = {};
+  const target = form.querySelector(".modeling-target-select");
+  if (target) {
+    const value = String(target.value || "").trim();
+    const current = String(target.getAttribute("data-current-target-type") || "").trim();
+    if (value && value !== current) params.target_type = value;
+  }
+  const nTrials = form.querySelector(".modeling-n-trials-input");
+  if (nTrials) {
+    const value = Number(nTrials.value);
+    const current = Number(nTrials.getAttribute("data-current-n-trials") || NaN);
+    if (Number.isFinite(value) && value !== current) params.n_trials = value;
+  }
+  const recipeControl = form.querySelector(".modeling-recipe-control");
+  if (recipeControl) {
+    const selected = [...recipeControl.querySelectorAll(".modeling-recipe-pick:checked")]
+      .map((input) => String(input.value || "").trim())
+      .filter(Boolean);
+    const current = String(recipeControl.dataset.currentRecipes || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (selected.join(",") !== current.join(",")) params.recipes = selected;
+  }
+  const picked = form.querySelector(".modeling-weight-pick:checked");
+  const sampleWeightCol = picked ? String(picked.value || "").trim() : "";
+  const currentWeight = String(form.dataset.modelingCurrentWeight || "").trim();
+  if (sampleWeightCol !== currentWeight) params.sample_weight_col = sampleWeightCol;
+  return params;
 }
 
 export function handleModelingWeightAdjustClick(event, context = {}) {

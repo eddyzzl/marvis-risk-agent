@@ -1304,6 +1304,55 @@
   color: var(--text, #111827);
   font-size: 12px;
 }
+.modeling-setup-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  padding: 10px 12px 0;
+}
+.modeling-setup-controls label,
+.modeling-recipe-control {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+.modeling-setup-controls select,
+.modeling-setup-controls input,
+.modeling-setup-controls textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface, #fff);
+  color: var(--text, #111827);
+  font: inherit;
+  padding: 7px 8px;
+}
+.modeling-setup-controls textarea {
+  resize: vertical;
+}
+.modeling-recipe-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.modeling-recipe-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  color: var(--text, #111827);
+}
+.modeling-recipe-option small {
+  color: var(--text-muted, #6b7280);
+}
+.modeling-override-reason {
+  grid-column: 1 / -1;
+}
 .modeling-weight-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

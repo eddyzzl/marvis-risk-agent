@@ -96,7 +96,12 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert 'class="modeling-weight-pick"' in module_js
     assert "data-modeling-gate-step-id" in module_js
     assert "function submitModelingWeightAdjust(button)" in app_js
-    assert "sample_weight_col: sampleWeightCol" in module_js
+    assert "collectModelingSetupAdjustParams" in module_js
+    assert "params.sample_weight_col" in module_js
+    assert "modeling-target-select" in module_js
+    assert "modeling-recipe-pick" in module_js
+    assert "modeling-n-trials-input" in module_js
+    assert "modeling-override-reason-input" in module_js
     assert "sample_weight_diagnostics" in module_js
     assert "modeling-weight-diagnostic" in module_js
     assert "modeling-spec-grid" in module_js
@@ -107,6 +112,8 @@ def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     assert ".modeling-spec-grid" in css
     assert ".modeling-algorithm-grid" in css
     assert ".modeling-split-grid" in css
+    assert ".modeling-setup-controls" in css
+    assert ".modeling-recipe-options" in css
     assert ".modeling-weight-options" in css
     assert ".modeling-weight-diagnostics" in css
 
@@ -158,6 +165,10 @@ def test_modeling_setup_weight_picker_renders_candidates():
         assert.equal(html.includes('value="weight" checked'), true);
         assert.equal(html.includes("sample_weight"), true);
         assert.equal(html.includes("lgb/xgb"), true);
+        assert.equal(html.includes("modeling-target-select"), true);
+        assert.equal(html.includes("modeling-recipe-pick"), true);
+        assert.equal(html.includes("modeling-n-trials-input"), true);
+        assert.equal(html.includes("变更原因"), true);
         assert.equal(html.includes("候选特征"), true);
         assert.equal(html.includes("24"), true);
         assert.equal(html.includes("PMML 可导出"), true);
@@ -328,10 +339,40 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
             return {{ messages: [{{ id: "m2" }}] }};
           }},
         }};
-        await submitModelingWeightAdjust({{ disabled: false, closest: () => ({{
-          dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
-          querySelector: () => ({{ value: "weight" }}),
-        }}) }}, context);
+        function makeForm({{
+          currentWeight = "",
+          pickedWeight = "",
+          currentTargetType = "binary",
+          targetType = "binary",
+          currentTrials = "12",
+          trials = "12",
+          currentRecipes = "lgb",
+          selectedRecipes = ["lgb"],
+          reason = "",
+        }} = {{}}) {{
+          const recipeInputs = selectedRecipes.map((value) => ({{ value }}));
+          return {{
+            dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: currentWeight }},
+            querySelector: (selector) => {{
+              if (selector === ".modeling-target-select") {{
+                return {{ value: targetType, getAttribute: (name) => name === "data-current-target-type" ? currentTargetType : "" }};
+              }}
+              if (selector === ".modeling-n-trials-input") {{
+                return {{ value: trials, getAttribute: (name) => name === "data-current-n-trials" ? currentTrials : "" }};
+              }}
+              if (selector === ".modeling-recipe-control") {{
+                return {{
+                  dataset: {{ currentRecipes }},
+                  querySelectorAll: (innerSelector) => innerSelector === ".modeling-recipe-pick:checked" ? recipeInputs : [],
+                }};
+              }}
+              if (selector === ".modeling-weight-pick:checked") return {{ value: pickedWeight }};
+              if (selector === ".modeling-override-reason-input") return {{ value: reason }};
+              return null;
+            }},
+          }};
+        }}
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ pickedWeight: "weight" }}) }}, context);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1].adjust_params, {{ sample_weight_col: "weight" }});
         assert.equal(calls[0][1].expected_step_id, "gate-modeling");
@@ -339,11 +380,35 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
 
-        await submitModelingWeightAdjust({{ disabled: false, closest: () => ({{
-          dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "weight" }},
-          querySelector: () => ({{ value: "weight" }}),
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ currentWeight: "weight", pickedWeight: "weight" }}) }}, context);
+        assert.deepEqual(statuses.at(-1), ["建模设置未变化。", "info"]);
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
+          currentRecipes: "lgb",
+          selectedRecipes: [],
+          reason: "清空算法",
         }}) }}, context);
-        assert.deepEqual(statuses.at(-1), ["样本权重设置未变化。", "info"]);
+        assert.deepEqual(statuses.at(-1), ["请至少选择一个训练算法。", "error"]);
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
+          targetType: "continuous",
+          selectedRecipes: ["regressor"],
+          currentRecipes: "lgb",
+          trials: "20",
+          reason: "",
+        }}) }}, context);
+        assert.deepEqual(statuses.at(-1), ["调整目标类型、算法或调参轮数时请填写变更原因。", "error"]);
+        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
+          targetType: "continuous",
+          selectedRecipes: ["regressor"],
+          currentRecipes: "lgb",
+          trials: "20",
+          reason: "目标是连续金额预测",
+        }}) }}, context);
+        assert.deepEqual(calls.at(-1)[1].adjust_params, {{
+          target_type: "continuous",
+          n_trials: 20,
+          recipes: ["regressor"],
+        }});
+        assert.equal(calls.at(-1)[1].content, "调整建模规格：目标是连续金额预测");
         const eventCalls = [];
         const eventContext = {{ ...context, api: async (url, options) => {{
           eventCalls.push([url, JSON.parse(options.body)]);
@@ -351,7 +416,17 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
         }} }};
         const eventForm = {{
           dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
-          querySelector: () => ({{ value: "sample_weight" }}),
+          querySelector: (selector) => {{
+            if (selector === ".modeling-target-select") return {{ value: "binary", getAttribute: () => "binary" }};
+            if (selector === ".modeling-n-trials-input") return {{ value: "12", getAttribute: () => "12" }};
+            if (selector === ".modeling-recipe-control") return {{
+              dataset: {{ currentRecipes: "lgb" }},
+              querySelectorAll: () => [{{ value: "lgb" }}],
+            }};
+            if (selector === ".modeling-weight-pick:checked") return {{ value: "sample_weight" }};
+            if (selector === ".modeling-override-reason-input") return {{ value: "" }};
+            return null;
+          }},
         }};
         await handleModelingWeightAdjustClick({{
           target: {{

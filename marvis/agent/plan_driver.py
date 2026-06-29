@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from marvis.agent.adjust_specs import adjust_param_error, has_sample_weight_adjust, has_screen_adjust
+from marvis.agent.adjust_specs import adjust_param_error, has_modeling_setup_adjust, has_screen_adjust
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_payloads import build_model_delivery_payload, screen_known_features
@@ -195,9 +195,9 @@ class PlanDriver:
             if gate is None or gate.id != str(expected_step_id):
                 raise DriverError("当前待确认步骤已变化,请刷新后使用最新步骤的控件。")
         screen_adjust = has_screen_adjust(adjust_params)
-        sample_weight_adjust = has_sample_weight_adjust(adjust_params)
+        modeling_setup_adjust = has_modeling_setup_adjust(adjust_params)
         dedup_adjust = bool(dedup_strategies)
-        if selection is None and not dedup_adjust and not screen_adjust and not sample_weight_adjust:
+        if selection is None and not dedup_adjust and not screen_adjust and not modeling_setup_adjust:
             return
         if gate is None:
             raise DriverError("当前没有待确认步骤,无法应用该控件。")
@@ -207,7 +207,7 @@ class PlanDriver:
             raise DriverError("该控件只适用于特征筛选确认步骤。")
         if dedup_adjust and not _gate_depends_on_tool(plan, gate, "confirm_join"):
             raise DriverError("该控件只适用于拼接去重确认步骤。")
-        if sample_weight_adjust and not _gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
+        if modeling_setup_adjust and not _gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
             raise DriverError("该控件只适用于建模规格确认步骤。")
 
     def _needs_dedup_features(self, plan, gate) -> list[str]:

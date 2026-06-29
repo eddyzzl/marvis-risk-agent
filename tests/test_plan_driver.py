@@ -738,6 +738,67 @@ def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(
     assert turn.messages[-1].metadata["modeling_setup"]["sample_weight_col"] == "weight"
 
 
+def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "n_trials": 12,
+        "sample_weight_col": "",
+        "feature_cols": ["x1", "x2"],
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "n_trials": 12,
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+        {
+            "target_type": "continuous",
+            "recipe": "regressor",
+            "recipes": ["regressor"],
+            "n_trials": 20,
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1", "x2"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整建模规格",
+        run_seq=1,
+        adjust_params={"target_type": "continuous", "recipes": ["regressor"], "n_trials": 20},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == [
+        "choose_modeling_spec",
+        "screen_features",
+        "choose_modeling_spec",
+        "screen_features",
+    ]
+    assert runner.calls[2][1]["target_type"] == "continuous"
+    assert runner.calls[2][1]["recipes"] == ["regressor"]
+    assert runner.calls[2][1]["n_trials"] == 20
+    assert turn.messages[-1].metadata["modeling_setup"]["target_type"] == "continuous"
+    assert turn.messages[-1].metadata["modeling_setup"]["recipes"] == ["regressor"]
+    assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 20
+
+
 def test_driver_sample_weight_adjust_rejects_unknown_candidate_without_reset(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
