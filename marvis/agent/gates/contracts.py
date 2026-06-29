@@ -200,6 +200,7 @@ class FailureEnvelope:
     editable_input_schema: dict[str, Any] = field(default_factory=dict)
     suggested_actions: tuple[str, ...] = ()
     downstream_reset: str = "dependent_steps"
+    downstream_reset_steps: tuple[str, ...] = ()
     schema_version: str = FAILURE_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -212,6 +213,7 @@ class FailureEnvelope:
             "editable_input_schema": dict(self.editable_input_schema),
             "suggested_actions": list(self.suggested_actions),
             "downstream_reset": self.downstream_reset,
+            "downstream_reset_steps": list(self.downstream_reset_steps),
         }
         if self.stale_token:
             data["stale_token"] = self.stale_token
@@ -229,6 +231,11 @@ class FailureEnvelope:
             editable_input_schema=_dict(payload.get("editable_input_schema")),
             suggested_actions=tuple(_clean_str(item) for item in payload.get("suggested_actions") or [] if _clean_str(item)),
             downstream_reset=_clean_str(payload.get("downstream_reset") or "dependent_steps"),
+            downstream_reset_steps=tuple(
+                _clean_str(item)
+                for item in payload.get("downstream_reset_steps") or []
+                if _clean_str(item)
+            ),
         )
 
 
@@ -333,12 +340,28 @@ def extract_gate_envelope(gate: Mapping[str, Any]) -> GateEnvelope:
     return GateEnvelope.from_gate_message(gate)
 
 
-def build_failure_envelope(*, plan_id: str, step_id: str | None, run_seq: int, message: str) -> FailureEnvelope:
+def build_failure_envelope(
+    *,
+    plan_id: str,
+    step_id: str | None,
+    run_seq: int,
+    message: str,
+    step_inputs: Mapping[str, Any] | None = None,
+    downstream_reset_steps: tuple[str, ...] = (),
+    error_kind: str = "execution",
+    retryable: bool = True,
+) -> FailureEnvelope:
+    editable_schema = _editable_input_schema(step_inputs or {})
+    actions = ("retry", "adjust", "replan", "halt") if retryable else ("replan", "halt")
     return FailureEnvelope(
         failed_step_id=step_id,
+        error_kind=error_kind,
         message=message,
+        retryable=retryable,
         stale_token=f"{plan_id}:{step_id or 'none'}:{run_seq}",
-        suggested_actions=("retry", "adjust", "replan", "halt"),
+        editable_input_schema=editable_schema,
+        suggested_actions=actions,
+        downstream_reset_steps=downstream_reset_steps,
     )
 
 
@@ -349,3 +372,38 @@ def _stale_token(meta: Mapping[str, Any]) -> str | None:
     if not plan_id:
         return None
     return f"{plan_id}:{step_id}:{run_seq or '0'}"
+
+
+def _editable_input_schema(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    properties = {
+        str(key): _schema_for_value(value)
+        for key, value in inputs.items()
+        if str(key)
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": True,
+    }
+
+
+def _schema_for_value(value: Any) -> dict[str, Any]:
+    schema: dict[str, Any] = {"default": value}
+    if isinstance(value, bool):
+        schema["type"] = "boolean"
+    elif isinstance(value, int) and not isinstance(value, bool):
+        schema["type"] = "integer"
+    elif isinstance(value, float):
+        schema["type"] = "number"
+    elif isinstance(value, str):
+        schema["type"] = "string"
+    elif isinstance(value, list):
+        schema["type"] = "array"
+    elif isinstance(value, Mapping):
+        schema["type"] = "object"
+    elif value is None:
+        schema["type"] = "null"
+    else:
+        schema["type"] = "string"
+        schema["default"] = str(value)
+    return schema

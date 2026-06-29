@@ -66,3 +66,25 @@ def test_failure_envelope_round_trips_retry_contract():
     assert payload["schema_version"] == "failure.v1"
     assert payload["retryable"] is False
     assert FailureEnvelope.from_dict(payload).to_dict() == payload
+
+
+def test_failure_envelope_round_trips_editable_inputs_and_reset_steps():
+    envelope = FailureEnvelope(
+        failed_step_id="train",
+        message="training failed",
+        editable_input_schema={
+            "type": "object",
+            "properties": {
+                "num_leaves": {"type": "integer", "default": 31},
+            },
+            "additionalProperties": True,
+        },
+        downstream_reset_steps=("train", "report"),
+        suggested_actions=("retry", "replan", "halt"),
+    )
+
+    payload = envelope.to_dict()
+
+    assert payload["editable_input_schema"]["properties"]["num_leaves"]["default"] == 31
+    assert payload["downstream_reset_steps"] == ["train", "report"]
+    assert FailureEnvelope.from_dict(payload).to_dict() == payload

@@ -49,6 +49,22 @@ class FakeRunner:
         return ToolResult(ok=True, output=self.outputs.pop(0), error=None, error_kind=None, duration_ms=1)
 
 
+class FailingRunner:
+    def __init__(self):
+        self.calls = []
+        self._tools = FakeTools()
+
+    def invoke(self, ref, inputs, *, task_id):
+        self.calls.append((ref.tool, inputs))
+        return ToolResult(
+            ok=False,
+            output=None,
+            error="bad threshold",
+            error_kind="validation",
+            duration_ms=1,
+        )
+
+
 class FakeHooks:
     def dispatch(self, event, payload, *, task_id):
         return []
@@ -196,6 +212,46 @@ def test_driver_resume_confirm_runs_to_done(tmp_path):
     loaded = repo.load_plan("plan-1")
     assert loaded.status == PlanStatus.DONE
     assert all(s.status == StepStatus.DONE for s in loaded.steps)
+
+
+def test_driver_failed_message_carries_retry_contract(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("screen", index=0, tool="screen_features", phase="特征"),
+            _step("train", index=1, tool="train_model", depends_on=["screen"], phase="建模"),
+        ],
+    )
+    plan.steps[0].inputs = {"leakage_ks": 0.4, "max_missing_rate": 0.95}
+    repo.create_plan(plan)
+    executor = PlanExecutor(repo, FailingRunner(), Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+    repo.confirm_plan("plan-1")
+
+    turn = driver._run_and_handle("plan-1", run_seq=3)
+
+    assert turn.status == PlanStatus.FAILED.value
+    msg = turn.messages[0]
+    assert msg.stage == "error"
+    envelope = msg.metadata["failure_envelope"]
+    assert envelope["schema_version"] == "failure.v1"
+    assert envelope["failed_step_id"] == "screen"
+    assert envelope["retryable"] is True
+    assert envelope["stale_token"] == "plan-1:screen:3"
+    assert envelope["downstream_reset_steps"] == ["screen", "train"]
+    assert envelope["editable_input_schema"]["properties"]["leakage_ks"] == {
+        "default": 0.4,
+        "type": "number",
+    }
 
 
 def test_driver_resume_non_confirm_holds_at_gate(tmp_path):
