@@ -22,6 +22,7 @@ from marvis.agent_memory.policy import (
     classify_memory_candidate,
 )
 from marvis.db import _now, connect
+from marvis.redaction import redact_text, redact_value
 
 
 AUDIT_EVENT_TYPES = (
@@ -68,7 +69,15 @@ class AgentMemoryStore:
             return self.reject(candidate, decision, task_id=task_id)
         entry_id = uuid.uuid4().hex
         now = _now()
-        payload_json = _dump_json_object(candidate.payload)
+        safe_summary = redact_text(candidate.summary)
+        safe_payload = redact_value(candidate.payload)
+        safe_reason = redact_text(candidate.reason)
+        redacted_count = (
+            int(safe_payload.redacted_count)
+            + int(safe_summary != candidate.summary)
+            + int(safe_reason != candidate.reason)
+        )
+        payload_json = _dump_json_object(safe_payload.value)
         with connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -83,12 +92,12 @@ class AgentMemoryStore:
                 (
                     entry_id,
                     candidate.memory_type,
-                    candidate.summary,
+                    safe_summary,
                     payload_json,
                     candidate.source_task_id,
                     candidate.source_message_id,
                     candidate.confidence,
-                    candidate.reason,
+                    safe_reason,
                     now,
                     now,
                 ),
@@ -99,7 +108,7 @@ class AgentMemoryStore:
                 "create",
                 task_id=task_id or candidate.source_task_id,
                 message_id=candidate.source_message_id,
-                details={"memory_type": candidate.memory_type},
+                details={"memory_type": candidate.memory_type, "redacted_count": redacted_count},
             )
             row = self._select_entry(conn, entry_id, include_deleted=True)
         return _row_to_entry(row)
@@ -253,35 +262,8 @@ class AgentMemoryStore:
         return [_row_to_event(row) for row in rows]
 
     def create_distillation(self, distillation: MemoryDistillation) -> MemoryDistillation:
-        now = _now()
-        created_at = distillation.created_at or now
-        updated_at = distillation.updated_at or now
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO memory_distillations
-                (
-                    id, category, scope_key, distilled_summary, structured_json,
-                    source_memory_ids_json, support_count, confidence,
-                    superseded_by, status, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    distillation.id,
-                    normalize_memory_type(distillation.category),
-                    distillation.scope_key,
-                    distillation.distilled_summary,
-                    _dump_json_object(distillation.structured),
-                    json.dumps(list(distillation.source_memory_ids), ensure_ascii=False, separators=(",", ":")),
-                    int(distillation.support_count),
-                    distillation.confidence,
-                    distillation.superseded_by,
-                    distillation.status,
-                    created_at,
-                    updated_at,
-                ),
-            )
+            redacted_count = self._insert_distillation(conn, distillation)
             self._append_distillation_event(
                 conn,
                 distillation.id,
@@ -290,9 +272,52 @@ class AgentMemoryStore:
                     "category": distillation.category,
                     "scope_key": distillation.scope_key,
                     "support_count": distillation.support_count,
+                    "redacted_count": redacted_count,
                 },
             )
             row = self._select_distillation(conn, distillation.id)
+        return _row_to_distillation(row)
+
+    def replace_active_distillation_with_audit(
+        self,
+        active_id: str,
+        candidate: MemoryDistillation,
+    ) -> MemoryDistillation:
+        now = _now()
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, active_id)
+            redacted_count = self._insert_distillation(conn, candidate)
+            self._append_distillation_event(
+                conn,
+                candidate.id,
+                "create",
+                details={
+                    "category": candidate.category,
+                    "scope_key": candidate.scope_key,
+                    "support_count": candidate.support_count,
+                    "redacted_count": redacted_count,
+                },
+            )
+            cursor = conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET superseded_by = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                   AND status = 'active'
+                   AND superseded_by IS NULL
+                """,
+                (candidate.id, now, active_id),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError("active distillation changed while replacing")
+            self._append_distillation_event(
+                conn,
+                active_id,
+                "supersede",
+                details={"superseded_by": candidate.id},
+            )
+            row = self._select_distillation(conn, candidate.id)
         return _row_to_distillation(row)
 
     def get_distillation(self, distillation_id: str) -> MemoryDistillation:
@@ -385,6 +410,57 @@ class AgentMemoryStore:
                 "restore",
                 details={},
             )
+
+    def rollback_active_distillation_with_audit(
+        self,
+        distillation_id: str,
+        *,
+        predecessor_id: str | None,
+    ) -> MemoryDistillation:
+        now = _now()
+        with connect(self.db_path) as conn:
+            self._select_distillation(conn, distillation_id)
+            if predecessor_id is not None:
+                self._select_distillation(conn, predecessor_id)
+                cursor = conn.execute(
+                    """
+                    UPDATE memory_distillations
+                       SET superseded_by = NULL,
+                           updated_at = ?
+                     WHERE id = ?
+                       AND superseded_by = ?
+                    """,
+                    (now, predecessor_id, distillation_id),
+                )
+                if cursor.rowcount == 0:
+                    raise RuntimeError("predecessor distillation changed while rolling back")
+                self._append_distillation_event(
+                    conn,
+                    predecessor_id,
+                    "restore",
+                    details={},
+                )
+            cursor = conn.execute(
+                """
+                UPDATE memory_distillations
+                   SET status = ?,
+                       updated_at = ?
+                 WHERE id = ?
+                   AND status = 'active'
+                   AND superseded_by IS NULL
+                """,
+                ("rolled_back", now, distillation_id),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError("active distillation changed while rolling back")
+            self._append_distillation_event(
+                conn,
+                distillation_id,
+                "rollback",
+                details={"status": "rolled_back"},
+            )
+            row = self._select_distillation(conn, distillation_id)
+        return _row_to_distillation(row)
 
     def update_distillation_support(self, distillation_id: str, support_count: int) -> MemoryDistillation:
         now = _now()
@@ -546,6 +622,8 @@ class AgentMemoryStore:
             entry = self._select_entry(conn, entry_id, include_deleted=False)
             if entry["status"] == "rejected":
                 raise ValueError("rejected memory entries are terminal")
+            if entry["status"] != "active":
+                raise ValueError("only active memory entries can be recorded as used")
             self._append_event(
                 conn,
                 entry_id,
@@ -671,6 +749,44 @@ class AgentMemoryStore:
         if row is None:
             raise KeyError(f"Memory distillation not found: {distillation_id}")
         return row
+
+    def _insert_distillation(
+        self,
+        conn: sqlite3.Connection,
+        distillation: MemoryDistillation,
+    ) -> int:
+        now = _now()
+        created_at = distillation.created_at or now
+        updated_at = distillation.updated_at or now
+        safe_summary = redact_text(distillation.distilled_summary)
+        safe_structured = redact_value(distillation.structured)
+        redacted_count = int(safe_structured.redacted_count) + int(safe_summary != distillation.distilled_summary)
+        conn.execute(
+            """
+            INSERT INTO memory_distillations
+            (
+                id, category, scope_key, distilled_summary, structured_json,
+                source_memory_ids_json, support_count, confidence,
+                superseded_by, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                distillation.id,
+                normalize_memory_type(distillation.category),
+                distillation.scope_key,
+                safe_summary,
+                _dump_json_object(safe_structured.value),
+                json.dumps(list(distillation.source_memory_ids), ensure_ascii=False, separators=(",", ":")),
+                int(distillation.support_count),
+                distillation.confidence,
+                distillation.superseded_by,
+                distillation.status,
+                created_at,
+                updated_at,
+            ),
+        )
+        return redacted_count
 
     def _append_event(
         self,

@@ -19,9 +19,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
+from marvis.agent.adjust_specs import adjust_param_error, has_sample_weight_adjust, has_screen_adjust
+from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
+from marvis.agent.gate_adapters import render_gate_dependencies
+from marvis.agent.gate_payloads import screen_known_features
 from marvis.agent.instruction_router import route_instruction
+from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
 
@@ -30,10 +34,19 @@ _CONFIRM = re.compile(
     r"(确认|确定|没问题|可以|就这样|同意|好的|继续|开始|对的?|ok|yes|go|proceed|looks good|sounds good)",
     re.IGNORECASE,
 )
-
-
+_NEGATED_CONFIRM = re.compile(
+    r"(先别|别执行|别继续|别开始|不要|不用|不需要|不执行|不继续|先不|暂不|暂停|停止|取消|"
+    r"不开始|不确认|不可以|hold on|do\s*not|don't|dont|not\s+(start|continue|proceed|go)|stop|cancel|wait)",
+    re.IGNORECASE,
+)
 def is_confirm(text: str) -> bool:
-    return bool(_CONFIRM.search(text or ""))
+    raw = text or ""
+    if _NEGATED_CONFIRM.search(raw):
+        return False
+    if not _CONFIRM.search(raw):
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    return not _NEGATED_CONFIRM.search(compact)
 
 
 def _parse_dedup_instruction(text: str) -> str | None:
@@ -43,6 +56,8 @@ def _parse_dedup_instruction(text: str) -> str | None:
     so an unrelated instruction isn't misread as a strategy. first = keep the first row per
     key, last = keep the last (spec §6 conflict resolution)."""
     low = (text or "").lower()
+    if re.search(r"(别|不要|不用|无需|不需要|勿|取消|暂停|停止|do\s*not|don't|dont|not\s+use)", text or "", re.IGNORECASE):
+        return None
     if not any(token in low for token in ("去重", "dedup", "策略", "保留", "重复")):
         return None
     if "first" in low or "首" in text or "第一" in text or "前" in text:
@@ -97,7 +112,17 @@ class PlanDriver:
         )
         return DriverTurn(plan.id, plan.status.value, [self._plan_overview_message(plan)])
 
-    def resume(self, *, plan_id, user_text, run_seq=0, selection=None, dedup_strategies=None) -> DriverTurn:
+    def resume(
+        self,
+        *,
+        plan_id,
+        user_text,
+        run_seq=0,
+        selection=None,
+        dedup_strategies=None,
+        adjust_params=None,
+        expected_step_id=None,
+    ) -> DriverTurn:
         """Advance the plan given a user reply. Two gate kinds are handled: the
         plan-level overview gate (plan not yet started) and per-step gates.
 
@@ -110,6 +135,9 @@ class PlanDriver:
         the §4 join dedup picker. At a join gate it re-confirms the ``confirm_join``
         dependency with those strategies (resolving non-unique-key conflicts) and
         re-pauses at the gate, now clear, for the final execute confirm.
+
+        ``adjust_params`` (optional): structured manual control overrides. Unlike
+        free-text instructions, these do not require an LLM router.
         """
         plan = self._repo.load_plan(plan_id)
         # Plan-level overview gate: nothing has run yet → 「开始」 begins execution.
@@ -120,11 +148,21 @@ class PlanDriver:
             return self._handle_instruction(plan, None, user_text, run_seq)
         # Per-step needs_confirmation gate.
         gate = self._awaiting_step(plan)
+        self._validate_gate_control(
+            plan,
+            gate,
+            expected_step_id=expected_step_id,
+            selection=selection,
+            dedup_strategies=dedup_strategies,
+            adjust_params=adjust_params,
+        )
         # Join dedup picker: re-confirm with the chosen strategies, then re-pause at the
         # (now conflict-free) gate — do NOT confirm-execute yet; the user confirms after.
         if dedup_strategies and gate is not None:
             self._apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
+        if adjust_params and gate is not None:
+            return self._apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
             if gate is not None:
                 if selection is not None:
@@ -142,6 +180,35 @@ class PlanDriver:
                     self._apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
                     return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
+
+    def _validate_gate_control(
+        self,
+        plan: Plan,
+        gate: PlanStep | None,
+        *,
+        expected_step_id: str | None,
+        selection,
+        dedup_strategies,
+        adjust_params,
+    ) -> None:
+        if expected_step_id:
+            if gate is None or gate.id != str(expected_step_id):
+                raise DriverError("当前待确认步骤已变化,请刷新后使用最新步骤的控件。")
+        screen_adjust = has_screen_adjust(adjust_params)
+        sample_weight_adjust = has_sample_weight_adjust(adjust_params)
+        dedup_adjust = bool(dedup_strategies)
+        if selection is None and not dedup_adjust and not screen_adjust and not sample_weight_adjust:
+            return
+        if gate is None:
+            raise DriverError("当前没有待确认步骤,无法应用该控件。")
+        if not expected_step_id:
+            raise DriverError("该控件缺少待确认步骤校验信息,请刷新后重试。")
+        if (selection is not None or screen_adjust) and not _gate_depends_on_tool(plan, gate, "screen_features"):
+            raise DriverError("该控件只适用于特征筛选确认步骤。")
+        if dedup_adjust and not _gate_depends_on_tool(plan, gate, "confirm_join"):
+            raise DriverError("该控件只适用于拼接去重确认步骤。")
+        if sample_weight_adjust and not _gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
+            raise DriverError("该控件只适用于建模规格确认步骤。")
 
     def _needs_dedup_features(self, plan, gate) -> list[str]:
         """Feature ids the gate's confirm_join dependency flagged as needing a dedup
@@ -201,11 +268,12 @@ class PlanDriver:
             output = self._safe_output(dep_id)
             if not isinstance(output, dict):
                 continue
-            known = _screen_known_features(output)
+            known = screen_known_features(output)
             chosen = [f for f in dict.fromkeys(sel) if not known or f in known]
             if not chosen:
                 continue
-            self._repo.store_step_output(dep_id, {**output, "selected": chosen})
+            dep.output_ref = self._repo.store_step_output(dep_id, {**output, "selected": chosen})
+            self._repo.update_step(dep)
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
@@ -262,33 +330,86 @@ class PlanDriver:
         """Re-run ALL of the gate's analysis dependencies with overridden parameters, then
         re-pause at the gate showing the recomputed result. Each override is applied only
         to a dependency whose inputs declare that key (so a param meant for one step isn't
-        forced onto another); every dependency is reset so the recompute is consistent."""
+        forced onto another); any downstream completed outputs are reset so the recompute
+        cannot mix new upstream parameters with stale models/reports."""
         deps = [step for step in (_find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
         if not deps:
             return self._instruction_message(plan, gate, run_seq, "没找到可调整的上一步,请重新确认。")
         params = params or {}
+        validation_error = adjust_param_error(params)
+        if validation_error:
+            return self._instruction_message(plan, gate, run_seq, validation_error)
         # Apply each override only to a dep that ALREADY declares that input key, and to
         # EVERY such dep (per-key fan-out). This never injects a schema-forbidden key (the
         # tools use additionalProperties:false, so an undeclared key would fail validation
         # and FAIL the plan), and keeps sibling deps that share a param consistent.
         primary = None
+        adjusted_ids: list[str] = []
         for dep in deps:
             overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
+            if "sample_weight_col" in overrides:
+                if dep.tool_ref.tool != "choose_modeling_spec":
+                    overrides.pop("sample_weight_col", None)
+                else:
+                    sample_weight_error = self._sample_weight_adjust_error(dep.id, overrides["sample_weight_col"])
+                    if sample_weight_error:
+                        return self._instruction_message(plan, gate, run_seq, sample_weight_error)
+            if not overrides:
+                continue
             self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), **overrides})
+            adjusted_ids.append(dep.id)
             if overrides and primary is None:
                 primary = dep
-        primary = primary or deps[0]
-        self._repo.reset_step(gate.id)
+        if primary is None:
+            available = sorted({str(key) for dep in deps for key in (dep.inputs or {}).keys()})
+            hint = f"可调整参数: {', '.join(available)}。" if available else "当前节点没有声明可调整参数。"
+            return self._instruction_message(
+                plan,
+                gate,
+                run_seq,
+                f"没有识别到可调整的参数,未重算。{hint}",
+            )
+        reset_ids = self._reset_downstream_steps(plan, adjusted_ids)
+        if gate.id not in reset_ids:
+            self._repo.reset_step(gate.id)
         turn = self._run_and_handle(plan.id, run_seq=run_seq)
         turn.messages.insert(
             0,
             DriverMessage(
                 "chat",
-                f"已按指令调整参数 {params} 并重算「{primary.title}」。",
+                f"已按指令调整参数 {dict(params)} 并重算「{primary.title}」。",
                 {"plan_id": plan.id, "step_id": primary.id, "run_seq": run_seq},
             ),
         )
         return turn
+
+    def _reset_downstream_steps(self, plan: Plan, root_ids: list[str]) -> set[str]:
+        downstream_ids = _downstream_step_ids(plan, root_ids)
+        reset_ids: set[str] = set()
+        for step in sorted(
+            (step for step in plan.steps if step.id in downstream_ids),
+            key=lambda item: (item.index, item.id),
+        ):
+            self._repo.reset_step(step.id)
+            reset_ids.add(step.id)
+        return reset_ids
+
+    def _sample_weight_adjust_error(self, step_id: str, value) -> str | None:
+        selected = str(value or "").strip()
+        if not selected:
+            return None
+        output = self._safe_output(step_id)
+        if not isinstance(output, dict):
+            return "缺少建模规格输出,无法调整样本权重列。"
+        candidates = [str(col) for col in (output.get("sample_weight_candidates") or []) if str(col).strip()]
+        current = str(output.get("sample_weight_col") or "").strip()
+        allowed = set(candidates)
+        if current:
+            allowed.add(current)
+        if selected not in allowed:
+            display = "、".join(candidates) if candidates else "无"
+            return f"样本权重列 `{selected}` 不在已检测候选列中,未重算。候选列:{display}。"
+        return None
 
     def _instruction_message(self, plan, gate, run_seq, text) -> DriverTurn:
         return DriverTurn(
@@ -364,37 +485,15 @@ class PlanDriver:
         for phase in order:
             lines.append(f"**{phase}**:{' → '.join(by_phase[phase])}")
         lines.append("确认「开始」后按计划执行。")
+        meta = {"plan_id": plan.id, "kind": "plan_overview"}
+        meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage(
-            "plan_overview", "\n".join(lines), {"plan_id": plan.id, "kind": "plan_overview"}
+            "plan_overview", "\n".join(lines), meta
         )
 
     def _compose_gate_message(self, plan: Plan, gate: PlanStep | None, *, run_seq) -> DriverMessage:
-        parts: list[str] = []
-        tables: list[dict] = []
-        screen: dict | None = None
-        confirm_join_o: dict | None = None
-        propose_join_o: dict | None = None
-        for dep_id in gate.depends_on if gate else []:
-            dep = _find_step(plan, dep_id)
-            if dep is None:
-                continue
-            output = self._safe_output(dep_id)
-            if output is None:
-                continue
-            text, dep_tables = render_tool_output(dep.tool_ref.tool, output)
-            if text:
-                parts.append(text)
-            tables.extend(dep_tables)
-            # Surface the structured screening result so the frontend can render the
-            # §4 interactive selection table (rows=features, metric cols, checkboxes).
-            # Pass-through of the tool output + the screen step id (so an edited
-            # selection can be confirmed back against it) + the gating thresholds.
-            if dep.tool_ref.tool == "screen_features":
-                screen = _screen_payload(output, dep)
-            elif dep.tool_ref.tool == "confirm_join":
-                confirm_join_o = output
-            elif dep.tool_ref.tool == "propose_join":
-                propose_join_o = output
+        rendered = render_gate_dependencies(plan, gate, self._safe_output)
+        parts = rendered.parts
         if not parts:
             parts.append("上一步已完成。")
         parts.append("确认请回复「确认」继续;要调整可直接说明。")
@@ -402,17 +501,18 @@ class PlanDriver:
             "plan_id": plan.id,
             "step_id": gate.id if gate else None,
             "run_seq": run_seq,
-            "tables": tables,
+            "tables": rendered.tables,
             "kind": "gate",  # marks a needs-confirmation gate (manual-mode confirm control)
         }
-        if screen is not None:
-            meta["screen"] = screen
-        # §4 join dedup picker: when confirm_join left features awaiting a dedup strategy
-        # (non-unique keys), surface them + their conflict counts so the frontend can
-        # render per-feature first/last pickers the user resolves before executing.
-        dedup = _dedup_payload(confirm_join_o, propose_join_o)
-        if dedup is not None:
-            meta["dedup"] = dedup
+        if rendered.output_refs:
+            meta["output_refs"] = rendered.output_refs
+        if rendered.screen is not None:
+            meta["screen"] = rendered.screen
+        if rendered.dedup is not None:
+            meta["dedup"] = rendered.dedup
+        if rendered.modeling_setup is not None:
+            meta["modeling_setup"] = rendered.modeling_setup
+        meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage("gate", "\n\n".join(parts), meta)
 
     def _compose_done_message(self, plan: Plan, *, run_seq) -> DriverMessage:
@@ -441,10 +541,17 @@ class PlanDriver:
     def _compose_failed_message(self, plan: Plan, *, run_seq) -> DriverMessage:
         failed = next((s for s in plan.steps if s.status == StepStatus.FAILED), None)
         detail = f"「{failed.title}」失败:{failed.error}" if failed and failed.error else "执行中断。"
+        meta = {"plan_id": plan.id, "step_id": failed.id if failed else None, "run_seq": run_seq}
+        meta["failure_envelope"] = build_failure_envelope(
+            plan_id=plan.id,
+            step_id=failed.id if failed else None,
+            run_seq=run_seq,
+            message=detail,
+        ).to_dict()
         return DriverMessage(
             "error",
             f"❌ {detail}",
-            {"plan_id": plan.id, "step_id": failed.id if failed else None, "run_seq": run_seq},
+            meta,
         )
 
     def _safe_output(self, step_id: str):
@@ -461,592 +568,28 @@ def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# tool -> table registry (decision #4 in the driver spec)
-# Each renderer turns a tool's raw output into (markdown text, [table dicts]).
-# Task differences land HERE; the driver loop above stays task-agnostic. A table
-# dict is {title, columns, rows} — the frontend maps it onto renderMetricTableSection.
-# ---------------------------------------------------------------------------
-def _fmt(value: Any) -> str:
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    return str(value)
+def _gate_depends_on_tool(plan: Plan, gate: PlanStep, tool: str) -> bool:
+    for dep_id in gate.depends_on or []:
+        dep = _find_step(plan, dep_id)
+        if dep is not None and dep.tool_ref.tool == tool:
+            return True
+    return False
 
 
-def _names(items) -> list[str]:
-    out = []
-    for item in items or []:
-        out.append(item[0] if isinstance(item, (list, tuple)) and item else item)
-    return [str(x) for x in out]
-
-
-def _pct(value):
-    """Missing-rate as a percentage string; ``None`` → n/a."""
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value) * 100:.1f}%"
-    except (TypeError, ValueError):
-        return "n/a"
-
-
-def _triple(item):
-    """A (feature, ks, reason) row from a leakage/suspected entry, tolerant of shape."""
-    if isinstance(item, (list, tuple)):
-        feat = str(item[0]) if len(item) > 0 else ""
-        ks = item[1] if len(item) > 1 else None
-        reason = str(item[2]) if len(item) > 2 else ""
-        return feat, ks, reason
-    return str(item), None, ""
-
-
-def _render_screen(o: dict):
-    selected = o.get("selected") or []
-    leak = o.get("leakage") or []
-    susp = o.get("suspected") or []
-    unusable = o.get("unusable") or []
-    scores = o.get("scores") if isinstance(o.get("scores"), dict) else {}
-    leak_names = _names(leak)
-    susp_names = _names(susp)
-    n = o.get("n_screened") or o.get("n") or (len(selected) + len(leak) + len(susp))
-    text = (
-        f"**特征筛选完成**:从 {n} 个候选中提议保留 **{len(selected)}** 个特征。\n"
-        f"- 剔除疑似**泄漏** {len(leak_names)} 个" + (f"(如 {leak_names[:3]})" if leak_names else "") + "\n"
-        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"(如 {susp_names[:5]})" if susp_names else "") + "\n"
-        f"- 剔除**不可用**(常量/稀疏) {len(unusable)} 个"
-    )
-    tables = []
-    if selected:
-        rows = []
-        for feat in selected[:20]:
-            s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
-            rows.append([feat, _num(s.get("ks")), _num(s.get("iv")), _pct(s.get("missing_rate"))])
-        tables.append({"title": "入选特征(前20)", "columns": ["特征", "KS", "IV", "缺失率"], "rows": rows})
-    if leak:
-        tables.append({
-            "title": f"疑似泄漏(KS≥阈值,共{len(leak)})",
-            "columns": ["特征", "KS", "原因"],
-            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])],
-        })
-    if susp:
-        tables.append({
-            "title": f"疑似模型输出/评分列(共{len(susp)})",
-            "columns": ["特征", "KS", "原因"],
-            "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])],
-        })
-    if unusable:
-        rows = []
-        for item in unusable[:20]:
-            if isinstance(item, (list, tuple)):
-                rows.append([str(item[0]) if item else "", str(item[1]) if len(item) > 1 else ""])
-            else:
-                rows.append([str(item), ""])
-        tables.append({"title": f"剔除·不可用(常量/稀疏,共{len(unusable)})", "columns": ["特征", "原因"], "rows": rows})
-    return text, tables
-
-
-def _dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict | None:
-    """Per-feature dedup picker payload for a join gate (§4). Returns None unless
-    ``confirm_join`` left features awaiting a dedup strategy. For each such feature,
-    attach the conflict-key count + conflicting columns from the propose-step
-    diagnostics so the picker shows *why* a strategy is needed."""
-    confirm = confirm_o if isinstance(confirm_o, dict) else {}
-    needs = [str(f) for f in (confirm.get("needs_dedup") or [])]
-    if not needs:
-        return None
-    info: dict[str, dict] = {}
-    propose = propose_o if isinstance(propose_o, dict) else {}
-    for join in propose.get("joins") or []:
-        if not isinstance(join, dict):
-            continue
-        fid = str(join.get("feature_id"))
-        diag = join.get("diagnostics") if isinstance(join.get("diagnostics"), dict) else {}
-        report = diag.get("conflict_report") if isinstance(diag.get("conflict_report"), dict) else {}
-        info[fid] = {
-            "conflict_keys": int(report.get("n_conflict_keys") or 0),
-            "conflict_columns": [str(c) for c in (report.get("conflict_columns") or [])],
-        }
-    features = [
-        {"feature_id": fid, **info.get(fid, {"conflict_keys": 0, "conflict_columns": []})}
-        for fid in needs
-    ]
-    return {"needs_dedup": needs, "features": features, "strategies": ["first", "last"]}
-
-
-def _screen_known_features(output: dict) -> set:
-    """Every feature the screen actually saw — scored, ranked, or bucketed into
-    leakage/suspected/unusable. Used to constrain an edited selection so it can only
-    re-pick among validated columns (force-selecting a flagged one is allowed)."""
-    known: set = set()
-    o = output if isinstance(output, dict) else {}
-    scores = o.get("scores")
-    if isinstance(scores, dict):
-        known.update(str(k) for k in scores)
-    for key in ("ranked", "leakage", "suspected", "unusable"):
-        for item in o.get(key) or []:
-            if isinstance(item, (list, tuple)) and item:
-                known.add(str(item[0]))
-            elif isinstance(item, str):
-                known.add(item)
-    known.update(str(f) for f in (o.get("selected") or []))
-    return known
-
-
-def _screen_payload(output: dict, dep) -> dict:
-    """Structured screening result for the frontend §4 interactive selection table.
-
-    A pass-through of the screen tool output (ranked KS, per-feature scores, the
-    leakage/suspected/unusable buckets with reasons) plus (a) the screen step id —
-    so an edited selection can be confirmed back against that exact step — and (b)
-    the gating thresholds the screen used, so the table's sliders default to them.
-    """
-    o = output if isinstance(output, dict) else {}
-    inputs = getattr(dep, "inputs", None) or {}
-
-    def _flt(key, default):
-        try:
-            return float(inputs.get(key, default))
-        except (TypeError, ValueError):
-            return default
-
-    return {
-        "step_id": getattr(dep, "id", None),
-        "step_title": getattr(dep, "title", None),
-        "selected": list(o.get("selected") or []),
-        "ranked": o.get("ranked") or [],
-        "leakage": o.get("leakage") or [],
-        "suspected": o.get("suspected") or [],
-        "unusable": o.get("unusable") or [],
-        "scores": o.get("scores") if isinstance(o.get("scores"), dict) else {},
-        "n_screened": o.get("n_screened") or 0,
-        "thresholds": {
-            "leakage_ks": _flt("leakage_ks", 0.40),
-            "max_missing_rate": _flt("max_missing_rate", 0.95),
-        },
-    }
-
-
-def _render_tune(o: dict):
-    best_params = o.get("best_params") or {}
-    best_metrics = o.get("best_metrics") or {}
-    trials = [t for t in (o.get("trials") or []) if isinstance(t, dict)]
-    text = f"**调参完成**:{o.get('n_trials', '?')} 轮搜索,选出最优超参组合。"
-    tables = []
-    if trials:
-        # trials leaderboard (G4): each trial's train/test/oot KS + overfit gap,
-        # ranked by the in-time selection score (OOT is the unbiased final metric).
-        ranked = sorted(
-            trials,
-            key=lambda t: t.get("score") if isinstance(t.get("score"), (int, float)) else float("-inf"),
-            reverse=True,
-        )
-        rows = []
-        for rank, trial in enumerate(ranked[:15], start=1):
-            train_ks, test_ks = trial.get("train_ks"), trial.get("test_ks")
-            # overfit gaps: prefer stored values, fall back to deriving train-test.
-            gap_tt = trial.get("overfit_gap_tt")
-            if gap_tt is None and isinstance(train_ks, (int, float)) and isinstance(test_ks, (int, float)):
-                gap_tt = train_ks - test_ks
-            rows.append([
-                str(rank), _num(train_ks), _num(test_ks), _num(trial.get("oot_ks")),
-                _num(trial.get("test_auc")), _num(trial.get("oot_auc")),
-                _num(trial.get("lift_head_5")), _num(trial.get("lift_head_10")),
-                _num(trial.get("lift_tail_5")), _num(trial.get("lift_tail_10")),
-                _num(gap_tt), _num(trial.get("overfit_gap_to")),
-            ])
-        tables.append({
-            "title": "trials 排行(按 in-time 选优;前15)",
-            "columns": [
-                "#", "train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc",
-                "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
-                "过拟合gap(tt)", "过拟合gap(to)",
-            ],
-            "rows": rows,
-        })
-    if best_metrics:
-        tables.append({"title": "最优 trial 指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in best_metrics.items()]})
-    if best_params:
-        tables.append({"title": "最优超参", "columns": ["参数", "值"], "rows": [[k, _fmt(v)] for k, v in best_params.items()]})
-    return text, tables
-
-
-def _render_train(o: dict):
-    metrics = o.get("metrics") or {}
-    text = "**训练完成**。"
-    tables = []
-    if metrics:
-        scalar = {k: v for k, v in metrics.items() if isinstance(v, (int, float, str, bool))}
-        if scalar:
-            tables.append({"title": "模型指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in scalar.items()]})
-    importance = o.get("feature_importance") or []
-    rows = []
-    for item in importance[:15]:
-        if isinstance(item, (list, tuple)) and item:
-            rows.append([str(item[0]), _fmt(item[1]) if len(item) > 1 else ""])
-    if rows:
-        tables.append({"title": "特征重要性(前15)", "columns": ["特征", "重要性"], "rows": rows})
-    return text, tables
-
-
-def _render_train_models(o: dict):
-    experiments = [e for e in (o.get("experiments") or []) if isinstance(e, dict)]
-    best_id = o.get("best_experiment_id")
-    best_recipe = o.get("best_recipe")
-    target_type = str(o.get("target_type") or "binary")
-    tables = []
-    rows = []
-    best_metrics: dict = {}
-    if target_type == "continuous":
-        metric_columns = ["train_rmse", "test_rmse", "oot_rmse", "test_mae", "oot_mae", "test_r2", "oot_r2"]
-        selector_label = "按 OOT RMSE"
-    elif target_type == "multiclass":
-        metric_columns = ["train_macro_auc", "test_macro_auc", "oot_macro_auc", "test_logloss", "oot_logloss", "test_accuracy", "oot_accuracy"]
-        selector_label = "按 OOT macro-AUC"
-    else:
-        metric_columns = ["train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"]
-        selector_label = "按 OOT KS"
-    for exp in experiments:
-        metrics = exp.get("metrics") or {}
-        is_best = exp.get("experiment_id") == best_id
-        if is_best:
-            best_metrics = metrics
-        rows.append(
-            [str(exp.get("recipe", "?")) + (" ★" if is_best else "")]
-            + [_num(metrics.get(column)) for column in metric_columns]
-        )
-    if len(experiments) > 1:
-        text = f"**训练完成**:对比 {len(experiments)} 个算法,最优 **{best_recipe}**(★;{selector_label})。"
-        tables.append({
-            "title": "候选模型对比",
-            "columns": ["算法", *metric_columns],
-            "rows": rows,
-        })
-    else:
-        text = "**训练完成**。"
-    # the best model's full metrics (mirrors the single-model 模型指标 table)
-    scalar = {k: v for k, v in best_metrics.items() if isinstance(v, (int, float, str, bool))}
-    if scalar:
-        tables.append({"title": "模型指标", "columns": ["指标", "值"], "rows": [[k, _fmt(v)] for k, v in scalar.items()]})
-    return text, tables
-
-
-def _render_compare(o: dict):
-    experiments = o.get("experiments") or []
-    rows = []
-    for exp in experiments:
-        if not isinstance(exp, dict):
-            continue
-        caps = exp.get("capabilities") or {}
-        rows.append([
-            exp.get("recipe") or "?",
-            "是" if caps.get("pmml_supported") else "否",
-            "是" if caps.get("handoff_supported") else "否",
-            "是" if caps.get("native_model_supported") else "否",
-            caps.get("reason") or "",
-        ])
-    tables = []
-    if rows:
-        tables.append({
-            "title": "训练后动作能力",
-            "columns": ["算法", "PMML", "移交验证", "原生模型", "说明"],
-            "rows": rows,
-        })
-    return f"**实验对比完成**:共 {len(experiments)} 个实验候选。", tables
-
-
-def _render_report(o: dict):
-    path = o.get("report_path") or ""
-    sections = o.get("section_status") or []
-    return f"**模型开发报告已生成**:`{path}`(共 {len(sections)} 个 sheet,可在右栏下载)。", []
-
-
-def _num(value):
-    return "n/a" if value is None else _fmt(value)
-
-
-def _render_feature_metrics(o: dict):
-    metrics = [metric for metric in (o.get("metrics") or []) if isinstance(metric, dict)]
-    # The risk-aware head/tail lift columns show only when that metric was selected
-    # (absent keys → not computed); base columns are always present.
-    has_head_tail = any("lift_head_5" in metric for metric in metrics)
-    has_importance = any("importance" in metric for metric in metrics)
-    columns = ["特征", "IV", "KS", "AUC", "PSI", "缺失率", "头部lift"]
-    if has_head_tail:
-        columns += ["头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%"]
-    if has_importance:
-        columns += ["重要性"]
-    rows = []
-    for metric in metrics:
-        row = [
-            str(metric.get("feature", "?")),
-            _num(metric.get("iv")),
-            _num(metric.get("ks")),
-            _num(metric.get("auc")),
-            _num(metric.get("psi")),
-            _num(metric.get("missing_rate")),
-            _num(metric.get("lift_top_bin")),
-        ]
-        if has_head_tail:
-            row += [
-                _num(metric.get("lift_head_5")),
-                _num(metric.get("lift_head_10")),
-                _num(metric.get("lift_tail_5")),
-                _num(metric.get("lift_tail_10")),
-            ]
-        if has_importance:
-            row += [_num(metric.get("importance"))]
-        rows.append(row)
-    text = (
-        f"**特征分析完成**:{len(rows)} 个特征的指标如下"
-        "(IV/KS/AUC 越高区分力越强;PSI/缺失率越低越稳)。可在右栏下载分析报告。"
-    )
-    tables = []
-    if rows:
-        tables.append({
-            "title": "特征指标",
-            "columns": columns,
-            "rows": rows,
-        })
-    # Optional collinear / VIF section (computed only when the metric was selected).
-    collinear = o.get("collinear")
-    if isinstance(collinear, dict):
-        vif = collinear.get("vif") or {}
-        if vif:
-            tables.append({
-                "title": "VIF(共线性)",
-                "columns": ["特征", "VIF"],
-                "rows": [[str(feat), _num(value)] for feat, value in vif.items()],
-            })
-        pairs = [p for p in (collinear.get("collinear_pairs") or []) if isinstance(p, (list, tuple)) and len(p) >= 3]
-        if pairs:
-            tables.append({
-                "title": "高相关特征对",
-                "columns": ["特征A", "特征B", "相关系数"],
-                "rows": [[str(p[0]), str(p[1]), _num(p[2])] for p in pairs],
-            })
-    return text, tables
-
-
-def _render_feature_report(o: dict):
-    # Reuse the metrics wide table (the tool echoes metrics) and append the report link.
-    text, tables = _render_feature_metrics(o)
-    path = o.get("report_path") or ""
-    if path:
-        text += f"\n\n**特征分析报告已生成**:`{path}`(可在右栏下载)。"
-    return text, tables
-
-
-def _render_propose_join(o: dict):
-    joins = o.get("joins") or []
-    rows = []
-    relax_rows = []
-    any_conflict = False
-    any_fp_mismatch = False
-    for j in joins:
-        diag = j.get("diagnostics") or {}
-        match_rate = diag.get("match_rate")
-        unique = diag.get("feature_key_unique")
-        fan_out = diag.get("fan_out_detected", diag.get("fan_out"))
-        # Prefer the friendly file name (features.parquet) over the raw ds_<hash> id.
-        fname = str(j.get("feature_name") or j.get("feature_id", "?"))
-        key_pairs = j.get("key_pairs") or []
-        keys = ", ".join(f"{p.get('anchor_col')}={p.get('feature_col')}" for p in key_pairs) or "?"
-        # Dynamic key relaxation proposals (spec §4/§5): low-match keys may match better with
-        # one element dropped — surface as suggestions (the user confirms; never auto-applied).
-        for alt in (diag.get("key_alternatives") or []):
-            if not isinstance(alt, dict):
+def _downstream_step_ids(plan: Plan, root_ids: list[str]) -> set[str]:
+    roots = set(root_ids or [])
+    downstream: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        known_upstream = roots | downstream
+        for step in plan.steps:
+            if step.id in known_upstream:
                 continue
-            alt_keys = ", ".join(f"{a}={f}" for a, f in (alt.get("key_pairs") or []))
-            relax_rows.append([
-                fname,
-                _fmt(match_rate) if match_rate is not None else "n/a",
-                f"减「{alt.get('dropped', '?')}」→ {alt_keys}",
-                _fmt(alt.get("match_rate")) if alt.get("match_rate") is not None else "n/a",
-                "是" if alt.get("feature_key_unique") else "否",
-                "⚠️是" if alt.get("fan_out_detected") else "否",
-            ])
-        # Fingerprint consistency (spec §5 C2 "指纹 raw=md5? ✓/✗"): transform_side == "both"
-        # means anchor and feature key share format (both raw or both md5); anything else
-        # means one side is raw and the other md5 (键格式不一致), joinable only via a hash
-        # transform — surfaced so the user can sanity-check the key before执行.
-        fp_consistent = all((p.get("transform_side") or "both") == "both" for p in key_pairs) if key_pairs else True
-        if not fp_consistent:
-            any_fp_mismatch = True
-        fp_cell = "✓" if fp_consistent else "✗ raw≠md5"
-        # Two-level dedup breakdown (spec §6): safe whole-row dups vs same-key conflicts.
-        report = diag.get("conflict_report") or {}
-        conflict_keys = int(report.get("n_conflict_keys") or 0)
-        safe_dropped = int(report.get("safe_dropped") or 0)
-        if conflict_keys:
-            any_conflict = True
-        dedup_cell = "-" if unique else f"安全{safe_dropped}/⚠️冲突{conflict_keys}"
-        rows.append([
-            fname,
-            keys,
-            fp_cell,
-            _fmt(match_rate) if match_rate is not None else "n/a",
-            "是" if unique else "否",
-            "⚠️是" if fan_out else "否",
-            dedup_cell,
-        ])
-    text = (
-        f"**拼接诊断完成**:{len(joins)} 张特征表待左连接到锚样本(锚行数 **1:1 保留**)。\n"
-        "请核对每张表的命中率/键唯一性/是否膨胀。键不唯一的特征需选去重策略;确认后才会真正执行拼接。"
-    )
-    if any_conflict:
-        text += (
-            "\n\n⚠️ 检测到**同键值冲突**(同一键多行但特征值不一致):这类**不会自动删除**,"
-            "请先确认去重策略或清洗数据后再拼接。"
-        )
-    if any_fp_mismatch:
-        text += (
-            "\n\n⚠️ 检测到**键指纹不一致**(`✗ raw≠md5`:锚/特征侧一为原文、一为 md5):"
-            "系统会自动对齐哈希后再连接,但请确认这是同一标识(避免误配)。"
-        )
-    if relax_rows:
-        text += (
-            "\n\n💡 部分特征表命中率偏低,**减一个识别要素**可提高命中(见下「择键建议」):"
-            "系统只提议、不会自动改键;若减后**膨胀**需配合去重策略。请确认后再选用。"
-        )
-    tables = []
-    if rows:
-        tables.append({
-            "title": "拼接诊断(逐特征表)",
-            "columns": ["特征表", "匹配键", "指纹(raw=md5?)", "命中率", "键唯一", "膨胀", "去重(安全/冲突键)"],
-            "rows": rows,
-        })
-    if relax_rows:
-        tables.append({
-            "title": "择键建议(减要素换更高命中)",
-            "columns": ["特征表", "当前命中率", "建议键", "减后命中率", "减后唯一", "减后膨胀"],
-            "rows": relax_rows,
-        })
-    return text, tables
-
-
-def _render_confirm_join(o: dict):
-    # Internal plumbing step (marks engine specs confirmed). It is a dependency of
-    # the execute_join gate, but its summary would show "已确认…" before the human
-    # actually confirms, which is confusing — so render nothing at the gate…
-    needs = o.get("needs_dedup") or []
-    if needs:
-        # …UNLESS a feature has a same-key conflict (spec §6): surface it so the user knows
-        # the join can't execute until they pick a dedup strategy (or exclude the feature).
-        labels = o.get("needs_dedup_labels") or {}
-        listed = "、".join(f"`{labels.get(f, f)}`" for f in needs)
-        return (
-            f"⚠️ 特征 {listed} 存在**同键冲突**(同一键多行、特征值不一致),"
-            "需先定去重策略才能拼接。回复「去重 first」(保留首条)或「去重 last」(保留末条)解决;"
-            "或排除这些特征后重试。"
-        ), []
-    return "", []
-
-
-def _render_execute_join(o: dict):
-    anchor_rows = o.get("anchor_rows")
-    joined_rows = o.get("joined_rows")
-    ok = anchor_rows == joined_rows
-    text = (
-        f"**拼接执行完成**:结果数据集 `{o.get('result_dataset_id', '')}`,"
-        f"锚行 {anchor_rows} → 拼接后 {joined_rows} 行"
-        + ("(1:1 保持 ✓)" if ok else "(⚠️ 行数发生变化,请检查膨胀)")
-    )
-    warnings = o.get("warnings") or []
-    if warnings:
-        text += "\n警告:" + "; ".join(str(w) for w in warnings)
-    # §8 per-table contribution summary from real diagnostics.
-    tables = []
-    per_table = [row for row in (o.get("per_table") or []) if isinstance(row, dict)]
-    if per_table:
-        tables.append({
-            "title": "各特征表贡献",
-            "columns": ["特征表", "命中率", "新增列", "新列缺失率", "去重策略"],
-            "rows": [
-                [
-                    str(row.get("feature_id", "?")),
-                    _num(row.get("match_rate")),
-                    str(row.get("new_columns", "")),
-                    _num(row.get("new_columns_null_rate")),
-                    str(row.get("dedup_strategy", "无")),
-                ]
-                for row in per_table
-            ],
-        })
-    return text, tables
-
-
-def _render_make_split(o: dict):
-    """G1 split gate: surface the train/test/oot counts + per month/channel distribution so
-    the user can sanity-check the split (proportions, OOT-by-time, no cross-group leakage)
-    before spending compute on screening/training."""
-    analysis = o.get("sample_analysis") or {}
-    counts = analysis.get("split_counts") or {}
-    total = analysis.get("total_rows")
-    rows = [
-        [str(split), int(n), _fmt(n / total) if total else "n/a"]
-        for split, n in counts.items()
-    ]
-    text = (
-        f"**样本切分完成**:共 {total} 行。请核对 train/test/oot 划分"
-        "(占比是否合理、OOT 是否按时间、分组是否防泄漏)后再继续。"
-    )
-    tables = []
-    if rows:
-        tables.append({
-            "title": "切分计数(train/test/oot)",
-            "columns": ["划分", "行数", "占比"],
-            "rows": rows,
-        })
-    for group_col, dist in (analysis.get("group_distributions") or {}).items():
-        if not isinstance(dist, dict):
-            continue
-        group_values = sorted({gv for per in dist.values() if isinstance(per, dict) for gv in per})
-        grows = [
-            [str(split)] + [int(per.get(gv, 0)) for gv in group_values]
-            for split, per in dist.items() if isinstance(per, dict)
-        ]
-        if grows:
-            tables.append({
-                "title": f"按「{group_col}」分布(逐划分)",
-                "columns": ["划分", *[str(gv) for gv in group_values]],
-                "rows": grows,
-            })
-    return text, tables
-
-
-_RENDERERS = {
-    "make_split": _render_make_split,
-    "screen_features": _render_screen,
-    "tune_hyperparameters": _render_tune,
-    "train_model": _render_train,
-    "train_models": _render_train_models,
-    "compare_experiments": _render_compare,
-    "generate_model_report": _render_report,
-    "propose_join": _render_propose_join,
-    "confirm_join": _render_confirm_join,
-    "execute_join": _render_execute_join,
-    "compute_feature_metrics": _render_feature_metrics,
-    "generate_feature_report": _render_feature_report,
-}
-
-
-def _render_generic(o: dict):
-    if not isinstance(o, dict) or not o:
-        return "已完成。", []
-    scalar = {k: v for k, v in o.items() if isinstance(v, (str, int, float, bool))}
-    if scalar:
-        head = ", ".join(f"{k}={_fmt(v)}" for k, v in list(scalar.items())[:6])
-        return f"已完成:{head}", []
-    return "已完成。", []
-
-
-def render_tool_output(tool: str, output: dict):
-    """Render a tool's raw output to (text, tables); falls back to generic."""
-    renderer = _RENDERERS.get(tool, _render_generic)
-    try:
-        return renderer(output or {})
-    except Exception:
-        return _render_generic(output or {})
+            if any(dep_id in known_upstream for dep_id in step.depends_on):
+                downstream.add(step.id)
+                changed = True
+    return downstream
 
 
 __all__ = [

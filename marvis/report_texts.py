@@ -212,7 +212,7 @@ def _period_text(start: str, end: str) -> str:
         return str(end)
     if not end:
         return str(start)
-    return f"{start}-{end}"
+    return str(start) if start == end else f"{start}-{end}"
 
 
 def _split_period_text(row: SplitRow | None) -> str:

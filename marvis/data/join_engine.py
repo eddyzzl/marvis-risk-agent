@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import (
@@ -34,6 +35,8 @@ class JoinEngine:
         registry,
         repo,
     ):
+        if not callable(getattr(repo, "write_audit", None)):
+            raise TypeError("JoinEngine repo must provide write_audit")
         self._backend = backend
         self._aligner = aligner
         self._registry = registry
@@ -148,12 +151,18 @@ class JoinEngine:
             # Break the non-unique key down (spec §6): how many duplicates are safe
             # (whole-row identical) vs genuine same-key value conflicts that must not be
             # silently dropped. Surfaced at the C2 gate so the user resolves consciously.
-            # Gated by LARGE_ROW_THRESHOLD like the rest of the backend — a full-frame read
-            # for the report would risk OOM on multi-million-row feature tables.
             if feature_rows <= LARGE_ROW_THRESHOLD:
                 _deduped, conflict_report = two_level_dedup(
                     self._backend.read_frame(feature_path), list(feature_keys)
                 )
+            else:
+                try:
+                    conflict_report = self._backend.conflict_report(
+                        feature_path,
+                        list(feature_keys),
+                    )
+                except DataBackendError:
+                    conflict_report = None
 
         # Dynamic key relaxation (spec §4/§5): the full identity key matched poorly — propose
         # dropping one element to raise the match (with the reduced key's re-checked fan-out).
@@ -258,8 +267,7 @@ class JoinEngine:
             )
         spec.dedup_strategy = dedup_strategy
         spec.confirmed = True
-        self._repo.update_join_spec(join_plan_id, spec)
-        self._write_audit(
+        audit = self._audit_payload(
             kind="join.confirmed",
             target_ref=join_plan_id,
             outcome="confirmed",
@@ -281,6 +289,12 @@ class JoinEngine:
                 ],
             },
         )
+        update_with_audit = getattr(self._repo, "update_join_spec_with_audit", None)
+        if callable(update_with_audit):
+            update_with_audit(join_plan_id, spec, audit=audit)
+        else:
+            self._repo.update_join_spec(join_plan_id, spec)
+            self._write_audit(**audit)
 
     def execute_join_plan(self, join_plan_id: str, *, out_dir: Path) -> Dataset:
         plan = self._repo.load_join_plan(join_plan_id)
@@ -290,6 +304,8 @@ class JoinEngine:
         anchor = self._registry.get(plan.anchor_dataset_id)
         anchor_rows = anchor.row_count
         current_path = self._registry.resolve_path(plan.anchor_dataset_id)
+        artifact_store = TransactionalArtifactStore(Path(out_dir))
+        staged_artifacts = []
         for spec in plan.joins:
             if (
                 not spec.diagnostics.feature_key_unique
@@ -299,16 +315,18 @@ class JoinEngine:
                     f"feature {spec.feature_dataset_id} key is not unique; choose dedup strategy",
                 )
             feature_path = self._registry.resolve_path(spec.feature_dataset_id)
-            out_path = Path(out_dir) / f"join_{uuid.uuid4().hex}.parquet"
+            artifact = artifact_store.stage(f"join_{uuid.uuid4().hex}.parquet")
+            staged_artifacts.append(artifact)
             try:
                 joined_rows = self._backend.left_join(
                     current_path,
                     feature_path,
                     spec.key_pairs,
                     dedup_strategy=spec.dedup_strategy,
-                    out_path=out_path,
+                    out_path=artifact.path,
                 )
             except DataBackendError as exc:
+                self._rollback_artifacts(staged_artifacts)
                 if "produced" in str(exc) and "anchor" in str(exc):
                     raise FanOutError(str(exc)) from exc
                 raise
@@ -316,57 +334,108 @@ class JoinEngine:
             # already asserts this; re-check defensively, distinguishing fan-out (grow)
             # from silent row loss (shrink) so a mismatch routes back to C2.
             if joined_rows != anchor_rows:
-                out_path.unlink(missing_ok=True)
+                self._rollback_artifacts(staged_artifacts)
                 kind = "fan-out" if joined_rows > anchor_rows else "row loss (shrink)"
                 raise FanOutError(
                     f"join {kind}: {joined_rows} rows vs anchor {anchor_rows} (must be 1:1)",
                 )
-            current_path = out_path
+            current_path = artifact.path
 
-        result = self._registry.register_existing(
-            current_path,
-            task_id=plan.task_id,
-            role="derived",
-            anchor_target=plan.anchor_dataset_id,
-        )
+        def audit_for(result) -> dict:
+            return self._audit_payload(
+                kind="join.executed",
+                target_ref=join_plan_id,
+                outcome="succeeded",
+                detail={
+                    "task_id": plan.task_id,
+                    "anchor_dataset_id": plan.anchor_dataset_id,
+                    "result_dataset_id": result.id,
+                    "anchor_rows": anchor_rows,
+                    "joined_rows": result.row_count,
+                    "feature_dataset_ids": [spec.feature_dataset_id for spec in plan.joins],
+                    # Column provenance (spec §11): which feature table each contributed column
+                    # came from, so downstream FEATURE/MODELING can trace a column's origin.
+                    "provenance": [
+                        {
+                            "feature_dataset_id": spec.feature_dataset_id,
+                            "columns": [
+                                column.name
+                                for column in self._registry.get(spec.feature_dataset_id).columns
+                                if column.name not in {pair.feature_col for pair in spec.key_pairs}
+                            ],
+                        }
+                        for spec in plan.joins
+                    ],
+                },
+            )
+
+        final_artifact = staged_artifacts[-1] if staged_artifacts else None
+        if final_artifact is None:
+            raise DataBackendError("join plan contains no confirmed feature joins")
+        final_path = final_artifact.promote()
+        for intermediate in staged_artifacts[:-1]:
+            intermediate.rollback()
+
+        register_join_result = getattr(self._registry, "register_join_result_with_audit", None)
+        if callable(register_join_result):
+            try:
+                result = register_join_result(
+                    final_path,
+                    join_plan_id=join_plan_id,
+                    audit_factory=audit_for,
+                    task_id=plan.task_id,
+                    role="derived",
+                    anchor_target=plan.anchor_dataset_id,
+                )
+            except Exception:
+                final_artifact.rollback()
+                raise
+        else:
+            result = self._registry.register_existing(
+                final_path,
+                task_id=plan.task_id,
+                role="derived",
+                anchor_target=plan.anchor_dataset_id,
+            )
+            audit = audit_for(result)
+            set_executed_with_audit = getattr(self._repo, "set_join_plan_executed_with_audit", None)
+            if callable(set_executed_with_audit):
+                set_executed_with_audit(join_plan_id, result.id, audit=audit)
+            else:
+                self._repo.set_join_plan_executed(join_plan_id, result.id)
+                self._write_audit(**audit)
+        final_artifact.commit()
         plan.status = "executed"
         plan.result_dataset_id = result.id
-        self._repo.set_join_plan_executed(join_plan_id, result.id)
-        self._write_audit(
-            kind="join.executed",
-            target_ref=join_plan_id,
-            outcome="succeeded",
-            detail={
-                "task_id": plan.task_id,
-                "anchor_dataset_id": plan.anchor_dataset_id,
-                "result_dataset_id": result.id,
-                "anchor_rows": anchor_rows,
-                "joined_rows": result.row_count,
-                "feature_dataset_ids": [spec.feature_dataset_id for spec in plan.joins],
-                # Column provenance (spec §11): which feature table each contributed column
-                # came from, so downstream FEATURE/MODELING can trace a column's origin.
-                "provenance": [
-                    {
-                        "feature_dataset_id": spec.feature_dataset_id,
-                        "columns": [
-                            column.name
-                            for column in self._registry.get(spec.feature_dataset_id).columns
-                            if column.name not in {pair.feature_col for pair in spec.key_pairs}
-                        ],
-                    }
-                    for spec in plan.joins
-                ],
-            },
-        )
         return result
 
-    def _write_audit(self, *, kind: str, target_ref: str, outcome: str, detail: dict) -> None:
-        if not hasattr(self._repo, "write_audit"):
-            return
+    @staticmethod
+    def _rollback_artifacts(staged_artifacts) -> None:
+        for artifact in reversed(staged_artifacts):
+            artifact.rollback()
+
+    def _audit_payload(self, *, kind: str, target_ref: str, outcome: str, detail: dict) -> dict:
+        return {
+            "kind": kind,
+            "target_ref": target_ref,
+            "actor": "system",
+            "outcome": outcome,
+            "detail": detail,
+        }
+
+    def _write_audit(
+        self,
+        *,
+        kind: str,
+        target_ref: str,
+        actor: str = "system",
+        outcome: str,
+        detail: dict,
+    ) -> None:
         self._repo.write_audit(
             kind=kind,
             target_ref=target_ref,
-            actor="system",
+            actor=actor,
             outcome=outcome,
             detail=detail,
         )

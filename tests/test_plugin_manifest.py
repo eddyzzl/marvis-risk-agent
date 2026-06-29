@@ -34,7 +34,7 @@ def _manifest(**overrides):
             }
         ],
         "hooks": [{"event": "task.created", "tool": "echo"}],
-        "permissions": ["workspace:read"],
+        "permissions": ["read:input"],
         "checksum": "uploaded-value-is-not-trusted",
     }
     data.update(overrides)

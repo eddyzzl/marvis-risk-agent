@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -238,6 +239,19 @@ def test_agg_mean_preserves_non_numeric_columns_instead_of_nulling(tmp_path):
     assert pd.notna(joined.loc["a", "grade"])
 
 
+def test_numeric_columns_does_not_treat_nested_types_as_numeric(tmp_path):
+    feature_path = tmp_path / "feature.parquet"
+    pd.DataFrame({
+        "id": [1, 2],
+        "amount": [10.5, 20.5],
+        "integer_list": [[1, 2], [3, 4]],
+        "note": ["a", "b"],
+    }).to_parquet(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+
+    assert backend.numeric_columns(feature_path) == {"id", "amount"}
+
+
 def test_left_join_collision_safe_alias_across_multiple_feature_tables(tmp_path):
     """A feature column colliding with the anchor is renamed feature_{col}; a SECOND
     feature table colliding again must not duplicate/overwrite — it gets feature_{col}_2,
@@ -303,6 +317,88 @@ def test_left_join_exact_normalizes_integral_float_keys_like_diagnostics(tmp_pat
     joined = pd.read_parquet(out_path)
     assert joined_rows == 2
     assert joined["limit"].tolist() == [100, 200]
+
+
+def test_match_rate_pushes_feature_key_scan_to_duckdb(tmp_path, monkeypatch):
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    pd.DataFrame({"id": ["A1", "B2", "C3"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame({"customer_id": ["a1", "b2"], "wide_payload": ["x" * 1000, "y" * 1000]}).to_csv(
+        feature_path,
+        index=False,
+    )
+    fp = _fingerprint(is_hashed=False)
+    backend = DataBackend(tmp_path)
+    original_read_frame = backend.read_frame
+
+    def tracked_read_frame(path, *args, **kwargs):
+        if Path(path) == feature_path:
+            raise AssertionError("feature match-rate path should stay inside DuckDB")
+        return original_read_frame(path, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "read_frame", tracked_read_frame)
+
+    assert backend.match_rate_for_method(
+        anchor_path,
+        ["id"],
+        feature_path,
+        ["customer_id"],
+        method="exact_lower",
+        key_fingerprints=[(fp, fp)],
+        sample_n=10,
+        seed=0,
+    ) == (2, 3)
+
+
+def test_match_rate_duckdb_path_resolves_relative_dataset_paths(tmp_path):
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    pd.DataFrame({"id": ["A1", "B2", "C3"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame({"customer_id": ["a1", "b2"]}).to_csv(feature_path, index=False)
+    fp = _fingerprint(is_hashed=False)
+    backend = DataBackend(tmp_path)
+
+    assert backend.match_rate_for_method(
+        Path("anchor.csv"),
+        ["id"],
+        Path("feature.csv"),
+        ["customer_id"],
+        method="exact_lower",
+        key_fingerprints=[(fp, fp)],
+        sample_n=10,
+        seed=0,
+    ) == (2, 3)
+
+
+def test_match_rate_falls_back_for_hash_methods_not_supported_by_duckdb(tmp_path, monkeypatch):
+    raw_fp = _fingerprint(is_hashed=False)
+    sha1_fp = _fingerprint(is_hashed=True, hash_type="sha1")
+    anchor_path = tmp_path / "anchor.csv"
+    feature_path = tmp_path / "feature.csv"
+    pd.DataFrame({"id": ["A1", "B2", "C3"]}).to_csv(anchor_path, index=False)
+    pd.DataFrame({
+        "customer_hash": [
+            hashlib.sha1(value.encode()).hexdigest()
+            for value in ["A1", "C3"]
+        ],
+    }).to_csv(feature_path, index=False)
+    backend = DataBackend(tmp_path)
+
+    def fail_if_duckdb_used(*args, **kwargs):
+        raise AssertionError("sha1 match-rate should use Python fallback")
+
+    monkeypatch.setattr(backend, "_duckdb_match_rate_for_method", fail_if_duckdb_used)
+
+    assert backend.match_rate_for_method(
+        anchor_path,
+        ["id"],
+        feature_path,
+        ["customer_hash"],
+        method="hash:sha1",
+        key_fingerprints=[(raw_fp, sha1_fp)],
+        sample_n=10,
+        seed=0,
+    ) == (2, 3)
 
 
 def test_match_rate_normalizes_hash_case_and_dates(tmp_path):
@@ -378,3 +474,30 @@ def test_match_rate_normalizes_hash_case_and_dates(tmp_path):
         sample_n=10,
         seed=0,
     ) == (2, 3)
+
+
+def test_python_match_rate_date_fallback_uses_same_formats_as_duckdb_join(tmp_path):
+    date_fp = ColumnFingerprint(
+        value_kind="date",
+        length_mode=8,
+        regex_pattern=None,
+        is_hashed=False,
+        hash_type=None,
+        hex_case=None,
+        date_format="%Y%m%d",
+    )
+    anchor_dates = tmp_path / "anchor_dates.csv"
+    feature_dates = tmp_path / "feature_dates.feather"
+    pd.DataFrame({"date_key": ["20260102"]}).to_csv(anchor_dates, index=False)
+    pd.DataFrame({"date_key": ["Jan 2, 2026"]}).to_feather(feature_dates)
+
+    assert DataBackend(tmp_path).match_rate_for_method(
+        anchor_dates,
+        ["date_key"],
+        feature_dates,
+        ["date_key"],
+        method="date",
+        key_fingerprints=[(date_fp, date_fp)],
+        sample_n=10,
+        seed=0,
+    ) == (0, 1)

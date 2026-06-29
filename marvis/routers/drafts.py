@@ -108,15 +108,6 @@ def create_learning_note(request: Request, payload: dict) -> dict:
     note = request.app.state.draft_repo.get_learning_note(str(result["learning_note_id"]))
     if note is None:
         raise HTTPException(status_code=500, detail="learning note was not saved")
-    request.app.state.plugin_repo.write_audit(
-        kind="draft.learning_note.create",
-        target_ref=note.id,
-        outcome="succeeded",
-        detail={
-            "query": query,
-            "source_count": len(note.sources),
-        },
-    )
     return {"learning_note": _public_learning_note(note)}
 
 
@@ -147,16 +138,6 @@ def author_draft(request: Request, payload: dict) -> dict:
         draft = request.app.state.draft_registry.get(str(result["draft_id"]))
     except DraftNotFound as exc:
         raise HTTPException(status_code=500, detail="draft was not saved") from exc
-    request.app.state.plugin_repo.write_audit(
-        kind="draft.author",
-        target_ref=draft.id,
-        outcome="succeeded",
-        detail={
-            "task_id": task_id,
-            "learning_note_id": draft.learning_note_id,
-            "source": draft.source,
-        },
-    )
     return {"draft": _public_draft(draft, include_code=False)}
 
 

@@ -1,12 +1,15 @@
 import hashlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, init_db
+from marvis.packs.data_ops import tools as data_ops_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -42,7 +45,8 @@ def _register_csv(registry, tmp_path, name: str, frame: pd.DataFrame, *, role: s
 
 def test_data_ops_ingest_excel_and_infer_schema_via_runner(tmp_path):
     runner, _registry, repo = _runtime(tmp_path)
-    workbook_path = tmp_path / "features.xlsx"
+    workbook_path = tmp_path / "workspace" / "materials" / "features.xlsx"
+    workbook_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({
         "mobile": ["13800138000", "13900139000"],
         "bad_flag": [0, 1],
@@ -68,6 +72,26 @@ def test_data_ops_ingest_excel_and_infer_schema_via_runner(tmp_path):
     assert schema.ok is True
     assert schema.output["has_target"] is True
     assert schema.output["target_col"] == "bad_flag"
+
+
+def test_data_ops_ingest_excel_rejects_paths_outside_material_roots(tmp_path):
+    runner, _registry, _repo = _runtime(tmp_path)
+    workbook_path = tmp_path / "outside_materials.xlsx"
+    pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [0]}).to_excel(
+        workbook_path,
+        sheet_name="Sheet1",
+        index=False,
+    )
+
+    ingest = runner.invoke(
+        ToolRef("data_ops", "ingest_excel"),
+        {"path": str(workbook_path), "sheets": ["Sheet1"], "role": "sample"},
+        task_id="task-1",
+    )
+
+    assert ingest.ok is False
+    assert ingest.error_kind == "execution"
+    assert "allowed material root" in ingest.error
 
 
 def test_data_ops_align_propose_and_execute_join_via_runner(tmp_path):
@@ -157,6 +181,9 @@ def test_data_ops_clean_format_and_dedup_rows_via_runner(tmp_path):
 
     assert cleaned.ok is True
     assert cleaned.output["changed_columns"] == ["acct", "acct"]
+    cleaned_path = registry.resolve_path(cleaned.output["dataset_id"])
+    assert cleaned_path.parent.name == "clean"
+    assert not (cleaned_path.parent / ".staging").exists()
 
     deduped = runner.invoke(
         ToolRef("data_ops", "dedup_rows"),
@@ -173,6 +200,36 @@ def test_data_ops_clean_format_and_dedup_rows_via_runner(tmp_path):
     deduped_dataset = repo.get_dataset(deduped.output["dataset_id"])
     assert deduped_dataset is not None
     assert deduped_dataset.row_count == 2
+    deduped_path = registry.resolve_path(deduped.output["dataset_id"])
+    assert deduped_path.parent.name == "dedup"
+    assert not (deduped_path.parent / ".staging").exists()
+
+
+def test_data_ops_derived_frame_registration_failure_rolls_back_staged_file(tmp_path):
+    class FailingRegistry:
+        def register_existing(self, *args, **kwargs):
+            raise RuntimeError("db down")
+
+    runtime = SimpleNamespace(
+        datasets_root=tmp_path / "datasets",
+        registry=FailingRegistry(),
+    )
+    ctx = SimpleNamespace(task_id="task-1", seed=0)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        data_ops_tools._register_derived_frame(
+            runtime,
+            ctx,
+            pd.DataFrame({"acct": ["A1"], "value": [1]}),
+            subdir="clean",
+            filename="clean.parquet",
+            role="feature",
+            anchor_target="source-dataset",
+        )
+
+    output_dir = tmp_path / "datasets" / "task-1" / "clean"
+    assert not list(output_dir.glob("*.parquet"))
+    assert not (output_dir / ".staging").exists()
 
 
 def test_dedup_rows_reports_same_key_conflict_without_dropping(tmp_path):

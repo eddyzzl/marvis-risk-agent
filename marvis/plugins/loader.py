@@ -6,13 +6,13 @@ import json
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
-import uuid
 import zipfile
 
 from jsonschema import Draft202012Validator
 
+from marvis.artifacts import TransactionalDirectoryStore
 from marvis.plugins.errors import DuplicatePluginError, ManifestError, PluginError
-from marvis.plugins.manifest import PluginManifest, parse_manifest
+from marvis.plugins.manifest import PluginManifest, manifest_to_dict, parse_manifest
 from marvis.plugins.registry import PluginRegistry
 
 
@@ -68,30 +68,15 @@ def install_plugin(
         manifest = replace(load_manifest(unpacked_dir, builtin=False), checksum=checksum)
         _raise_if_duplicate_same_version(registry, manifest)
 
-        plugins_dir.mkdir(parents=True, exist_ok=True)
-        destination = plugins_dir / manifest.name
-        backup = None
-        with tempfile.TemporaryDirectory(
-            prefix=f".{manifest.name}-staging-",
-            dir=plugins_dir,
-        ) as staging_parent_name:
-            staging_parent = Path(staging_parent_name)
-            staged = staging_parent / manifest.name
-            shutil.copytree(unpacked_dir, staged)
-            try:
-                if destination.exists():
-                    backup = plugins_dir / f".{manifest.name}-backup-{uuid.uuid4().hex}"
-                    destination.rename(backup)
-                staged.rename(destination)
-                registry.register(manifest, enabled=True)
-            except Exception:
-                _remove_path(destination)
-                if backup is not None and backup.exists():
-                    backup.rename(destination)
-                raise
-            else:
-                if backup is not None and backup.exists():
-                    _remove_path(backup)
+        staged = TransactionalDirectoryStore(plugins_dir).stage(manifest.name)
+        shutil.copytree(unpacked_dir, staged.path)
+        try:
+            staged.activate()
+            registry.register(manifest, enabled=True)
+            staged.commit()
+        except Exception:
+            staged.rollback()
+            raise
         return manifest
 
 
@@ -107,6 +92,33 @@ def load_builtin_packs(registry: PluginRegistry, packs_root: Path) -> None:
         except DuplicatePluginError:
             # Builtin discovery runs at app startup and should be idempotent.
             continue
+
+
+def sync_builtin_packs(repo, packs_root: Path) -> None:
+    if not packs_root.exists():
+        return
+    for plugin_dir in sorted(path for path in packs_root.iterdir() if path.is_dir()):
+        if not (plugin_dir / "manifest.json").is_file():
+            continue
+        manifest = load_manifest(plugin_dir, builtin=True)
+        existing = repo.get_plugin(manifest.name)
+        if existing is not None and not existing["builtin"]:
+            continue
+        enabled = existing["enabled"] if existing is not None else True
+        if existing is not None and _stored_builtin_manifest_matches(
+            existing["manifest_json"],
+            manifest,
+        ):
+            continue
+        repo.upsert_plugin(manifest, enabled=enabled)
+
+
+def _stored_builtin_manifest_matches(raw: str, manifest: PluginManifest) -> bool:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return data == manifest_to_dict(manifest)
 
 
 def _assert_manifest_schemas(manifest: PluginManifest) -> None:
@@ -130,13 +142,6 @@ def _safe_extract_zip(zip_path: Path, destination: Path) -> None:
             archive.extractall(destination)
     except zipfile.BadZipFile as exc:
         raise PluginError("invalid plugin zip") from exc
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_dir():
-        shutil.rmtree(path)
-    elif path.exists():
-        path.unlink()
 
 
 def _assert_safe_zip_member(filename: str) -> None:

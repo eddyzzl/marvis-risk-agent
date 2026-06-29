@@ -184,16 +184,6 @@ def _append_text_range(paragraph, text: str, run_ranges, start: int, end: int) -
         paragraph.add_run(text[start:end])
 
 
-def _run_at_offset(run_ranges, start: int, end: int):
-    for run_start, run_end, run in run_ranges:
-        if run_start <= start < run_end:
-            return run
-    for run_start, run_end, run in run_ranges:
-        if run_start < end and start < run_end:
-            return run
-    return None
-
-
 def _run_for_placeholder(run_ranges, start: int, end: int):
     overlapping_runs = [
         (run_start, run_end, run)

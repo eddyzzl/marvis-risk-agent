@@ -97,12 +97,13 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "确认「开始」后按计划执行" in overview["content"]
 
-    # turn 1 — 开始: make the split, pause at the G1 split-review gate (spec §2)
+    # turn 1 — 开始: make the split + G2 spec, pause before feature screening
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
     assert resp.status_code == 202, resp.text
     split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert split_gate["metadata"].get("kind") == "gate"
     assert "样本切分完成" in split_gate["content"]
+    assert "建模规格已生成" in split_gate["content"]
 
     # turn 2 — confirm the split: screen features, pause at the confirm-features gate
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
@@ -118,15 +119,29 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     # edit the selection (drop the last proposed feature) to exercise the override path
     chosen = proposed[:-1] if len(proposed) > 1 else proposed
 
-    # turn 1 — confirm features WITH an edited selection: override the screen's set,
-    # then tune + train on exactly the chosen features, pause at the confirm-model gate
+    stale = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "selection": chosen, "expected_step_id": "old-gate"},
+    )
+    assert stale.status_code == 409
+
+    # confirm features WITH an edited selection: override the screen's set,
+    # then pause at the explicit G3 tuning-configuration gate.
     resp = client.post(
-        f"/api/tasks/{task_id}/agent/messages", json={"content": "确认", "selection": chosen}
+        f"/api/tasks/{task_id}/agent/messages",
+        json={"content": "确认", "selection": chosen, "expected_step_id": gate1["metadata"]["step_id"]},
     )
     assert resp.status_code == 202, resp.text
     # the screen step's stored output now reflects the user's edited selection
     overridden = client.app.state.plan_repo.load_step_output(screen["step_id"])["selected"]
     assert overridden == chosen
+    tuning_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert tuning_gate["metadata"].get("kind") == "gate"
+    assert "调参配置已生成" in tuning_gate["content"]
+
+    # confirm tuning config: tune + train + compare, pause at the final-experiment selection gate.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
     gate2 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert gate2["metadata"].get("kind") == "gate"
     assert "训练完成" in gate2["content"]
@@ -136,11 +151,21 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     # the trials leaderboard (G4) is shown at the model gate too
     assert any(t["title"].startswith("trials 排行") for t in gate2_tables)
 
-    # turn 2 — confirm model: generate the model-development report, done
+    # confirm selected model, approve report generation, then approve final delivery actions.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    report_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "已选择最终实验" in report_gate["content"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    delivery_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "报告已生成" in delivery_gate["content"]
+
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "报告已生成" in done["content"]
+    assert "计划已全部完成" in done["content"]
 
 
 def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: Path):
@@ -160,19 +185,25 @@ def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: 
     # target_type derived from lgb_multiclass — surfaced in the opening setup message
     assert any("多分类任务" in m["content"] for m in msgs if m["role"] == "assistant")
 
-    # 开始 → split gate, 确认 → feature gate, 确认 → model gate (tune skipped, model trained)
-    for content in ["开始", "确认", "确认"]:
+    # 开始 → split/spec gate, 确认 → feature gate, 确认 → tuning-config gate,
+    # 确认 → model-selection gate (tune skipped, model trained)
+    for content in ["开始", "确认", "确认", "确认"]:
         resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
         assert resp.status_code == 202, resp.text
     model_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert model_gate["metadata"].get("kind") == "gate"
     assert "训练完成" in model_gate["content"]  # tune-skip no longer fails the flow
 
-    # 确认 → minimal non-binary report, plan done
+    # 确认 selected experiment → report gate; 确认 report → delivery gate; 确认 delivery → done.
+    for content in ["确认", "确认"]:
+        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        assert resp.status_code == 202, resp.text
+    delivery_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "报告已生成" in delivery_gate["content"]
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
-    assert "报告已生成" in done["content"]
+    assert "计划已全部完成" in done["content"]
     assert not done["metadata"].get("error")
 
 
@@ -200,11 +231,14 @@ def test_modeling_persists_explicit_target_type_and_defaults_recipe(client: Test
     assert "lgb_regressor" in opening["content"]
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans
+    spec_step = next(step for step in plans[0].steps if step.title == "选择建模规格")
     train_step = next(step for step in plans[0].steps if step.title == "训练模型")
     screen_step = next(step for step in plans[0].steps if step.title == "特征筛选")
-    assert screen_step.inputs["target_type"] == "continuous"
-    assert train_step.inputs["target_type"] == "continuous"
-    assert train_step.inputs["recipes"] == ["lgb_regressor"]
+    assert spec_step.inputs["target_type"] == "continuous"
+    assert spec_step.inputs["recipes"] == ["lgb_regressor"]
+    assert screen_step.inputs["target_type"] == f"$ref:{spec_step.id}.output.target_type"
+    assert train_step.inputs["target_type"] == f"$ref:{spec_step.id}.output.target_type"
+    assert train_step.inputs["recipes"] == f"$ref:{spec_step.id}.output.recipes"
 
 
 def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClient, tmp_path: Path):
@@ -236,11 +270,15 @@ def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClie
 
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     split_step = next(step for step in plans[0].steps if step.title == "切分样本")
+    spec_step = next(step for step in plans[0].steps if step.title == "选择建模规格")
+    config_step = next(step for step in plans[0].steps if step.title == "配置调参")
     tune_step = next(step for step in plans[0].steps if step.title == "调参")
     train_step = next(step for step in plans[0].steps if step.title == "训练模型")
     assert "sample_weight" in split_step.inputs["passthrough_cols"]
-    assert tune_step.inputs["sample_weight_col"] == "sample_weight"
-    assert train_step.inputs["sample_weight_col"] == "sample_weight"
+    assert spec_step.inputs["sample_weight_col"] == "sample_weight"
+    assert config_step.inputs["sample_weight_col"] == f"$ref:{spec_step.id}.output.sample_weight_col"
+    assert tune_step.inputs["sample_weight_col"] == f"$ref:{config_step.id}.output.sample_weight_col"
+    assert train_step.inputs["sample_weight_col"] == f"$ref:{spec_step.id}.output.sample_weight_col"
 
 
 def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClient, tmp_path: Path):
@@ -259,6 +297,15 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
 
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
+    c1 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "样本主表" in c1["content"]
+    assert c1["metadata"]["join_c1"]["anchor_id"]
+    assert not client.app.state.plan_repo.list_plans_for_task(task_id)
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "确认「开始」后按计划执行" in overview["content"]
     plans = client.app.state.plan_repo.list_plans_for_task(task_id)
     assert plans and plans[-1].template_id == "modeling_with_join"
     plan = plans[-1]

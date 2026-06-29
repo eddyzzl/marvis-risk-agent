@@ -32,6 +32,46 @@ def test_roll_rate_matrix_builds_adjacent_pairs_per_customer_in_time_order():
     )
 
 
+def test_roll_rate_matrix_sorts_by_parsed_dates_not_lexical_strings():
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A", "A"],
+        "month": ["2026-1", "2026-10", "2026-2"],
+        "status": ["C", "M2", "M1"],
+    })
+
+    result = roll_rate_matrix(
+        frame,
+        id_col="customer_id",
+        time_col="month",
+        status_col="status",
+        states=["C", "M1", "M2"],
+    )
+
+    assert result.base_counts == {"C": 1, "M1": 1, "M2": 0}
+    assert result.matrix == (
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (0.0, 0.0, 0.0),
+    )
+
+
+def test_roll_rate_matrix_rejects_unparseable_time_values():
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A"],
+        "month": ["2026-01", "not-a-date"],
+        "status": ["C", "M1"],
+    })
+
+    with pytest.raises(ValueError, match="time_col"):
+        roll_rate_matrix(
+            frame,
+            id_col="customer_id",
+            time_col="month",
+            status_col="status",
+            states=["C", "M1"],
+        )
+
+
 def test_roll_rate_matrix_returns_complete_zero_matrix_for_no_transitions():
     frame = pd.DataFrame({
         "customer_id": ["A", "B"],

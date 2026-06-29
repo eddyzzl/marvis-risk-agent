@@ -180,6 +180,9 @@ def compute_psi_stability_table(
     actual_bins = _bin_counts(actual_scores, edges)
     expected_total = int(expected_bins.sum())
     actual_total = int(actual_bins.sum())
+    expected_dist = _normalized_distribution(expected_bins, expected_total)
+    actual_dist = _normalized_distribution(actual_bins, actual_total)
+    psi_by_bin = _psi_contributions(expected_dist, actual_dist)
     rows: list[PsiStabilityRow] = []
     for index, (expected_count, actual_count) in enumerate(zip(expected_bins, actual_bins), start=1):
         expected_pct = _ratio(expected_count, expected_total)
@@ -191,10 +194,33 @@ def compute_psi_stability_table(
                 expected_pct=float(expected_pct),
                 actual_count=int(actual_count),
                 actual_pct=float(actual_pct),
-                psi=float(compute_psi([expected_pct], [actual_pct])),
+                psi=float(psi_by_bin[index - 1]),
             )
         )
     return rows
+
+
+def _normalized_distribution(counts: np.ndarray, total: int) -> np.ndarray:
+    if total <= 0:
+        return np.zeros_like(counts, dtype=float)
+    return counts.astype(float) / float(total)
+
+
+def _psi_contributions(
+    expected_dist: np.ndarray,
+    actual_dist: np.ndarray,
+    *,
+    smoothing: float = 1e-6,
+) -> np.ndarray:
+    expected = np.where(expected_dist <= 0, smoothing, expected_dist.astype(float))
+    actual = np.where(actual_dist <= 0, smoothing, actual_dist.astype(float))
+    expected_total = float(expected.sum())
+    actual_total = float(actual.sum())
+    if expected_total <= 0 or actual_total <= 0:
+        return np.zeros_like(expected, dtype=float)
+    expected = expected / expected_total
+    actual = actual / actual_total
+    return np.maximum(0.0, (actual - expected) * np.log(actual / expected))
 
 
 def compute_roc_ks_curves(
@@ -374,7 +400,7 @@ def compute_auc(scores, labels) -> float:
     positive_count = int(labels.sum())
     negative_count = int(len(labels) - positive_count)
     if len(scores) == 0 or positive_count == 0 or negative_count == 0:
-        return 0.0
+        return 0.5
 
     ranks = pd.Series(scores).rank(method="average").to_numpy(dtype=float)
     positive_rank_sum = float(ranks[labels == 1].sum())

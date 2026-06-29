@@ -437,6 +437,43 @@ def test_join_handlers_surface_execute_api_errors_without_bubbling():
     )
 
 
+def test_join_handlers_render_fan_out_message_for_conflict_errors():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const listeners = {};
+        const messages = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachJoinHandlers(root, {
+          executeJoin: async () => {
+            const error = new Error("conflict");
+            error.status = 409;
+            throw error;
+          },
+          showError: (message) => messages.push(message),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-exec-join]"
+                ? { dataset: { execJoin: "join-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(messages, ["检测到 fan-out 风险，已停止执行拼接。"]);
+        """
+    )
+
+
 def test_join_handlers_surface_confirm_api_errors_without_bubbling():
     run_node(
         """

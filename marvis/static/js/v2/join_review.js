@@ -264,6 +264,11 @@ function defaultShowError(message) {
   console.error(message);
 }
 
+function isFanOutError(error) {
+  const text = String(error?.message || error?.detail || "").toLowerCase();
+  return error?.status === 409 || text.includes("fan-out") || text.includes("fanout");
+}
+
 async function defaultRefreshJoin(joinId) {
   const payload = await getJoinPlan(joinId);
   const joinPlan = payload?.join_plan || payload?.join || payload;
@@ -383,6 +388,10 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
         }
         actions.showResult(result);
       } catch (error) {
+        if (isFanOutError(error)) {
+          actions.showError("检测到 fan-out 风险，已停止执行拼接。");
+          return;
+        }
         actions.showError(error?.message || "拼接执行失败");
       }
     }

@@ -10,6 +10,8 @@ from marvis.orchestrator.planner import (
     EXPLORE_SYS,
     PLAN_SYS,
     REPLAN_SYS,
+    build_plan_prompt,
+    compact_catalog_for_prompt,
     Planner,
     PlanningError,
     ReplanError,
@@ -170,6 +172,71 @@ def test_planner_generate_accepts_valid_llm_plan(tmp_path):
     assert plan.source == "generated"
     assert plan.steps[0].tool_ref == ToolRef("_sample", "echo")
     assert llm.calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_plan_prompt_uses_compact_catalog_and_ref_examples():
+    catalog = [
+        {
+            "plugin": "_sample",
+            "tool": "echo",
+            "version": "0.1.0",
+            "summary": "Echo a message",
+            "determinism": "deterministic",
+            "input_schema": {
+                "type": "object",
+                "required": ["message"],
+                "properties": {
+                    "message": {"type": "string", "description": "Message to echo"},
+                    "seconds": {"type": "number"},
+                },
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {"echoed": {"type": "string"}},
+            },
+        }
+    ]
+
+    payload = json.loads(
+        build_plan_prompt(
+            "echo once",
+            catalog,
+            memory_context={},
+            task_context={},
+            last_error=None,
+        )
+    )
+
+    tool = payload["available_tools"][0]
+    assert "input_schema" not in tool
+    assert "output_schema" not in tool
+    assert tool["required_inputs"] == ["message"]
+    assert tool["input_fields"][0]["name"] == "message"
+    assert tool["output_fields"] == [{"name": "echoed", "type": "string"}]
+    assert "$ref:train-step.output.experiment_id" in json.dumps(
+        payload["planning_examples"],
+        ensure_ascii=False,
+    )
+
+
+def test_compact_catalog_truncates_large_schema_fields():
+    catalog = [
+        {
+            "plugin": "wide",
+            "tool": "tool",
+            "input_schema": {
+                "type": "object",
+                "properties": {f"field_{index}": {"type": "string"} for index in range(14)},
+            },
+            "output_schema": {},
+        }
+    ]
+
+    compact = compact_catalog_for_prompt(catalog)
+
+    assert len(compact[0]["input_fields"]) == 13
+    assert compact[0]["input_fields"][-1]["name"] == "..."
+    assert compact[0]["input_fields"][-1]["type"] == "truncated"
 
 
 def test_planner_generate_retries_after_invalid_json(tmp_path):

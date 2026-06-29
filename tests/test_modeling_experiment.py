@@ -1,5 +1,6 @@
 import pytest
 
+import marvis.db as db_module
 from marvis.db import ModelingRepository, init_db
 from marvis.packs.modeling import ModelArtifact, ModelMetrics, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
@@ -70,6 +71,30 @@ def test_experiment_store_create_get_list_and_status(tmp_path):
     assert store.list_for_task("task-1") == [experiment]
     with pytest.raises(KeyError):
         store.get("missing")
+    audits = db_module.PluginRepository(db_path).list_audit()
+    assert [audit["kind"] for audit in audits] == [
+        "modeling.experiment.create",
+        "modeling.experiment.status",
+    ]
+
+
+def test_experiment_store_rolls_back_create_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = ExperimentStore(db_path)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        store.create("task-1", "lr", _config())
+
+    assert store.list_for_task("task-1") == []
 
 
 def test_experiment_store_attach_result_persists_artifact_and_metrics(tmp_path):
@@ -89,6 +114,37 @@ def test_experiment_store_attach_result_persists_artifact_and_metrics(tmp_path):
     assert artifact is not None
     assert artifact.experiment_id == experiment_id
     assert artifact.feature_importance == (("x1", 0.7), ("x2", 0.3))
+    audit = db_module.PluginRepository(db_path).list_audit(kind="modeling.experiment.trained")[0]
+    assert audit["target_ref"] == experiment_id
+    assert audit["detail"]["artifact_id"] == "artifact-1"
+
+
+def test_experiment_store_rolls_back_attach_result_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = ExperimentStore(db_path)
+    experiment_id = store.create("task-1", "lr", _config())
+
+    original_write_audit = db_module._write_audit_row
+
+    def fail_trained_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.experiment.trained":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_trained_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        store.attach_result(experiment_id, _result("artifact-1", _metrics(0.37)))
+
+    experiment = store.get(experiment_id)
+    assert experiment.status == "created"
+    assert experiment.artifact_id is None
+    assert experiment.metrics is None
+    assert ModelingRepository(db_path).get_model_artifact("artifact-1") is None
 
 
 def test_experiment_store_compare_returns_metric_rows_in_requested_order(tmp_path):

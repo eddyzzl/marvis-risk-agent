@@ -3,6 +3,7 @@ import json
 import pytest
 
 from marvis.db import PluginRepository, connect, init_db
+import marvis.db as db_module
 from marvis.plugins.errors import PluginNotFoundError
 from marvis.plugins.manifest import parse_manifest
 
@@ -111,6 +112,93 @@ def test_plugin_repository_set_enabled_missing_raises_plugin_error(tmp_path):
 
     with pytest.raises(PluginNotFoundError):
         repo.set_enabled("missing", True)
+
+
+def test_plugin_repository_rolls_back_register_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.upsert_plugin_with_audit(
+            _manifest(),
+            enabled=True,
+            audit={
+                "kind": "plugin.register",
+                "target_ref": "_sample",
+                "outcome": "succeeded",
+                "detail": {"version": "0.1.0"},
+            },
+        )
+
+    assert repo.get_plugin("_sample") is None
+    assert repo.list_tools() == []
+
+
+def test_plugin_repository_rolls_back_enabled_change_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    repo.upsert_plugin(_manifest(), enabled=True)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.set_enabled_with_audit(
+            "_sample",
+            False,
+            audit={
+                "kind": "plugin.disable",
+                "target_ref": "_sample",
+                "outcome": "succeeded",
+                "detail": {"version": "0.1.0", "enabled": False},
+            },
+        )
+
+    assert repo.get_plugin("_sample")["enabled"] is True
+
+
+def test_plugin_repository_rolls_back_delete_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    repo.upsert_plugin(_manifest(), enabled=True)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.delete_plugin_with_audit(
+            "_sample",
+            audit={
+                "kind": "plugin.remove",
+                "target_ref": "_sample",
+                "outcome": "succeeded",
+                "detail": {"version": "0.1.0"},
+            },
+        )
+
+    assert repo.get_plugin("_sample") is not None
+    assert repo.list_tools()[0]["name"] == "echo"
 
 
 def test_plugin_repository_writes_audit_records(tmp_path):

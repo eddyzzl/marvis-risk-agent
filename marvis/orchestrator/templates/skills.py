@@ -47,6 +47,11 @@ def parse_skill_template(data: dict) -> WorkflowTemplate:
         slots=slots,
         steps=steps,
         default_autonomy=default_autonomy,
+        success_criteria=tuple(
+            dict(item)
+            for item in data.get("success_criteria") or []
+            if isinstance(item, dict)
+        ),
         source="user",
     )
 
@@ -126,6 +131,7 @@ def _dry_instantiate(template: WorkflowTemplate) -> Plan:
         template_id=template.id,
         steps=steps,
         autonomy_level=template.default_autonomy,
+        success_criteria=[dict(item) for item in template.success_criteria],
     )
 
 

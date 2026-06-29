@@ -6,15 +6,18 @@ import pytest
 
 from marvis.agent.modeling_setup import build_modeling_proposal
 from marvis.data.backend import DataBackend
+from marvis.data.errors import NanLabelNotConfirmedError
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
 from marvis.feature.metrics import feature_auc, feature_ks
 from marvis.packs.modeling import ModelingError
+from marvis.packs.modeling.artifact import load_model
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import (
     compute_model_metrics,
     compute_multiclass_metrics,
+    sample_weight_values,
     split_modeling_frame,
 )
 from marvis.packs.modeling.recipes.lgb import train_lgb
@@ -24,6 +27,8 @@ from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
+from marvis.packs.modeling.tools import _ModelArtifactScorer
+from marvis.packs.modeling.tune import _trial_score
 from marvis.settings import build_settings
 
 
@@ -92,6 +97,98 @@ def test_compute_model_metrics_uses_platform_feature_metrics_and_overfitting():
     assert metrics.overfit_flag is False
 
 
+def test_compute_model_metrics_reports_weighted_binary_metrics():
+    frame = pd.DataFrame({
+        "score": [0.3, 0.4, 0.8, 0.9, 0.3, 0.4, 0.8, 0.9, 0.2, 0.7, 0.6, 0.95],
+        "y": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        "weight": [1, 10, 10, 1, 1, 10, 10, 1, 1, 2, 3, 4],
+        "split": ["train"] * 4 + ["test"] * 4 + ["oot"] * 4,
+    })
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"sample_weight_col": "weight"},
+        seed=13,
+        early_stopping_rounds=None,
+    )
+    train, test, oot = split_modeling_frame(frame, config)
+
+    metrics = compute_model_metrics(
+        lambda data: data["score"].to_numpy(dtype=float),
+        train,
+        test,
+        oot,
+        config,
+    )
+
+    assert metrics.weighted_train_auc is not None
+    assert metrics.weighted_test_auc is not None
+    assert metrics.weighted_oot_auc is not None
+    assert metrics.weighted_psi_test_vs_train is not None
+    assert metrics.weighted_psi_oot_vs_train is not None
+    assert metrics.weighted_test_auc != pytest.approx(metrics.test_auc)
+
+
+def test_weighted_binary_metrics_have_formula_level_values_and_weight_validation():
+    frame = pd.DataFrame({
+        "score": [0.1, 0.4, 0.4, 0.9, 0.1, 0.4, 0.4, 0.9, 0.3, 0.8],
+        "y": [0, 0, 1, 1, 0, 0, 1, 1, np.nan, np.nan],
+        "weight": [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        "split": ["train"] * 4 + ["test"] * 4 + ["oot"] * 2,
+    })
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"sample_weight_col": "weight"},
+        seed=13,
+        early_stopping_rounds=None,
+    )
+    train, test, oot = split_modeling_frame(frame, config)
+
+    metrics = compute_model_metrics(
+        lambda data: data["score"].to_numpy(dtype=float),
+        train,
+        test,
+        oot,
+        config,
+        oot_has_labels=False,
+    )
+
+    assert metrics.weighted_train_auc == pytest.approx(12 / 14)
+    assert metrics.weighted_train_ks == pytest.approx(4 / 7)
+    assert metrics.weighted_test_auc == pytest.approx(12 / 14)
+    assert metrics.weighted_psi_test_vs_train == pytest.approx(0.0)
+    assert metrics.weighted_oot_ks is None
+    assert metrics.weighted_oot_auc is None
+
+    bad_weights = train.copy()
+    bad_weights.loc[bad_weights.index[0], "weight"] = -1
+    with pytest.raises(ModelingError, match="negative"):
+        sample_weight_values(bad_weights, config)
+
+
+def test_tune_trial_score_does_not_use_oot_holdout_for_selection():
+    stable = _trial_score(
+        train_ks=0.45,
+        test_ks=0.40,
+        overfit_penalty=0.5,
+    )
+    fragile = _trial_score(
+        train_ks=0.45,
+        test_ks=0.40,
+        overfit_penalty=0.5,
+    )
+
+    assert stable == pytest.approx(0.40 - 0.5 * 0.05)
+    assert fragile == stable
+
+
 def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     rows = 180
     frame = pd.DataFrame({
@@ -118,6 +215,13 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     second = train_lr(backend, path, config, out_dir=tmp_path / "models_b")
 
     assert (tmp_path / "models_a" / first.artifact.model_path).exists()
+    meta = json.loads((tmp_path / "models_a" / f"{first.artifact.id}.model_meta.json").read_text(encoding="utf-8"))
+    assert meta["seed"] == 23
+    assert meta["dataset_id"] == "dataset-1"
+    assert meta["target_col"] == "y"
+    assert meta["split_col"] == "split"
+    assert meta["split_values"] == {"train": "train", "test": "test", "oot": "oot"}
+    assert meta["feature_list"] == ["x1", "x2"]
     assert first.artifact.algorithm == "lr"
     assert first.artifact.params["C"] == 0.7
     assert first.artifact.feature_list == ("x1", "x2")
@@ -200,12 +304,105 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
 
     assert (tmp_path / "lgb_a" / first_lgb.artifact.model_path).exists()
     assert (tmp_path / "xgb_a" / first_xgb.artifact.model_path).exists()
+    assert not (tmp_path / "lgb_a" / ".staging").exists()
+    assert not (tmp_path / "xgb_a" / ".staging").exists()
     assert first_lgb.artifact.algorithm == "lgb"
     assert first_xgb.artifact.algorithm == "xgb"
     assert first_lgb.metrics.test_auc == pytest.approx(second_lgb.metrics.test_auc)
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
     assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
+
+
+def test_train_lgb_uses_shared_nan_label_gate(tmp_path):
+    rows = 160
+    labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]
+    labels[3] = np.nan
+    labels[112] = np.nan
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": labels,
+        "split": ["train"] * 100 + ["test"] * 40 + ["oot"] * 20,
+    })
+    path = tmp_path / "lgb_nan_labels.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 4, "learning_rate": 0.1, "num_leaves": 4},
+        seed=37,
+        early_stopping_rounds=None,
+        drop_nan_labels=True,
+    )
+
+    result = train_lgb(DataBackend(tmp_path), path, config, out_dir=tmp_path / "lgb_nan")
+
+    assert result.nan_labels_dropped == 2
+    assert result.metrics.test_auc is not None
+
+
+def test_train_lgb_blocks_train_test_nan_labels_without_confirmation(tmp_path):
+    rows = 160
+    labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]
+    labels[3] = np.nan
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": labels,
+        "split": ["train"] * 100 + ["test"] * 40 + ["oot"] * 20,
+    })
+    path = tmp_path / "lgb_nan_unconfirmed.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 4, "learning_rate": 0.1, "num_leaves": 4},
+        seed=37,
+        early_stopping_rounds=None,
+        drop_nan_labels=False,
+    )
+
+    with pytest.raises(NanLabelNotConfirmedError):
+        train_lgb(DataBackend(tmp_path), path, config, out_dir=tmp_path / "lgb_nan_unconfirmed")
+
+
+def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
+    rows = 160
+    labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]
+    for index in range(140, rows):
+        labels[index] = np.nan
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": labels,
+        "split": ["train"] * 100 + ["test"] * 40 + ["oot"] * 20,
+    })
+    path = tmp_path / "lgb_scoring_oot.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"num_boost_round": 4, "learning_rate": 0.1, "num_leaves": 4},
+        seed=41,
+        early_stopping_rounds=None,
+        drop_nan_labels=False,
+    )
+
+    result = train_lgb(DataBackend(tmp_path), path, config, out_dir=tmp_path / "lgb_scoring_oot")
+
+    assert result.nan_labels_dropped == 0
+    assert result.metrics.oot_ks is None
+    assert result.metrics.oot_auc is None
 
 
 def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
@@ -234,15 +431,64 @@ def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
     second = train_scorecard(backend, path, config, out_dir=tmp_path / "scorecard_b")
 
     assert (tmp_path / "scorecard_a" / first.artifact.model_path).exists()
+    assert not (tmp_path / "scorecard_a" / ".staging").exists()
     assert first.artifact.algorithm == "scorecard"
     assert set(first.artifact.woe_maps or {}) == {"x1", "x2"}
     assert first.artifact.params["base_score"] == 600
+    assert first.artifact.params["scorecard_base_points"] == pytest.approx(
+        second.artifact.params["scorecard_base_points"]
+    )
+    assert first.artifact.params["enforce_monotonic"] is True
+    assert set(first.artifact.params["monotonic_directions"]) == {"x1", "x2"}
     assert "max_depth" not in first.artifact.params
+    assert first.artifact.scorecard_table
+    assert first.artifact.scorecard_table[0]["feature"] == "__base__"
+    assert first.artifact.scorecard_table[0]["points"] == pytest.approx(
+        first.artifact.params["scorecard_base_points"]
+    )
+    detail_rows = [row for row in first.artifact.scorecard_table if row["feature"] != "__base__"]
+    assert {"feature", "bin_label", "points"} <= set(detail_rows[0])
+    assert detail_rows[0]["monotonic_direction"] in {"increasing", "decreasing"}
+    assert max(abs(float(row["points"])) for row in first.artifact.scorecard_table) > 0
+    assert {row["feature"] for row in detail_rows} == {"x1", "x2"}
+    for feature in ("x1", "x2"):
+        rows = sorted(
+            (row for row in detail_rows if row["feature"] == feature and row["bin_index"] >= 0),
+            key=lambda row: row["bin_index"],
+        )
+        bad_rates = [float(row["bad_rate"]) for row in rows]
+        assert (
+            all(left <= right for left, right in zip(bad_rates, bad_rates[1:]))
+            or all(left >= right for left, right in zip(bad_rates, bad_rates[1:]))
+        )
     assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)
     assert [item[0] for item in first.feature_importance] == [item[0] for item in second.feature_importance]
     assert [item[1] for item in first.feature_importance] == pytest.approx(
         [item[1] for item in second.feature_importance],
     )
+    meta = json.loads((tmp_path / "scorecard_a" / f"{first.artifact.id}.model_meta.json").read_text(encoding="utf-8"))
+    assert meta["scorecard_table"][0]["feature"] == "__base__"
+    loaded = load_model(first.artifact, base_dir=tmp_path / "scorecard_a")
+    assert loaded["scorecard_table"] == list(first.artifact.scorecard_table)
+    scorer = _ModelArtifactScorer(first.artifact, base_dir=tmp_path / "scorecard_a")
+    pd_scores = scorer.score(frame.head(10))
+    assert all(0.0 <= score <= 1.0 for score in pd_scores)
+    point_scores = scorer.scorecard_points(frame.head(10))
+    assert point_scores is not None
+    assert min(point_scores) > 100
+    assert max(point_scores) < 1000
+    first_row = frame.head(1).iloc[0]
+    manual_points = float(first.artifact.scorecard_table[0]["points"])
+    for feature in ("x1", "x2"):
+        value = float(first_row[feature])
+        match = next(
+            row for row in detail_rows
+            if row["feature"] == feature
+            and (row["lower"] is None or value >= float(row["lower"]))
+            and (row["upper"] is None or value < float(row["upper"]))
+        )
+        manual_points += float(match["points"])
+    assert manual_points == pytest.approx(point_scores[0])
 
 
 def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp_path):
@@ -480,6 +726,31 @@ def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature
     assert slots["sample_weight_col"] == ""
     assert slots["passthrough_cols"] == ["sample_weight"]
     assert any("检测到样本权重候选列" in note for note in proposal.notes)
+
+
+def test_build_modeling_proposal_continuous_target_skips_meta_columns(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "limit_flag": [i % 2 for i in range(rows)],
+        "monthly_income": [1000 + i * 10 for i in range(rows)],
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "regression_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-reg", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        "task-reg",
+        tmp_path,
+        recipes=["lgb_regressor"],
+    )
+
+    assert proposal.target_type == "continuous"
+    assert proposal.target_col == "monthly_income"
 
 
 def test_build_modeling_proposal_derives_multiclass_target_type_from_recipe(tmp_path):

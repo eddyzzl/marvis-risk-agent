@@ -60,6 +60,7 @@ class PipelineSettings:
     report_template_path: Path
     feature_columns: list[str] = field(default_factory=list)
     notebook_kernel_name: str = "python3"
+    notebook_memory_limit_mb: int | None = 4096
     bin_count: int = 10
     random_sample_size: int = 1000
     random_seed: int = 42
@@ -131,6 +132,7 @@ def run_notebook_stage(
                 model_params_path=execution_dir / "model_params.json",
                 notebook_steps_path=execution_dir / "notebook_steps.json",
                 kernel_name=kernel_name,
+                notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
                 stage_claimed=stage_claimed,
                 cancellation_token=cancellation_token,
                 keep_alive=True,
@@ -1083,6 +1085,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             model_params_path=model_params_path,
             notebook_steps_path=notebook_steps_path,
             kernel_name=kernel_name,
+            notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
             keep_alive=True,
         )
         if live_session is None:
@@ -1334,13 +1337,13 @@ def _load_arrow_sample_with_python(
             "    df = pd.read_parquet(input_path)",
             "else:",
             "    raise ValueError(f'unsupported arrow suffix: {suffix}')",
-            "df.to_json(output_path, orient='table', force_ascii=False)",
+            "df.to_pickle(output_path)",
         ]
     )
     with tempfile.TemporaryDirectory(prefix="marvis-sample-") as tmp_dir:
-        json_path = Path(tmp_dir) / "sample.json"
+        pickle_path = Path(tmp_dir) / "sample.pkl"
         completed = subprocess.run(
-            [str(python_executable), "-c", code, str(sample_path), str(json_path), suffix],
+            [str(python_executable), "-c", code, str(sample_path), str(pickle_path), suffix],
             check=False,
             capture_output=True,
             text=True,
@@ -1351,7 +1354,7 @@ def _load_arrow_sample_with_python(
             raise PipelineError(
                 (completed.stderr or completed.stdout or "selected Python failed").strip()
             )
-        return pd.read_json(json_path, orient="table")
+        return pd.read_pickle(pickle_path)
 
 
 def _same_python(left: Path | str, right: Path | str) -> bool:
@@ -1654,6 +1657,7 @@ def _notebook_step_v3(
     model_params_path: Path,
     notebook_steps_path: Path,
     kernel_name: str,
+    notebook_memory_limit_mb: int | None = None,
     stage_claimed: bool = False,
     cancellation_token: NotebookCancellationToken | None = None,
     keep_alive: bool = False,
@@ -1695,6 +1699,7 @@ def _notebook_step_v3(
             progress_path=notebook_steps_path,
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
+            memory_limit_mb=notebook_memory_limit_mb,
         )
         result = live_session.execute_notebook(keep_alive=True)
     else:
@@ -1706,6 +1711,7 @@ def _notebook_step_v3(
             progress_path=notebook_steps_path,
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
+            memory_limit_mb=notebook_memory_limit_mb,
         )
     if result.step_events is not None:
         notebook_steps_path.parent.mkdir(parents=True, exist_ok=True)

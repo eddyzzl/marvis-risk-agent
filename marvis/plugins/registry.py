@@ -13,6 +13,7 @@ from marvis.plugins.manifest import (
     ToolRef,
     ToolSpec,
     parse_manifest,
+    python_requires_satisfied,
 )
 
 
@@ -32,41 +33,56 @@ class PluginRegistry:
         existing = self._plugins.get(manifest.name)
         if existing is not None and existing[0].version == manifest.version:
             raise DuplicatePluginError(f"{manifest.name}@{manifest.version} already registered")
-        self._repo.upsert_plugin(manifest, enabled=enabled)
-        self._repo.write_audit(
-            kind="plugin.register",
-            target_ref=manifest.name,
-            outcome="succeeded",
-            detail={
+        audit = {
+            "kind": "plugin.register",
+            "target_ref": manifest.name,
+            "outcome": "succeeded",
+            "detail": {
                 "version": manifest.version,
                 "builtin": manifest.builtin,
                 "enabled": bool(enabled),
             },
-        )
+        }
+        upsert_with_audit = getattr(self._repo, "upsert_plugin_with_audit", None)
+        if callable(upsert_with_audit):
+            upsert_with_audit(manifest, enabled=enabled, audit=audit)
+        else:
+            self._repo.upsert_plugin(manifest, enabled=enabled)
+            self._repo.write_audit(**audit)
         self._plugins[manifest.name] = (manifest, bool(enabled))
 
     def remove(self, name: str) -> None:
         manifest, _enabled = self._require(name)
         if manifest.builtin:
             raise ValueError("cannot remove builtin plugin")
-        self._repo.delete_plugin(name)
-        self._repo.write_audit(
-            kind="plugin.remove",
-            target_ref=name,
-            outcome="succeeded",
-            detail={"version": manifest.version},
-        )
+        audit = {
+            "kind": "plugin.remove",
+            "target_ref": name,
+            "outcome": "succeeded",
+            "detail": {"version": manifest.version},
+        }
+        delete_with_audit = getattr(self._repo, "delete_plugin_with_audit", None)
+        if callable(delete_with_audit):
+            delete_with_audit(name, audit=audit)
+        else:
+            self._repo.delete_plugin(name)
+            self._repo.write_audit(**audit)
         del self._plugins[name]
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         manifest, _current = self._require(name)
-        self._repo.set_enabled(name, enabled)
-        self._repo.write_audit(
-            kind="plugin.enable" if enabled else "plugin.disable",
-            target_ref=name,
-            outcome="succeeded",
-            detail={"version": manifest.version, "enabled": bool(enabled)},
-        )
+        audit = {
+            "kind": "plugin.enable" if enabled else "plugin.disable",
+            "target_ref": name,
+            "outcome": "succeeded",
+            "detail": {"version": manifest.version, "enabled": bool(enabled)},
+        }
+        set_enabled_with_audit = getattr(self._repo, "set_enabled_with_audit", None)
+        if callable(set_enabled_with_audit):
+            set_enabled_with_audit(name, enabled, audit=audit)
+        else:
+            self._repo.set_enabled(name, enabled)
+            self._repo.write_audit(**audit)
         self._plugins[name] = (manifest, bool(enabled))
 
     def get(self, name: str) -> PluginManifest:
@@ -105,6 +121,10 @@ class ToolRegistry:
             raise
         if not self._plugins.is_enabled(ref.plugin):
             raise PluginNotFoundError(ref.plugin)
+        if not python_requires_satisfied(manifest.python_requires):
+            raise ToolNotFoundError(
+                f"{ref.label()} requires Python {manifest.python_requires}"
+            )
         if ref.version and ref.version != manifest.version:
             raise ToolNotFoundError(
                 f"{ref.label()} version {ref.version} does not match {manifest.version}"
@@ -117,6 +137,8 @@ class ToolRegistry:
     def catalog_for_planner(self) -> list[dict]:
         catalog: list[dict] = []
         for manifest in self._plugins.list():
+            if not python_requires_satisfied(manifest.python_requires):
+                continue
             for tool in manifest.tools:
                 catalog.append({
                     "plugin": manifest.name,

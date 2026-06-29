@@ -2,7 +2,8 @@ import pandas as pd
 import pytest
 
 import marvis.packs.strategy as strategy_pack
-from marvis.packs.strategy import ProfitParams, backtest_strategy, build_strategy
+from marvis.packs.strategy import ProfitParams, apply_strategy, backtest_strategy, build_strategy
+from marvis.packs.strategy.errors import StrategyError
 
 
 def _profit_params() -> ProfitParams:
@@ -81,6 +82,36 @@ def test_backtest_strategy_defaults_swap_and_profit_when_optional_inputs_missing
     assert result.swap_out_count == 0
     assert result.swap_in_bad_rate == 0.0
     assert result.swap_out_bad_rate == 0.0
+
+
+def test_strategy_conditions_coerce_numeric_literals_for_string_columns():
+    frame = pd.DataFrame({"score": ["580", "620", "730"], "segment": ["1", "2", "3"]})
+    strategy = build_strategy(
+        "approval",
+        [
+            {"condition": "score < 600", "decision": "reject"},
+            {"condition": "segment in [2, 3]", "decision": "reject"},
+        ],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    decisions = apply_strategy(frame, strategy)
+
+    assert decisions.tolist() == ["reject", "reject", "reject"]
+
+
+def test_strategy_conditions_fail_loud_for_numeric_literal_on_non_numeric_column():
+    frame = pd.DataFrame({"score": ["low", "high"]})
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score == 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    with pytest.raises(StrategyError, match="non-numeric"):
+        apply_strategy(frame, strategy)
 
 
 def test_strategy_package_exports_backtest_strategy():

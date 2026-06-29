@@ -12,6 +12,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.output.model_report import MODEL_REPORT_SHEETS
 
 # (display label, ModelMetrics field stem) per target type. The stem is prefixed with
@@ -25,7 +26,6 @@ _TARGET_LABEL = {"continuous": "回归(连续型)", "multiclass": "多分类"}
 
 def render_minimal_model_report(experiment, out_path: Path) -> Path:
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     config = experiment.config
     metrics = experiment.metrics
     target_type = getattr(config, "target_type", "binary")
@@ -66,8 +66,15 @@ def render_minimal_model_report(experiment, out_path: Path) -> Path:
             value = getattr(metrics, f"{split}_{stem}", None) if metrics is not None else None
             sheet[f"{col}{row}"] = "n/a" if value is None else round(float(value), 6)
 
-    workbook.save(out_path)
-    return out_path
+    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
+    try:
+        workbook.save(artifact.path)
+        final_path = artifact.promote()
+        artifact.commit()
+        return final_path
+    except Exception:
+        artifact.rollback()
+        raise
 
 
 __all__ = ["render_minimal_model_report"]

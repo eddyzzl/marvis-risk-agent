@@ -15,6 +15,18 @@ class FakeLLM:
         return self.response
 
 
+class SequencedLLM:
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.calls = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) <= len(self.responses):
+            return self.responses[len(self.calls) - 1]
+        return self.responses[-1]
+
+
 def _step(post_checks: list[PostCheck]) -> PlanStep:
     return PlanStep(
         id="step-1",
@@ -28,7 +40,7 @@ def _step(post_checks: list[PostCheck]) -> PlanStep:
     )
 
 
-def _plan(*steps: PlanStep) -> Plan:
+def _plan(*steps: PlanStep, success_criteria=None) -> Plan:
     return Plan(
         id="plan-1",
         task_id="task-1",
@@ -37,6 +49,7 @@ def _plan(*steps: PlanStep) -> Plan:
         template_id="test",
         steps=list(steps),
         autonomy_level=1,
+        success_criteria=list(success_criteria or []),
     )
 
 
@@ -123,7 +136,30 @@ def test_reviewer_llm_critique_returns_soft_verdict_only():
     assert llm.calls
 
 
-def test_reviewer_final_review_keeps_goal_met_deterministic_and_tracks_doubt():
+def test_reviewer_llm_critique_marks_unparseable_reply_as_soft_warning():
+    verdict = Reviewer(lambda: FakeLLM("not json")).llm_critique(
+        _step([]),
+        {"echoed": "hi"},
+        "finish",
+    )
+
+    assert verdict.reviewer == "llm_critic"
+    assert verdict.passed is False
+    assert verdict.reasons == ["llm critique returned non-json"]
+
+
+def test_reviewer_llm_critique_retries_after_unparseable_reply():
+    llm = SequencedLLM(["not json", json.dumps({"passed": True, "reasons": []})])
+
+    verdict = Reviewer(lambda: llm).llm_critique(_step([]), {"echoed": "hi"}, "finish")
+
+    assert verdict.passed is True
+    assert verdict.reasons == []
+    assert len(llm.calls) == 2
+    assert "Previous reply was not parseable JSON" in llm.calls[1]["user_prompt"]
+
+
+def test_reviewer_final_review_goal_doubt_blocks_goal_met():
     done = _step([])
     done.status = StepStatus.DONE
     skipped = _step([])
@@ -142,9 +178,24 @@ def test_reviewer_final_review_keeps_goal_met_deterministic_and_tracks_doubt():
     )
 
     assert isinstance(review, FinalReview)
-    assert review.goal_met is True
+    assert review.goal_met is False
     assert review.goal_doubt is True
     assert review.open_items == ["review business wording"]
+
+
+def test_reviewer_final_review_retries_summary_after_unparseable_reply():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = SequencedLLM([
+        "not json",
+        json.dumps({"summary": "Retried summary.", "open_items": [], "goal_doubt": False}),
+    ])
+
+    review = Reviewer(lambda: llm).final_review(_plan(done), {"step-1": {"ok": True}}, "finish")
+
+    assert review.summary == "Retried summary."
+    assert review.goal_met is True
+    assert len(llm.calls) == 2
 
 
 def test_reviewer_final_review_marks_incomplete_steps_as_open_items():
@@ -155,3 +206,110 @@ def test_reviewer_final_review_marks_incomplete_steps_as_open_items():
 
     assert review.goal_met is False
     assert "Metrics" in review.open_items
+
+
+def test_reviewer_final_review_passes_when_success_criteria_are_met():
+    done = _step([])
+    done.status = StepStatus.DONE
+    plan = _plan(
+        done,
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "aggregate": "max",
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+
+    review = Reviewer(lambda: FakeLLM("{}")).final_review(
+        plan,
+        {
+            "step-1": {
+                "target_type": "binary",
+                "experiments": [{"metrics": {"oot_ks": 0.41}}],
+            }
+        },
+        "finish",
+    )
+
+    assert review.goal_met is True
+    assert review.open_items == []
+
+
+def test_reviewer_final_review_fails_when_success_criteria_are_not_met():
+    done = _step([])
+    done.status = StepStatus.DONE
+    plan = _plan(
+        done,
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "aggregate": "max",
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+
+    review = Reviewer(lambda: FakeLLM("{}")).final_review(
+        plan,
+        {"step-1": {"target_type": "binary", "metrics": {"oot_ks": 0.2}}},
+        "finish",
+    )
+
+    assert review.goal_met is False
+    assert "OOT KS=0.2 < 0.3331" in review.open_items
+    assert "成功标准未达成" in review.summary
+
+
+def test_reviewer_final_review_reports_invalid_success_thresholds():
+    done = _step([])
+    done.status = StepStatus.DONE
+    plan = _plan(
+        done,
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": "not-a-number",
+                "label": "OOT KS",
+            }
+        ],
+    )
+
+    review = Reviewer(lambda: FakeLLM("{}")).final_review(
+        plan,
+        {"step-1": {"metrics": {"oot_ks": 0.41}}},
+        "finish",
+    )
+
+    assert review.goal_met is False
+    assert "OOT KS invalid min threshold: 'not-a-number'" in review.open_items
+
+
+def test_reviewer_final_review_skips_binary_success_criteria_for_continuous_targets():
+    done = _step([])
+    done.status = StepStatus.DONE
+    plan = _plan(
+        done,
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+
+    review = Reviewer(lambda: FakeLLM("{}")).final_review(
+        plan,
+        {"step-1": {"target_type": "continuous", "metrics": {"oot_rmse": 1.4}}},
+        "finish",
+    )
+
+    assert review.goal_met is True
+    assert review.open_items == []

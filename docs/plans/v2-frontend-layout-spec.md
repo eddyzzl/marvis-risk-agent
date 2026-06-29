@@ -54,9 +54,8 @@
 - 与本计划的关系:仅约束决策 #5「调整→replan」的**重规划次数上限**;模板流程形状固定,`max_plan_depth`/explore 基本不触发。
 
 ## 6. 切换矩阵
-- `task_type ∈ {data_join, feature_analysis, modeling}` → 新三区行为(plan_view 右栏 + 对话流中 + 极简顶)。
+- `task_type ∈ {data_join, feature_analysis, modeling, strategy, vintage}` → 新三区行为(plan_view 右栏 + 对话流中 + 极简顶)。
 - `task_type == validation` → 完全原样(workflowStepper + stage 区),**零改动**。
-- `task_type ∈ {strategy, vintage}` → 入口保留,暂不接(本轮不开发)。
 - 渲染分发集中在一处(按 task_type 选右栏渲染器 + 中间区可见性),避免散落。
 
 ## 7. 缓存破除

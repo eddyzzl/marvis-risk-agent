@@ -48,7 +48,18 @@ def tool_distill_learning(inputs: dict, ctx) -> dict:
         _string_list(inputs.get("sources") or []),
         llm_factory=_llm_factory(runtime.workspace, _optional_str(inputs.get("model_id"))),
     )
-    runtime.draft_repo.save_learning_note(note)
+    runtime.draft_repo.save_learning_note_with_audit(
+        note,
+        audit={
+            "kind": "draft.learning_note.create",
+            "target_ref": note.id,
+            "outcome": "succeeded",
+            "detail": {
+                "query": note.query,
+                "source_count": len(note.sources),
+            },
+        },
+    )
     return {
         "learning_note_id": note.id,
         "query": note.query,
@@ -70,7 +81,19 @@ def tool_draft_script(inputs: dict, ctx) -> dict:
         learning_note=learning_note,
         llm_factory=_llm_factory(runtime.workspace, _optional_str(inputs.get("model_id"))),
     )
-    runtime.drafts.add(draft)
+    runtime.drafts.add_with_audit(
+        draft,
+        audit={
+            "kind": "draft.author",
+            "target_ref": draft.id,
+            "outcome": "succeeded",
+            "detail": {
+                "task_id": draft.task_id,
+                "learning_note_id": draft.learning_note_id,
+                "source": draft.source,
+            },
+        },
+    )
     return {
         "draft_id": draft.id,
         "name": draft.name,

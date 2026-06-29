@@ -91,21 +91,12 @@
   z-index: 1;
 }
 
-/* per-task accent tones (light) — coordinated "中等鲜明" palette */
-.welcome-task-card[data-task-kind="feature_analysis"] { --tone: #3d6fd1; }
-.welcome-task-card[data-task-kind="data_join"] { --tone: #1aa595; }
-.welcome-task-card[data-task-kind="modeling"] { --tone: #745fd6; }
-.welcome-task-card[data-task-kind="validation"] { --tone: #2aa158; }
-.welcome-task-card[data-task-kind="strategy"] { --tone: #df9326; }
-.welcome-task-card[data-task-kind="vintage"] { --tone: #d35d87; }
-
-/* per-task accent tones (dark, slightly brighter for contrast) */
-body[data-theme="dark"] .welcome-task-card[data-task-kind="feature_analysis"] { --tone: #6b93e6; }
-body[data-theme="dark"] .welcome-task-card[data-task-kind="data_join"] { --tone: #3fc7b4; }
-body[data-theme="dark"] .welcome-task-card[data-task-kind="modeling"] { --tone: #9c8bea; }
-body[data-theme="dark"] .welcome-task-card[data-task-kind="validation"] { --tone: #54c47e; }
-body[data-theme="dark"] .welcome-task-card[data-task-kind="strategy"] { --tone: #ecb24f; }
-body[data-theme="dark"] .welcome-task-card[data-task-kind="vintage"] { --tone: #e389aa; }
+.welcome-task-card[data-task-kind="feature_analysis"] { --tone: var(--tone-feature-analysis); }
+.welcome-task-card[data-task-kind="data_join"] { --tone: var(--tone-data-join); }
+.welcome-task-card[data-task-kind="modeling"] { --tone: var(--tone-modeling); }
+.welcome-task-card[data-task-kind="validation"] { --tone: var(--tone-validation); }
+.welcome-task-card[data-task-kind="strategy"] { --tone: var(--tone-strategy); }
+.welcome-task-card[data-task-kind="vintage"] { --tone: var(--tone-vintage); }
 
 .welcome-task-card.available:hover {
   border-color: color-mix(in srgb, var(--tone, var(--accent)) 26%, var(--border));
@@ -376,14 +367,11 @@ body[data-theme="dark"] .welcome-task-card[data-task-kind="vintage"] { --tone: #
   }
 }
 
-/* Temporarily-disabled task types: dimmed with a "敬请期待" corner badge. The card stays
-   clickable so the click can surface the coming-soon toast (see app.js). */
-.welcome-task-card.unavailable,
-.welcome-task-card[data-coming-soon] {
+/* Temporarily-disabled task types: dimmed with a "敬请期待" corner badge. */
+.welcome-task-card.unavailable {
   opacity: 0.6;
 }
-.welcome-task-card.unavailable::after,
-.welcome-task-card[data-coming-soon]::after {
+.welcome-task-card.unavailable::after {
   content: "敬请期待";
   position: absolute;
   top: 12px;

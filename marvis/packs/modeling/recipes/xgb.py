@@ -8,12 +8,14 @@ import joblib
 import xgboost as xgb
 
 from marvis.data.labels import resolve_modeling_splits
+from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
     compute_model_metrics,
     model_params,
+    normalized_monotone_constraints,
     sample_weight_values,
     split_modeling_frame,
 )
@@ -31,6 +33,11 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         "random_state": config.seed,
         "n_jobs": 1,
     }
+    constraints = normalized_monotone_constraints(config)
+    params.pop("monotone_constraints", None)
+    params.pop("monotonic_constraints", None)
+    if constraints is not None:
+        params["monotone_constraints"] = f"({','.join(str(value) for value in constraints)})"
     num_boost_round = int(params.pop("num_boost_round", 20))
     if config.early_stopping_rounds:
         params["early_stopping_rounds"] = int(config.early_stopping_rounds)
@@ -79,8 +86,8 @@ def _save_xgb_model(
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}.pkl"
-    joblib.dump(model, out_dir / model_path)
-    return ModelArtifact(
+    write_artifact_file(out_dir, model_path, lambda path: joblib.dump(model, path))
+    artifact = ModelArtifact(
         id=artifact_id,
         experiment_id="",
         algorithm="xgb",
@@ -91,6 +98,8 @@ def _save_xgb_model(
         woe_maps=None,
         created_at=datetime.now(UTC).isoformat(),
     )
+    persist_model_meta(out_dir, artifact, config=config)
+    return artifact
 
 
 def _xgb_importance(

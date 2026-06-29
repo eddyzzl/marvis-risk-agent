@@ -144,6 +144,8 @@ def _eval_node(node: ast.AST, df: pd.DataFrame) -> pd.Series:
 
 def _eval_comparison(series: pd.Series, op: ast.cmpop, value: Any) -> pd.Series:
     try:
+        if _numeric_literal(value):
+            series = _coerce_numeric_series(series)
         if isinstance(op, ast.Lt):
             return series < value
         if isinstance(op, ast.LtE):
@@ -157,12 +159,30 @@ def _eval_comparison(series: pd.Series, op: ast.cmpop, value: Any) -> pd.Series:
         if isinstance(op, ast.NotEq):
             return series != value
         if isinstance(op, ast.In):
-            return series.isin(_membership_values(value))
+            values = _membership_values(value)
+            if values and all(_numeric_literal(item) for item in values):
+                series = _coerce_numeric_series(series)
+            return series.isin(values)
         if isinstance(op, ast.NotIn):
-            return ~series.isin(_membership_values(value))
+            values = _membership_values(value)
+            if values and all(_numeric_literal(item) for item in values):
+                series = _coerce_numeric_series(series)
+            return ~series.isin(values)
     except TypeError as exc:
         raise StrategyError("condition comparison failed") from exc
     raise StrategyError("unsupported condition comparison")
+
+
+def _numeric_literal(value) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _coerce_numeric_series(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    failed = series.notna() & numeric.isna()
+    if bool(failed.any()):
+        raise StrategyError("condition comparison failed: field contains non-numeric values")
+    return numeric
 
 
 def _literal_value(node: ast.AST):

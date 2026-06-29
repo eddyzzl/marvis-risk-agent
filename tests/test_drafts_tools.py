@@ -160,6 +160,9 @@ def test_draft_distill_learning_tool_persists_note(monkeypatch, tmp_path):
     assert note.query == "scorecard monitoring"
     assert note.sources == ("https://example.test/woe",)
     assert "Use WOE bins" in note.distilled
+    audit = PluginRepository(build_settings(tmp_path).db_path).list_audit(kind="draft.learning_note.create")[0]
+    assert audit["target_ref"] == note.id
+    assert audit["detail"]["source_count"] == 1
 
 
 def test_draft_script_tool_persists_generated_draft(monkeypatch, tmp_path):
@@ -185,6 +188,9 @@ def test_draft_script_tool_persists_generated_draft(monkeypatch, tmp_path):
     assert draft is not None
     assert draft.status == "draft"
     assert draft.task_id == "task-1"
+    audit = PluginRepository(build_settings(tmp_path).db_path).list_audit(kind="draft.author")[0]
+    assert audit["target_ref"] == draft.id
+    assert audit["detail"]["task_id"] == "task-1"
 
 
 def test_draft_run_tool_runs_saved_draft_in_subprocess(tmp_path):

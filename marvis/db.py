@@ -1,9 +1,6 @@
 import json
-import logging
-import re
 import sqlite3
 import uuid
-from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass, replace as dataclass_replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,12 +21,19 @@ from marvis.domain import (
     TaskRecord,
     TaskStatus,
 )
+from marvis.db_schema import (
+    _ensure_column as _ensure_column,
+    connect as connect,
+    init_db as init_db,
+    sqlite_health as sqlite_health,
+)
 from marvis.drafts.contracts import (
     DraftRun,
     DraftTool,
     LearningNote,
     assert_draft_status_transition,
 )
+from marvis.agent.gates.contracts import EvidenceEnvelope
 from marvis.model_algorithms import normalize_algorithm
 from marvis.packs.modeling.contracts import (
     Experiment,
@@ -44,10 +48,12 @@ from marvis.packs.strategy.contracts import (
 )
 from marvis.plugins.errors import PluginNotFoundError
 from marvis.plugins.manifest import PluginManifest, ToolRef, manifest_to_dict
+from marvis.redaction import redact_value
 from marvis.orchestrator.contracts import (
     AgentStatus,
     Plan,
     PlanStatus,
+    StepStatus,
     SubAgent,
     plan_from_dict,
     plan_to_dict,
@@ -61,533 +67,16 @@ from marvis.state_machine import (
     assert_transition,
 )
 
-logger = logging.getLogger(__name__)
-
 AGENT_REPORT_CONCLUSION_KEYS = frozenset({
     "TEXT:pressure_test_summary",
     "TEXT:pressure_impact_recommendation",
     "TEXT:final_validation_conclusion",
 })
-_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MIGRATION_TABLES = frozenset({"tasks", "plans", "plan_steps", "model_artifacts"})
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
-
-def init_db(db_path: Path) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with connect(db_path) as conn:
-        conn.execute(
-            """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY,
-                    task_type TEXT NOT NULL DEFAULT 'validation',
-                    model_name TEXT NOT NULL,
-                model_version TEXT NOT NULL,
-                validator TEXT NOT NULL,
-                source_dir TEXT NOT NULL,
-                algorithm TEXT NOT NULL DEFAULT 'lgb',
-                run_mode TEXT NOT NULL DEFAULT 'manual',
-                target_col TEXT NOT NULL DEFAULT 'y',
-                score_col TEXT NOT NULL DEFAULT 'pred',
-                split_col TEXT NOT NULL DEFAULT 'split',
-                time_col TEXT NOT NULL DEFAULT 'apply_month',
-                target_type TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL,
-                status_message TEXT NOT NULL,
-                status_reason_code TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="task_type",
-            definition="TEXT NOT NULL DEFAULT 'validation'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="algorithm",
-            definition="TEXT NOT NULL DEFAULT 'lgb'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="run_mode",
-            definition="TEXT NOT NULL DEFAULT 'manual'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="target_col",
-            definition="TEXT NOT NULL DEFAULT 'y'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="score_col",
-            definition="TEXT NOT NULL DEFAULT 'pred'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="split_col",
-            definition="TEXT NOT NULL DEFAULT 'split'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="time_col",
-            definition="TEXT NOT NULL DEFAULT 'apply_month'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="feature_columns_json",
-            definition="TEXT NOT NULL DEFAULT '[]'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="recipes_json",
-            definition="TEXT NOT NULL DEFAULT '[]'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="target_type",
-            definition="TEXT NOT NULL DEFAULT ''",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="sample_weight_col",
-            definition="TEXT NOT NULL DEFAULT ''",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="metrics_json",
-            definition="TEXT NOT NULL DEFAULT '[]'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="capability_tier",
-            definition="TEXT NOT NULL DEFAULT ''",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="notebook_path",
-            definition="TEXT",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="sample_path",
-            definition="TEXT",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="pmml_path",
-            definition="TEXT",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="dictionary_path",
-            definition="TEXT",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="report_values_json",
-            definition="TEXT NOT NULL DEFAULT '{}'",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="report_values_revision",
-            definition="INTEGER NOT NULL DEFAULT 0",
-        )
-        _ensure_column(
-            conn,
-            table="tasks",
-            column="status_reason_code",
-            definition="TEXT NOT NULL DEFAULT ''",
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                progress_message TEXT NOT NULL DEFAULT '',
-                error_name TEXT,
-                error_value TEXT,
-                traceback TEXT,
-                created_at TEXT NOT NULL,
-                started_at TEXT,
-                finished_at TEXT,
-                log_path TEXT,
-                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, kind, status)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)"
-        )
-        conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_task
-                ON jobs(task_id)
-             WHERE status IN ('queued', 'running')
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agent_messages (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                stage TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_agent_messages_task
-                ON agent_messages(task_id, created_at, id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plugins (
-                name TEXT PRIMARY KEY,
-                version TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                module TEXT NOT NULL,
-                manifest_json TEXT NOT NULL,
-                checksum TEXT NOT NULL DEFAULT '',
-                builtin INTEGER NOT NULL DEFAULT 0,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                installed_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tools (
-                plugin TEXT NOT NULL,
-                name TEXT NOT NULL,
-                summary TEXT NOT NULL DEFAULT '',
-                input_schema_json TEXT NOT NULL,
-                output_schema_json TEXT NOT NULL,
-                determinism TEXT NOT NULL,
-                timeout_seconds INTEGER NOT NULL,
-                failure_policy TEXT NOT NULL,
-                side_effects_json TEXT NOT NULL DEFAULT '[]',
-                entrypoint TEXT NOT NULL DEFAULT '',
-                memory_limit_mb INTEGER NOT NULL DEFAULT 2048,
-                PRIMARY KEY (plugin, name),
-                FOREIGN KEY(plugin) REFERENCES plugins(name) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS audit (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                actor TEXT,
-                target_ref TEXT,
-                inputs_hash TEXT,
-                outcome TEXT,
-                detail_json TEXT NOT NULL DEFAULT '{}',
-                at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plans (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                goal TEXT NOT NULL,
-                source TEXT NOT NULL,
-                template_id TEXT,
-                autonomy_level INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                novel_mode TEXT NOT NULL DEFAULT 'plan_ahead',
-                tier TEXT NOT NULL DEFAULT 'balanced',
-                replan_count INTEGER NOT NULL DEFAULT 0,
-                loop_events_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        _ensure_column(
-            conn,
-            table="plans",
-            column="novel_mode",
-            definition="TEXT NOT NULL DEFAULT 'plan_ahead'",
-        )
-        _ensure_column(
-            conn,
-            table="plans",
-            column="tier",
-            definition="TEXT NOT NULL DEFAULT 'balanced'",
-        )
-        _ensure_column(
-            conn,
-            table="plans",
-            column="replan_count",
-            definition="INTEGER NOT NULL DEFAULT 0",
-        )
-        _ensure_column(
-            conn,
-            table="plans",
-            column="loop_events_json",
-            definition="TEXT NOT NULL DEFAULT '[]'",
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plan_steps (
-                id TEXT PRIMARY KEY,
-                plan_id TEXT NOT NULL,
-                idx INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                tool_plugin TEXT NOT NULL,
-                tool_name TEXT NOT NULL,
-                tool_version TEXT,
-                inputs_json TEXT NOT NULL,
-                depends_on_json TEXT NOT NULL,
-                post_checks_json TEXT NOT NULL,
-                needs_confirmation INTEGER NOT NULL,
-                decision_point INTEGER NOT NULL DEFAULT 0,
-                sub_agent_scope TEXT,
-                granted_tools_json TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL,
-                sub_agent_id TEXT,
-                output_ref TEXT,
-                review_json TEXT NOT NULL DEFAULT '[]',
-                error TEXT,
-                phase TEXT,
-                confirmed INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
-            )
-            """
-        )
-        _ensure_column(
-            conn,
-            table="plan_steps",
-            column="phase",
-            definition="TEXT",
-        )
-        _ensure_column(
-            conn,
-            table="plan_steps",
-            column="decision_point",
-            definition="INTEGER NOT NULL DEFAULT 0",
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plan_step_outputs (
-                step_id TEXT PRIMARY KEY,
-                output_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(step_id) REFERENCES plan_steps(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plan_summaries (
-                id TEXT PRIMARY KEY,
-                plan_id TEXT NOT NULL,
-                summary_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sub_agents (
-                id TEXT PRIMARY KEY,
-                parent_task_id TEXT NOT NULL,
-                parent_step_id TEXT,
-                scope TEXT NOT NULL,
-                granted_tools_json TEXT NOT NULL DEFAULT '[]',
-                context_budget INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                result_ref TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS datasets (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                format TEXT NOT NULL,
-                sheet TEXT,
-                row_count INTEGER NOT NULL,
-                columns_json TEXT NOT NULL,
-                has_target INTEGER NOT NULL,
-                target_col TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS joins (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                anchor_dataset_id TEXT NOT NULL,
-                joins_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                result_dataset_id TEXT,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS experiments (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                recipe_id TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                metrics_json TEXT,
-                artifact_id TEXT,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS model_artifacts (
-                id TEXT PRIMARY KEY,
-                experiment_id TEXT NOT NULL,
-                algorithm TEXT NOT NULL,
-                model_path TEXT NOT NULL,
-                pmml_path TEXT,
-                feature_list_json TEXT NOT NULL,
-                feature_importance_json TEXT NOT NULL DEFAULT '[]',
-                params_json TEXT NOT NULL,
-                woe_maps_json TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS strategies (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                strategy_type TEXT NOT NULL,
-                rules_json TEXT NOT NULL,
-                score_col TEXT,
-                default_decision_json TEXT NOT NULL,
-                description TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS backtests (
-                id TEXT PRIMARY KEY,
-                strategy_id TEXT NOT NULL,
-                dataset_id TEXT NOT NULL,
-                result_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS learning_notes (
-                id TEXT PRIMARY KEY,
-                query TEXT NOT NULL,
-                sources_json TEXT NOT NULL,
-                distilled TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS draft_tools (
-                id TEXT PRIMARY KEY,
-                task_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                code TEXT NOT NULL,
-                input_schema_json TEXT NOT NULL,
-                output_schema_json TEXT NOT NULL,
-                determinism TEXT NOT NULL,
-                source TEXT NOT NULL,
-                learning_note_id TEXT,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS draft_runs (
-                id TEXT PRIMARY KEY,
-                draft_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                inputs_hash TEXT NOT NULL,
-                ok INTEGER NOT NULL,
-                output_json TEXT,
-                error TEXT,
-                at TEXT NOT NULL,
-                FOREIGN KEY (draft_id) REFERENCES draft_tools(id) ON DELETE CASCADE
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_model_artifacts_experiment ON model_artifacts(experiment_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_task ON strategies(task_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_backtests_strategy ON backtests(strategy_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_task ON draft_tools(task_id, status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_runs_draft ON draft_runs(draft_id)")
-        _ensure_column(conn, "model_artifacts", "feature_importance_json", "TEXT NOT NULL DEFAULT '[]'")
-        from marvis.agent_memory.store import ensure_agent_memory_schema
-
-        ensure_agent_memory_schema(conn)
 
 
 class TaskRepository:
@@ -595,84 +84,25 @@ class TaskRepository:
         self.db_path = db_path
 
     def create_task(self, payload: TaskCreate) -> TaskRecord:
-        task_id = uuid.uuid4().hex
-        now = _now()
-        record = TaskRecord(
-            id=task_id,
-            task_type=_normalize_task_type(payload.task_type),
-            model_name=payload.model_name,
-            model_version=payload.model_version,
-            validator=payload.validator,
-            source_dir=payload.source_dir,
-            algorithm=_normalize_algorithm(payload.algorithm),
-            run_mode=_normalize_run_mode(payload.run_mode),
-            target_col=payload.target_col,
-            score_col=payload.score_col,
-            split_col=payload.split_col,
-            time_col=payload.time_col,
-            feature_columns=list(payload.feature_columns),
-            target_type=payload.target_type,
-            recipes=list(payload.recipes),
-            sample_weight_col=payload.sample_weight_col,
-            metrics=list(payload.metrics),
-            capability_tier=payload.capability_tier,
-            notebook_path=payload.notebook_path,
-            sample_path=payload.sample_path,
-            pmml_path=payload.pmml_path,
-            dictionary_path=payload.dictionary_path,
-            report_values_revision=0,
-            status=TaskStatus.CREATED,
-            status_message="created",
-            status_reason_code="",
-            created_at=now,
-            updated_at=now,
-        )
+        record = _task_record_from_create(payload)
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO tasks
-                (
-                    id, task_type, model_name, model_version, validator, source_dir,
-                    algorithm, run_mode, target_col, score_col, split_col,
-                    time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, metrics_json, capability_tier, notebook_path, sample_path,
-                    pmml_path, dictionary_path, report_values_json,
-                    report_values_revision, status, status_message,
-                    status_reason_code, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.id,
-                    record.task_type,
-                    record.model_name,
-                    record.model_version,
-                    record.validator,
-                    record.source_dir,
-                    record.algorithm,
-                    record.run_mode,
-                    record.target_col,
-                    record.score_col,
-                    record.split_col,
-                    record.time_col,
-                    _dump_json_list(record.feature_columns),
-                    record.target_type,
-                    _dump_json_list(record.recipes),
-                    record.sample_weight_col,
-                    _dump_json_list(record.metrics),
-                    record.capability_tier,
-                    record.notebook_path,
-                    record.sample_path,
-                    record.pmml_path,
-                    record.dictionary_path,
-                    _dump_json_dict(payload.report_values),
-                    record.report_values_revision,
-                    record.status.value,
-                    record.status_message,
-                    record.status_reason_code,
-                    record.created_at,
-                    record.updated_at,
-                ),
-            )
+            _insert_task_record_row(conn, record, report_values=payload.report_values)
+        return record
+
+    def create_validation_handoff_with_audit(
+        self,
+        payload: TaskCreate,
+        *,
+        experiment_id: str,
+        experiment_status: str,
+        audit_factory,
+    ) -> TaskRecord:
+        record = _task_record_from_create(payload)
+        audit = audit_factory(record)
+        with connect(self.db_path) as conn:
+            _insert_task_record_row(conn, record, report_values=payload.report_values)
+            _set_experiment_status_row(conn, experiment_id, experiment_status)
+            _write_audit_row(conn, **audit)
         return record
 
     def get_task(self, task_id: str) -> TaskRecord:
@@ -968,6 +398,23 @@ class TaskRepository:
         _reject_computed_report_values(values)
         return self._merge_report_values(task_id, values, expected_revision)
 
+    def update_report_values_with_audit(
+        self,
+        task_id: str,
+        values: dict[str, str],
+        expected_revision: int,
+        *,
+        audit: dict,
+    ) -> int:
+        _validate_report_values(values)
+        _reject_computed_report_values(values)
+        return self._merge_report_values(
+            task_id,
+            values,
+            expected_revision,
+            audit=audit,
+        )
+
     def update_agent_report_conclusions(
         self,
         task_id: str,
@@ -982,6 +429,28 @@ class TaskRepository:
                 + ", ".join(invalid_keys)
             )
         return self._merge_report_values(task_id, values, expected_revision)
+
+    def update_agent_report_conclusions_with_audit(
+        self,
+        task_id: str,
+        values: dict[str, str],
+        expected_revision: int,
+        *,
+        audit: dict,
+    ) -> int:
+        _validate_report_values(values)
+        invalid_keys = sorted(set(values) - AGENT_REPORT_CONCLUSION_KEYS)
+        if invalid_keys:
+            raise ValueError(
+                "agent confirmation can only update agent conclusion keys: "
+                + ", ".join(invalid_keys)
+            )
+        return self._merge_report_values(
+            task_id,
+            values,
+            expected_revision,
+            audit=audit,
+        )
 
     def add_agent_message(
         self,
@@ -1020,7 +489,7 @@ class TaskRepository:
             "metadata": metadata or {},
         }
 
-    def list_agent_messages(self, task_id: str) -> list[dict]:
+    def list_agent_messages(self, task_id: str, *, after_id: str | None = None) -> list[dict]:
         with connect(self.db_path) as conn:
             task_row = conn.execute(
                 "SELECT 1 FROM tasks WHERE id = ?",
@@ -1028,6 +497,29 @@ class TaskRepository:
             ).fetchone()
             if task_row is None:
                 raise KeyError(f"Task not found: {task_id}")
+            after_row = None
+            if after_id:
+                after_row = conn.execute(
+                    """
+                    SELECT created_at, id
+                      FROM agent_messages
+                     WHERE task_id = ?
+                       AND id = ?
+                    """,
+                    (task_id, after_id),
+                ).fetchone()
+            if after_id and after_row is not None:
+                rows = conn.execute(
+                    """
+                    SELECT id, task_id, role, stage, content, created_at, metadata_json
+                      FROM agent_messages
+                     WHERE task_id = ?
+                       AND (created_at > ? OR (created_at = ? AND id > ?))
+                     ORDER BY created_at ASC, id ASC
+                    """,
+                    (task_id, after_row["created_at"], after_row["created_at"], after_row["id"]),
+                ).fetchall()
+                return [_row_to_agent_message(row) for row in rows]
             rows = conn.execute(
                 """
                 SELECT id, task_id, role, stage, content, created_at, metadata_json
@@ -1038,6 +530,19 @@ class TaskRepository:
                 (task_id,),
             ).fetchall()
         return [_row_to_agent_message(row) for row in rows]
+
+    def has_agent_message(self, task_id: str, message_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM agent_messages
+                 WHERE task_id = ?
+                   AND id = ?
+                """,
+                (task_id, message_id),
+            ).fetchone()
+        return row is not None
 
     def update_agent_message(
         self,
@@ -1074,6 +579,8 @@ class TaskRepository:
         task_id: str,
         values: dict[str, str],
         expected_revision: int,
+        *,
+        audit: dict | None = None,
     ) -> int:
         with connect(self.db_path) as conn:
             row = conn.execute(
@@ -1114,6 +621,8 @@ class TaskRepository:
             )
             if cursor.rowcount == 0:
                 raise ConflictError("stale report values revision")
+            if audit is not None:
+                _write_audit_row(conn, **audit)
         return new_revision
 
 
@@ -1131,9 +640,10 @@ class PlanRepository:
                 """
                 INSERT INTO plans(
                     id, task_id, goal, source, template_id, autonomy_level,
-                    status, novel_mode, tier, replan_count, loop_events_json, created_at, updated_at
+                    status, novel_mode, tier, replan_count, loop_events_json,
+                    success_criteria_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["id"],
@@ -1147,6 +657,7 @@ class PlanRepository:
                     payload["tier"],
                     payload["replan_count"],
                     _dump_json_any(payload["loop_events"]),
+                    _dump_json_any(payload["success_criteria"]),
                     created_at,
                     updated_at,
                 ),
@@ -1166,7 +677,8 @@ class PlanRepository:
             plan_row = conn.execute(
                 """
                 SELECT id, task_id, goal, source, template_id, autonomy_level,
-                       status, novel_mode, tier, replan_count, loop_events_json, created_at, updated_at
+                       status, novel_mode, tier, replan_count, loop_events_json,
+                       success_criteria_json, created_at, updated_at
                   FROM plans
                  WHERE id = ?
                 """,
@@ -1240,13 +752,21 @@ class PlanRepository:
                 raise KeyError(step.id)
 
     def set_plan_status(self, plan_id: str, status: PlanStatus) -> None:
-        current = self.load_plan(plan_id).status
-        assert_plan_transition(current, status)
         with connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
-                (status.value, _now(), plan_id),
+            row = conn.execute(
+                "SELECT status FROM plans WHERE id = ?",
+                (plan_id,),
+            ).fetchone()
+            if row is None:
+                raise PlanNotFoundError(plan_id)
+            current = PlanStatus(str(row["status"]))
+            assert_plan_transition(current, status)
+            cursor = conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (status.value, _now(), plan_id, current.value),
             )
+            if cursor.rowcount == 0:
+                raise ConflictError(f"plan {plan_id} changed while updating status")
             _write_audit_row(
                 conn,
                 kind="plan.status",
@@ -1284,10 +804,9 @@ class PlanRepository:
                     "UPDATE plan_steps SET inputs_json = ? WHERE id = ?",
                     (json.dumps(inputs, ensure_ascii=False), step_id),
                 )
-            # Leave review_json as-is (NOT NULL); the re-run overwrites it.
             cursor = conn.execute(
                 "UPDATE plan_steps SET status = 'pending', confirmed = 0, "
-                "output_ref = NULL, error = NULL WHERE id = ?",
+                "output_ref = NULL, review_json = '[]', error = NULL WHERE id = ?",
                 (step_id,),
             )
             if cursor.rowcount == 0:
@@ -1299,6 +818,106 @@ class PlanRepository:
                 outcome="succeeded",
             )
 
+    def retry_failed_step(
+        self,
+        plan_id: str,
+        step_id: str,
+        *,
+        inputs: dict | None = None,
+    ) -> list[str]:
+        """Explicitly retry a failed step and every downstream dependent step."""
+        with connect(self.db_path) as conn:
+            plan_row = conn.execute(
+                "SELECT status FROM plans WHERE id = ?",
+                (plan_id,),
+            ).fetchone()
+            if plan_row is None:
+                raise PlanNotFoundError(plan_id)
+            if str(plan_row["status"]) != PlanStatus.FAILED.value:
+                raise ConflictError(f"plan is not failed: {plan_row['status']}")
+
+            step_rows = conn.execute(
+                """
+                SELECT id, idx, depends_on_json, status
+                  FROM plan_steps
+                 WHERE plan_id = ?
+                 ORDER BY idx, id
+                """,
+                (plan_id,),
+            ).fetchall()
+            rows_by_id = {str(row["id"]): row for row in step_rows}
+            target = rows_by_id.get(step_id)
+            if target is None:
+                raise KeyError(step_id)
+            if str(target["status"]) != StepStatus.FAILED.value:
+                raise ConflictError(f"step is not failed: {target['status']}")
+
+            reset_ids = {step_id}
+            changed = True
+            while changed:
+                changed = False
+                for row in step_rows:
+                    row_id = str(row["id"])
+                    if row_id in reset_ids:
+                        continue
+                    depends_on = {str(item) for item in _load_json_array(row["depends_on_json"])}
+                    if depends_on.intersection(reset_ids):
+                        reset_ids.add(row_id)
+                        changed = True
+
+            ordered_reset_ids = [
+                str(row["id"]) for row in step_rows if str(row["id"]) in reset_ids
+            ]
+            for reset_id in ordered_reset_ids:
+                if reset_id == step_id and inputs is not None:
+                    conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET inputs_json = ?,
+                               status = 'pending',
+                               confirmed = 0,
+                               sub_agent_id = NULL,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ?
+                        """,
+                        (_dump_json_any(inputs), reset_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE plan_steps
+                           SET status = 'pending',
+                               confirmed = 0,
+                               sub_agent_id = NULL,
+                               output_ref = NULL,
+                               review_json = '[]',
+                               error = NULL
+                         WHERE id = ?
+                        """,
+                        (reset_id,),
+                    )
+
+            cursor = conn.execute(
+                "UPDATE plans SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (PlanStatus.RUNNING.value, _now(), plan_id, PlanStatus.FAILED.value),
+            )
+            if cursor.rowcount == 0:
+                raise ConflictError(f"plan {plan_id} changed while retrying step")
+            _write_audit_row(
+                conn,
+                kind="plan.step.retry",
+                target_ref=step_id,
+                outcome="succeeded",
+                detail={
+                    "plan_id": plan_id,
+                    "reset_step_ids": ordered_reset_ids,
+                    "inputs_replaced": inputs is not None,
+                },
+            )
+            return ordered_reset_ids
+
     def is_step_confirmed(self, step_id: str) -> bool:
         with connect(self.db_path) as conn:
             row = conn.execute(
@@ -1309,30 +928,213 @@ class PlanRepository:
             raise KeyError(step_id)
         return bool(row["confirmed"])
 
-    def store_step_output(self, step_id: str, output: dict) -> str:
-        with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO plan_step_outputs(step_id, output_json, created_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(step_id) DO UPDATE SET
-                    output_json = excluded.output_json,
-                    created_at = excluded.created_at
-                """,
-                (step_id, _dump_json_any(output), _now()),
-            )
-        return f"metrics:{step_id}"
-
-    def load_step_output(self, step_id: str) -> dict:
+    def start_step_run(self, *, plan_id: str, step_id: str, tool_ref: str, inputs: dict) -> str:
+        run_id = uuid.uuid4().hex
+        now = _now()
         with connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT output_json FROM plan_step_outputs WHERE step_id = ?",
+                "SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt FROM plan_step_runs WHERE step_id = ?",
                 (step_id,),
             ).fetchone()
+            attempt = int(row["next_attempt"] if row is not None else 1)
+            conn.execute(
+                """
+                INSERT INTO plan_step_runs(
+                    id, plan_id, step_id, attempt, tool_ref, status, input_json, started_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+                """,
+                (run_id, plan_id, step_id, attempt, tool_ref, _dump_json_any(inputs), now),
+            )
+        return run_id
+
+    def finish_step_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        output_ref: str | None = None,
+        error: str | None = None,
+        error_kind: str | None = None,
+        duration_ms: int | None = None,
+        side_effects: list | None = None,
+    ) -> None:
+        if status not in {"succeeded", "failed", "interrupted"}:
+            raise ValueError(f"unsupported step run status: {status}")
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE plan_step_runs
+                   SET status = ?,
+                       output_ref = ?,
+                       error = ?,
+                       error_kind = ?,
+                       duration_ms = ?,
+                       side_effects_json = ?,
+                       finished_at = ?
+                 WHERE id = ?
+                   AND status = 'running'
+                """,
+                (
+                    status,
+                    output_ref,
+                    error,
+                    error_kind,
+                    duration_ms,
+                    _dump_json_any(side_effects or []),
+                    _now(),
+                    run_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(run_id)
+
+    def list_step_runs(self, step_id: str) -> list[dict]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                  FROM plan_step_runs
+                 WHERE step_id = ?
+                 ORDER BY attempt ASC
+                """,
+                (step_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = _load_json_object(item.pop("input_json", "{}"))
+            item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            result.append(item)
+        return result
+
+    def list_running_step_runs(self, plan_id: str) -> list[dict]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                  FROM plan_step_runs
+                 WHERE plan_id = ?
+                   AND status = 'running'
+                 ORDER BY started_at ASC, attempt ASC
+                """,
+                (plan_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = _load_json_object(item.pop("input_json", "{}"))
+            item["side_effects"] = _load_json_array(item.pop("side_effects_json", "[]"))
+            result.append(item)
+        return result
+
+    def latest_succeeded_step_run_output_ref(self, step_id: str) -> str | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT output_ref
+                  FROM plan_step_runs
+                 WHERE step_id = ?
+                   AND status = 'succeeded'
+                   AND output_ref IS NOT NULL
+                 ORDER BY attempt DESC, finished_at DESC
+                 LIMIT 1
+                """,
+                (step_id,),
+            ).fetchone()
+        return None if row is None else str(row["output_ref"] or "") or None
+
+    def store_step_output(self, step_id: str, output: dict, *, evidence: dict | EvidenceEnvelope | None = None) -> str:
+        now = _now()
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS next_version "
+                "FROM plan_step_output_versions WHERE step_id = ?",
+                (step_id,),
+            ).fetchone()
+            version = int(row["next_version"] if row is not None else 1)
+            output_ref = f"metrics:{step_id}:v{version}"
+            safe_output = redact_value(output)
+            evidence_payload = _step_evidence_payload(output_ref, evidence)
+            safe_evidence = redact_value(evidence_payload)
+            total_redacted = int(safe_output.redacted_count) + int(safe_evidence.redacted_count)
+            evidence_value = safe_evidence.value
+            if total_redacted and isinstance(evidence_value, dict):
+                evidence_value["persistence_redacted_count"] = int(
+                    evidence_value.get("persistence_redacted_count") or 0
+                ) + total_redacted
+            output_json = _dump_json_any(safe_output.value)
+            evidence_json = _dump_json_any(evidence_value)
+            conn.execute(
+                """
+                INSERT INTO plan_step_output_versions(step_id, version, output_json, evidence_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (step_id, version, output_json, evidence_json, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO plan_step_outputs(step_id, output_json, evidence_json, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(step_id) DO UPDATE SET
+                    output_json = excluded.output_json,
+                    evidence_json = excluded.evidence_json,
+                    created_at = excluded.created_at
+                """,
+                (step_id, output_json, evidence_json, now),
+            )
+        return output_ref
+
+    def load_step_output(self, step_id: str, *, version: int | None = None) -> dict:
+        with connect(self.db_path) as conn:
+            if version is None:
+                row = conn.execute(
+                    "SELECT output_json FROM plan_step_outputs WHERE step_id = ?",
+                    (step_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT output_json FROM plan_step_output_versions WHERE step_id = ? AND version = ?",
+                    (step_id, int(version)),
+                ).fetchone()
         if row is None:
             raise KeyError(step_id)
         value = json.loads(row["output_json"])
         return value if isinstance(value, dict) else {}
+
+    def load_step_evidence(self, step_id: str, *, version: int | None = None) -> dict:
+        with connect(self.db_path) as conn:
+            if version is None:
+                row = conn.execute(
+                    "SELECT evidence_json FROM plan_step_outputs WHERE step_id = ?",
+                    (step_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT evidence_json FROM plan_step_output_versions WHERE step_id = ? AND version = ?",
+                    (step_id, int(version)),
+                ).fetchone()
+        if row is None:
+            raise KeyError(step_id)
+        value = json.loads(row["evidence_json"] or "{}")
+        evidence = value if isinstance(value, dict) else {}
+        if not evidence.get("output_ref"):
+            if version is None:
+                output_ref = self.latest_step_output_ref(step_id) or f"metrics:{step_id}"
+            else:
+                output_ref = f"metrics:{step_id}:v{int(version)}"
+            evidence = EvidenceEnvelope(output_ref=output_ref).to_dict()
+        return evidence
+
+    def latest_step_output_ref(self, step_id: str) -> str | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT MAX(version) AS version FROM plan_step_output_versions WHERE step_id = ?",
+                (step_id,),
+            ).fetchone()
+        if row is None or row["version"] is None:
+            return None
+        return f"metrics:{step_id}:v{int(row['version'])}"
 
     def replace_remaining_steps(
         self,
@@ -1476,7 +1278,19 @@ class PlanRepository:
                 """,
                 (plan_id, int(limit)),
             ).fetchall()
-        return [f"{row['tool_plugin']}.{row['tool_name']}" for row in rows]
+            loop_events = _load_plan_loop_events(conn, plan_id)
+        refs = [f"{row['tool_plugin']}.{row['tool_name']}" for row in rows]
+        for event in reversed(loop_events):
+            if not isinstance(event, dict):
+                continue
+            if event.get("reason") != "failure":
+                continue
+            tool_ref = _optional_str(event.get("tool_ref"))
+            if tool_ref:
+                refs.append(tool_ref)
+            if len(refs) >= int(limit):
+                break
+        return refs[: int(limit)]
 
     def store_plan_summary(self, plan_id: str, summary) -> str:
         summary_id = uuid.uuid4().hex
@@ -1503,36 +1317,28 @@ class PlanRepository:
         value = json.loads(row["summary_json"])
         return value if isinstance(value, dict) else {}
 
+    def latest_plan_summary_ref(self, plan_id: str) -> str | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id
+                  FROM plan_summaries
+                 WHERE plan_id = ?
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 1
+                """,
+                (plan_id,),
+            ).fetchone()
+        return None if row is None else f"artifact:{row['id']}"
+
     def upsert_sub_agent(self, sub: SubAgent) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO sub_agents(
-                    id, parent_task_id, parent_step_id, scope, granted_tools_json,
-                    context_budget, status, result_ref, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    parent_task_id = excluded.parent_task_id,
-                    parent_step_id = excluded.parent_step_id,
-                    scope = excluded.scope,
-                    granted_tools_json = excluded.granted_tools_json,
-                    context_budget = excluded.context_budget,
-                    status = excluded.status,
-                    result_ref = excluded.result_ref
-                """,
-                (
-                    sub.id,
-                    sub.parent_task_id,
-                    sub.parent_step_id,
-                    sub.scope,
-                    _dump_json_any([_tool_ref_to_dict(ref) for ref in sub.granted_tools]),
-                    sub.context_budget,
-                    sub.status.value,
-                    sub.result_ref,
-                    _now(),
-                ),
-            )
+            _upsert_sub_agent_row(conn, sub)
+
+    def upsert_sub_agent_with_audit(self, sub: SubAgent, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _upsert_sub_agent_row(conn, sub)
+            _write_audit_row(conn, **audit)
 
     def set_sub_agent_status(
         self,
@@ -1542,17 +1348,19 @@ class PlanRepository:
         result_ref: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE sub_agents
-                   SET status = ?,
-                       result_ref = COALESCE(?, result_ref)
-                 WHERE id = ?
-                """,
-                (status.value, result_ref, sub_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(sub_id)
+            _set_sub_agent_status_row(conn, sub_id, status, result_ref=result_ref)
+
+    def set_sub_agent_status_with_audit(
+        self,
+        sub_id: str,
+        status: AgentStatus,
+        *,
+        audit: dict,
+        result_ref: str | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _set_sub_agent_status_row(conn, sub_id, status, result_ref=result_ref)
+            _write_audit_row(conn, **audit)
 
     def get_sub_agent(self, sub_id: str) -> SubAgent:
         with connect(self.db_path) as conn:
@@ -1613,16 +1421,12 @@ class DatasetRepository:
 
     def create_dataset(self, dataset: Dataset) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO datasets(
-                    id, task_id, role, source_path, format, sheet, row_count,
-                    columns_json, has_target, target_col, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _dataset_insert_values(dataset),
-            )
+            _insert_dataset_row(conn, dataset)
+
+    def create_dataset_with_audit(self, dataset: Dataset, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _insert_dataset_row(conn, dataset)
+            _write_audit_row(conn, **audit)
 
     def get_dataset(self, dataset_id: str) -> Dataset | None:
         with connect(self.db_path) as conn:
@@ -1697,42 +1501,46 @@ class DatasetRepository:
         return _join_plan_from_row(row)
 
     def update_join_spec(self, plan_id: str, spec: JoinSpec) -> None:
-        plan = self.load_join_plan(plan_id)
-        replaced = False
-        joins = []
-        for item in plan.joins:
-            if item.feature_dataset_id == spec.feature_dataset_id:
-                joins.append(spec)
-                replaced = True
-            else:
-                joins.append(item)
-        if not replaced:
-            raise KeyError(spec.feature_dataset_id)
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joins
-                   SET joins_json = ?
-                 WHERE id = ?
-                """,
-                (_dump_json_any([_join_spec_to_dict(item) for item in joins]), plan_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(plan_id)
+            _update_join_spec_row(conn, plan_id, spec)
+
+    def update_join_spec_with_audit(
+        self,
+        plan_id: str,
+        spec: JoinSpec,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _update_join_spec_row(conn, plan_id, spec)
+            _write_audit_row(conn, **audit)
 
     def set_join_plan_executed(self, plan_id: str, result_dataset_id: str) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE joins
-                   SET status = 'executed',
-                       result_dataset_id = ?
-                 WHERE id = ?
-                """,
-                (result_dataset_id, plan_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(plan_id)
+            _set_join_plan_executed_row(conn, plan_id, result_dataset_id)
+
+    def set_join_plan_executed_with_audit(
+        self,
+        plan_id: str,
+        result_dataset_id: str,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _set_join_plan_executed_row(conn, plan_id, result_dataset_id)
+            _write_audit_row(conn, **audit)
+
+    def record_join_result_with_audit(
+        self,
+        plan_id: str,
+        dataset: Dataset,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _insert_dataset_row(conn, dataset)
+            _set_join_plan_executed_row(conn, plan_id, dataset.id)
+            _write_audit_row(conn, **audit)
 
     def write_audit(self, **kwargs) -> None:
         with connect(self.db_path) as conn:
@@ -1745,16 +1553,12 @@ class ModelingRepository:
 
     def create_experiment(self, experiment: Experiment) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO experiments(
-                    id, task_id, recipe_id, config_json, metrics_json,
-                    artifact_id, status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _experiment_insert_values(experiment),
-            )
+            _insert_experiment_row(conn, experiment)
+
+    def create_experiment_with_audit(self, experiment: Experiment, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _insert_experiment_row(conn, experiment)
+            _write_audit_row(conn, **audit)
 
     def get_experiment(self, experiment_id: str) -> Experiment | None:
         with connect(self.db_path) as conn:
@@ -1792,69 +1596,90 @@ class ModelingRepository:
         status: str = "trained",
     ) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE experiments
-                   SET metrics_json = ?,
-                       artifact_id = ?,
-                       status = ?
-                 WHERE id = ?
-                """,
-                (
-                    _dump_json_any(_model_metrics_to_dict(metrics)),
-                    artifact_id,
-                    status,
-                    experiment_id,
-                ),
+            _attach_experiment_result_row(
+                conn,
+                experiment_id,
+                metrics=metrics,
+                artifact_id=artifact_id,
+                status=status,
             )
-            if cursor.rowcount == 0:
-                raise KeyError(experiment_id)
+
+    def attach_experiment_result_with_artifact_and_audit(
+        self,
+        experiment_id: str,
+        *,
+        artifact: ModelArtifact,
+        metrics: ModelMetrics,
+        status: str = "trained",
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _insert_model_artifact_row(conn, artifact)
+            _attach_experiment_result_row(
+                conn,
+                experiment_id,
+                metrics=metrics,
+                artifact_id=artifact.id,
+                status=status,
+            )
+            _write_audit_row(conn, **audit)
 
     def set_experiment_status(self, experiment_id: str, status: str) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE experiments
-                   SET status = ?
-                 WHERE id = ?
-                """,
-                (status, experiment_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(experiment_id)
+            _set_experiment_status_row(conn, experiment_id, status)
+
+    def set_experiment_status_with_audit(
+        self,
+        experiment_id: str,
+        status: str,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _set_experiment_status_row(conn, experiment_id, status)
+            _write_audit_row(conn, **audit)
 
     def create_model_artifact(self, artifact: ModelArtifact) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO model_artifacts(
-                    id, experiment_id, algorithm, model_path, pmml_path,
-                    feature_list_json, feature_importance_json, params_json, woe_maps_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _model_artifact_insert_values(artifact),
-            )
+            _insert_model_artifact_row(conn, artifact)
 
     def set_model_artifact_pmml_path(self, artifact_id: str, pmml_path: str) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                """
-                UPDATE model_artifacts
-                   SET pmml_path = ?
-                 WHERE id = ?
-                """,
-                (pmml_path, artifact_id),
-            )
-            if cursor.rowcount == 0:
-                raise KeyError(artifact_id)
+            _set_model_artifact_pmml_path_row(conn, artifact_id, pmml_path)
+
+    def set_model_artifact_pmml_path_with_audit(
+        self,
+        artifact_id: str,
+        pmml_path: str,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _set_model_artifact_pmml_path_row(conn, artifact_id, pmml_path)
+            _write_audit_row(conn, **audit)
+
+    def set_model_artifact_params(self, artifact_id: str, params: dict) -> None:
+        with connect(self.db_path) as conn:
+            _set_model_artifact_params_row(conn, artifact_id, params)
+
+    def set_model_artifact_params_with_audit(
+        self,
+        artifact_id: str,
+        params: dict,
+        *,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _set_model_artifact_params_row(conn, artifact_id, params)
+            _write_audit_row(conn, **audit)
 
     def get_model_artifact(self, artifact_id: str) -> ModelArtifact | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
                 """
                 SELECT id, experiment_id, algorithm, model_path, pmml_path,
-                       feature_list_json, feature_importance_json, params_json, woe_maps_json, created_at
+                       feature_list_json, feature_importance_json, params_json, woe_maps_json,
+                       scorecard_table_json, created_at
                   FROM model_artifacts
                  WHERE id = ?
                 """,
@@ -1875,16 +1700,19 @@ class StrategyRepository:
         created_at: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO strategies(
-                    id, task_id, strategy_type, rules_json, score_col,
-                    default_decision_json, description, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _strategy_insert_values(task_id, strategy, created_at or _now()),
-            )
+            _insert_strategy_row(conn, task_id, strategy, created_at or _now())
+
+    def create_strategy_with_audit(
+        self,
+        task_id: str,
+        strategy: Strategy,
+        *,
+        audit: dict,
+        created_at: str | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _insert_strategy_row(conn, task_id, strategy, created_at or _now())
+            _write_audit_row(conn, **audit)
 
     def get_strategy(self, strategy_id: str) -> Strategy | None:
         with connect(self.db_path) as conn:
@@ -1923,21 +1751,35 @@ class StrategyRepository:
         created_at: str | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO backtests(
-                    id, strategy_id, dataset_id, result_json, created_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                _backtest_insert_values(
-                    backtest_id,
-                    strategy_id,
-                    dataset_id,
-                    result,
-                    created_at or _now(),
-                ),
+            _insert_backtest_row(
+                conn,
+                backtest_id,
+                strategy_id,
+                dataset_id,
+                result,
+                created_at or _now(),
             )
+
+    def save_backtest_with_audit(
+        self,
+        backtest_id: str,
+        strategy_id: str,
+        dataset_id: str,
+        result: BacktestResult,
+        *,
+        audit: dict,
+        created_at: str | None = None,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _insert_backtest_row(
+                conn,
+                backtest_id,
+                strategy_id,
+                dataset_id,
+                result,
+                created_at or _now(),
+            )
+            _write_audit_row(conn, **audit)
 
     def get_backtest(self, backtest_id: str) -> BacktestResult | None:
         with connect(self.db_path) as conn:
@@ -1971,15 +1813,12 @@ class DraftRepository:
 
     def save_learning_note(self, note: LearningNote) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO learning_notes(
-                    id, query, sources_json, distilled, created_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                _learning_note_insert_values(note),
-            )
+            _insert_learning_note_row(conn, note)
+
+    def save_learning_note_with_audit(self, note: LearningNote, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _insert_learning_note_row(conn, note)
+            _write_audit_row(conn, **audit)
 
     def get_learning_note(self, note_id: str) -> LearningNote | None:
         with connect(self.db_path) as conn:
@@ -1995,17 +1834,12 @@ class DraftRepository:
 
     def save_draft(self, draft: DraftTool) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO draft_tools(
-                    id, task_id, name, summary, code, input_schema_json,
-                    output_schema_json, determinism, source, learning_note_id,
-                    status, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _draft_tool_insert_values(draft),
-            )
+            _insert_draft_tool_row(conn, draft)
+
+    def save_draft_with_audit(self, draft: DraftTool, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _insert_draft_tool_row(conn, draft)
+            _write_audit_row(conn, **audit)
 
     def get_draft(self, draft_id: str) -> DraftTool | None:
         with connect(self.db_path) as conn:
@@ -2077,29 +1911,29 @@ class DraftRepository:
 
     def set_status(self, draft_id: str, status: str) -> None:
         with connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT status FROM draft_tools WHERE id = ?",
-                (draft_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(draft_id)
-            assert_draft_status_transition(str(row["status"]), status)
-            conn.execute(
-                "UPDATE draft_tools SET status = ? WHERE id = ?",
-                (status, draft_id),
-            )
+            _set_draft_status_row(conn, draft_id, status)
+
+    def set_status_with_audit(self, draft_id: str, status: str, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _set_draft_status_row(conn, draft_id, status)
+            _write_audit_row(conn, **audit)
 
     def save_draft_run(self, run: DraftRun) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO draft_runs(
-                    id, draft_id, task_id, inputs_hash, ok, output_json, error, at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                _draft_run_insert_values(run),
-            )
+            _insert_draft_run_row(conn, run)
+
+    def save_draft_run_with_status_audit(
+        self,
+        run: DraftRun,
+        *,
+        status: str | None = None,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _insert_draft_run_row(conn, run)
+            if status is not None:
+                _set_draft_status_row(conn, run.draft_id, status)
+            _write_audit_row(conn, **audit)
 
     def list_runs(self, draft_id: str) -> list[DraftRun]:
         with connect(self.db_path) as conn:
@@ -2120,85 +1954,52 @@ class PluginRepository:
         self.db_path = db_path
 
     def upsert_plugin(self, manifest: PluginManifest, *, enabled: bool) -> None:
-        manifest_json = json.dumps(
-            manifest_to_dict(manifest),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        now = _now()
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO plugins(
-                    name, version, display_name, description, module,
-                    manifest_json, checksum, builtin, enabled, installed_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    version = excluded.version,
-                    display_name = excluded.display_name,
-                    description = excluded.description,
-                    module = excluded.module,
-                    manifest_json = excluded.manifest_json,
-                    checksum = excluded.checksum,
-                    builtin = excluded.builtin,
-                    enabled = excluded.enabled,
-                    installed_at = excluded.installed_at
-                """,
-                (
-                    manifest.name,
-                    manifest.version,
-                    manifest.display_name,
-                    manifest.description,
-                    manifest.module,
-                    manifest_json,
-                    manifest.checksum,
-                    int(manifest.builtin),
-                    int(enabled),
-                    now,
-                ),
-            )
-            conn.execute("DELETE FROM tools WHERE plugin = ?", (manifest.name,))
-            for tool in manifest.tools:
-                conn.execute(
-                    """
-                    INSERT INTO tools(
-                        plugin, name, summary, input_schema_json,
-                        output_schema_json, determinism, timeout_seconds,
-                        failure_policy, side_effects_json, entrypoint,
-                        memory_limit_mb
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        manifest.name,
-                        tool.name,
-                        tool.summary,
-                        json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":")),
-                        json.dumps(tool.output_schema, ensure_ascii=False, separators=(",", ":")),
-                        tool.determinism,
-                        tool.timeout_seconds,
-                        tool.failure_policy,
-                        json.dumps(list(tool.side_effects), ensure_ascii=False, separators=(",", ":")),
-                        tool.entrypoint,
-                        tool.memory_limit_mb,
-                    ),
-                )
+            _upsert_plugin_row(conn, manifest, enabled=enabled)
+
+    def upsert_plugin_with_audit(
+        self,
+        manifest: PluginManifest,
+        *,
+        enabled: bool,
+        audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _upsert_plugin_row(conn, manifest, enabled=enabled)
+            _write_audit_row(conn, **audit)
+
+    def promote_draft_with_plugin_audits(
+        self,
+        manifest: PluginManifest,
+        *,
+        enabled: bool,
+        draft_id: str,
+        plugin_audit: dict,
+        draft_audit: dict,
+    ) -> None:
+        with connect(self.db_path) as conn:
+            _upsert_plugin_row(conn, manifest, enabled=enabled)
+            _write_audit_row(conn, **plugin_audit)
+            _set_draft_status_row(conn, draft_id, "promoted")
+            _write_audit_row(conn, **draft_audit)
 
     def set_enabled(self, name: str, enabled: bool) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "UPDATE plugins SET enabled = ? WHERE name = ?",
-                (int(enabled), name),
-            )
-            if cursor.rowcount == 0:
-                raise PluginNotFoundError(name)
+            _set_plugin_enabled_row(conn, name, enabled)
+
+    def set_enabled_with_audit(self, name: str, enabled: bool, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _set_plugin_enabled_row(conn, name, enabled)
+            _write_audit_row(conn, **audit)
 
     def delete_plugin(self, name: str) -> None:
         with connect(self.db_path) as conn:
-            cursor = conn.execute("DELETE FROM plugins WHERE name = ?", (name,))
-            if cursor.rowcount == 0:
-                raise PluginNotFoundError(name)
+            _delete_plugin_row(conn, name)
+
+    def delete_plugin_with_audit(self, name: str, *, audit: dict) -> None:
+        with connect(self.db_path) as conn:
+            _delete_plugin_row(conn, name)
+            _write_audit_row(conn, **audit)
 
     def get_plugin(self, name: str) -> dict | None:
         with connect(self.db_path) as conn:
@@ -2347,6 +2148,234 @@ def _audit_row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
+def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
+    now = _now()
+    return TaskRecord(
+        id=uuid.uuid4().hex,
+        task_type=_normalize_task_type(payload.task_type),
+        model_name=payload.model_name,
+        model_version=payload.model_version,
+        validator=payload.validator,
+        source_dir=payload.source_dir,
+        algorithm=_normalize_algorithm(payload.algorithm),
+        run_mode=_normalize_run_mode(payload.run_mode),
+        target_col=payload.target_col,
+        score_col=payload.score_col,
+        split_col=payload.split_col,
+        time_col=payload.time_col,
+        feature_columns=list(payload.feature_columns),
+        target_type=payload.target_type,
+        recipes=list(payload.recipes),
+        sample_weight_col=payload.sample_weight_col,
+        metrics=list(payload.metrics),
+        capability_tier=payload.capability_tier,
+        notebook_path=payload.notebook_path,
+        sample_path=payload.sample_path,
+        pmml_path=payload.pmml_path,
+        dictionary_path=payload.dictionary_path,
+        report_values_revision=0,
+        status=TaskStatus.CREATED,
+        status_message="created",
+        status_reason_code="",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _insert_task_record_row(
+    conn: sqlite3.Connection,
+    record: TaskRecord,
+    *,
+    report_values: dict[str, str] | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO tasks
+        (
+            id, task_type, model_name, model_version, validator, source_dir,
+            algorithm, run_mode, target_col, score_col, split_col,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, metrics_json, capability_tier, notebook_path, sample_path,
+            pmml_path, dictionary_path, report_values_json,
+            report_values_revision, status, status_message,
+            status_reason_code, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.id,
+            record.task_type,
+            record.model_name,
+            record.model_version,
+            record.validator,
+            record.source_dir,
+            record.algorithm,
+            record.run_mode,
+            record.target_col,
+            record.score_col,
+            record.split_col,
+            record.time_col,
+            _dump_json_list(record.feature_columns),
+            record.target_type,
+            _dump_json_list(record.recipes),
+            record.sample_weight_col,
+            _dump_json_list(record.metrics),
+            record.capability_tier,
+            record.notebook_path,
+            record.sample_path,
+            record.pmml_path,
+            record.dictionary_path,
+            _dump_json_dict(report_values or {}),
+            record.report_values_revision,
+            record.status.value,
+            record.status_message,
+            record.status_reason_code,
+            record.created_at,
+            record.updated_at,
+        ),
+    )
+
+
+def _upsert_sub_agent_row(conn: sqlite3.Connection, sub: SubAgent) -> None:
+    conn.execute(
+        """
+        INSERT INTO sub_agents(
+            id, parent_task_id, parent_step_id, scope, granted_tools_json,
+            context_budget, status, result_ref, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            parent_task_id = excluded.parent_task_id,
+            parent_step_id = excluded.parent_step_id,
+            scope = excluded.scope,
+            granted_tools_json = excluded.granted_tools_json,
+            context_budget = excluded.context_budget,
+            status = excluded.status,
+            result_ref = excluded.result_ref
+        """,
+        (
+            sub.id,
+            sub.parent_task_id,
+            sub.parent_step_id,
+            sub.scope,
+            _dump_json_any([_tool_ref_to_dict(ref) for ref in sub.granted_tools]),
+            sub.context_budget,
+            sub.status.value,
+            sub.result_ref,
+            _now(),
+        ),
+    )
+
+
+def _set_sub_agent_status_row(
+    conn: sqlite3.Connection,
+    sub_id: str,
+    status: AgentStatus,
+    *,
+    result_ref: str | None = None,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE sub_agents
+           SET status = ?,
+               result_ref = COALESCE(?, result_ref)
+         WHERE id = ?
+        """,
+        (status.value, result_ref, sub_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(sub_id)
+
+
+def _upsert_plugin_row(
+    conn: sqlite3.Connection,
+    manifest: PluginManifest,
+    *,
+    enabled: bool,
+) -> None:
+    manifest_json = json.dumps(
+        manifest_to_dict(manifest),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO plugins(
+            name, version, display_name, description, module,
+            manifest_json, checksum, builtin, enabled, installed_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            version = excluded.version,
+            display_name = excluded.display_name,
+            description = excluded.description,
+            module = excluded.module,
+            manifest_json = excluded.manifest_json,
+            checksum = excluded.checksum,
+            builtin = excluded.builtin,
+            enabled = excluded.enabled,
+            installed_at = excluded.installed_at
+        """,
+        (
+            manifest.name,
+            manifest.version,
+            manifest.display_name,
+            manifest.description,
+            manifest.module,
+            manifest_json,
+            manifest.checksum,
+            int(manifest.builtin),
+            int(enabled),
+            now,
+        ),
+    )
+    conn.execute("DELETE FROM tools WHERE plugin = ?", (manifest.name,))
+    for tool in manifest.tools:
+        conn.execute(
+            """
+            INSERT INTO tools(
+                plugin, name, summary, input_schema_json,
+                output_schema_json, determinism, timeout_seconds,
+                failure_policy, side_effects_json, entrypoint,
+                memory_limit_mb
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest.name,
+                tool.name,
+                tool.summary,
+                json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(tool.output_schema, ensure_ascii=False, separators=(",", ":")),
+                tool.determinism,
+                tool.timeout_seconds,
+                tool.failure_policy,
+                json.dumps(list(tool.side_effects), ensure_ascii=False, separators=(",", ":")),
+                tool.entrypoint,
+                tool.memory_limit_mb,
+            ),
+        )
+
+
+def _set_plugin_enabled_row(
+    conn: sqlite3.Connection,
+    name: str,
+    enabled: bool,
+) -> None:
+    cursor = conn.execute(
+        "UPDATE plugins SET enabled = ? WHERE name = ?",
+        (int(enabled), name),
+    )
+    if cursor.rowcount == 0:
+        raise PluginNotFoundError(name)
+
+
+def _delete_plugin_row(conn: sqlite3.Connection, name: str) -> None:
+    cursor = conn.execute("DELETE FROM plugins WHERE name = ?", (name,))
+    if cursor.rowcount == 0:
+        raise PluginNotFoundError(name)
+
+
 def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row]) -> dict:
     return {
         "id": plan_row["id"],
@@ -2363,6 +2392,7 @@ def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row])
         "tier": plan_row["tier"],
         "replan_count": int(plan_row["replan_count"]),
         "loop_events": _load_json_array(plan_row["loop_events_json"]),
+        "success_criteria": _load_json_array(plan_row["success_criteria_json"]),
     }
 
 
@@ -2467,6 +2497,19 @@ def _dataset_insert_values(dataset: Dataset) -> tuple:
     )
 
 
+def _insert_dataset_row(conn: sqlite3.Connection, dataset: Dataset) -> None:
+    conn.execute(
+        """
+        INSERT INTO datasets(
+            id, task_id, role, source_path, format, sheet, row_count,
+            columns_json, has_target, target_col, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _dataset_insert_values(dataset),
+    )
+
+
 def _dataset_from_row(row: sqlite3.Row) -> Dataset:
     return Dataset(
         id=str(row["id"]),
@@ -2484,6 +2527,61 @@ def _dataset_from_row(row: sqlite3.Row) -> Dataset:
         target_col=row["target_col"],
         created_at=str(row["created_at"]),
     )
+
+
+def _update_join_spec_row(conn: sqlite3.Connection, plan_id: str, spec: JoinSpec) -> None:
+    row = conn.execute(
+        "SELECT joins_json FROM joins WHERE id = ?",
+        (plan_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(plan_id)
+    original_json = str(row["joins_json"])
+    replaced = False
+    joins = []
+    for item in (
+        _join_spec_from_dict(payload) for payload in _load_json_array(original_json)
+    ):
+        if item.feature_dataset_id == spec.feature_dataset_id:
+            joins.append(spec)
+            replaced = True
+        else:
+            joins.append(item)
+    if not replaced:
+        raise KeyError(spec.feature_dataset_id)
+    cursor = conn.execute(
+        """
+        UPDATE joins
+           SET joins_json = ?
+         WHERE id = ?
+           AND joins_json = ?
+        """,
+        (
+            _dump_json_any([_join_spec_to_dict(item) for item in joins]),
+            plan_id,
+            original_json,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise ConflictError(f"join plan {plan_id} changed while updating spec")
+
+
+def _set_join_plan_executed_row(
+    conn: sqlite3.Connection,
+    plan_id: str,
+    result_dataset_id: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE joins
+           SET status = 'executed',
+               result_dataset_id = ?
+         WHERE id = ?
+        """,
+        (result_dataset_id, plan_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(plan_id)
 
 
 def _column_profile_to_dict(profile: ColumnProfile) -> dict:
@@ -2568,6 +2666,63 @@ def _experiment_insert_values(experiment: Experiment) -> tuple:
     )
 
 
+def _insert_experiment_row(conn: sqlite3.Connection, experiment: Experiment) -> None:
+    conn.execute(
+        """
+        INSERT INTO experiments(
+            id, task_id, recipe_id, config_json, metrics_json,
+            artifact_id, status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _experiment_insert_values(experiment),
+    )
+
+
+def _attach_experiment_result_row(
+    conn: sqlite3.Connection,
+    experiment_id: str,
+    *,
+    metrics: ModelMetrics,
+    artifact_id: str,
+    status: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE experiments
+           SET metrics_json = ?,
+               artifact_id = ?,
+               status = ?
+         WHERE id = ?
+        """,
+        (
+            _dump_json_any(_model_metrics_to_dict(metrics)),
+            artifact_id,
+            status,
+            experiment_id,
+        ),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(experiment_id)
+
+
+def _set_experiment_status_row(
+    conn: sqlite3.Connection,
+    experiment_id: str,
+    status: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE experiments
+           SET status = ?
+         WHERE id = ?
+        """,
+        (status, experiment_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(experiment_id)
+
+
 def _experiment_from_row(row: sqlite3.Row) -> Experiment:
     metrics_json = row["metrics_json"]
     return Experiment(
@@ -2593,8 +2748,57 @@ def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
         _dump_json_any([list(item) for item in artifact.feature_importance]),
         _dump_json_any(artifact.params),
         None if artifact.woe_maps is None else _dump_json_any(artifact.woe_maps),
+        _dump_json_any(list(artifact.scorecard_table)),
         artifact.created_at,
     )
+
+
+def _insert_model_artifact_row(conn: sqlite3.Connection, artifact: ModelArtifact) -> None:
+    conn.execute(
+        """
+        INSERT INTO model_artifacts(
+            id, experiment_id, algorithm, model_path, pmml_path,
+            feature_list_json, feature_importance_json, params_json, woe_maps_json,
+            scorecard_table_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _model_artifact_insert_values(artifact),
+    )
+
+
+def _set_model_artifact_pmml_path_row(
+    conn: sqlite3.Connection,
+    artifact_id: str,
+    pmml_path: str,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE model_artifacts
+           SET pmml_path = ?
+         WHERE id = ?
+        """,
+        (pmml_path, artifact_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(artifact_id)
+
+
+def _set_model_artifact_params_row(
+    conn: sqlite3.Connection,
+    artifact_id: str,
+    params: dict,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE model_artifacts
+           SET params_json = ?
+         WHERE id = ?
+        """,
+        (_dump_json_any(params), artifact_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(artifact_id)
 
 
 def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
@@ -2610,6 +2814,11 @@ def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
         params=_load_json_object(row["params_json"]),
         woe_maps=None if woe_maps_json is None else _load_json_object(woe_maps_json),
         created_at=str(row["created_at"]),
+        scorecard_table=tuple(
+            dict(item)
+            for item in _load_json_array(row["scorecard_table_json"])
+            if isinstance(item, dict)
+        ),
     )
 
 
@@ -2636,6 +2845,24 @@ def _strategy_insert_values(task_id: str, strategy: Strategy, created_at: str) -
         _dump_json_any(strategy.default_decision),
         strategy.description,
         created_at,
+    )
+
+
+def _insert_strategy_row(
+    conn: sqlite3.Connection,
+    task_id: str,
+    strategy: Strategy,
+    created_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO strategies(
+            id, task_id, strategy_type, rules_json, score_col,
+            default_decision_json, description, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _strategy_insert_values(task_id, strategy, created_at),
     )
 
 
@@ -2681,6 +2908,31 @@ def _backtest_insert_values(
     )
 
 
+def _insert_backtest_row(
+    conn: sqlite3.Connection,
+    backtest_id: str,
+    strategy_id: str,
+    dataset_id: str,
+    result: BacktestResult,
+    created_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO backtests(
+            id, strategy_id, dataset_id, result_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        _backtest_insert_values(
+            backtest_id,
+            strategy_id,
+            dataset_id,
+            result,
+            created_at,
+        ),
+    )
+
+
 def _backtest_result_to_dict(result: BacktestResult) -> dict:
     payload = asdict(result)
     payload["by_segment"] = list(result.by_segment)
@@ -2717,6 +2969,18 @@ def _learning_note_insert_values(note: LearningNote) -> tuple:
     )
 
 
+def _insert_learning_note_row(conn: sqlite3.Connection, note: LearningNote) -> None:
+    conn.execute(
+        """
+        INSERT INTO learning_notes(
+            id, query, sources_json, distilled, created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        _learning_note_insert_values(note),
+    )
+
+
 def _learning_note_from_row(row: sqlite3.Row) -> LearningNote:
     return LearningNote(
         id=str(row["id"]),
@@ -2744,6 +3008,20 @@ def _draft_tool_insert_values(draft: DraftTool) -> tuple:
     )
 
 
+def _insert_draft_tool_row(conn: sqlite3.Connection, draft: DraftTool) -> None:
+    conn.execute(
+        """
+        INSERT INTO draft_tools(
+            id, task_id, name, summary, code, input_schema_json,
+            output_schema_json, determinism, source, learning_note_id,
+            status, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _draft_tool_insert_values(draft),
+    )
+
+
 def _draft_tool_from_row(row: sqlite3.Row) -> DraftTool:
     return DraftTool(
         id=str(row["id"]),
@@ -2761,6 +3039,26 @@ def _draft_tool_from_row(row: sqlite3.Row) -> DraftTool:
     )
 
 
+def _set_draft_status_row(
+    conn: sqlite3.Connection,
+    draft_id: str,
+    status: str,
+) -> None:
+    row = conn.execute(
+        "SELECT status FROM draft_tools WHERE id = ?",
+        (draft_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(draft_id)
+    assert_draft_status_transition(str(row["status"]), status)
+    cursor = conn.execute(
+        "UPDATE draft_tools SET status = ? WHERE id = ?",
+        (status, draft_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(draft_id)
+
+
 def _draft_run_insert_values(run: DraftRun) -> tuple:
     return (
         run.id,
@@ -2771,6 +3069,18 @@ def _draft_run_insert_values(run: DraftRun) -> tuple:
         None if run.output is None else _dump_json_any(run.output),
         run.error,
         run.at,
+    )
+
+
+def _insert_draft_run_row(conn: sqlite3.Connection, run: DraftRun) -> None:
+    conn.execute(
+        """
+        INSERT INTO draft_runs(
+            id, draft_id, task_id, inputs_hash, ok, output_json, error, at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _draft_run_insert_values(run),
     )
 
 
@@ -2828,6 +3138,14 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         overfit_train_test_gap=float(payload.get("overfit_train_test_gap") or 0.0),
         overfit_train_oot_gap=_optional_float(payload.get("overfit_train_oot_gap")),
         overfit_flag=bool(payload.get("overfit_flag")),
+        weighted_train_ks=_optional_float(payload.get("weighted_train_ks")),
+        weighted_test_ks=_optional_float(payload.get("weighted_test_ks")),
+        weighted_oot_ks=_optional_float(payload.get("weighted_oot_ks")),
+        weighted_train_auc=_optional_float(payload.get("weighted_train_auc")),
+        weighted_test_auc=_optional_float(payload.get("weighted_test_auc")),
+        weighted_oot_auc=_optional_float(payload.get("weighted_oot_auc")),
+        weighted_psi_test_vs_train=_optional_float(payload.get("weighted_psi_test_vs_train")),
+        weighted_psi_oot_vs_train=_optional_float(payload.get("weighted_psi_oot_vs_train")),
         train_rmse=_optional_float(payload.get("train_rmse")),
         test_rmse=_optional_float(payload.get("test_rmse")),
         oot_rmse=_optional_float(payload.get("oot_rmse")),
@@ -2868,6 +3186,18 @@ def _dump_json_any(value) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _step_evidence_payload(output_ref: str, evidence: dict | EvidenceEnvelope | None) -> dict:
+    if isinstance(evidence, EvidenceEnvelope):
+        payload = evidence.to_dict()
+    elif isinstance(evidence, dict):
+        payload = dict(evidence)
+    else:
+        payload = EvidenceEnvelope(output_ref=output_ref).to_dict()
+    payload.setdefault("schema_version", "evidence.v1")
+    payload["output_ref"] = output_ref
+    return payload
+
+
 def _load_json_object_unchecked(raw: str | None) -> dict:
     if not raw:
         return {}
@@ -2887,7 +3217,7 @@ def _normalize_loop_event(event: dict | None) -> dict | None:
         return None
     payload = asdict(event) if is_dataclass(event) else dict(event)
     normalized = {
-        "type": str(payload["type"]),
+        "type": str(payload.get("type") or "unknown"),
         "reason": str(payload.get("reason") or ""),
         "at": str(payload.get("at") or _now()),
     }
@@ -2897,6 +3227,9 @@ def _normalize_loop_event(event: dict | None) -> dict | None:
     instruction = _optional_str(payload.get("instruction"))
     if instruction is not None:
         normalized["instruction"] = instruction[:500]  # keep the replan rationale, bounded
+    tool_ref = _optional_str(payload.get("tool_ref"))
+    if tool_ref is not None:
+        normalized["tool_ref"] = tool_ref[:200]
     return normalized
 
 
@@ -3068,33 +3401,6 @@ def _reject_computed_report_values(values: dict[str, str]) -> None:
         )
 
 
-def _ensure_column(
-    conn: sqlite3.Connection,
-    table: str,
-    column: str,
-    definition: str,
-) -> None:
-    table_sql = _migration_table_identifier(table)
-    column_sql = _sql_identifier(column)
-    existing_columns = {
-        row[1]
-        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
-    }
-    if column not in existing_columns:
-        conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {definition}")
-
-
-def _migration_table_identifier(table: str) -> str:
-    if table not in _MIGRATION_TABLES:
-        raise ValueError(f"unsupported migration table: {table}")
-    return _sql_identifier(table)
-
-
-def _sql_identifier(identifier: str) -> str:
-    if not _SQL_IDENTIFIER_RE.fullmatch(identifier):
-        raise ValueError(f"unsafe SQL identifier: {identifier}")
-    return f'"{identifier}"'
-
 
 def _expected_status_set(
     expected: TaskStatus | set[TaskStatus] | None,
@@ -3104,32 +3410,3 @@ def _expected_status_set(
     if isinstance(expected, TaskStatus):
         return {expected}
     return set(expected)
-
-
-def _configure_connection(conn: sqlite3.Connection) -> None:
-    mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
-    # WAL is requested for concurrent readers/writers. It silently degrades on
-    # read-only or networked filesystems; surface that instead of assuming the
-    # concurrency guarantees hold. In-memory databases legitimately report
-    # "memory" and are exempt.
-    if mode_row is not None and str(mode_row[0]).lower() not in ("wal", "memory"):
-        logger.warning("Failed to enable WAL journal mode; got %r", mode_row[0])
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA temp_store=MEMORY")
-
-
-@contextmanager
-def connect(db_path: Path):
-    conn = sqlite3.connect(db_path, timeout=5.0, isolation_level="DEFERRED")
-    conn.row_factory = sqlite3.Row
-    try:
-        _configure_connection(conn)
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()

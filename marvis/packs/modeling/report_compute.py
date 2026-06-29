@@ -120,19 +120,25 @@ def compute_vintage_report(
 ) -> dict:
     columns = _unique([loan_month_col, amount_col, *mob_observe_cols])
     frame = backend.read_frame(dataset_path, columns=columns)
-    long_rows = []
-    for mob_index, column in enumerate(mob_observe_cols, start=1):
-        mob = _mob_number(column, fallback=mob_index)
-        for _, row in frame[[loan_month_col, column, *( [amount_col] if amount_col else [] )]].iterrows():
-            item = {
-                "cohort": row[loan_month_col],
-                "mob": mob,
-                "target": row[column],
-            }
-            if amount_col:
-                item["amount"] = row[amount_col]
-            long_rows.append(item)
-    long_frame = pd.DataFrame(long_rows)
+    amount_vars = [amount_col] if amount_col else []
+    id_vars = [loan_month_col, *amount_vars]
+    long_frame = frame.melt(
+        id_vars=id_vars,
+        value_vars=list(mob_observe_cols),
+        var_name="_mob_column",
+        value_name="target",
+    )
+    mob_lookup = {
+        column: _mob_number(column, fallback=index)
+        for index, column in enumerate(mob_observe_cols, start=1)
+    }
+    long_frame = long_frame.rename(columns={loan_month_col: "cohort"})
+    long_frame["mob"] = long_frame["_mob_column"].map(mob_lookup).astype(int)
+    if amount_col:
+        long_frame = long_frame.rename(columns={amount_col: "amount"})
+        long_frame = long_frame[["cohort", "mob", "target", "amount"]]
+    else:
+        long_frame = long_frame[["cohort", "mob", "target"]]
     points = compute_vintage_curve(
         long_frame,
         cohort_col="cohort",

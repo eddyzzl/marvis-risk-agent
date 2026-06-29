@@ -266,9 +266,26 @@ def test_plan_validator_requires_join_confirmation(tmp_path):
         {"left": "a", "right": "b"},
         needs_confirmation=True,
     )
+    checked = _step(
+        "step-1",
+        ToolRef("join_pack", "execute_join"),
+        {"left": "a", "right": "b"},
+        needs_confirmation=True,
+        post_checks=[
+            PostCheck("rowcount", {"field": "joined_rows", "min": 1}),
+            PostCheck("invariant", {"rule": "joined_rows<=anchor_rows"}),
+        ],
+    )
 
-    assert any("join" in problem for problem in _validator(tmp_path).validate(_plan(join)))
-    assert _validator(tmp_path).validate(_plan(confirmed)) == []
+    problems = _validator(tmp_path).validate(_plan(join))
+    assert any("must require confirmation" in problem for problem in problems)
+    assert any("rowcount" in problem for problem in problems)
+    assert any("joined_rows<=anchor_rows" in problem for problem in problems)
+
+    confirmed_problems = _validator(tmp_path).validate(_plan(confirmed))
+    assert any("rowcount" in problem for problem in confirmed_problems)
+    assert any("joined_rows<=anchor_rows" in problem for problem in confirmed_problems)
+    assert _validator(tmp_path).validate(_plan(checked)) == []
 
 
 def test_plan_validator_requires_draft_run_confirmation(tmp_path):

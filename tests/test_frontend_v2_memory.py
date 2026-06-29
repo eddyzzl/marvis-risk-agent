@@ -123,6 +123,10 @@ def test_memory_handlers_load_detail_rollback_consolidate_and_filter():
             return { consolidated: { [category]: 1 } };
           },
           refreshMemories: async (query) => calls.push(["refreshMemories", query]),
+          confirmRollback: (id) => {
+            calls.push(["confirmRollback", id]);
+            return true;
+          },
           showMessage: (message) => messages.push(message),
           showError: (message) => messages.push(`error:${message}`),
         });
@@ -168,6 +172,7 @@ def test_memory_handlers_load_detail_rollback_consolidate_and_filter():
 
         assert.deepEqual(calls, [
           ["getMemoryDistillation", "distill-1"],
+          ["confirmRollback", "distill-1"],
           ["rollbackMemoryDistillation", "distill-1"],
           ["refreshMemories", { category: "field_convention" }],
           ["consolidateMemory", "field_convention"],
@@ -180,5 +185,43 @@ def test_memory_handlers_load_detail_rollback_consolidate_and_filter():
         detach();
         assert.equal(listeners.click, undefined);
         assert.equal(listeners.change, undefined);
+        """
+    )
+
+
+def test_memory_handlers_skip_rollback_when_not_confirmed():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachMemoryHandlers } from "./marvis/static/js/v2/memory_manager.js";
+
+        const calls = [];
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelector() { return null; },
+        };
+        attachMemoryHandlers(root, {
+          confirmRollback: (id) => {
+            calls.push(["confirmRollback", id]);
+            return false;
+          },
+          rollbackMemoryDistillation: async (id) => calls.push(["rollbackMemoryDistillation", id]),
+          refreshMemories: async (query) => calls.push(["refreshMemories", query]),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-rollback-memory-distillation]"
+                ? { dataset: { rollbackMemoryDistillation: "distill-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(calls, [["confirmRollback", "distill-1"]]);
         """
     )

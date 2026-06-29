@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from marvis.feature.candidates import candidate_numeric_features
+from marvis.feature.candidates import META_TOKENS, candidate_numeric_features
 # Preferred binary-target name tokens, most-specific first.
 _TARGET_PRIORITY = (
     "long_y", "fission_y", "y", "label", "target",
@@ -158,8 +158,11 @@ def _detect_continuous_target(probe, configured_target: str) -> str:
         return configured_target
     for token in _CONTINUOUS_TARGET_TOKENS:
         for col in numeric_cols:
-            if token in str(col).lower():
-                return col
+            name = str(col)
+            if _looks_like_split_name(name) or META_TOKENS.search(name):
+                continue
+            if token in name.lower():
+                return name
     return ""
 
 

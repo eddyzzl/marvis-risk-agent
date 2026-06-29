@@ -314,6 +314,8 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
             sample_analysis=None,
             vintage=None,
             feature_importance=[{"feature": "x1", "importance": 0.7}],
+            scorecard_table=[{"feature": "x1", "bin_label": "[0, 1)", "points": 12.3}],
+            score_bands=[{"split": "oot", "bin": 1, "bad_rate": 0.1}],
             univariate=[{"feature": "x1", "iv": 0.2, "ks": 0.3}],
             oot_bin_table=[{"bin": 1, "bad_rate": 0.1}],
             stress_product_removal={"baseline": []},
@@ -325,16 +327,25 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     )
 
     workbook = load_workbook(output)
+    assert not (output.parent / ".staging").exists()
     assert workbook.sheetnames == [
         "汇总",
         "样本分析",
         "Vintage",
         "特征重要性",
+        "评分卡",
+        "评分分段",
+        "概率校准",
         "oot分箱评估_十分箱",
         "单变量分析",
         "压力测试",
     ]
     assert workbook["样本分析"]["A1"].value.startswith("无业务数据")
+    assert workbook["评分卡"]["A1"].value == "feature"
+    assert workbook["评分卡"]["B2"].value == "[0, 1)"
+    assert workbook["评分卡"]["C2"].value == 12.3
+    assert workbook["评分分段"]["A1"].value == "split"
+    assert workbook["评分分段"]["C2"].value == 0.1
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
@@ -371,11 +382,15 @@ def test_non_binary_model_report_keeps_fixed_sheets_and_adds_metrics(tmp_path):
     render_minimal_model_report(experiment, out)
 
     workbook = load_workbook(out)
+    assert not (out.parent / ".staging").exists()
     assert workbook.sheetnames == [
         "汇总",
         "样本分析",
         "Vintage",
         "特征重要性",
+        "评分卡",
+        "评分分段",
+        "概率校准",
         "oot分箱评估_十分箱",
         "单变量分析",
         "压力测试",
@@ -400,6 +415,8 @@ def test_render_model_report_summary_lists_unique_products_from_feature_dictiona
                 {"feature": "x2", "importance": 0.3, "产品名称": "征信评分", "厂商名称": "数据厂商A"},
                 {"feature": "x3", "importance": 0.1, "产品名称": "借贷画像", "厂商名称": "数据厂商B"},
             ],
+            scorecard_table=[],
+            score_bands=[],
             univariate=[],
             oot_bin_table=[],
             stress_product_removal={},
@@ -430,6 +447,8 @@ def test_render_model_report_includes_vintage_cohort_counts_and_amounts(tmp_path
                 "amounts": {"2026-01": {"total": 3000.0, "average": 1500.0}},
             },
             feature_importance=[],
+            scorecard_table=[],
+            score_bands=[],
             univariate=[],
             oot_bin_table=[],
             stress_product_removal={},
@@ -667,12 +686,19 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert Path(report.output["report_path"]).exists()
     scored_path = settings.tasks_dir / task.id / "outputs" / "model_report_scored.parquet"
     assert scored_path.exists()
+    assert not (scored_path.parent / ".staging").exists()
     scored_frame = pd.read_parquet(scored_path)
     assert "__model_score__" in scored_frame.columns
     assert scored_frame["__model_score__"].between(0, 1).all()
     assert not scored_frame["__model_score__"].equals(scored_frame["x1"])
+    assert report.output["score_bands"]
+    assert {row["split"] for row in report.output["score_bands"]} == {"train", "test", "oot"}
     assert len(report.output["section_status"]) == 5
     workbook = load_workbook(report.output["report_path"])
+    score_band_sheet = workbook["评分分段"]
+    score_band_headers = [cell.value for cell in score_band_sheet[1]]
+    assert score_band_headers[:5] == ["split", "bin", "score_lower", "score_upper", "sample_count"]
+    assert score_band_sheet.max_row > 1
     summary_sheet = workbook["汇总"]
     train_row = next(
         row
@@ -806,6 +832,45 @@ def _train_report_experiment(runner, task, dataset, recipe, params):
     )
     assert trained.ok is True, trained.error
     return trained.output["experiment_id"]
+
+
+def test_generate_scorecard_report_keeps_pd_and_points_separate(tmp_path):
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(
+        runner,
+        task,
+        dataset,
+        "scorecard",
+        {"scorecard_max_bins": 3, "max_iter": 200},
+    )
+
+    report = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {"experiment_id": experiment_id, "dataset_id": dataset.id, "project_meta": {"项目名称": "评分卡报告"}},
+        task_id=task.id,
+    )
+
+    assert report.ok is True, report.error
+    scored_path = settings.tasks_dir / task.id / "outputs" / "model_report_scored.parquet"
+    assert not (scored_path.parent / ".staging").exists()
+    scored_frame = pd.read_parquet(scored_path)
+    assert scored_frame["__model_score__"].between(0, 1).all()
+    assert "__scorecard_points__" in scored_frame.columns
+    assert not scored_frame["__scorecard_points__"].between(0, 1).all()
+    assert scored_frame["__scorecard_points__"].max() > 100
+    assert report.output["scorecard_table"][0]["feature"] == "__base__"
+    assert report.output["score_bands"]
+    assert max(row["avg_score"] for row in report.output["score_bands"]) > 100
+    workbook = load_workbook(report.output["report_path"])
+    scorecard_sheet = workbook["评分卡"]
+    headers = [cell.value for cell in scorecard_sheet[1]]
+    base_row = {
+        header: scorecard_sheet.cell(row=2, column=index).value
+        for index, header in enumerate(headers, start=1)
+    }
+    assert base_row["feature"] == "__base__"
+    assert base_row["bin_label"] == "base_points"
+    assert base_row["points"] > 100
 
 
 def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):

@@ -40,6 +40,28 @@ def test_draft_registry_crud_delegates_to_repository(tmp_path):
     assert registry.list_for_task("task-1", status="tested") == [registry.get(draft.id)]
 
 
+def test_draft_registry_add_with_audit_delegates_to_repository(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DraftRepository(db_path)
+    registry = DraftRegistry(repo)
+    draft = _draft()
+
+    registry.add_with_audit(
+        draft,
+        audit={
+            "kind": "draft.author",
+            "target_ref": draft.id,
+            "outcome": "succeeded",
+            "detail": {"task_id": draft.task_id},
+        },
+    )
+
+    assert registry.get(draft.id) == draft
+    audit = PluginRepository(db_path).list_audit(kind="draft.author")[0]
+    assert audit["target_ref"] == draft.id
+
+
 def test_draft_registry_raises_for_missing_draft(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

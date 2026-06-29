@@ -4,6 +4,7 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -63,28 +64,71 @@ class DatasetRegistry:
         seed: int = 0,
     ) -> Dataset:
         parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
-        profiles = profile_dataset(self._backend, parquet_path, seed=seed)
-        target = None
-        if anchor_target:
-            anchor = self.get(anchor_target)
-            target = anchor.target_col if anchor.has_target else None
-        if target is None:
-            sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
-            target = detect_target_column(profiles, sample)
-        dataset = Dataset(
-            id=_new_dataset_id(),
+        dataset = self._dataset_from_existing(
+            parquet_path,
             task_id=task_id,
             role=role,
-            source_path=self._relative_path(parquet_path),
-            format="parquet",
-            sheet=None,
-            row_count=self._backend.row_count(parquet_path),
-            columns=tuple(profiles),
-            has_target=target is not None,
-            target_col=target,
-            created_at=_now_iso(),
+            anchor_target=anchor_target,
+            seed=seed,
         )
         self._repo.create_dataset(dataset)
+        return dataset
+
+    def register_existing_with_audit(
+        self,
+        parquet_path: Path,
+        *,
+        audit_factory: Callable[[Dataset], dict],
+        task_id: str,
+        role: str,
+        anchor_target: str | None = None,
+        seed: int = 0,
+    ) -> Dataset:
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        dataset = self._dataset_from_existing(
+            parquet_path,
+            task_id=task_id,
+            role=role,
+            anchor_target=anchor_target,
+            seed=seed,
+        )
+        audit = audit_factory(dataset)
+        try:
+            self._repo.create_dataset_with_audit(dataset, audit=audit)
+        except Exception:
+            parquet_path.unlink(missing_ok=True)
+            raise
+        return dataset
+
+    def register_join_result_with_audit(
+        self,
+        parquet_path: Path,
+        *,
+        join_plan_id: str,
+        audit_factory: Callable[[Dataset], dict],
+        task_id: str,
+        role: str,
+        anchor_target: str | None = None,
+        seed: int = 0,
+    ) -> Dataset:
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        dataset = self._dataset_from_existing(
+            parquet_path,
+            task_id=task_id,
+            role=role,
+            anchor_target=anchor_target,
+            seed=seed,
+        )
+        audit = audit_factory(dataset)
+        try:
+            self._repo.record_join_result_with_audit(
+                join_plan_id,
+                dataset,
+                audit=audit,
+            )
+        except Exception:
+            parquet_path.unlink(missing_ok=True)
+            raise
         return dataset
 
     def get(self, dataset_id: str) -> Dataset:
@@ -144,6 +188,37 @@ class DatasetRegistry:
 
     def _relative_path(self, path: Path) -> str:
         return path.resolve().relative_to(self._root.resolve()).as_posix()
+
+    def _dataset_from_existing(
+        self,
+        parquet_path: Path,
+        *,
+        task_id: str,
+        role: str,
+        anchor_target: str | None,
+        seed: int,
+    ) -> Dataset:
+        profiles = profile_dataset(self._backend, parquet_path, seed=seed)
+        target = None
+        if anchor_target:
+            anchor = self.get(anchor_target)
+            target = anchor.target_col if anchor.has_target else None
+        if target is None:
+            sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
+            target = detect_target_column(profiles, sample)
+        return Dataset(
+            id=_new_dataset_id(),
+            task_id=task_id,
+            role=role,
+            source_path=self._relative_path(parquet_path),
+            format="parquet",
+            sheet=None,
+            row_count=self._backend.row_count(parquet_path),
+            columns=tuple(profiles),
+            has_target=target is not None,
+            target_col=target,
+            created_at=_now_iso(),
+        )
 
 
 def _new_dataset_id() -> str:

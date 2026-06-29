@@ -39,6 +39,7 @@ class WorkflowTemplate:
     steps: tuple[StepTemplate, ...]
     default_autonomy: int = 1
     source: str = "builtin"
+    success_criteria: tuple[dict, ...] = ()
 
 
 _TEMPLATES: dict[str, WorkflowTemplate] = {}
@@ -109,4 +110,5 @@ def _with_source(template: WorkflowTemplate, source: str) -> WorkflowTemplate:
         steps=template.steps,
         default_autonomy=template.default_autonomy,
         source=source,
+        success_criteria=template.success_criteria,
     )

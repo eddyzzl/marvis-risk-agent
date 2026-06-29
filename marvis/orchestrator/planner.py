@@ -30,6 +30,30 @@ EXPLORE_SYS = (
     "只能从工具目录选工具，不计算指标，输出严格 JSON。"
 )
 MAX_REPLAN_PARSE_RETRY = 1
+MAX_CATALOG_FIELDS = 12
+
+PLANNING_EXAMPLES = (
+    {
+        "purpose": "Call a first tool with literal inputs.",
+        "step": {
+            "title": "读取数据概况",
+            "tool": {"plugin": "data_ops", "tool": "profile_dataset"},
+            "inputs": {"dataset_id": "dataset-1"},
+            "depends_on": [],
+            "post_checks": [{"kind": "nonempty", "spec": {"field": "row_count"}}],
+        },
+    },
+    {
+        "purpose": "Reference a previous tool output; depends_on must include that step id.",
+        "step": {
+            "title": "生成报告",
+            "tool": {"plugin": "report", "tool": "generate"},
+            "inputs": {"experiment_id": "$ref:train-step.output.experiment_id"},
+            "depends_on": ["train-step"],
+            "post_checks": [{"kind": "nonempty", "spec": {"field": "report_path"}}],
+        },
+    },
+)
 
 
 class PlanningError(Exception):
@@ -99,6 +123,7 @@ class Planner:
             template_id=template.id,
             steps=steps,
             autonomy_level=autonomy if autonomy is not None else template.default_autonomy,
+            success_criteria=[dict(item) for item in template.success_criteria],
         )
 
     def generate(
@@ -293,6 +318,11 @@ class Planner:
             autonomy_level=int(data.get("autonomy_level", tier.default_autonomy_level)),
             novel_mode=novel_mode,
             tier=tier.name,
+            success_criteria=[
+                dict(item)
+                for item in data.get("success_criteria") or []
+                if isinstance(item, dict)
+            ],
         )
 
 
@@ -309,7 +339,8 @@ def build_plan_prompt(
     return json.dumps(
         {
             "goal": goal,
-            "available_tools": catalog,
+            "available_tools": compact_catalog_for_prompt(catalog),
+            "planning_examples": PLANNING_EXAMPLES,
             "memory_context": memory_context,
             "task_context": task_context,
             "novel_mode": novel_mode,
@@ -317,6 +348,7 @@ def build_plan_prompt(
             "last_error": last_error,
             "instruction": (
                 "Return a JSON object with steps. Each step chooses a tool and inputs; "
+                "use $ref:<step_id>.output.<field> for upstream outputs; "
                 "do not compute metrics yourself."
             ),
         },
@@ -336,13 +368,15 @@ def build_explore_prompt(
     return json.dumps(
         {
             "goal": plan.goal,
-            "available_tools": catalog,
+            "available_tools": compact_catalog_for_prompt(catalog),
+            "planning_examples": PLANNING_EXAMPLES,
             "progress_ledger": ledger,
             "max_steps": max_steps,
             "last_error": last_error,
             "instruction": (
                 "Return {done: true, steps: []} if the goal is complete. Otherwise "
-                "return only the next segment steps, no more than max_steps."
+                "return only the next segment steps, no more than max_steps. "
+                "Use $ref:<step_id>.output.<field> for upstream outputs."
             ),
         },
         ensure_ascii=False,
@@ -363,7 +397,8 @@ def build_replan_prompt(
     payload = {
         "goal": plan.goal,
         "reason": reason,
-        "available_tools": catalog,
+        "available_tools": compact_catalog_for_prompt(catalog),
+        "planning_examples": PLANNING_EXAMPLES,
         "context_items": context_items,
         "observation": observation,
         "remaining_steps": [
@@ -374,7 +409,8 @@ def build_replan_prompt(
         "last_error": last_error,
         "instruction": (
             "Return only revised remaining steps. Preserve useful dependencies on "
-            "completed step ids when needed; do not include completed steps."
+            "completed step ids when needed; do not include completed steps. "
+            "Use $ref:<step_id>.output.<field> for upstream outputs."
         ),
     }
     if instruction:
@@ -382,6 +418,75 @@ def build_replan_prompt(
         # revised steps MUST honour it.
         payload["user_constraint"] = instruction
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
+    """Keep full schemas out of the LLM prompt; validation still uses them later."""
+    return [
+        {
+            "plugin": item.get("plugin"),
+            "tool": item.get("tool"),
+            "version": item.get("version"),
+            "summary": item.get("summary"),
+            "determinism": item.get("determinism"),
+            "required_inputs": _schema_required(item.get("input_schema")),
+            "input_fields": _schema_field_summary(item.get("input_schema")),
+            "output_fields": _schema_field_summary(item.get("output_schema")),
+        }
+        for item in catalog
+    ]
+
+
+def _schema_required(schema) -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return []
+    return [str(item) for item in required if isinstance(item, str)]
+
+
+def _schema_field_summary(schema) -> list[dict[str, Any]]:
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    fields: list[dict[str, Any]] = []
+    required = set(_schema_required(schema))
+    for name, spec in sorted(properties.items())[:MAX_CATALOG_FIELDS]:
+        field = {"name": str(name), "type": _schema_type_label(spec)}
+        if name in required:
+            field["required"] = True
+        description = spec.get("description") if isinstance(spec, dict) else None
+        if isinstance(description, str) and description.strip():
+            field["description"] = description.strip()[:120]
+        fields.append(field)
+    remaining = len(properties) - len(fields)
+    if remaining > 0:
+        fields.append({
+            "name": "...",
+            "type": "truncated",
+            "description": f"{remaining} more fields omitted from prompt",
+        })
+    return fields
+
+
+def _schema_type_label(schema) -> str:
+    if not isinstance(schema, dict):
+        return "unknown"
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        return "|".join(str(item) for item in schema_type)
+    if isinstance(schema_type, str):
+        return schema_type
+    if "anyOf" in schema:
+        return "anyOf"
+    if "oneOf" in schema:
+        return "oneOf"
+    if "allOf" in schema:
+        return "allOf"
+    return "object" if "properties" in schema else "unknown"
 
 
 def _parse_steps_json(
@@ -447,6 +552,7 @@ def _splice_remaining(plan: Plan, revised_remaining: list[PlanStep], tier: Capab
         novel_mode=plan.novel_mode,
         tier=tier.name,
         replan_count=plan.replan_count + 1,
+        success_criteria=[dict(item) for item in plan.success_criteria],
     )
 
 
@@ -465,6 +571,7 @@ def _append_segment_plan(plan: Plan, segment: list[PlanStep], tier: CapabilityTi
         novel_mode="explore",
         tier=tier.name,
         replan_count=plan.replan_count + 1,
+        success_criteria=[dict(item) for item in plan.success_criteria],
     )
 
 

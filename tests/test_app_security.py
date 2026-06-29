@@ -1,9 +1,52 @@
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from marvis import __version__
 from marvis.app import _is_local_client, create_app
+from marvis.db import PluginRepository, connect, init_db
+
+
+def test_create_app_refreshes_stale_builtin_manifest_before_plugin_registry_load(tmp_path):
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    manifest_path = Path(__file__).parents[1] / "marvis" / "packs" / "feature" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "write:artifact" in manifest["permissions"]
+    manifest["permissions"] = [
+        permission for permission in manifest["permissions"] if permission != "write:artifact"
+    ]
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO plugins(
+                name, version, display_name, description, module,
+                manifest_json, checksum, builtin, enabled, installed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest["name"],
+                manifest["version"],
+                manifest["display_name"],
+                manifest["description"],
+                manifest["module"],
+                json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+                "",
+                1,
+                1,
+                "2026-06-29T00:00:00Z",
+            ),
+        )
+
+    create_app(tmp_path)
+
+    refreshed = PluginRepository(db_path).get_plugin("feature")
+    assert refreshed is not None
+    refreshed_manifest = json.loads(refreshed["manifest_json"])
+    assert "write:artifact" in refreshed_manifest["permissions"]
 
 
 def test_remote_read_does_not_leak_validator_aliases_via_branding(tmp_path, monkeypatch):
@@ -58,7 +101,33 @@ def test_remote_client_can_read_health_check(tmp_path):
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["sqlite_journal_mode"] in {"wal", "memory"}
+    assert payload["sqlite_wal_degraded"] is False
+    assert isinstance(payload["sqlite_busy_timeout_ms"], int)
+
+
+def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "marvis.app.sqlite_health",
+        lambda _db_path: {
+            "sqlite_journal_mode": "delete",
+            "sqlite_wal_degraded": True,
+            "sqlite_busy_timeout_ms": 5000,
+        },
+    )
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "sqlite_journal_mode": "delete",
+        "sqlite_wal_degraded": True,
+        "sqlite_busy_timeout_ms": 5000,
+    }
 
 
 def test_remote_client_can_read_api_when_explicitly_enabled(tmp_path, monkeypatch):

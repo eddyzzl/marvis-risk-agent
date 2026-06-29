@@ -11,10 +11,33 @@ import time
 from typing import Any
 
 from marvis.db import PluginRepository
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import PluginManifest, ToolRef
 from marvis.plugins.registry import ToolRegistry
 from marvis.plugins.schema_validation import validate_against_schema
 from marvis.plugins.errors import SchemaValidationError
+from marvis.redaction import redact_text
+from marvis.safe_paths import assert_within
+
+
+_WORKER_ENV_ALLOWLIST = frozenset({
+    "CONDA_PREFIX",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "MARVIS_PROBE_URL",
+    "MARVIS_SEARCH_ENDPOINT",
+    "PATH",
+    "PYTHONHASHSEED",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "RMC_MATERIAL_ROOTS",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+})
 
 
 @dataclass(frozen=True)
@@ -25,7 +48,7 @@ class ToolContext:
     workspace: Path
 
     def load_dataset_path(self, dataset_id: str) -> Path:
-        return self.datasets_root / dataset_id
+        return assert_within(self.datasets_root, self.datasets_root / dataset_id)
 
 
 @dataclass
@@ -38,6 +61,7 @@ class ToolResult:
     stdout_tail: str = ""
     stderr_tail: str = ""
     error_detail: dict | None = None
+    resource_limits: dict | None = None
 
 
 class ToolRunner:
@@ -70,16 +94,30 @@ class ToolRunner:
         target_ref = ref.label()
         try:
             manifest, tool = self._tools.resolve_with_manifest(ref)
+            _require_tool_permissions(manifest, tool.side_effects)
             validate_against_schema(inputs, tool.input_schema, label="inputs")
         except SchemaValidationError as exc:
             result = _failed_result(started, "schema", str(exc))
-            self._write_audit(target_ref, inputs, result)
-            return result
+            return self._finalize_audited_result(started, target_ref, inputs, result)
+        except PermissionError as exc:
+            result = _failed_result(started, "permission", str(exc))
+            return self._finalize_audited_result(started, target_ref, inputs, result)
         effective_seed = seed
         if effective_seed is None and tool.determinism == "stochastic":
             effective_seed = _input_seed(inputs)
         if effective_seed is None and tool.determinism == "stochastic":
             effective_seed = _derive_seed(target_ref, task_id, inputs)
+
+        checkpoint_error = self._write_started_audit(
+            started,
+            target_ref,
+            inputs,
+            seed=effective_seed,
+            side_effects=tool.side_effects,
+            timeout_seconds=tool.timeout_seconds,
+        )
+        if checkpoint_error is not None:
+            return checkpoint_error
 
         job = {
             "module": manifest.module,
@@ -90,7 +128,10 @@ class ToolRunner:
             "datasets_root": str(self._datasets_root),
             "workspace": str(self._workspace),
             "memory_limit_mb": tool.memory_limit_mb,
+            "cpu_limit_seconds": int(tool.timeout_seconds) + 2,
+            "file_size_limit_mb": 2048,
             "plugin_paths": [str(path) for path in self._plugin_paths],
+            "side_effects": list(tool.side_effects),
         }
         try:
             completed = _run_worker(
@@ -106,8 +147,13 @@ class ToolRunner:
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
-            self._write_audit(target_ref, inputs, result, seed=effective_seed)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
 
         protocol = _parse_worker_result(completed.stdout)
         if protocol is None:
@@ -118,8 +164,13 @@ class ToolRunner:
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
             )
-            self._write_audit(target_ref, inputs, result, seed=effective_seed)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
 
         if not protocol.get("ok"):
             error_detail = protocol.get("error_detail")
@@ -130,13 +181,24 @@ class ToolRunner:
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
                 error_detail=error_detail if isinstance(error_detail, dict) else None,
+                resource_limits=_protocol_resource_limits(protocol),
             )
-            self._write_audit(target_ref, inputs, result, seed=effective_seed)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
 
         output = protocol.get("output")
         try:
             validate_against_schema(output, tool.output_schema, label=f"output:{target_ref}")
+            _validate_output_paths(
+                output,
+                workspace=self._workspace,
+                datasets_root=self._datasets_root,
+            )
         except SchemaValidationError as exc:
             result = _failed_result(
                 started,
@@ -144,9 +206,31 @@ class ToolRunner:
                 str(exc),
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                resource_limits=_protocol_resource_limits(protocol),
             )
-            self._write_audit(target_ref, inputs, result, seed=effective_seed)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
+        except PermissionError as exc:
+            result = _failed_result(
+                started,
+                "permission",
+                str(exc),
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                resource_limits=_protocol_resource_limits(protocol),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
 
         result = ToolResult(
             ok=True,
@@ -156,9 +240,15 @@ class ToolRunner:
             duration_ms=_duration_ms(started),
             stdout_tail=_tail(protocol.get("stdout") or ""),
             stderr_tail=_tail(protocol.get("stderr") or ""),
+            resource_limits=_protocol_resource_limits(protocol),
         )
-        self._write_audit(target_ref, inputs, result, seed=effective_seed)
-        return result
+        return self._finalize_audited_result(
+            started,
+            target_ref,
+            inputs,
+            result,
+            seed=effective_seed,
+        )
 
     def invoke_adhoc(
         self,
@@ -181,8 +271,28 @@ class ToolRunner:
             validate_against_schema(inputs, input_schema, label="inputs")
         except SchemaValidationError as exc:
             result = _failed_result(started, "schema", str(exc))
-            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
+
+        checkpoint_error = self._write_started_audit(
+            started,
+            target_ref,
+            inputs,
+            seed=seed,
+            kind=f"{audit_kind}.started",
+            mode=mode,
+            side_effects=(),
+            timeout_seconds=timeout_seconds,
+        )
+        if checkpoint_error is not None:
+            return checkpoint_error
 
         job = {
             "module_path": str(Path(module)),
@@ -193,7 +303,10 @@ class ToolRunner:
             "datasets_root": str(self._datasets_root),
             "workspace": str(self._workspace),
             "memory_limit_mb": int(memory_limit_mb),
+            "cpu_limit_seconds": int(timeout_seconds) + 2,
+            "file_size_limit_mb": 2048,
             "plugin_paths": [str(path) for path in self._plugin_paths],
+            "side_effects": [],
         }
         try:
             completed = _run_worker(
@@ -209,8 +322,15 @@ class ToolRunner:
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
             )
-            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
 
         protocol = _parse_worker_result(completed.stdout)
         if protocol is None:
@@ -221,8 +341,15 @@ class ToolRunner:
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
             )
-            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
 
         if not protocol.get("ok"):
             error_detail = protocol.get("error_detail")
@@ -233,13 +360,26 @@ class ToolRunner:
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("traceback") or protocol.get("stderr") or completed.stderr),
                 error_detail=error_detail if isinstance(error_detail, dict) else None,
+                resource_limits=_protocol_resource_limits(protocol),
             )
-            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
 
         output = protocol.get("output")
         try:
             validate_against_schema(output, output_schema, label=f"output:{target_ref}")
+            _validate_output_paths(
+                output,
+                workspace=self._workspace,
+                datasets_root=self._datasets_root,
+            )
         except SchemaValidationError as exc:
             result = _failed_result(
                 started,
@@ -247,9 +387,35 @@ class ToolRunner:
                 str(exc),
                 stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
                 stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                resource_limits=_protocol_resource_limits(protocol),
             )
-            self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
-            return result
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
+        except PermissionError as exc:
+            result = _failed_result(
+                started,
+                "permission",
+                str(exc),
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                resource_limits=_protocol_resource_limits(protocol),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
 
         result = ToolResult(
             ok=True,
@@ -259,8 +425,64 @@ class ToolRunner:
             duration_ms=_duration_ms(started),
             stdout_tail=_tail(protocol.get("stdout") or ""),
             stderr_tail=_tail(protocol.get("stderr") or ""),
+            resource_limits=_protocol_resource_limits(protocol),
         )
-        self._write_audit(target_ref, inputs, result, seed=seed, kind=audit_kind, mode=mode)
+        return self._finalize_audited_result(
+            started,
+            target_ref,
+            inputs,
+            result,
+            seed=seed,
+            kind=audit_kind,
+            mode=mode,
+        )
+
+    def _write_started_audit(
+        self,
+        started: float,
+        target_ref: str,
+        inputs: dict,
+        *,
+        seed: int | None,
+        kind: str = "tool.invoke.started",
+        mode: str | None = None,
+        side_effects: tuple[str, ...],
+        timeout_seconds: int,
+    ) -> ToolResult | None:
+        detail: dict[str, Any] = {
+            "seed": seed,
+            "side_effects": list(side_effects),
+            "timeout_seconds": int(timeout_seconds),
+        }
+        if mode:
+            detail["mode"] = mode
+        try:
+            self._repo.write_audit(
+                kind=kind,
+                target_ref=target_ref,
+                inputs_hash=_hash_inputs(inputs),
+                outcome="started",
+                detail=detail,
+            )
+        except Exception as exc:
+            return _audit_failure_result(started, "start", exc)
+        return None
+
+    def _finalize_audited_result(
+        self,
+        started: float,
+        target_ref: str,
+        inputs: dict,
+        result: ToolResult,
+        *,
+        seed: int | None = None,
+        kind: str = "tool.invoke",
+        mode: str | None = None,
+    ) -> ToolResult:
+        try:
+            self._write_audit(target_ref, inputs, result, seed=seed, kind=kind, mode=mode)
+        except Exception as exc:
+            return _audit_failure_result(started, "finish", exc, result=result)
         return result
 
     def _write_audit(
@@ -280,6 +502,8 @@ class ToolRunner:
         }
         if result.error_detail:
             detail["error_detail"] = result.error_detail
+        if result.resource_limits:
+            detail["resource_limits"] = result.resource_limits
         if mode:
             detail["mode"] = mode
         self._repo.write_audit(
@@ -291,6 +515,76 @@ class ToolRunner:
         )
 
 
+def _require_tool_permissions(manifest: PluginManifest, side_effects: tuple[str, ...]) -> None:
+    allowed = set(manifest.permissions)
+    missing = [effect for effect in side_effects if effect not in allowed]
+    if missing:
+        raise PermissionError(
+            f"tool side_effects not allowed by plugin permissions: {', '.join(missing)}"
+        )
+
+
+def _validate_output_paths(output: Any, *, workspace: Path, datasets_root: Path) -> None:
+    allowed_roots = (Path(workspace), Path(datasets_root))
+    for location, value in _iter_output_path_values(output):
+        _validate_output_path_value(str(value), location=location, allowed_roots=allowed_roots)
+
+
+def _iter_output_path_values(value: Any, *, prefix: str = "$"):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            location = f"{prefix}.{key}"
+            if isinstance(item, str):
+                if item and (
+                    (isinstance(key, str) and _is_path_output_key(key))
+                    or _is_artifact_ref(item)
+                ):
+                    yield location, item
+                continue
+            yield from _iter_output_path_values(item, prefix=location)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _iter_output_path_values(item, prefix=f"{prefix}[{index}]")
+    elif isinstance(value, str) and _is_artifact_ref(value):
+        yield prefix, value
+
+
+def _is_path_output_key(key: str) -> bool:
+    normalized = key.lower()
+    return normalized == "path" or normalized.endswith("_path")
+
+
+def _is_artifact_ref(value: str) -> bool:
+    return value.strip().startswith("artifact:")
+
+
+def _validate_output_path_value(value: str, *, location: str, allowed_roots: tuple[Path, ...]) -> None:
+    text = value.strip()
+    if not text:
+        return
+    if text.startswith("artifact:"):
+        _validate_relative_output_path(text.split(":", 1)[1], location=location)
+        return
+    path = Path(text)
+    if path.is_absolute():
+        for root in allowed_roots:
+            try:
+                assert_within(root, path)
+                return
+            except PermissionError:
+                continue
+        raise PermissionError(f"output path {location} escapes allowed roots: {text}")
+    _validate_relative_output_path(text, location=location)
+
+
+def _validate_relative_output_path(value: str, *, location: str) -> None:
+    path = Path(value)
+    if path.is_absolute() or path.drive:
+        raise PermissionError(f"output path {location} must be relative: {value}")
+    if value.startswith("~") or any(part == ".." for part in path.parts):
+        raise PermissionError(f"output path {location} contains unsafe relative path: {value}")
+
+
 def _failed_result(
     started: float,
     error_kind: str,
@@ -299,6 +593,7 @@ def _failed_result(
     stdout_tail: str = "",
     stderr_tail: str = "",
     error_detail: dict | None = None,
+    resource_limits: dict | None = None,
 ) -> ToolResult:
     return ToolResult(
         ok=False,
@@ -309,6 +604,30 @@ def _failed_result(
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
         error_detail=error_detail,
+        resource_limits=resource_limits,
+    )
+
+
+def _audit_failure_result(
+    started: float,
+    phase: str,
+    exc: Exception,
+    *,
+    result: ToolResult | None = None,
+) -> ToolResult:
+    detail: dict[str, Any] = {
+        "audit_phase": phase,
+        "audit_error": str(exc),
+    }
+    if result is not None:
+        detail["result_ok"] = result.ok
+        detail["result_error_kind"] = result.error_kind
+    return _failed_result(
+        started,
+        "audit",
+        f"audit {phase} failed: {exc}",
+        error_detail=detail,
+        resource_limits=result.resource_limits if result is not None else None,
     )
 
 
@@ -321,6 +640,7 @@ def _run_worker(python_executable: str, job: dict, *, timeout: int) -> subproces
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        env=_worker_env(),
         start_new_session=(os.name != "nt"),
     )
     try:
@@ -349,6 +669,17 @@ def _kill_worker_tree(process: subprocess.Popen) -> None:
         pass
 
 
+def _worker_env() -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _WORKER_ENV_ALLOWLIST and value
+    }
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 def _duration_ms(started: float) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
 
@@ -364,6 +695,11 @@ def _parse_worker_result(stdout: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _protocol_resource_limits(protocol: dict) -> dict | None:
+    value = protocol.get("resource_limits")
+    return value if isinstance(value, dict) else None
+
+
 def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
     if value is None:
         return ""
@@ -371,7 +707,7 @@ def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
         text = value.decode("utf-8", errors="replace")
     else:
         text = value
-    return text[-limit:]
+    return redact_text(text[-limit:])
 
 
 def _hash_inputs(inputs: dict) -> str:

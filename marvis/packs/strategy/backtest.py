@@ -32,7 +32,7 @@ def backtest_strategy(
     decision = apply_strategy(df, strategy)
     approved = decision != "reject"
     target = _target_series(df, target_col)
-    swap = _swap_analysis(df, strategy, baseline, target_col) if baseline else _zero_swap()
+    swap = _swap_analysis(df, approved, baseline, target_col) if baseline else _zero_swap()
     return BacktestResult(
         strategy_id=strategy.id,
         approval_rate=_ratio(float(approved.sum()), float(len(df))),
@@ -55,13 +55,12 @@ def backtest_strategy(
 
 def _swap_analysis(
     df: pd.DataFrame,
-    strategy: Strategy,
+    new_approved: pd.Series,
     baseline: Strategy | None,
     target_col: str,
 ) -> _SwapStats:
     if baseline is None:
         return _zero_swap()
-    new_approved = apply_strategy(df, strategy) != "reject"
     old_approved = apply_strategy(df, baseline) != "reject"
     target = _target_series(df, target_col)
     swap_in = new_approved & ~old_approved

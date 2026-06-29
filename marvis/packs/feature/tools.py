@@ -17,6 +17,8 @@ from marvis.feature.binning import (
     equal_frequency_edges,
     equal_width_edges,
     manual_edges,
+    monotonic_direction,
+    monotonic_edges,
     tree_edges,
 )
 from marvis.feature.correlation import correlation_report
@@ -221,17 +223,38 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
         str(inputs["target_col"]),
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
+    feature = str(inputs["feature"])
+    target_col = str(inputs["target_col"])
+    target = _target_values(frame, target_col)
+    values = frame[feature].to_numpy(dtype=float)
     edges = _edges_for(frame, inputs, ctx)
+    before = None
+    resolved_direction = None
+    if bool(inputs.get("enforce_monotonic")):
+        before = compute_woe_iv(values, target, edges, feature=feature)
+        resolved_direction = monotonic_direction(
+            values,
+            target,
+            edges,
+            direction=str(inputs.get("monotonic_direction") or "auto"),
+        )
+        edges = monotonic_edges(values, target, edges, direction=resolved_direction)
     result = compute_woe_iv(
-        frame[str(inputs["feature"])].to_numpy(dtype=float),
-        _target_values(frame, str(inputs["target_col"])),
+        values,
+        target,
         edges,
-        feature=str(inputs["feature"]),
+        feature=feature,
     )
     payload = _jsonable(result)
     payload["bins"] = [_jsonable(bin_row) for bin_row in result.bins]
     payload["na_bin"] = _jsonable(result.na_bin) if result.na_bin else None
     payload["nan_labels_dropped"] = nan_labels_dropped
+    if before is not None:
+        payload["monotonic_enforced"] = True
+        payload["monotonic_direction"] = resolved_direction
+        payload["monotonic_before"] = bool(before.monotonic)
+        payload["total_iv_before_monotonic"] = before.total_iv
+        payload["edges_before_monotonic"] = [float(value) for value in before.edges]
     return payload
 
 
@@ -309,9 +332,11 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
 def tool_onehot_encode(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    columns = [str(item) for item in inputs["columns"]]
+    _assert_columns(frame, columns)
     encoded, mapping = onehot_encode(
         frame,
-        [str(item) for item in inputs["columns"]],
+        columns,
         max_categories=int(inputs.get("max_categories") or 50),
     )
     result = _register_frame(runtime, encoded, dataset, ctx, "onehot")
@@ -324,8 +349,9 @@ def tool_normalize(inputs: dict, ctx) -> dict:
     method = str(inputs["method"])
     out = frame.copy()
     params = {}
-    for column in inputs["columns"]:
-        col = str(column)
+    columns = [str(column) for column in inputs["columns"]]
+    _assert_columns(out, columns)
+    for col in columns:
         if method == "minmax":
             values, column_params = minmax_normalize(
                 out[col].to_numpy(dtype=float),
@@ -346,14 +372,16 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     out = frame.copy()
     fill_values = {}
-    for column in inputs["columns"]:
+    columns = [str(column) for column in inputs["columns"]]
+    _assert_columns(out, columns)
+    for column in columns:
         filled, value = impute_missing(
-            out[str(column)],
+            out[column],
             strategy=str(inputs["strategy"]),
             fill_value=inputs.get("fill_value"),
         )
-        out[str(column)] = filled
-        fill_values[str(column)] = value
+        out[column] = filled
+        fill_values[column] = value
     result = _register_frame(runtime, out, dataset, ctx, "impute")
     return {"result_dataset_id": result.id, "fill_values": _jsonable(fill_values)}
 
@@ -363,15 +391,17 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     out = frame.copy()
     bounds = {}
-    for column in inputs["columns"]:
+    columns = [str(column) for column in inputs["columns"]]
+    _assert_columns(out, columns)
+    for column in columns:
         values, params = cap_outliers(
-            out[str(column)].to_numpy(dtype=float),
+            out[column].to_numpy(dtype=float),
             method=str(inputs.get("method") or "iqr"),
             lower_q=float(inputs.get("lower_q", 0.01)),
             upper_q=float(inputs.get("upper_q", 0.99)),
         )
-        out[str(column)] = values
-        bounds[str(column)] = params
+        out[column] = values
+        bounds[column] = params
     result = _register_frame(runtime, out, dataset, ctx, "cap")
     return {"result_dataset_id": result.id, "bounds": _jsonable(bounds)}
 

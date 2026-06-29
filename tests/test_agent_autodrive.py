@@ -38,6 +38,27 @@ def _join_dir(root: Path, n: int = 50) -> Path:
     return src
 
 
+def _strategy_dir(root: Path) -> Path:
+    src = root / "strategy_material"
+    src.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "bad": [1, 0, 0, 0, 1, 0],
+        "score": [580, 620, 730, 760, 590, 800],
+    }).to_csv(src / "strategy.csv", index=False)
+    return src
+
+
+def _vintage_dir(root: Path) -> Path:
+    src = root / "vintage_material"
+    src.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "cohort": ["202601", "202601", "202602", "202602"],
+        "mob": [0, 1, 0, 1],
+        "bad": [0, 1, 0, 0],
+    }).to_csv(src / "vintage.csv", index=False)
+    return src
+
+
 def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
@@ -57,6 +78,20 @@ class _FakeLLM:
     def complete(self, **kwargs) -> str:
         self.calls.append(kwargs)
         return self._payload
+
+
+class _SequencedLLM:
+    """Returns one payload per call, then repeats the last payload."""
+
+    def __init__(self, payloads: list[str]):
+        self.payloads = list(payloads)
+        self.calls: list[dict] = []
+
+    def complete(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+        if len(self.calls) <= len(self.payloads):
+            return self.payloads[len(self.calls) - 1]
+        return self.payloads[-1]
 
 
 # -- invariant 1: agent mode requires an LLM ---------------------------------
@@ -81,6 +116,36 @@ def test_manual_mode_data_join_without_llm_runs(client: TestClient, tmp_path: Pa
     }).json()["id"]
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
     assert resp.status_code == 202, resp.text
+
+
+@pytest.mark.parametrize(
+    ("task_type", "source_factory", "extra_payload"),
+    [
+        ("strategy", _strategy_dir, {"target_col": "bad", "score_col": "score"}),
+        ("vintage", _vintage_dir, {"target_col": "bad", "time_col": "cohort"}),
+    ],
+)
+def test_agent_mode_strategy_and_vintage_without_llm_error(
+    client: TestClient,
+    tmp_path: Path,
+    task_type: str,
+    source_factory,
+    extra_payload: dict,
+):
+    src = source_factory(tmp_path)
+    task_payload = {
+        "model_name": f"{task_type} agent",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": task_type,
+        "run_mode": "agent",
+        **extra_payload,
+    }
+    task_id = client.post("/api/tasks", json=task_payload).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    assert resp.status_code == 409, resp.text
 
 
 # -- invariant 2: with an LLM, agent mode auto-drives the gates ---------------
@@ -144,9 +209,61 @@ def test_agent_normal_mode_stops_at_first_gate(client: TestClient, tmp_path: Pat
     assert fake.calls == []
 
 
+def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
+    fake = _FakeLLM(action="confirm", reason="策略规则可回测,继续")
+    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    src = _strategy_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "策略自动",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "strategy",
+        "run_mode": "agent",
+        "target_col": "bad",
+        "score_col": "score",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
+
+    assert resp.status_code == 202, resp.text
+    msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    done = _last_assistant(msgs)
+    assert "策略权衡视图完成" in done["content"]
+    assert len(fake.calls) >= 2
+    assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
+
+
+def test_agent_mode_autodrives_vintage_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
+    fake = _FakeLLM(action="confirm", reason="字段已识别,继续")
+    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    src = _vintage_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "Vintage 自动",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "vintage",
+        "run_mode": "agent",
+        "target_col": "bad",
+        "time_col": "cohort",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
+
+    assert resp.status_code == 202, resp.text
+    msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    done = _last_assistant(msgs)
+    assert "Vintage 曲线完成" in done["content"]
+    assert len(fake.calls) >= 1
+
+
 # -- unit: gate-decision parsing ---------------------------------------------
 def test_parse_decision_confirm():
     assert parse_decision('{"action":"confirm","reason":"ok"}') == {"action": "confirm", "reason": "ok"}
+
+
+def test_parse_decision_extracts_json_from_markdown():
+    out = parse_decision('```json\n{"action":"confirm","reason":"指标稳定"}\n```')
+    assert out == {"action": "confirm", "reason": "指标稳定"}
 
 
 def test_parse_decision_defaults_to_halt_on_junk():
@@ -159,6 +276,57 @@ def test_parse_decision_unknown_action_is_halt():
     assert out["action"] == "halt"
 
 
+def test_parse_decision_adjust_when_gate_allows_it():
+    out = parse_decision(
+        '{"action":"adjust","reason":"降低泄漏阈值重算","params":{"leakage_ks":0.35},'
+        '"selection":["x1","x2"],"confidence":0.82}',
+        allowed_actions=("confirm", "adjust", "halt"),
+    )
+
+    assert out == {
+        "action": "adjust",
+        "reason": "降低泄漏阈值重算",
+        "params": {"leakage_ks": 0.35},
+        "selection": ["x1", "x2"],
+        "confidence": 0.82,
+    }
+
+
+def test_parse_decision_disallowed_adjust_becomes_safe_halt():
+    out = parse_decision(
+        '{"action":"adjust","reason":"想调参","params":{"n_trials":10}}',
+        allowed_actions=("confirm", "halt"),
+    )
+
+    assert out["action"] == "halt"
+    assert "不允许" in out["reason"]
+
+
+def test_decide_gate_uses_gate_envelope_allowed_actions():
+    fake = _FakeLLM(action="adjust", reason="泄漏阈值偏保守,重算")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "泄漏阈值偏保守,重算",
+        "params": {"leakage_ks": 0.35},
+    })
+    gate = {
+        "content": "特征筛选完成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "screen",
+                "target_step_id": "gate-screen",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "adjust"
+    assert decision["params"] == {"leakage_ks": 0.35}
+    assert "confirm, adjust, halt" in fake.calls[0]["system_prompt"]
+
+
 def test_decide_gate_passes_table_context_to_llm():
     fake = _FakeLLM()
     gate = {"content": "拼接诊断完成", "metadata": {"tables": [
@@ -168,3 +336,74 @@ def test_decide_gate_passes_table_context_to_llm():
     assert decision["action"] == "confirm"
     assert "拼接诊断" in fake.calls[0]["user_prompt"]
     assert "命中率" in fake.calls[0]["user_prompt"]
+
+
+def test_decide_gate_injects_screen_red_flags_into_prompt():
+    fake = _FakeLLM()
+    gate = {
+        "content": "特征筛选完成",
+        "metadata": {
+            "screen": {
+                "leakage": [["leak_col", 0.55, "suspected target leakage"]],
+                "suspected": [["score_x", 0.31, "model output"]],
+                "unusable": [["all_null", "high_missing"]],
+            }
+        },
+    }
+
+    decide_gate(fake, gate=gate)
+
+    prompt = fake.calls[0]["user_prompt"]
+    assert "平台红旗 checklist" in prompt
+    assert "疑似硬泄漏特征" in prompt
+    assert "可疑模型输出/泄漏特征" in prompt
+    assert "不可用特征" in prompt
+
+
+def test_decide_gate_injects_join_red_flags_from_tables_into_prompt():
+    fake = _FakeLLM()
+    gate = {
+        "content": "拼接诊断完成",
+        "metadata": {
+            "tables": [
+                {
+                    "title": "拼接诊断(逐特征表)",
+                    "columns": ["特征表", "命中率", "膨胀", "去重(安全/冲突键)"],
+                    "rows": [["features.parquet", "0.1000", "⚠️是", "安全0/⚠️冲突3"]],
+                }
+            ]
+        },
+    }
+
+    decide_gate(fake, gate=gate)
+
+    prompt = fake.calls[0]["user_prompt"]
+    assert "命中率偏低(10.00%)" in prompt
+    assert "存在拼接膨胀风险" in prompt
+    assert "存在同键冲突去重风险" in prompt
+
+
+def test_decide_gate_omits_red_flag_section_for_clean_gate():
+    fake = _FakeLLM()
+    gate = {"content": "拼接诊断完成", "metadata": {"tables": [
+        {
+            "title": "拼接诊断(逐特征表)",
+            "columns": ["特征表", "命中率", "膨胀"],
+            "rows": [["features.parquet", "1.0000", "否"]],
+        }
+    ]}}
+
+    decide_gate(fake, gate=gate)
+
+    assert "平台红旗 checklist" not in fake.calls[0]["user_prompt"]
+
+
+def test_decide_gate_retries_once_after_unparseable_reply():
+    fake = _SequencedLLM(["not json", '{"action":"confirm","reason":"重试后可解析"}'])
+    gate = {"content": "调参结果完成", "metadata": {}}
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision == {"action": "confirm", "reason": "重试后可解析"}
+    assert len(fake.calls) == 2
+    assert "上一次返回无法解析" in fake.calls[1]["user_prompt"]

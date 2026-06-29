@@ -3,8 +3,9 @@
 The modeling pack previously had no tuning at all — train_model ran a single
 fixed (and very weak: 20-round) configuration, so an out-of-the-box model badly
 underperformed a hand-tuned reference. This module runs a seeded random search
-over a sensible LightGBM space, selecting on the **test** split (OOT is kept as
-the final unbiased judge) and penalising train/test overfit, so the agent's "调参"
+over a sensible LightGBM space, selecting on the **test** split while penalising
+train/test overfit. OOT metrics are reported for transparency but are not used for
+hyperparameter selection, so the search does not tune against the holdout window.
 step produces strong, robust ``params`` to hand straight to ``train_model``.
 
 Deterministic given ``seed`` (the trial space is sampled from a seeded RNG and
@@ -86,11 +87,12 @@ def tune_hyperparameters(
     max_boost_round: int = 3000,
     overfit_penalty: float = 0.5,
     sample_weight_col: str = "",
+    base_params: dict | None = None,
 ) -> TuneResult:
-    """Random-search LightGBM params; select by test KS minus an overfit penalty.
+    """Random-search LightGBM params; select by test KS minus in-time overfit penalty.
 
-    Objective per trial: ``test_ks - overfit_penalty * max(0, train_ks - test_ks)``.
-    OOT is scored but never used for selection (it is the final unbiased metric).
+    Objective per trial:
+    ``test_ks - overfit_penalty * max(0, train_ks - test_ks)``.
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     weight_col = str(sample_weight_col or "").strip()
@@ -108,20 +110,22 @@ def tune_hyperparameters(
     dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
     dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
     rng = np.random.RandomState(seed)
+    fixed_params = _lgb_base_params(base_params)
+    trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
 
     best = None
     trials: list[dict] = []
     for trial in range(max(1, n_trials)):
-        params = _sample_params(rng, pos_weight_hint)
+        params = {**_sample_params(rng, pos_weight_hint), **fixed_params}
         params.update({"seed": seed, "num_threads": 0, "deterministic": True})
         booster = lgb.train(
             params,
             dtrain,
-            num_boost_round=max_boost_round,
+            num_boost_round=trial_max_boost_round,
             valid_sets=[dvalid],
             callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
         )
-        rounds = int(booster.best_iteration or max_boost_round)
+        rounds = int(booster.best_iteration or trial_max_boost_round)
         train_preds = booster.predict(train[feats])
         test_preds = booster.predict(test[feats])
         train_ks = feature_ks(train_preds, ytr)
@@ -138,10 +142,15 @@ def tune_hyperparameters(
             oot_preds = booster.predict(oot[feats])
             oot_ks = feature_ks(oot_preds, yoot)
             oot_auc = feature_auc(oot_preds, yoot)
-        score = test_ks - overfit_penalty * max(0.0, train_ks - test_ks)
         # Overfit gaps: train-test always; train-oot when an OOT split exists.
         gap_tt = train_ks - test_ks
         gap_to = (train_ks - oot_ks) if oot_ks is not None else None
+        oot_stability_gap = abs(test_ks - oot_ks) if oot_ks is not None else None
+        score = _trial_score(
+            train_ks=train_ks,
+            test_ks=test_ks,
+            overfit_penalty=overfit_penalty,
+        )
         record = {
             "params": {**params, "num_boost_round": rounds},
             "train_ks": train_ks, "test_ks": test_ks, "oot_ks": oot_ks, "score": score,
@@ -149,6 +158,7 @@ def tune_hyperparameters(
             "lift_head_5": lift.get("lift_head_5"), "lift_tail_5": lift.get("lift_tail_5"),
             "lift_head_10": lift.get("lift_head_10"), "lift_tail_10": lift.get("lift_tail_10"),
             "overfit_gap_tt": gap_tt, "overfit_gap_to": gap_to,
+            "oot_stability_gap": oot_stability_gap,
         }
         trials.append(record)
         if best is None or score > best["score"]:
@@ -162,12 +172,22 @@ def tune_hyperparameters(
             "oot_ks": best["oot_ks"],
             "overfit_gap": best["overfit_gap_tt"],
             "overfit_gap_oot": best["overfit_gap_to"],
+            "oot_stability_gap": best["oot_stability_gap"],
             "train_auc": best.get("train_auc"), "test_auc": best.get("test_auc"),
             "oot_auc": best.get("oot_auc"),
         },
         trials=tuple(trials),
         n_trials=len(trials),
     )
+
+
+def _trial_score(
+    *,
+    train_ks: float,
+    test_ks: float,
+    overfit_penalty: float,
+) -> float:
+    return test_ks - overfit_penalty * max(0.0, train_ks - test_ks)
 
 
 def _sample_weight(frame: pd.DataFrame, column: str) -> np.ndarray | None:
@@ -183,6 +203,15 @@ def _sample_weight(frame: pd.DataFrame, column: str) -> np.ndarray | None:
     if float(weights.sum()) <= 0:
         raise ModelingError(f"sample weight column `{column}` must have a positive total weight")
     return weights.to_numpy(dtype=float)
+
+
+def _lgb_base_params(params: dict | None) -> dict:
+    blocked = {"sample_weight_col", "sample_weight_column", "weight_col"}
+    return {
+        str(key): value
+        for key, value in dict(params or {}).items()
+        if str(key) not in blocked and value not in (None, "")
+    }
 
 
 def _weighted_count(labels: np.ndarray, weights: np.ndarray | None, value: float) -> float:

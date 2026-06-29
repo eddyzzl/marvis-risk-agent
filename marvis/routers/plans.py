@@ -35,6 +35,10 @@ class CreatePlanRequest(BaseModel):
     memory_context: dict = Field(default_factory=dict)
 
 
+class RetryStepRequest(BaseModel):
+    inputs: dict | None = None
+
+
 @router.post("/tasks/{task_id}/plans", status_code=201)
 def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict:
     intent_router = request.app.state.intent_router
@@ -88,10 +92,21 @@ def list_capability_tiers() -> dict:
 
 @router.get("/step-outputs/{step_id}")
 def get_step_output(request: Request, step_id: str) -> dict:
+    resolved_step_id, version = _parse_step_output_id(step_id)
     try:
-        return request.app.state.plan_repo.load_step_output(step_id)
+        return request.app.state.plan_repo.load_step_output(resolved_step_id, version=version)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="step output not found") from exc
+
+
+def _parse_step_output_id(raw: str) -> tuple[str, int | None]:
+    text = str(raw or "")
+    step_id, sep, version_text = text.rpartition(":v")
+    if not sep:
+        return text, None
+    if not step_id or not version_text.isdigit():
+        return text, None
+    return step_id, int(version_text)
 
 
 @router.get("/tasks/{task_id}/plans")
@@ -166,6 +181,44 @@ def confirm_step(
         plan_id,
     )
     return {"ok": True, "plan_id": plan_id, "step_id": step_id, "job_id": job_id}
+
+
+@router.post("/plans/{plan_id}/steps/{step_id}/retry", status_code=202)
+def retry_step(
+    request: Request,
+    plan_id: str,
+    step_id: str,
+    background_tasks: BackgroundTasks,
+    body: RetryStepRequest | None = None,
+) -> dict:
+    plan = _load_plan(request, plan_id)
+    job_id = _start_plan_job(request, plan.task_id)
+    try:
+        reset_step_ids = request.app.state.plan_repo.retry_failed_step(
+            plan_id,
+            step_id,
+            inputs=None if body is None else body.inputs,
+        )
+    except KeyError as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise HTTPException(status_code=404, detail="step not found") from exc
+    except ConflictError as exc:
+        _fail_plan_job(_db_path(request), job_id, exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    background_tasks.add_task(
+        _run_plan_job,
+        job_id,
+        _db_path(request),
+        request.app.state.plan_executor,
+        plan_id,
+    )
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "step_id": step_id,
+        "reset_step_ids": reset_step_ids,
+        "job_id": job_id,
+    }
 
 
 @router.post("/plans/{plan_id}/cancel")

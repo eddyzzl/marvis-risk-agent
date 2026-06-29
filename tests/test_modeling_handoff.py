@@ -1,12 +1,15 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import nbformat
 import pandas as pd
+import pytest
 from sklearn.linear_model import LogisticRegression
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, ModelingRepository, TaskRepository, init_db
+from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
+import marvis.db as db_module
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
 from marvis.notebook_contract import precheck_notebook_contract
 from marvis.packs.modeling.artifact import save_model
@@ -16,6 +19,7 @@ from marvis.packs.modeling.handoff import (
     handoff_to_validation,
     mark_validated_from_validation_task,
 )
+import marvis.packs.modeling.tools as modeling_tools
 from marvis.settings import build_settings
 
 
@@ -142,6 +146,7 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert (material_dir / "sample.parquet").exists()
     assert (material_dir / "model.pmml").exists()
     assert (material_dir / "dictionary.csv").exists()
+    assert not (material_dir.parent / ".staging").exists()
     precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
     notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
     source = notebook.cells[0].source
@@ -150,6 +155,75 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert 'Path(\'"model.joblib"\')' not in source
     assert persisted_artifact.pmml_path == f"{artifact.id}.pmml"
     assert store.get(artifact.experiment_id).status == "handed_off"
+    audit = db_module.PluginRepository(settings.db_path).list_audit(
+        kind="modeling.validation_handoff.create",
+    )[0]
+    assert audit["target_ref"] == validation_task_id
+    assert audit["detail"]["experiment_id"] == artifact.experiment_id
+    assert audit["detail"]["artifact_id"] == artifact.id
+
+
+def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_fails(
+    tmp_path,
+    monkeypatch,
+):
+    settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
+    original_write_audit = db_module._write_audit_row
+
+    def fail_handoff_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.validation_handoff.create":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_handoff_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        handoff_to_validation(
+            store,
+            artifact,
+            sample_dataset_id=dataset.id,
+            settings=settings,
+        )
+
+    task_repo = TaskRepository(settings.db_path)
+    assert [task.id for task in task_repo.list_tasks()] == [source_task.id]
+    assert store.get(artifact.experiment_id).status == "trained"
+    assert not (
+        settings.tasks_dir
+        / source_task.id
+        / "validation_handoff"
+        / artifact.id
+    ).exists()
+    assert not (
+        settings.tasks_dir
+        / source_task.id
+        / "validation_handoff"
+        / ".staging"
+    ).exists()
+
+
+def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monkeypatch):
+    settings, _store, source_task, _dataset, artifact = _seed_experiment(tmp_path)
+
+    def fail_meta(*args, **kwargs):
+        raise RuntimeError("meta down")
+
+    monkeypatch.setattr(modeling_tools, "persist_model_meta", fail_meta)
+    ctx = SimpleNamespace(
+        task_id=source_task.id,
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=0,
+    )
+
+    with pytest.raises(RuntimeError, match="meta down"):
+        modeling_tools.tool_export_pmml({"artifact_id": artifact.id}, ctx)
+
+    stored = ModelingRepository(settings.db_path).get_model_artifact(artifact.id)
+    assert stored is not None
+    assert stored.pmml_path is None
+    assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.pmml") == []
+    assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
 def test_mark_validated_from_validation_task_updates_completed_experiment(tmp_path):

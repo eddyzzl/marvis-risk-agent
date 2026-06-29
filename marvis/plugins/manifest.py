@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+import sys
 from typing import Any
 
 from marvis.plugins.errors import ManifestError
@@ -9,6 +10,33 @@ from marvis.plugins.errors import ManifestError
 
 DETERMINISM_CHOICES = frozenset({"deterministic", "stochastic"})
 FAILURE_POLICY_CHOICES = frozenset({"fail", "retry", "skip"})
+PERMISSION_CHOICES = frozenset({
+    "llm",
+    "network:optional",
+    "read:artifacts",
+    "read:dataset",
+    "read:draft",
+    "read:experiment",
+    "read:input",
+    "read:join_plan",
+    "read:materials",
+    "read:model",
+    "read:strategy",
+    "read:task",
+    "write:artifact",
+    "write:artifacts",
+    "write:backtest",
+    "write:dataset",
+    "write:draft",
+    "write:draft_run",
+    "write:experiment",
+    "write:join_plan",
+    "write:learning_note",
+    "write:model",
+    "write:report",
+    "write:strategy",
+    "write:task",
+})
 PLATFORM_HOOK_EVENTS = frozenset({
     "task.created",
     "task.scanned",
@@ -109,8 +137,10 @@ def parse_manifest(data: dict[str, Any], *, builtin: bool = False) -> PluginMani
         seen_tools.add(tool.name)
         tools.append(tool)
 
-    hooks = tuple(_parse_hooks(data.get("hooks", []), seen_tools))
     permissions = tuple(_parse_string_list(data.get("permissions", []), "permissions"))
+    _validate_known_permissions(permissions, label="permissions")
+    _validate_tool_permissions(tools, permissions)
+    hooks = tuple(_parse_hooks(data.get("hooks", []), seen_tools))
     checksum = "" if builtin else str(data.get("checksum") or "")
 
     return PluginManifest(
@@ -184,6 +214,7 @@ def _parse_tool(item: Any, index: int) -> ToolSpec:
     )
     entrypoint = _required_text(item, "entrypoint", context=f"tool {name}")
     side_effects = tuple(_parse_string_list(item.get("side_effects", []), f"tool {name} side_effects"))
+    _validate_known_permissions(side_effects, label=f"tool {name} side_effects")
     return ToolSpec(
         name=name,
         summary=summary,
@@ -215,6 +246,22 @@ def _parse_hooks(raw_hooks: Any, tool_names: set[str]) -> list[HookSpec]:
             raise ManifestError(f"hook tool not found: {tool}")
         hooks.append(HookSpec(event=event, tool=tool))
     return hooks
+
+
+def _validate_tool_permissions(tools: list[ToolSpec], permissions: tuple[str, ...]) -> None:
+    allowed = set(permissions)
+    for tool in tools:
+        missing = [effect for effect in tool.side_effects if effect not in allowed]
+        if missing:
+            raise ManifestError(
+                f"tool {tool.name} side_effects not declared in permissions: {', '.join(missing)}"
+            )
+
+
+def _validate_known_permissions(values: tuple[str, ...], *, label: str) -> None:
+    unknown = sorted({value for value in values if value not in PERMISSION_CHOICES})
+    if unknown:
+        raise ManifestError(f"{label} contains unknown permission: {', '.join(unknown)}")
 
 
 def _required_text(data: dict[str, Any], field: str, *, context: str = "manifest") -> str:
@@ -281,3 +328,50 @@ def _validate_semver(version: str) -> None:
 def _validate_python_requires(value: str) -> None:
     if value and not _PYTHON_REQUIRES_RE.fullmatch(value):
         raise ManifestError("python_requires must be a Python version specifier")
+
+
+def python_requires_satisfied(value: str, version: tuple[int, int, int] | None = None) -> bool:
+    if not value:
+        return True
+    current = version or tuple(sys.version_info[:3])
+    return all(_version_spec_satisfied(part.strip(), current) for part in value.split(",") if part.strip())
+
+
+def _version_spec_satisfied(spec: str, current: tuple[int, int, int]) -> bool:
+    match = re.fullmatch(r"(>=|>|<=|<|==|~=|!=)\s*(\d+(?:\.\d+){0,2})(?:\.\*)?", spec)
+    if match is None:
+        return False
+    op, raw_version = match.groups()
+    wildcard = spec.strip().endswith(".*")
+    target = _version_tuple(raw_version)
+    if wildcard and op in {"==", "!="}:
+        prefix_len = len(raw_version.split("."))
+        equal = current[:prefix_len] == target[:prefix_len]
+        return equal if op == "==" else not equal
+    if op == "~=":
+        return current >= target and current < _compatible_upper_bound(raw_version)
+    if op == ">=":
+        return current >= target
+    if op == ">":
+        return current > target
+    if op == "<=":
+        return current <= target
+    if op == "<":
+        return current < target
+    if op == "==":
+        return current == target
+    if op == "!=":
+        return current != target
+    return False
+
+
+def _version_tuple(raw: str) -> tuple[int, int, int]:
+    parts = [int(part) for part in raw.split(".")]
+    return tuple([*parts, 0, 0][:3])
+
+
+def _compatible_upper_bound(raw: str) -> tuple[int, int, int]:
+    parts = [int(part) for part in raw.split(".")]
+    if len(parts) <= 2:
+        return (parts[0] + 1, 0, 0)
+    return (parts[0], parts[1] + 1, 0)

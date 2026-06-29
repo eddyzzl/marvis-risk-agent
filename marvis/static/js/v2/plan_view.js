@@ -102,12 +102,13 @@ export function reviewVerdictHtml(verdicts = []) {
     const reviewer = classToken(verdict.reviewer, "reviewer");
     const passed = Boolean(verdict.passed);
     const hardFail = reviewer === "deterministic" && !passed;
+    const softWarning = !passed && !hardFail;
     const reasons = (verdict.reasons || [])
       .map((reason) => `<li>${escapeHtml(reason)}</li>`)
       .join("");
-    return `<li class="review-verdict reviewer-${reviewer} ${passed ? "passed" : "failed"}${hardFail ? " hard-fail" : ""}">
+    return `<li class="review-verdict reviewer-${reviewer} ${passed ? "passed" : "failed"}${hardFail ? " hard-fail" : ""}${softWarning ? " soft-warning" : ""}">
       <span class="reviewer">${escapeHtml(verdict.reviewer || "审查器")}</span>
-      <span class="verdict">${passed ? "通过" : "失败"}</span>
+      <span class="verdict">${passed ? "通过" : softWarning ? "警告" : "失败"}</span>
       ${reasons ? `<ul class="review-reasons">${reasons}</ul>` : ""}
     </li>`;
   }).join("");
@@ -122,6 +123,19 @@ function outputRefHtml(step) {
   return `<button type="button" class="step-output-button" data-artifact="${escapeHtml(outputRef)}">查看输出</button>`;
 }
 
+function retryPanelHtml(step) {
+  const stepId = String(step?.id || "");
+  const inputText = JSON.stringify(step?.inputs || {}, null, 2);
+  return `<details class="retry-step-panel" data-retry-panel="${escapeHtml(stepId)}">
+    <summary>重试步骤</summary>
+    <label>
+      参数 JSON
+      <textarea data-retry-inputs-for="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(inputText)}</textarea>
+    </label>
+    <button type="button" data-retry-step="${escapeHtml(stepId)}">使用这些参数重试</button>
+  </details>`;
+}
+
 export function stepRowHtml(step) {
   const status = step?.status || "pending";
   const index = Number.isFinite(Number(step?.index)) ? Number(step.index) + 1 : "";
@@ -131,6 +145,9 @@ export function stepRowHtml(step) {
     : "";
   const confirm = status === "awaiting_confirm"
     ? `<button type="button" data-confirm-step="${escapeHtml(step.id)}">确认步骤</button>`
+    : "";
+  const retry = status === "failed"
+    ? retryPanelHtml(step)
     : "";
   const verdicts = reviewVerdictHtml(step?.review_verdicts || []);
   const output = outputRefHtml(step);
@@ -142,6 +159,7 @@ export function stepRowHtml(step) {
     ${decisionPoint}
     ${stepStatusBadge(status)}
     ${confirm}
+    ${retry}
     ${output}
     ${verdicts}
   </li>`;
@@ -211,7 +229,14 @@ export function renderPlanView(container) {
     container.innerHTML = planHtml(plan);
   };
   render(getCurrentPlan());
-  return onPlanChange((plan) => render(plan));
+  const unsubscribe = onPlanChange((plan) => render(plan));
+  return () => {
+    const plan = getCurrentPlan();
+    if (plan?.id) {
+      stopPlanPolling(plan.id);
+    }
+    unsubscribe();
+  };
 }
 
 function defaultShowError(message) {

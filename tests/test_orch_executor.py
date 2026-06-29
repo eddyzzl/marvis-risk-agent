@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from marvis.db import PlanRepository, init_db
 from marvis.orchestrator.contracts import (
     AgentStatus,
+    LoopEvent,
     Plan,
     PlanStatus,
     PlanStep,
@@ -143,7 +144,7 @@ def _step(
     )
 
 
-def _plan(*steps, status=PlanStatus.CONFIRMED):
+def _plan(*steps, status=PlanStatus.CONFIRMED, success_criteria=None):
     return Plan(
         id="plan-1",
         task_id="task-1",
@@ -153,6 +154,7 @@ def _plan(*steps, status=PlanStatus.CONFIRMED):
         steps=list(steps),
         autonomy_level=1,
         status=status,
+        success_criteria=list(success_criteria or []),
     )
 
 
@@ -200,6 +202,7 @@ def _plan_like(plan, steps, *, replan_count=None, tier=None):
         novel_mode=plan.novel_mode,
         tier=tier or plan.tier,
         replan_count=plan.replan_count if replan_count is None else replan_count,
+        success_criteria=[dict(item) for item in plan.success_criteria],
     )
 
 
@@ -230,6 +233,17 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
         "step.completed",
         "workflow.completed",
     ]
+    first_runs = repo.list_step_runs("step-1")
+    second_runs = repo.list_step_runs("step-2")
+    assert [run["status"] for run in first_runs] == ["succeeded"]
+    assert [run["status"] for run in second_runs] == ["succeeded"]
+    assert second_runs[0]["input"] == {"message": "hi"}
+    assert second_runs[0]["output_ref"] == "metrics:step-2:v1"
+    evidence = repo.load_step_evidence("step-2")
+    assert evidence["tool_name"] == "_sample.echo"
+    assert evidence["input_hash"].startswith("sha256:")
+    assert evidence["input_summary"] == {"message": "hi"}
+    assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
 
 
 def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
@@ -261,6 +275,121 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     assert repo.load_plan_summary(result.summary_ref)["goal_doubt"] is True
     assert [call[0] for call in hooks.calls] == ["step.completed"]
 
+    resumed = _executor(repo, FakeRunner([])).run("plan-1")
+    assert resumed.status == PlanStatus.REVIEW
+    assert resumed.summary_ref == result.summary_ref
+
+
+def test_plan_executor_surfaces_llm_critique_warnings_without_blocking_step(tmp_path):
+    plan = _plan(_step("step-1"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "hi"})])
+    hooks = FakeHooks()
+    llm = FakeLLM(json.dumps({"passed": False, "reasons": ["needs human review"]}))
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    completed_payload = hooks.calls[0][1]
+    assert result.status == PlanStatus.DONE
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].review_verdicts[-1].reviewer == "llm_critic"
+    assert loaded.steps[0].review_verdicts[-1].passed is False
+    assert completed_payload["review_warning_count"] == 1
+    assert completed_payload["review_warnings"] == [
+        {"reviewer": "llm_critic", "reasons": ["needs human review"]}
+    ]
+
+
+def test_plan_executor_fails_final_review_when_success_criteria_fail(tmp_path):
+    plan = _plan(
+        _step("step-1"),
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "aggregate": "max",
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"target_type": "binary", "metrics": {"oot_ks": 0.2}})])
+    hooks = FakeHooks()
+
+    result = _executor(repo, runner, hooks=hooks).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    summary = repo.load_plan_summary(result.summary_ref)
+    assert result.status == PlanStatus.FAILED
+    assert loaded.status == PlanStatus.FAILED
+    assert summary["goal_met"] is False
+    assert "OOT KS=0.2 < 0.3331" in summary["open_items"]
+
+
+def test_plan_executor_replans_after_failed_success_criteria_and_continues(tmp_path):
+    plan = _plan(
+        _step("step-1"),
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([
+        _ok({"target_type": "binary", "metrics": {"oot_ks": 0.2}}),
+        _ok({"target_type": "binary", "metrics": {"oot_ks": 0.45}}),
+    ])
+    hooks = FakeHooks()
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-2", index=1, inputs={"message": "try stronger model"})]
+    )
+
+    result = _adaptive_executor(repo, runner, planner, hooks=hooks).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert loaded.status == PlanStatus.DONE
+    assert [step.id for step in loaded.steps] == ["step-1", "step-2"]
+    assert loaded.replan_count == 1
+    assert loaded.loop_events[0].reason == "final_review"
+    assert planner.replan_calls[0][3] == "final_review"
+    assert planner.replan_calls[0][2]["open_items"] == ["OOT KS=0.2 < 0.3331"]
+    assert [call[0] for call in hooks.calls] == [
+        "step.completed",
+        "plan.replanned",
+        "step.completed",
+        "workflow.completed",
+    ]
+
+
+def test_plan_executor_does_not_replan_invalid_success_criterion_threshold(tmp_path):
+    plan = _plan(
+        _step("step-1"),
+        success_criteria=[{"metric": "oot_ks", "min": "bad", "label": "OOT KS"}],
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"metrics": {"oot_ks": 0.45}})])
+    hooks = FakeHooks()
+    planner = FakeAdaptivePlanner(replanned_steps=[_step("step-2", index=1)])
+
+    result = _adaptive_executor(repo, runner, planner, hooks=hooks).run("plan-1")
+
+    summary = repo.load_plan_summary(result.summary_ref)
+    assert result.status == PlanStatus.FAILED
+    assert planner.replan_calls == []
+    assert "OOT KS invalid min threshold: 'bad'" in summary["open_items"]
+
 
 def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_path):
     repo = _repo(
@@ -282,7 +411,7 @@ def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_pat
                 "plan_id": "plan-1",
                 "step_id": "step-1",
                 "tool": "compute_feature_metrics",
-                "output_ref": "metrics:step-1",
+                "output_ref": "metrics:step-1:v1",
                 "dataset_id": "dataset-1",
                 "features": ["income"],
             },
@@ -290,7 +419,12 @@ def test_plan_executor_dispatches_feature_computed_for_feature_pack_step(tmp_pat
         ),
         (
             "step.completed",
-            {"plan_id": "plan-1", "step_id": "step-1"},
+            {
+                "plan_id": "plan-1",
+                "step_id": "step-1",
+                "review_warning_count": 0,
+                "review_warnings": [],
+            },
             "task-1",
         ),
     ]
@@ -364,6 +498,186 @@ def test_plan_executor_blocks_deterministic_postcheck_failure_without_llm_rescue
     assert loaded.steps[0].status == StepStatus.FAILED
     assert loaded.steps[0].review_verdicts[0].reviewer == "deterministic"
     assert llm.calls == []
+
+
+def test_plan_executor_recovers_checking_step_from_persisted_output_without_rerun(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    loaded = repo.load_plan("plan-1")
+    loaded.steps[0].output_ref = output_ref
+    repo.update_step(loaded.steps[0])
+    runner = FakeRunner([])
+    hooks = FakeHooks()
+
+    result = _executor(repo, runner, hooks=hooks).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].output_ref == output_ref
+    assert [verdict.reviewer for verdict in loaded.steps[0].review_verdicts] == [
+        "deterministic",
+        "llm_critic",
+    ]
+    assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
+
+
+def test_plan_executor_recovers_checking_step_with_run_ledger_output_without_step_ref(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "hi"},
+    )
+    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].output_ref == output_ref
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [run_id]
+    assert runs[0]["status"] == "succeeded"
+    assert runs[0]["output_ref"] == output_ref
+
+
+def test_plan_executor_recovers_checking_step_from_succeeded_run_without_step_ref(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "hi"},
+    )
+    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    repo.finish_step_run(run_id, status="succeeded", output_ref=output_ref, duration_ms=10)
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].output_ref == output_ref
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [run_id]
+    assert runs[0]["status"] == "succeeded"
+    assert runs[0]["output_ref"] == output_ref
+
+
+def test_plan_executor_recovers_running_step_with_persisted_output_without_rerun(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.RUNNING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    first_run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "first"},
+    )
+    second_run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "second"},
+    )
+    output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.DONE
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[0].output_ref == output_ref
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [first_run_id, second_run_id]
+    assert [run["status"] for run in runs] == ["succeeded", "succeeded"]
+    assert [run["output_ref"] for run in runs] == [output_ref, output_ref]
+
+
+def test_plan_executor_does_not_recover_from_stale_output_version_after_reset(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    repo.store_step_output("step-1", {"echoed": "old"})
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.FAILED
+    assert loaded.steps[0].output_ref is None
+    assert "before output was persisted" in loaded.steps[0].error
+
+
+def test_plan_executor_recovers_running_step_without_output_as_failure_not_rerun(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.RUNNING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id="step-1",
+        tool_ref="_sample.echo",
+        inputs={"message": "hi"},
+    )
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.FAILED
+    assert "explicit retry required" in loaded.steps[0].error
+    runs = repo.list_step_runs("step-1")
+    assert [run["id"] for run in runs] == [run_id]
+    assert runs[0]["status"] == "interrupted"
+    assert runs[0]["error_kind"] == "ServerRestart"
+
+
+def test_plan_executor_does_not_replan_recovered_running_failure(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.RUNNING), status=PlanStatus.RUNNING)
+    plan.tier = "adaptive"
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([])
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-2", tool="echo", inputs={"message": "unsafe rerun"})]
+    )
+
+    result = _adaptive_executor(repo, runner, planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    assert planner.replan_calls == []
+    assert [step.id for step in loaded.steps] == ["step-1"]
+    assert loaded.replan_count == 0
+    assert "explicit retry required" in loaded.steps[0].error
+
+
+def test_plan_executor_recovers_checking_step_without_output_as_failure_not_rerun(tmp_path):
+    plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([])
+
+    result = _executor(repo, runner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert runner.calls == []
+    assert loaded.steps[0].status == StepStatus.FAILED
+    assert "before output was persisted" in loaded.steps[0].error
 
 
 def test_plan_executor_delegates_subagent_steps_and_stores_result_ref(tmp_path):
@@ -474,6 +788,7 @@ def test_plan_executor_replans_execution_failure_and_continues(tmp_path):
     assert loaded.loop_events[0].type == "replan"
     assert loaded.loop_events[0].reason == "failure"
     assert loaded.loop_events[0].trigger_step_id == "step-1"
+    assert loaded.loop_events[0].tool_ref == "_sample.fail_tool"
     assert planner.replan_calls[0][3] == "failure"
     assert len(runner.calls) == 2
 
@@ -498,7 +813,36 @@ def test_plan_executor_records_no_progress_when_repeated_failures_block_replan(t
     assert loaded.loop_events[0].type == "no_progress"
     assert loaded.loop_events[0].reason == "failure"
     assert loaded.loop_events[0].trigger_step_id == "step-1"
+    assert loaded.loop_events[0].tool_ref == "_sample.fail_tool"
     assert loaded.loop_events[0].at
+
+
+def test_plan_executor_no_progress_uses_failure_history_after_replan_deleted_step(tmp_path):
+    plan = _plan(
+        _step("step-2", tool="fail_tool", status=StepStatus.FAILED),
+    )
+    plan.loop_events = [
+        LoopEvent(
+            type="replan",
+            reason="failure",
+            at="2026-01-01T00:00:00Z",
+            trigger_step_id="step-1",
+            tool_ref="_sample.fail_tool",
+        )
+    ]
+    repo = _repo(tmp_path, plan)
+    planner = FakeAdaptivePlanner(
+        replanned_steps=[_step("step-3", tool="echo", inputs={"message": "fixed"})]
+    )
+
+    result = _adaptive_executor(repo, FakeRunner([]), planner).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert result.status == PlanStatus.FAILED
+    assert planner.replan_calls == []
+    assert loaded.loop_events[-1].type == "no_progress"
+    assert loaded.loop_events[-1].trigger_step_id == "step-2"
+    assert loaded.loop_events[-1].tool_ref == "_sample.fail_tool"
 
 
 def test_plan_executor_appends_explore_segment_until_done(tmp_path):

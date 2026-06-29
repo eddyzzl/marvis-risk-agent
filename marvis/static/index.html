@@ -248,10 +248,19 @@
                 <span>多分类 (LightGBM)</span>
               </label>
             </div>
-            <label class="wide-field">
-              <span>样本权重列（可选）</span>
-              <input id="modelSampleWeightCol" placeholder="例如：weight 或 sample_weight" autocomplete="off" />
-            </label>
+            <div class="wide-field sample-weight-create">
+              <span>样本权重</span>
+              <select id="modelSampleWeightPolicy" aria-label="样本权重策略">
+                <option value="none">不使用样本权重</option>
+                <option value="explicit">指定权重列</option>
+              </select>
+              <input
+                id="modelSampleWeightCol"
+                placeholder="例如：weight 或 sample_weight"
+                autocomplete="off"
+                disabled
+              />
+            </div>
           </section>
           <section id="createTaskMetricField" class="task-form-section" hidden>
             <h3>可选指标</h3>
@@ -277,7 +286,7 @@
             <select id="createTaskTier" class="tier-select">
               <option value="conservative">稳健 · 最多重规划 2 次</option>
               <option value="balanced" selected>均衡 · 最多重规划 4 次</option>
-              <option value="aggressive">自治 · 最多重规划 8 次</option>
+              <option value="autonomous">自治 · 最多重规划 8 次</option>
             </select>
           </section>
           <button id="createTaskButton" class="button primary full" type="button">
@@ -698,7 +707,7 @@
             <img
               id="brandLogo"
               class="brand-mark"
-              src="static/brand/marvis-workspace-logo.png"
+              src="static/brand/marvis-logo.png"
               alt="MARVIS-全能风控智能体 logo"
             />
             <h1 id="platformName">MARVIS-全能风控智能体</h1>
@@ -992,11 +1001,9 @@
               </button>
               <button
                 id="welcomeVintageAnalysisCard"
-                class="welcome-task-card unavailable"
+                class="welcome-task-card available"
                 type="button"
                 data-task-kind="vintage"
-                data-coming-soon="1"
-                aria-disabled="true"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">
@@ -1089,11 +1096,9 @@
               </button>
               <button
                 id="welcomeStrategyDevelopmentCard"
-                class="welcome-task-card unavailable"
+                class="welcome-task-card available"
                 type="button"
                 data-task-kind="strategy"
-                data-coming-soon="1"
-                aria-disabled="true"
               >
                 <span class="welcome-task-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" focusable="false">

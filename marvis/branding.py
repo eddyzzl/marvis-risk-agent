@@ -12,7 +12,7 @@ DEFAULT_BRANDING: dict[str, Any] = {
     "platformName": "MARVIS-全能风控智能体",
     "browserTitle": "MARVIS-全能风控智能体",
     "primaryColor": "#303034",
-    "logoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+    "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
     "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
     "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
     # Optional per-workspace map of real validator name -> display alias, used for
@@ -146,7 +146,7 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
         1,
     )
     html = html.replace(
-        'id="brandLogo"\n              class="brand-mark"\n              src="static/brand/marvis-workspace-logo.png"',
+        'id="brandLogo"\n              class="brand-mark"\n              src="static/brand/marvis-logo.png"',
         f'id="brandLogo"\n              class="brand-mark"\n              src="{logo_url}"',
         1,
     )

@@ -93,6 +93,7 @@ class Plan:
     tier: str = "balanced"
     replan_count: int = 0
     loop_events: list["LoopEvent"] = field(default_factory=list)
+    success_criteria: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ class LoopEvent:
     at: str
     trigger_step_id: str | None = None
     instruction: str | None = None  # free-text user constraint for user_instruction replans
+    tool_ref: str | None = None
 
 
 @dataclass
@@ -162,6 +164,7 @@ def plan_to_dict(plan: Plan) -> dict[str, Any]:
         "tier": plan.tier,
         "replan_count": plan.replan_count,
         "loop_events": [_loop_event_to_dict(event) for event in plan.loop_events],
+        "success_criteria": [dict(item) for item in plan.success_criteria],
     }
 
 
@@ -183,6 +186,11 @@ def plan_from_dict(payload: dict[str, Any]) -> Plan:
         loop_events=[
             _loop_event_from_dict(item)
             for item in payload.get("loop_events") or []
+        ],
+        success_criteria=[
+            dict(item)
+            for item in payload.get("success_criteria") or []
+            if isinstance(item, dict)
         ],
     )
 
@@ -290,6 +298,8 @@ def _loop_event_to_dict(event: LoopEvent) -> dict[str, Any]:
         payload["trigger_step_id"] = event.trigger_step_id
     if event.instruction is not None:
         payload["instruction"] = event.instruction
+    if event.tool_ref is not None:
+        payload["tool_ref"] = event.tool_ref
     return payload
 
 
@@ -300,6 +310,7 @@ def _loop_event_from_dict(payload: dict[str, Any]) -> LoopEvent:
         at=str(payload.get("at") or ""),
         trigger_step_id=_optional_str(payload.get("trigger_step_id")),
         instruction=_optional_str(payload.get("instruction")),
+        tool_ref=_optional_str(payload.get("tool_ref")),
     )
 
 

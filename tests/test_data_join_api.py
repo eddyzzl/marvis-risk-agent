@@ -125,7 +125,11 @@ def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path:
     # pick a strategy -> re-confirm; conflict resolved, re-pause at the now-clear gate
     resp = client.post(
         f"/api/tasks/{task_id}/agent/messages",
-        json={"content": "确认", "dedup_strategies": {feature_id: "first"}},
+        json={
+            "content": "确认",
+            "dedup_strategies": {feature_id: "first"},
+            "expected_step_id": gate["metadata"]["step_id"],
+        },
     )
     assert resp.status_code == 202, resp.text
     gate2 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
@@ -208,21 +212,3 @@ def test_data_join_single_file_confirms_then_skips(client: TestClient, tmp_path:
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     skip = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "无需拼接" in skip["content"]
-
-
-def test_strategy_task_still_returns_501(client: TestClient, tmp_path: Path):
-    """Routing allowlist: an un-wired agent task type must still error explicitly,
-    not silently fall through to the validation agent."""
-    src = tmp_path / "strat"
-    src.mkdir()
-    pd.DataFrame({"x": [1, 2]}).to_parquet(src / "s.parquet")
-    resp = client.post("/api/tasks", json={
-        "model_name": "策略",
-        "validator": "qa",
-        "source_dir": str(src),
-        "task_type": "strategy",
-        "run_mode": "agent",
-    })
-    task_id = resp.json()["id"]
-    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
-    assert started.status_code == 501

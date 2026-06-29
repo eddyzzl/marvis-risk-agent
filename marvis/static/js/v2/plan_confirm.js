@@ -3,6 +3,7 @@ import {
   cancelPlan as cancelPlanApi,
   confirmPlan as confirmPlanApi,
   confirmStep as confirmStepApi,
+  retryStep as retryStepApi,
   runPlan as runPlanApi,
 } from "./api_v2.js";
 import { startPlanPolling, stopPlanPolling } from "./plan_view.js";
@@ -29,6 +30,30 @@ function syncPlanFromPayload(payload) {
   }
 }
 
+function parseJsonObject(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (_error) {
+    throw new Error("重试参数必须是合法 JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("重试参数必须是 JSON 对象");
+  }
+  return value;
+}
+
+function defaultReadRetryInputs(root, retryButton, stepId) {
+  const panel = closest(retryButton, "[data-retry-panel]");
+  const panelField = panel?.querySelector?.("[data-retry-inputs-for]");
+  const field = panelField || Array.from(root?.querySelectorAll?.("[data-retry-inputs-for]") || [])
+    .find((candidate) => candidate?.dataset?.retryInputsFor === stepId);
+  if (!field) {
+    return undefined;
+  }
+  return parseJsonObject(String(field.value || "{}"));
+}
+
 function defaultShowError(message) {
   if (typeof alert === "function") {
     alert(message);
@@ -37,15 +62,35 @@ function defaultShowError(message) {
   console.error(message);
 }
 
+async function withButtonLock(button, key, inflight, fn) {
+  if (inflight.has(key)) {
+    return;
+  }
+  inflight.add(key);
+  const previousDisabled = button.disabled;
+  button.disabled = true;
+  button.setAttribute?.("aria-busy", "true");
+  try {
+    await fn();
+  } finally {
+    inflight.delete(key);
+    button.disabled = previousDisabled;
+    button.removeAttribute?.("aria-busy");
+  }
+}
+
 export function attachPlanConfirmHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachPlanConfirmHandlers requires a stable event root");
   }
+  const inflight = new Set();
   const actions = {
     cancelPlan: cancelPlanApi,
     confirmPlan: confirmPlanApi,
     confirmStep: confirmStepApi,
     getCurrentPlan,
+    readRetryInputs: defaultReadRetryInputs,
+    retryStep: retryStepApi,
     runPlan: runPlanApi,
     showError: defaultShowError,
     startPlanPolling,
@@ -59,13 +104,15 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (planButton?.dataset?.confirmPlan) {
       event.preventDefault?.();
       const planId = planButton.dataset.confirmPlan;
-      try {
-        syncPlanFromPayload(await actions.confirmPlan(planId));
-        await actions.runPlan(planId);
-        actions.startPlanPolling(planId);
-      } catch (error) {
-        actions.showError(error?.message || "计划确认失败");
-      }
+      await withButtonLock(planButton, `confirm-plan:${planId}`, inflight, async () => {
+        try {
+          syncPlanFromPayload(await actions.confirmPlan(planId));
+          await actions.runPlan(planId);
+          actions.startPlanPolling(planId);
+        } catch (error) {
+          actions.showError(error?.message || "计划确认失败");
+        }
+      });
       return;
     }
 
@@ -76,12 +123,35 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
       if (!plan?.id) {
         return;
       }
-      try {
-        await actions.confirmStep(plan.id, stepButton.dataset.confirmStep);
-        actions.startPlanPolling(plan.id);
-      } catch (error) {
-        actions.showError(error?.message || "步骤确认失败");
+      const stepId = stepButton.dataset.confirmStep;
+      await withButtonLock(stepButton, `confirm-step:${plan.id}:${stepId}`, inflight, async () => {
+        try {
+          await actions.confirmStep(plan.id, stepId);
+          actions.startPlanPolling(plan.id);
+        } catch (error) {
+          actions.showError(error?.message || "步骤确认失败");
+        }
+      });
+      return;
+    }
+
+    const retryButton = closest(target, "[data-retry-step]");
+    if (retryButton?.dataset?.retryStep) {
+      event.preventDefault?.();
+      const plan = actions.getCurrentPlan();
+      if (!plan?.id) {
+        return;
       }
+      const stepId = retryButton.dataset.retryStep;
+      await withButtonLock(retryButton, `retry-step:${plan.id}:${stepId}`, inflight, async () => {
+        try {
+          const inputs = actions.readRetryInputs(root, retryButton, stepId, plan);
+          await actions.retryStep(plan.id, stepId, inputs);
+          actions.startPlanPolling(plan.id);
+        } catch (error) {
+          actions.showError(error?.message || "步骤重试失败");
+        }
+      });
       return;
     }
 
@@ -89,12 +159,14 @@ export function attachPlanConfirmHandlers(root, deps = {}) {
     if (cancelButton?.dataset?.cancelPlan) {
       event.preventDefault?.();
       const planId = cancelButton.dataset.cancelPlan;
-      try {
-        syncPlanFromPayload(await actions.cancelPlan(planId));
-        actions.stopPlanPolling(planId);
-      } catch (error) {
-        actions.showError(error?.message || "计划取消失败");
-      }
+      await withButtonLock(cancelButton, `cancel-plan:${planId}`, inflight, async () => {
+        try {
+          syncPlanFromPayload(await actions.cancelPlan(planId));
+          actions.stopPlanPolling(planId);
+        } catch (error) {
+          actions.showError(error?.message || "计划取消失败");
+        }
+      });
     }
   };
 

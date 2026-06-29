@@ -73,6 +73,39 @@ def test_distillation_engine_drops_sensitive_distilled_output(tmp_path):
     assert engine._distill_group("user_preference", "user_preference:general", [member]) is None
 
 
+def test_distillation_engine_skips_non_numeric_model_metrics_instead_of_dropping_group(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    for task_id, ks in [("task-1", "N/A"), ("task-2", 0.31)]:
+        store.create(
+            MemoryCandidate(
+                memory_type="model_experience",
+                summary=f"模型经验 {task_id}",
+                payload={
+                    "model_name": "A卡",
+                    "model_version": "V1",
+                    "scope": "train",
+                    "channel": "app",
+                    "month": "202601",
+                    "ks": ks,
+                    "auc": 0.72,
+                    "psi": 0.08,
+                    "source_task_id": task_id,
+                    "important_feature_sources": ["征信"],
+                },
+                source_task_id=task_id,
+            )
+        )
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category("model_experience")
+
+    assert len(distillations) == 1
+    metric_ranges = distillations[0].structured["metric_ranges"]
+    assert metric_ranges["ks"] == {"min": 0.31, "max": 0.31}
+    assert metric_ranges["auc"] == {"min": 0.72, "max": 0.72}
+
+
 class _BrokenLLM:
     def complete(self, **_kwargs):
         raise RuntimeError("unavailable")

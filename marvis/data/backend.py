@@ -13,6 +13,7 @@ from marvis.data.contracts import (
     DATE_FORMATS,
     LARGE_ROW_THRESHOLD,
     ColumnFingerprint,
+    ConflictReport,
     KeyPair,
 )
 from marvis.data.errors import DataBackendError, DataSecurityError
@@ -20,6 +21,22 @@ from marvis.data.errors import DataBackendError, DataSecurityError
 
 SUPPORTED_FRAME_SUFFIXES = {".csv", ".parquet", ".feather"}
 SUPPORTED_DUCKDB_SUFFIXES = {".csv", ".parquet"}
+DUCKDB_NUMERIC_TYPES = {
+    "TINYINT",
+    "SMALLINT",
+    "INTEGER",
+    "BIGINT",
+    "HUGEINT",
+    "UTINYINT",
+    "USMALLINT",
+    "UINTEGER",
+    "UBIGINT",
+    "FLOAT",
+    "DOUBLE",
+    "REAL",
+    "DECIMAL",
+    "NUMERIC",
+}
 
 
 def sql_string_literal(value: str) -> str:
@@ -67,11 +84,75 @@ class DataBackend:
         if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
             return set()
         rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
-        kinds = (
-            "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
-            "UINTEGER", "UBIGINT", "FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC",
+        return {str(row[0]) for row in rows if _is_duckdb_numeric_type(str(row[1]))}
+
+    def conflict_report(
+        self,
+        path: Path,
+        key_columns: Sequence[str],
+        *,
+        sample_key_limit: int = 50,
+        row_limit: int = 5000,
+    ) -> ConflictReport:
+        from marvis.data.dedup import two_level_dedup
+
+        path = self._resolve_path(path)
+        if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
+            _deduped, report = two_level_dedup(self.read_frame(path), list(key_columns))
+            return report
+        allowed_columns = set(self.column_names(path))
+        self._validate_columns(key_columns, allowed_columns)
+        keys_sql = ", ".join(sql_identifier(col, allowed_columns) for col in key_columns)
+        key_not_null = " AND ".join(
+            f"{sql_identifier(col, allowed_columns)} IS NOT NULL"
+            for col in key_columns
+        ) or "TRUE"
+        duplicate_groups = (
+            f"SELECT {keys_sql}, count(*) AS __n "
+            f"FROM {self._duckdb_rel(path)} "
+            f"WHERE {key_not_null} "
+            f"GROUP BY {keys_sql} "
+            "HAVING count(*) > 1"
         )
-        return {str(row[0]) for row in rows if any(kind in str(row[1]).upper() for kind in kinds)}
+        count_row = duckdb.sql(
+            "SELECT count(*) AS n_keys, coalesce(sum(__n), 0) AS n_rows "
+            f"FROM ({duplicate_groups})"
+        ).fetchone()
+        n_conflict_keys = int(count_row[0] or 0)
+        n_conflict_rows = int(count_row[1] or 0)
+        if n_conflict_keys == 0:
+            return ConflictReport(
+                key_columns=tuple(str(col) for col in key_columns),
+                conflict_columns=(),
+                n_conflict_keys=0,
+                n_conflict_rows=0,
+                safe_dropped=0,
+                sample_keys=(),
+            )
+
+        join_condition = " AND ".join(
+            f"f.{sql_identifier(col, allowed_columns)} IS NOT DISTINCT FROM "
+            f"d.{sql_identifier(col, allowed_columns)}"
+            for col in key_columns
+        )
+        sample_rows = duckdb.sql(
+            "WITH duplicate_keys AS ("
+            f"SELECT {keys_sql} FROM ({duplicate_groups}) ORDER BY {keys_sql} "
+            f"LIMIT {int(sample_key_limit)}"
+            ") "
+            f"SELECT f.* FROM {self._duckdb_rel(path)} f "
+            f"JOIN duplicate_keys d ON {join_condition} "
+            f"LIMIT {int(row_limit)}"
+        ).df()
+        _deduped, sample_report = two_level_dedup(sample_rows, list(key_columns))
+        return ConflictReport(
+            key_columns=tuple(str(col) for col in key_columns),
+            conflict_columns=sample_report.conflict_columns,
+            n_conflict_keys=n_conflict_keys,
+            n_conflict_rows=n_conflict_rows,
+            safe_dropped=sample_report.safe_dropped,
+            sample_keys=sample_report.sample_keys,
+        )
 
     def column_names(self, path: Path) -> list[str]:
         path = self._resolve_path(path)
@@ -225,6 +306,8 @@ class DataBackend:
         sample_n: int,
         seed: int,
     ) -> tuple[int, int]:
+        anchor_path = self._resolve_path(anchor_path)
+        feature_path = self._resolve_path(feature_path)
         if len(anchor_keys) != len(feature_keys):
             raise DataBackendError("anchor_keys and feature_keys must have the same length")
         if len(anchor_keys) != len(key_fingerprints):
@@ -234,6 +317,18 @@ class DataBackend:
         self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
         self._validate_columns(feature_keys, set(self.column_names(feature_path)))
         anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
+        if (
+            feature_path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES
+            and _duckdb_supports_match_methods(methods)
+        ):
+            return self._duckdb_match_rate_for_method(
+                anchor_frame,
+                feature_path,
+                anchor_keys,
+                feature_keys,
+                methods=methods,
+                key_fingerprints=key_fingerprints,
+            )
         feature_frame = self.read_frame(feature_path, columns=feature_keys)
         fingerprint_pairs = [
             _fingerprint_pair(item)
@@ -272,6 +367,61 @@ class DataBackend:
                 matched += 1
         return matched, int(anchor_frame.shape[0])
 
+    def _duckdb_match_rate_for_method(
+        self,
+        anchor_frame: pd.DataFrame,
+        feature_path: Path,
+        anchor_keys: Sequence[str],
+        feature_keys: Sequence[str],
+        *,
+        methods: Sequence[str],
+        key_fingerprints: Sequence[Any],
+    ) -> tuple[int, int]:
+        fingerprint_pairs = [_fingerprint_pair(item) for item in key_fingerprints]
+        anchor_columns = set(str(column) for column in anchor_frame.columns)
+        feature_columns = set(self.column_names(feature_path))
+        anchor_exprs = []
+        feature_exprs = []
+        for index, (anchor_col, feature_col, method, (anchor_fp, feature_fp)) in enumerate(
+            zip(anchor_keys, feature_keys, methods, fingerprint_pairs, strict=True),
+        ):
+            anchor_expr = _sql_normalized_key(
+                method,
+                "a." + sql_identifier(anchor_col, anchor_columns),
+                fingerprint=anchor_fp,
+            )
+            feature_expr = _sql_normalized_key(
+                method,
+                "b." + sql_identifier(feature_col, feature_columns),
+                fingerprint=feature_fp,
+            )
+            anchor_exprs.append(f"{anchor_expr} AS __key_{index}")
+            feature_exprs.append(f"{feature_expr} AS __key_{index}")
+        anchor_projection = ", ".join(anchor_exprs)
+        feature_projection = ", ".join(feature_exprs)
+        key_columns = [f"__key_{index}" for index in range(len(anchor_exprs))]
+        join_condition = " AND ".join(f"a.{column} = f.{column}" for column in key_columns)
+        anchor_not_null = " AND ".join(f"a.{column} IS NOT NULL" for column in key_columns)
+        feature_rel = self._duckdb_text_rel(feature_path)
+        query = (
+            "WITH anchor_keys AS ("
+            f"SELECT {anchor_projection} FROM anchor_sample a"
+            "), feature_keys AS ("
+            f"SELECT DISTINCT {feature_projection} FROM {feature_rel} b"
+            "), joined AS ("
+            f"SELECT a.*, f.{key_columns[0]} AS __matched_key "
+            "FROM anchor_keys a "
+            f"LEFT JOIN feature_keys f ON {join_condition}"
+            ") "
+            "SELECT count(*) FILTER ("
+            f"WHERE {anchor_not_null} AND __matched_key IS NOT NULL"
+            ") FROM joined a"
+        )
+        with duckdb.connect(database=":memory:") as conn:
+            conn.register("anchor_sample", anchor_frame)
+            matched = conn.execute(query).fetchone()[0]
+        return int(matched), int(anchor_frame.shape[0])
+
     def _resolve_path(self, path: Path) -> Path:
         path = Path(path)
         return path if path.is_absolute() else self._root / path
@@ -280,6 +430,14 @@ class DataBackend:
         suffix = path.suffix.lower()
         if suffix == ".csv":
             return csv_rel(path)
+        if suffix == ".parquet":
+            return parquet_rel(path)
+        raise DataBackendError(f"unsupported DuckDB dataset format: {path.suffix}")
+
+    def _duckdb_text_rel(self, path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            return f"read_csv_auto({sql_string_literal(path.as_posix())}, all_varchar=true)"
         if suffix == ".parquet":
             return parquet_rel(path)
         raise DataBackendError(f"unsupported DuckDB dataset format: {path.suffix}")
@@ -492,6 +650,21 @@ def _methods_for_keys(method: str | Sequence[str], key_count: int) -> list[str]:
     return methods
 
 
+def _duckdb_supports_match_methods(methods: Sequence[str]) -> bool:
+    for method in methods:
+        if not method.startswith("hash:"):
+            continue
+        algorithm = method.split(":", 1)[1]
+        if algorithm not in {"md5", "sha256"}:
+            return False
+    return True
+
+
+def _is_duckdb_numeric_type(type_name: str) -> bool:
+    base = type_name.strip().upper().split("(", 1)[0].strip()
+    return base in DUCKDB_NUMERIC_TYPES
+
+
 def _sql_transform(method: str, expression: str, *, side: str, pair: KeyPair) -> str:
     trimmed = _sql_value_text(expression)
     if method == "exact":
@@ -524,6 +697,28 @@ def _sql_value_text(expression: str) -> str:
     )
 
 
+def _sql_normalized_key(method: str, expression: str, *, fingerprint: ColumnFingerprint) -> str:
+    text = f"nullif({_sql_value_text(expression)}, '')"
+    if method == "exact":
+        return text
+    if method == "exact_lower":
+        return f"lower({text})"
+    if method == "date":
+        date_exprs = ", ".join(
+            f"try_strptime({text}, {sql_string_literal(fmt)})"
+            for fmt in DATE_FORMATS
+        )
+        return f"strftime(coalesce({date_exprs}), '%Y-%m-%d')"
+    if method.startswith("hash:"):
+        algorithm = method.split(":", 1)[1]
+        if algorithm not in {"md5", "sha256"}:
+            raise DataBackendError(f"DuckDB hash method is not supported: {method}")
+        if fingerprint.is_hashed:
+            return f"lower({text})"
+        return f"lower({algorithm}({text}))"
+    raise DataBackendError(f"unsupported match method: {method}")
+
+
 def _fingerprint_pair(item: Any) -> tuple[ColumnFingerprint, ColumnFingerprint]:
     if isinstance(item, ColumnFingerprint):
         return item, item
@@ -539,10 +734,7 @@ def _canonical_date(text: str) -> str | None:
         parsed = pd.to_datetime(text, format=fmt, errors="coerce")
         if not pd.isna(parsed):
             return parsed.strftime("%Y-%m-%d")
-    parsed = pd.to_datetime(text, errors="coerce")
-    if pd.isna(parsed):
-        return None
-    return parsed.strftime("%Y-%m-%d")
+    return None
 
 
 def _hash_text(text: str, algorithm: str) -> str:

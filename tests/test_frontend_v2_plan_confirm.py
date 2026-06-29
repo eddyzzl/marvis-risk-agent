@@ -127,6 +127,131 @@ def test_plan_confirm_handlers_ignore_step_without_current_plan():
     )
 
 
+def test_plan_confirm_handlers_retry_failed_step_and_poll():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
+        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", status: "failed", steps: [] });
+        const calls = [];
+        const listeners = {};
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachPlanConfirmHandlers(root, {
+          retryStep: async (planId, stepId, inputs) => calls.push(["retryStep", planId, stepId, inputs]),
+          startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
+        });
+        const retryTarget = {
+          closest(selector) {
+            return selector === "[data-retry-step]"
+              ? { dataset: { retryStep: "step-1" } }
+              : null;
+          },
+        };
+
+        await listeners.click({ target: retryTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, [
+          ["retryStep", "plan-1", "step-1", undefined],
+          ["startPlanPolling", "plan-1"],
+        ]);
+        """
+    )
+
+
+def test_plan_confirm_handlers_retry_failed_step_with_edited_inputs():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
+        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", status: "failed", steps: [] });
+        const calls = [];
+        const listeners = {};
+        const field = {
+          dataset: { retryInputsFor: "step-1" },
+          value: '{"message":"new threshold"}',
+        };
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelectorAll(selector) {
+            return selector === "[data-retry-inputs-for]" ? [field] : [];
+          },
+        };
+        attachPlanConfirmHandlers(root, {
+          retryStep: async (planId, stepId, inputs) => calls.push(["retryStep", planId, stepId, inputs]),
+          startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
+        });
+        const retryTarget = {
+          closest(selector) {
+            return selector === "[data-retry-step]"
+              ? { dataset: { retryStep: "step-1" } }
+              : null;
+          },
+        };
+
+        await listeners.click({ target: retryTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, [
+          ["retryStep", "plan-1", "step-1", { message: "new threshold" }],
+          ["startPlanPolling", "plan-1"],
+        ]);
+        """
+    )
+
+
+def test_plan_confirm_handlers_reject_invalid_retry_inputs_without_polling():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
+        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", status: "failed", steps: [] });
+        const calls = [];
+        const messages = [];
+        const listeners = {};
+        const field = {
+          dataset: { retryInputsFor: "step-1" },
+          value: "[1,2,3]",
+        };
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelectorAll(selector) {
+            return selector === "[data-retry-inputs-for]" ? [field] : [];
+          },
+        };
+        attachPlanConfirmHandlers(root, {
+          retryStep: async (...args) => calls.push(args),
+          startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
+          showError: (message) => messages.push(message),
+        });
+        const retryTarget = {
+          closest(selector) {
+            return selector === "[data-retry-step]"
+              ? { dataset: { retryStep: "step-1" } }
+              : null;
+          },
+        };
+
+        await listeners.click({ target: retryTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, []);
+        assert.deepEqual(messages, ["重试参数必须是 JSON 对象"]);
+        """
+    )
+
+
 def test_plan_confirm_handlers_surface_run_errors_without_polling():
     run_node(
         """
@@ -170,6 +295,57 @@ def test_plan_confirm_handlers_surface_run_errors_without_polling():
         ]);
         assert.equal(getPlan().status, "confirmed");
         assert.deepEqual(messages, ["task already has an active job"]);
+        """
+    )
+
+
+def test_plan_confirm_handlers_ignore_duplicate_confirm_click_while_inflight():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
+
+        const calls = [];
+        const listeners = {};
+        let resolveConfirm;
+        const confirmDone = new Promise((resolve) => { resolveConfirm = resolve; });
+        const button = {
+          dataset: { confirmPlan: "plan-1" },
+          disabled: false,
+          setAttribute() {},
+          removeAttribute() {},
+        };
+        const target = {
+          closest(selector) {
+            return selector === "[data-confirm-plan]" ? button : null;
+          },
+        };
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachPlanConfirmHandlers(root, {
+          confirmPlan: async (planId) => {
+            calls.push(["confirmPlan", planId]);
+            await confirmDone;
+          },
+          runPlan: async (planId) => calls.push(["runPlan", planId]),
+          startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
+        });
+
+        const first = listeners.click({ target, preventDefault() {} });
+        const second = listeners.click({ target, preventDefault() {} });
+        assert.deepEqual(calls, [["confirmPlan", "plan-1"]]);
+        assert.equal(button.disabled, true);
+
+        resolveConfirm();
+        await Promise.all([first, second]);
+        assert.deepEqual(calls, [
+          ["confirmPlan", "plan-1"],
+          ["runPlan", "plan-1"],
+          ["startPlanPolling", "plan-1"],
+        ]);
+        assert.equal(button.disabled, false);
         """
     )
 

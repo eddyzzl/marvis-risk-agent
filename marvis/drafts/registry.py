@@ -11,6 +11,9 @@ class DraftRegistry:
     def add(self, draft: DraftTool) -> None:
         self._repo.save_draft(draft)
 
+    def add_with_audit(self, draft: DraftTool, *, audit: dict) -> None:
+        self._repo.save_draft_with_audit(draft, audit=audit)
+
     def get(self, draft_id: str) -> DraftTool:
         draft = self._repo.get_draft(draft_id)
         if draft is None:
@@ -22,6 +25,9 @@ class DraftRegistry:
 
     def set_status(self, draft_id: str, status: str) -> None:
         self._repo.set_status(draft_id, status)
+
+    def set_status_with_audit(self, draft_id: str, status: str, *, audit: dict) -> None:
+        self._repo.set_status_with_audit(draft_id, status, audit=audit)
 
 
 __all__ = ["DraftRegistry"]

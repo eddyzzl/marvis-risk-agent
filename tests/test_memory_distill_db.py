@@ -62,6 +62,29 @@ def test_store_distillation_crud_and_search_order(tmp_path):
     assert store.list_distillations(category="field_convention") == [created_low]
 
 
+def test_store_distillation_redacts_summary_and_structured_payload(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    distillation = new_distillation(
+        category="user_preference",
+        scope_key="user_preference:contact",
+        distilled_summary="用户说联系邮箱是 eddy@example.com。",
+        structured={"preference": "银行卡 6222000000001234 只保留汇总口径。"},
+        source_memory_ids=("mem-1",),
+        support_count=1,
+    )
+
+    created = store.create_distillation(distillation)
+
+    assert "eddy@example.com" not in created.distilled_summary
+    assert "[REDACTED_EMAIL]" in created.distilled_summary
+    assert "6222000000001234" not in created.structured["preference"]
+    assert "6222********1234" in created.structured["preference"]
+    events = store.list_distillation_events(created.id)
+    assert events[0]["details"]["redacted_count"] >= 2
+
+
 def test_store_supersede_support_status_and_consolidation_state(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

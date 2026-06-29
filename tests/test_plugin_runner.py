@@ -1,14 +1,18 @@
 import json
 import signal
+import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 from marvis.db import PluginRepository, init_db
 from marvis.plugins.loader import load_builtin_packs
-from marvis.plugins.manifest import ToolRef
+from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
-from marvis.plugins.runner import ToolRunner
+from marvis.plugins.runner import ToolContext, ToolRunner
 
 
 def _runner(tmp_path):
@@ -44,9 +48,26 @@ def test_tool_runner_invokes_sample_echo_in_subprocess(tmp_path):
     assert result.duration_ms >= 0
 
 
+def test_tool_context_load_dataset_path_rejects_parent_escape(tmp_path):
+    ctx = ToolContext(
+        task_id="task-1",
+        seed=None,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+    )
+
+    assert ctx.load_dataset_path("task-1/sample.parquet") == tmp_path / "datasets" / "task-1" / "sample.parquet"
+    with pytest.raises(PermissionError):
+        ctx.load_dataset_path("../outside.parquet")
+
+
 def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeypatch):
     runner = _runner(tmp_path)
     calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/shadow")
+    monkeypatch.setenv("MARVIS_PROBE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("PATH", "/usr/bin")
 
     class FakeProcess:
         pid = 123
@@ -75,6 +96,15 @@ def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeyp
     assert calls[0]["kwargs"]["encoding"] == "utf-8"
     assert calls[0]["kwargs"]["text"] is True
     assert calls[0]["kwargs"]["start_new_session"] is True
+    assert calls[0]["kwargs"]["env"]["PATH"] == "/usr/bin"
+    assert calls[0]["kwargs"]["env"]["MARVIS_PROBE_URL"] == "http://127.0.0.1:9"
+    assert calls[0]["kwargs"]["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert "OPENAI_API_KEY" not in calls[0]["kwargs"]["env"]
+    assert "PYTHONPATH" not in calls[0]["kwargs"]["env"]
+    job = json.loads(calls[1]["input"])
+    assert job["cpu_limit_seconds"] == 12
+    assert job["file_size_limit_mb"] == 2048
+    assert job["side_effects"] == []
 
 
 def test_tool_runner_records_invocation_audit(tmp_path):
@@ -82,12 +112,137 @@ def test_tool_runner_records_invocation_audit(tmp_path):
 
     result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
 
+    started = repo.list_audit(kind="tool.invoke.started")
     audits = repo.list_audit(kind="tool.invoke")
     assert result.ok is True
+    assert len(started) == 1
+    assert started[0]["target_ref"] == "_sample.echo"
+    assert started[0]["outcome"] == "started"
     assert len(audits) == 1
     assert audits[0]["target_ref"] == "_sample.echo"
     assert audits[0]["outcome"] == "succeeded"
     assert audits[0]["inputs_hash"]
+    assert result.resource_limits is not None
+    assert result.resource_limits["memory_limit_mb"] == 2048
+    assert "memory_limit_applied" in result.resource_limits
+    assert audits[0]["detail"]["resource_limits"] == result.resource_limits
+
+
+def test_tool_runner_does_not_start_worker_when_started_audit_fails(tmp_path, monkeypatch):
+    runner, repo = _runtime(tmp_path)
+    original_write_audit = repo.write_audit
+
+    def fail_started_audit(**kwargs):
+        if kwargs.get("kind") == "tool.invoke.started":
+            raise RuntimeError("audit down")
+        return original_write_audit(**kwargs)
+
+    monkeypatch.setattr(repo, "write_audit", fail_started_audit)
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("worker should not start")),
+    )
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "audit"
+    assert result.error_detail["audit_phase"] == "start"
+    assert repo.list_audit(kind="tool.invoke") == []
+
+
+def test_tool_runner_returns_audit_failure_when_finish_audit_fails_after_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    runner, repo = _runtime(tmp_path)
+    original_write_audit = repo.write_audit
+
+    def fail_finish_audit(**kwargs):
+        if kwargs.get("kind") == "tool.invoke":
+            raise RuntimeError("audit down")
+        return original_write_audit(**kwargs)
+
+    monkeypatch.setattr(repo, "write_audit", fail_finish_audit)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "audit"
+    assert result.error_detail["audit_phase"] == "finish"
+    assert result.error_detail["result_ok"] is True
+    started = repo.list_audit(kind="tool.invoke.started")
+    assert len(started) == 1
+    assert started[0]["target_ref"] == "_sample.echo"
+    assert repo.list_audit(kind="tool.invoke") == []
+
+
+def test_worker_resource_limits_apply_memory_cpu_and_file_size(monkeypatch):
+    from marvis.plugins import subprocess_worker
+
+    class FakeResource:
+        RLIM_INFINITY = -1
+        RLIMIT_DATA = 1
+        RLIMIT_AS = 2
+        RLIMIT_CPU = 3
+        RLIMIT_FSIZE = 4
+
+        def __init__(self):
+            self.calls = []
+
+        def getrlimit(self, _kind):
+            return (self.RLIM_INFINITY, self.RLIM_INFINITY)
+
+        def setrlimit(self, kind, limits):
+            self.calls.append((kind, limits))
+
+    fake = FakeResource()
+    monkeypatch.setitem(sys.modules, "resource", fake)
+
+    meta = subprocess_worker._apply_resource_limits(
+        128,
+        cpu_seconds=12,
+        file_size_mb=256,
+    )
+
+    assert meta["memory_limit_applied"] is True
+    assert meta["cpu_limit_applied"] is True
+    assert meta["file_size_limit_applied"] is True
+    assert meta["degraded"] is False
+    assert (fake.RLIMIT_CPU, (12, 12)) in fake.calls
+    assert (fake.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024)) in fake.calls
+
+
+def test_worker_resource_limit_degradation_is_per_limit(monkeypatch):
+    from marvis.plugins import subprocess_worker
+
+    class FakeResource:
+        RLIM_INFINITY = -1
+        RLIMIT_DATA = 1
+        RLIMIT_AS = 2
+        RLIMIT_CPU = 3
+        RLIMIT_FSIZE = 4
+
+        def getrlimit(self, _kind):
+            return (self.RLIM_INFINITY, self.RLIM_INFINITY)
+
+        def setrlimit(self, kind, _limits):
+            if kind == self.RLIMIT_AS:
+                raise ValueError("unsupported address limit")
+
+    monkeypatch.setitem(sys.modules, "resource", FakeResource())
+
+    meta = subprocess_worker._apply_resource_limits(
+        128,
+        cpu_seconds=12,
+        file_size_mb=256,
+    )
+
+    assert meta["memory_limit_applied"] is True  # RLIMIT_DATA still applied.
+    assert meta["cpu_limit_applied"] is True
+    assert meta["file_size_limit_applied"] is True
+    assert meta["degraded"] is True
+    assert "memory_as" in meta["error"]
 
 
 def test_tool_runner_derives_seed_for_stochastic_tools(tmp_path):
@@ -128,6 +283,133 @@ def test_tool_runner_returns_schema_error_before_worker(tmp_path):
     assert "message" in result.error
 
 
+def test_tool_runner_blocks_tool_when_side_effect_exceeds_permissions(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    manifest = PluginManifest(
+        name="unsafe",
+        version="0.1.0",
+        display_name="Unsafe",
+        description="Bypassed manifest parser",
+        module="unsafe.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="write_data",
+                summary="Writes data",
+                input_schema={"type": "object", "additionalProperties": False},
+                output_schema={"type": "object", "additionalProperties": False},
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=("write:dataset",),
+                entrypoint="run",
+            ),
+        ),
+        permissions=("read:dataset",),
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("unsafe", "write_data")
+            return manifest, manifest.tools[0]
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("worker should not start")),
+    )
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+    )
+
+    result = runner.invoke(ToolRef("unsafe", "write_data"), {}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "permission"
+    assert "write:dataset" in result.error
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[0]["target_ref"] == "unsafe.write_data"
+    assert audits[0]["outcome"] == "failed"
+
+
+def test_tool_runner_validates_output_paths_for_registered_tool(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    manifest = PluginManifest(
+        name="pathpack",
+        version="0.1.0",
+        display_name="Path Pack",
+        description="Path output",
+        module="pathpack.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="emit_path",
+                summary="Emits a path",
+                input_schema={"type": "object", "additionalProperties": False},
+                output_schema={
+                    "type": "object",
+                    "properties": {"report_path": {"type": "string"}},
+                    "required": ["report_path"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=(),
+                entrypoint="run",
+            ),
+        ),
+        permissions=(),
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("pathpack", "emit_path")
+            return manifest, manifest.tools[0]
+
+    class FakeProcess:
+        pid = 123
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return (
+                json.dumps({
+                    "ok": True,
+                    "output": {"report_path": str(tmp_path / "outside" / "report.xlsx")},
+                }),
+                "",
+            )
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(
+        "marvis.plugins.runner.subprocess.Popen",
+        lambda *args, **kwargs: FakeProcess(),
+    )
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+    )
+
+    result = runner.invoke(ToolRef("pathpack", "emit_path"), {}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "permission"
+    assert "escapes allowed roots" in result.error
+    assert repo.list_audit(kind="tool.invoke")[0]["outcome"] == "failed"
+
+
 def test_tool_runner_converts_tool_exception_to_execution_error(tmp_path):
     runner = _runner(tmp_path)
 
@@ -137,6 +419,330 @@ def test_tool_runner_converts_tool_exception_to_execution_error(tmp_path):
     assert result.error_kind == "execution"
     assert "sample failure" in result.error
     assert "RuntimeError" in result.stderr_tail
+
+
+def test_worker_execution_failure_uses_nonzero_exit_code(tmp_path):
+    module_path = tmp_path / "failing_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    raise RuntimeError('boom')\n",
+        encoding="utf-8",
+    )
+    job = {
+        "module_path": str(module_path),
+        "entrypoint": "run",
+        "inputs": {},
+        "task_id": "task-1",
+        "datasets_root": str(tmp_path / "datasets"),
+        "workspace": str(tmp_path / "workspace"),
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "marvis.plugins.subprocess_worker"],
+        input=json.dumps(job),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode != 0
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "execution"
+
+
+def test_tool_runner_redacts_stdout_and_stderr_tails(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "noisy_tool.py"
+    module_path.write_text(
+        "import sys\n"
+        "def run(inputs, ctx):\n"
+        "    print('mobile=13800138000 email=raw@example.com')\n"
+        "    print('bank=6222000000001234', file=sys.stderr)\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={},
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is True, result.error
+    combined = f"{result.stdout_tail}\n{result.stderr_tail}"
+    assert "13800138000" not in combined
+    assert "raw@example.com" not in combined
+    assert "6222000000001234" not in combined
+    assert "138******00" in combined
+    assert "[REDACTED_EMAIL]" in combined
+    assert "6222********1234" in combined
+
+
+def test_tool_runner_denies_network_for_adhoc_without_network_side_effect(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "network_tool.py"
+    module_path.write_text(
+        "import socket\n"
+        "def run(inputs, ctx):\n"
+        "    socket.create_connection(('203.0.113.1', 80), timeout=0.1)\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={},
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "network access requires network:optional or llm" in result.error
+
+
+def test_tool_runner_allows_loopback_for_local_kernels_without_network_side_effect(tmp_path):
+    runner = _runner(tmp_path)
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve_once():
+        conn, _addr = server.accept()
+        conn.close()
+        server.close()
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    module_path = tmp_path / "loopback_tool.py"
+    module_path.write_text(
+        "import socket\n"
+        "def run(inputs, ctx):\n"
+        "    conn = socket.create_connection(('127.0.0.1', inputs['port']), timeout=1.0)\n"
+        "    conn.close()\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"port": port},
+        input_schema={
+            "type": "object",
+            "properties": {"port": {"type": "integer"}},
+            "required": ["port"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+    thread.join(timeout=2)
+
+    assert result.ok is True, result.error
+
+
+def test_tool_runner_allows_output_paths_under_workspace(tmp_path):
+    runner = _runner(tmp_path)
+    report_path = tmp_path / "workspace" / "tasks" / "task-1" / "outputs" / "report.xlsx"
+    module_path = tmp_path / "path_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    return {'report_path': inputs['report_path']}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"report_path": str(report_path)},
+        input_schema={
+            "type": "object",
+            "properties": {"report_path": {"type": "string"}},
+            "required": ["report_path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"report_path": {"type": "string"}},
+            "required": ["report_path"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output == {"report_path": str(report_path)}
+
+
+def test_tool_runner_rejects_output_paths_outside_allowed_roots(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "path_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    return {'report_path': inputs['report_path']}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"report_path": str(tmp_path / "outside" / "report.xlsx")},
+        input_schema={
+            "type": "object",
+            "properties": {"report_path": {"type": "string"}},
+            "required": ["report_path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"report_path": {"type": "string"}},
+            "required": ["report_path"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "permission"
+    assert "escapes allowed roots" in result.error
+
+
+def test_tool_runner_rejects_unsafe_relative_output_paths(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "path_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    return {'artifacts': [{'path': '../secret.txt'}]}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={},
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "artifacts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            },
+            "required": ["artifacts"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "permission"
+    assert "unsafe relative path" in result.error
+
+
+def test_tool_runner_validates_artifact_refs_in_output(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "artifact_ref_tool.py"
+    module_path.write_text(
+        "def run(inputs, ctx):\n"
+        "    return {'sample_ref': inputs['sample_ref'], 'download_url': '/api/downloads/../x'}\n",
+        encoding="utf-8",
+    )
+    schema = {
+        "type": "object",
+        "properties": {"sample_ref": {"type": "string"}},
+        "required": ["sample_ref"],
+        "additionalProperties": False,
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "sample_ref": {"type": "string"},
+            "download_url": {"type": "string"},
+        },
+        "required": ["sample_ref", "download_url"],
+        "additionalProperties": False,
+    }
+
+    allowed = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"sample_ref": "artifact:tasks/task-1/outputs/sample.parquet"},
+        input_schema=schema,
+        output_schema=output_schema,
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+    escaped_relative = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"sample_ref": "artifact:../secret.parquet"},
+        input_schema=schema,
+        output_schema=output_schema,
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+    escaped_absolute = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"sample_ref": "artifact:/etc/passwd"},
+        input_schema=schema,
+        output_schema=output_schema,
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert allowed.ok is True, allowed.error
+    assert escaped_relative.ok is False
+    assert escaped_relative.error_kind == "permission"
+    assert "unsafe relative path" in escaped_relative.error
+    assert escaped_absolute.ok is False
+    assert escaped_absolute.error_kind == "permission"
+    assert "must be relative" in escaped_absolute.error
 
 
 def test_tool_runner_rejects_output_schema_mismatch(tmp_path):

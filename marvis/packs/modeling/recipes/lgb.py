@@ -7,12 +7,15 @@ from pathlib import Path
 import joblib
 import lightgbm as lgb
 
+from marvis.data.labels import resolve_modeling_splits
+from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
     compute_model_metrics,
     model_params,
+    normalized_monotone_constraints,
     sample_weight_values,
     split_modeling_frame,
 )
@@ -21,6 +24,9 @@ from marvis.packs.modeling.recipes.common import (
 def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
+    )
     params = {
         **get_recipe("lgb").default_params,
         **model_params(config.params),
@@ -28,6 +34,11 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         "n_jobs": 1,
         "deterministic": True,
     }
+    constraints = normalized_monotone_constraints(config)
+    params.pop("monotone_constraints", None)
+    params.pop("monotonic_constraints", None)
+    if constraints is not None:
+        params["monotone_constraints"] = list(constraints)
     num_boost_round = int(params.pop("num_boost_round", 20))
     callbacks = []
     if config.early_stopping_rounds:
@@ -39,9 +50,9 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     test_weight = sample_weight_values(test, config)
     model.fit(
         train[list(config.features)],
-        train[config.target_col],
+        train[config.target_col].to_numpy(dtype=int),
         sample_weight=sample_weight_values(train, config),
-        eval_set=[(test[list(config.features)], test[config.target_col])],
+        eval_set=[(test[list(config.features)], test[config.target_col].to_numpy(dtype=int))],
         eval_sample_weight=[test_weight] if test_weight is not None else None,
         callbacks=callbacks,
     )
@@ -51,6 +62,7 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         test,
         oot,
         config,
+        oot_has_labels=oot_has_labels,
     )
     artifact = _save_lgb_model(
         model,
@@ -63,6 +75,7 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         metrics=metrics,
         feature_importance=_lgb_importance(model, config.features),
         experiment_id="",
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 
@@ -75,8 +88,8 @@ def _save_lgb_model(
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}.pkl"
-    joblib.dump(model, out_dir / model_path)
-    return ModelArtifact(
+    write_artifact_file(out_dir, model_path, lambda path: joblib.dump(model, path))
+    artifact = ModelArtifact(
         id=artifact_id,
         experiment_id="",
         algorithm="lgb",
@@ -87,6 +100,8 @@ def _save_lgb_model(
         woe_maps=None,
         created_at=datetime.now(UTC).isoformat(),
     )
+    persist_model_meta(out_dir, artifact, config=config)
+    return artifact
 
 
 def _lgb_importance(

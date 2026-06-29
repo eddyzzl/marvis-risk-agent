@@ -3,14 +3,16 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import nbformat
 
+from marvis.artifacts import TransactionalDirectoryStore
 from marvis.db import DatasetRepository, TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
-from marvis.packs.modeling.artifact import export_pmml
+from marvis.packs.modeling.artifact import export_pmml, persist_model_meta
 from marvis.packs.modeling.contracts import Experiment, ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 
@@ -43,48 +45,75 @@ def handoff_to_validation(
     pmml_path = _ensure_pmml_path(
         experiment_store,
         artifact,
+        experiment=experiment,
         sample_path=sample_path,
         artifact_base_dir=artifact_base_dir,
     )
 
     material_dir = _material_dir(settings, experiment, artifact)
-    material_dir.mkdir(parents=True, exist_ok=True)
+    staged_materials = TransactionalDirectoryStore(material_dir.parent).stage(material_dir.name)
+    staged_materials.path.mkdir(parents=True, exist_ok=True)
     sample_material_name = f"sample{sample_path.suffix or '.parquet'}"
     model_material_name = f"model{model_path.suffix or '.joblib'}"
-    shutil.copy2(sample_path, material_dir / sample_material_name)
-    shutil.copy2(pmml_path, material_dir / "model.pmml")
-    shutil.copy2(model_path, material_dir / model_material_name)
-    _write_dictionary(material_dir / DICTIONARY_NAME, artifact.feature_list)
+    shutil.copy2(sample_path, staged_materials.path / sample_material_name)
+    shutil.copy2(pmml_path, staged_materials.path / "model.pmml")
+    shutil.copy2(model_path, staged_materials.path / model_material_name)
+    calibration_material_name = _copy_calibration_payload(
+        artifact,
+        artifact_base_dir=artifact_base_dir,
+        material_dir=staged_materials.path,
+    )
+    _write_dictionary(staged_materials.path / DICTIONARY_NAME, artifact.feature_list)
     _write_scoring_notebook(
-        material_dir / SCORING_NOTEBOOK_NAME,
+        staged_materials.path / SCORING_NOTEBOOK_NAME,
         artifact=artifact,
         experiment=experiment,
         model_filename=model_material_name,
+        calibration_filename=calibration_material_name,
     )
 
     source_task = _source_task(settings, experiment.task_id)
-    validation_task = TaskRepository(settings.db_path).create_task(
-        TaskCreate(
-            task_type=TASK_TYPE_VALIDATION,
-            model_name=source_task.model_name if source_task else f"{experiment.recipe_id} model",
-            model_version=artifact.id,
-            validator=source_task.validator if source_task else "MARVIS Modeling",
-            source_dir=str(material_dir.resolve()),
-            algorithm=artifact.algorithm,
-            run_mode="agent",
-            target_col=experiment.config.target_col,
-            score_col=_score_col(experiment.config.params),
-            split_col=experiment.config.split_col,
-            time_col=_time_col(experiment.config.params),
-            feature_columns=list(artifact.feature_list),
-            notebook_path=SCORING_NOTEBOOK_NAME,
-            sample_path=sample_material_name,
-            pmml_path="model.pmml",
-            dictionary_path=DICTIONARY_NAME,
-            report_values={},
-        )
+    payload = TaskCreate(
+        task_type=TASK_TYPE_VALIDATION,
+        model_name=source_task.model_name if source_task else f"{experiment.recipe_id} model",
+        model_version=artifact.id,
+        validator=source_task.validator if source_task else "MARVIS Modeling",
+        source_dir=str(material_dir.resolve()),
+        algorithm=artifact.algorithm,
+        run_mode="agent",
+        target_col=experiment.config.target_col,
+        score_col=_score_col(experiment.config.params),
+        split_col=experiment.config.split_col,
+        time_col=_time_col(experiment.config.params),
+        feature_columns=list(artifact.feature_list),
+        notebook_path=SCORING_NOTEBOOK_NAME,
+        sample_path=sample_material_name,
+        pmml_path="model.pmml",
+        dictionary_path=DICTIONARY_NAME,
+        report_values={},
     )
-    experiment_store.set_status(artifact.experiment_id, "handed_off")
+    try:
+        staged_materials.activate()
+        validation_task = TaskRepository(settings.db_path).create_validation_handoff_with_audit(
+            payload,
+            experiment_id=artifact.experiment_id,
+            experiment_status="handed_off",
+            audit_factory=lambda record: {
+                "kind": "modeling.validation_handoff.create",
+                "target_ref": record.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "experiment_id": artifact.experiment_id,
+                    "artifact_id": artifact.id,
+                    "sample_dataset_id": sample_dataset_id,
+                    "source_dir": str(material_dir.resolve()),
+                },
+            },
+        )
+        staged_materials.commit()
+    except Exception:
+        staged_materials.rollback()
+        raise
     return validation_task.id
 
 
@@ -129,6 +158,7 @@ def _ensure_pmml_path(
     experiment_store,
     artifact: ModelArtifact,
     *,
+    experiment: Experiment,
     sample_path: Path,
     artifact_base_dir: Path,
 ) -> Path:
@@ -136,6 +166,7 @@ def _ensure_pmml_path(
         path = _resolve_artifact_path(artifact.pmml_path, base_dir=artifact_base_dir)
         if not path.exists():
             raise ModelingError(f"PMML file does not exist: {path}")
+        persist_model_meta(artifact_base_dir, artifact, config=experiment.config)
         return path
 
     out_path = artifact_base_dir / f"{artifact.id}.pmml"
@@ -144,9 +175,45 @@ def _ensure_pmml_path(
         sample_path,
         out_path,
         base_dir=artifact_base_dir,
+        target_col=experiment.config.target_col,
     )
-    experiment_store.set_artifact_pmml_path(artifact.id, pmml_path.name)
+    try:
+        updated_artifact = replace(artifact, pmml_path=pmml_path.name)
+        persist_model_meta(artifact_base_dir, updated_artifact, config=experiment.config)
+        experiment_store.set_artifact_pmml_path(artifact.id, pmml_path.name)
+    except Exception:
+        pmml_path.unlink(missing_ok=True)
+        try:
+            persist_model_meta(artifact_base_dir, artifact, config=experiment.config)
+        except Exception:
+            pass
+        raise
     return pmml_path
+
+
+def _copy_calibration_payload(
+    artifact: ModelArtifact,
+    *,
+    artifact_base_dir: Path,
+    material_dir: Path,
+) -> str | None:
+    calibration = _calibration_metadata(artifact)
+    if not calibration:
+        return None
+    source_name = calibration.get("path")
+    if not source_name:
+        return None
+    source_path = _resolve_artifact_path(str(source_name), base_dir=artifact_base_dir)
+    if not source_path.exists():
+        raise ModelingError(f"calibration file does not exist: {source_path}")
+    material_name = f"calibration{source_path.suffix or '.joblib'}"
+    shutil.copy2(source_path, material_dir / material_name)
+    return material_name
+
+
+def _calibration_metadata(artifact: ModelArtifact) -> dict[str, Any] | None:
+    calibration = (artifact.params or {}).get("calibration")
+    return calibration if isinstance(calibration, dict) else None
 
 
 def _source_task(settings, task_id: str):
@@ -178,11 +245,13 @@ def _write_scoring_notebook(
     artifact: ModelArtifact,
     experiment: Experiment,
     model_filename: str,
+    calibration_filename: str | None,
 ) -> None:
     source = _scoring_notebook_source(
         artifact=artifact,
         experiment=experiment,
         model_filename=model_filename,
+        calibration_filename=calibration_filename,
     )
     notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell(source)])
     nbformat.write(notebook, path)
@@ -193,9 +262,20 @@ def _scoring_notebook_source(
     artifact: ModelArtifact,
     experiment: Experiment,
     model_filename: str,
+    calibration_filename: str | None,
 ) -> str:
     features_json = json.dumps(list(artifact.feature_list), ensure_ascii=False)
     params_json = json.dumps(artifact.params, ensure_ascii=False, default=str)
+    calibration = _calibration_metadata(artifact) or {}
+    calibration_filename_json = json.dumps(calibration_filename, ensure_ascii=False)
+    calibration_method_json = json.dumps(calibration.get("method"), ensure_ascii=False)
+    score_version_json = json.dumps(
+        "calibrated" if calibration_filename else "raw",
+        ensure_ascii=False,
+    )
+    pmml_includes_calibration_python = repr(
+        bool(calibration.get("pmml_includes_calibration", False)),
+    )
     target_json = json.dumps(experiment.config.target_col, ensure_ascii=False)
     split_json = json.dumps(experiment.config.split_col, ensure_ascii=False)
     time_json = json.dumps(_time_col(experiment.config.params), ensure_ascii=False)
@@ -206,6 +286,7 @@ def _scoring_notebook_source(
             "from pathlib import Path",
             "",
             "import joblib",
+            "import numpy as np",
             "import pandas as pd",
             "from marvis.feature.encode import woe_encode",
             "",
@@ -216,6 +297,10 @@ def _scoring_notebook_source(
             f"RMC_SPLIT_COL = {split_json}",
             f"RMC_TIME_COL = {time_json}",
             "RMC_PMML_OUTPUT_FIELD = 'probability_1'",
+            f"RMC_CALIBRATION_FILENAME = {calibration_filename_json}",
+            f"RMC_CALIBRATION_METHOD = {calibration_method_json}",
+            f"RMC_SCORE_VERSION = {score_version_json}",
+            f"RMC_PMML_INCLUDES_CALIBRATION = {pmml_includes_calibration_python}",
             "RMC_SCORE_DECIMAL_PLACES = 6",
             "",
             "def _rmc_read_sample(path):",
@@ -228,14 +313,29 @@ def _scoring_notebook_source(
             "",
             "RMC_SAMPLE_DF = _rmc_read_sample(RMC_SAMPLE_PATH)",
             f"_RMC_MODEL = joblib.load(Path({model_filename!r}))",
+            "_RMC_CALIBRATION = joblib.load(Path(RMC_CALIBRATION_FILENAME)) if RMC_CALIBRATION_FILENAME else None",
+            "",
+            "def _rmc_apply_calibration(scores):",
+            "    if _RMC_CALIBRATION is None:",
+            "        return np.asarray(scores, dtype=float)",
+            "    method = str(_RMC_CALIBRATION.get('method') or RMC_CALIBRATION_METHOD)",
+            "    calibrator = _RMC_CALIBRATION['calibrator']",
+            "    values = np.asarray(scores, dtype=float)",
+            "    if method == 'sigmoid':",
+            "        return calibrator.predict_proba(values.reshape(-1, 1))[:, 1]",
+            "    if method == 'isotonic':",
+            "        return calibrator.predict(values)",
+            "    raise ValueError(f'unsupported calibration method: {method}')",
             "",
             "def RMC_SCORE_FN(dataframe):",
             "    if isinstance(_RMC_MODEL, dict) and 'model' in _RMC_MODEL and 'woe_maps' in _RMC_MODEL:",
             "        encoded = pd.DataFrame(index=dataframe.index)",
             "        for feature in RMC_FEATURES:",
             "            encoded[feature] = woe_encode(dataframe, feature, _RMC_MODEL['woe_maps'][feature]).to_numpy(dtype=float)",
-            "        return _RMC_MODEL['model'].predict_proba(encoded)[:, 1]",
-            "    return _RMC_MODEL.predict_proba(dataframe[RMC_FEATURES])[:, 1]",
+            "        scores = _RMC_MODEL['model'].predict_proba(encoded)[:, 1]",
+            "    else:",
+            "        scores = _RMC_MODEL.predict_proba(dataframe[RMC_FEATURES])[:, 1]",
+            "    return np.clip(_rmc_apply_calibration(scores), 0.0, 1.0)",
         ]
     )
 

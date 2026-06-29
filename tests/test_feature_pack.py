@@ -51,6 +51,39 @@ def _register_sample(registry, tmp_path):
     return registry.register_from_upload("task-feature", path, role="sample")
 
 
+def test_bin_feature_can_enforce_monotonic_bad_rates(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "x": list(range(1, 13)),
+        "y": [0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1],
+    })
+    path = tmp_path / "non_monotonic.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "x",
+            "target_col": "y",
+            "method": "manual",
+            "breakpoints": [2.5, 4.5, 6.5],
+            "enforce_monotonic": True,
+            "monotonic_direction": "auto",
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["monotonic_enforced"] is True
+    assert result.output["monotonic_before"] is False
+    assert result.output["monotonic"] is True
+    assert result.output["monotonic_direction"] == "increasing"
+    assert result.output["edges"] == [float("-inf"), 2.5, 6.5, float("inf")]
+    assert result.output["total_iv_before_monotonic"] > result.output["total_iv"]
+
+
 def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     runner, registry, repo, backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)
@@ -145,6 +178,21 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     assert imputed.output["fill_values"]["missing"] == 5.0
     assert capped.output["bounds"]["amount"]["upper"] == 62.5
     assert crossed.output["new_columns"] == ["x1_ratio_x2", "amount_by_cat_mean"]
+
+
+def test_feature_transform_tools_return_feature_error_for_missing_columns(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    result = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {"dataset_id": dataset.id, "columns": ["missing_column"], "method": "minmax"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "missing columns: missing_column" in result.error
 
 
 def test_feature_metrics_tool_drops_unlabeled_target_rows_when_confirmed(tmp_path):

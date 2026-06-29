@@ -56,6 +56,12 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
                   reasons: ["KS drift < threshold failed"],
                   at: "2026-06-20T00:00:00Z",
                 },
+                {
+                  reviewer: "llm_critic",
+                  passed: false,
+                  reasons: ["needs human review"],
+                  at: "2026-06-20T00:00:01Z",
+                },
               ],
             },
           ],
@@ -77,6 +83,31 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
         assert.equal(html.includes('data-confirm-step="step-2"'), false);
         assert.ok(html.includes("review-verdict reviewer-deterministic failed hard-fail"));
         assert.ok(html.includes("KS drift &lt; threshold failed"));
+        assert.ok(html.includes("review-verdict reviewer-llm_critic failed soft-warning"));
+        assert.ok(html.includes("<span class=\\"verdict\\">警告</span>"));
+        assert.ok(html.includes("needs human review"));
+        """
+    )
+
+
+def test_artifact_view_fetches_versioned_metric_refs():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderArtifact } from "./marvis/static/js/v2/artifact_view.js";
+
+        const calls = [];
+        const container = { innerHTML: "", dataset: {} };
+        const result = await renderArtifact(container, "metrics:screen:v2", {
+          fetchMetrics: async (id) => {
+            calls.push(id);
+            return { selected: ["x1"] };
+          },
+        });
+
+        assert.deepEqual(calls, ["screen:v2"]);
+        assert.deepEqual(result, { selected: ["x1"] });
+        assert.equal(container.innerHTML.includes("x1"), true);
         """
     )
 
@@ -113,6 +144,34 @@ def test_render_plan_view_updates_from_state_and_can_unsubscribe():
     )
 
 
+def test_render_plan_view_stops_active_polling_on_unsubscribe():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderPlanView, startPlanPolling } from "./marvis/static/js/v2/plan_view.js";
+        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", goal: "poll", status: "running", steps: [] });
+        const cleared = [];
+        const poll = startPlanPolling("plan-1", {
+          autoStart: false,
+          setTimeoutFn: () => 11,
+          clearTimeoutFn: (timerId) => cleared.push(timerId),
+        });
+        poll.timer = 11;
+
+        const container = { innerHTML: "", dataset: {} };
+        const unsubscribe = renderPlanView(container);
+        unsubscribe();
+
+        assert.deepEqual(cleared, [11]);
+        const next = startPlanPolling("plan-1", { autoStart: false });
+        assert.notEqual(next, poll);
+        """
+    )
+
+
 def test_plan_html_renders_validated_plan_actions_and_hides_terminal_actions():
     run_node(
         """
@@ -139,6 +198,39 @@ def test_plan_html_renders_validated_plan_actions_and_hides_terminal_actions():
         });
         assert.equal(done.includes("data-confirm-plan"), false);
         assert.equal(done.includes("data-cancel-plan"), false);
+        """
+    )
+
+
+def test_plan_html_renders_failed_step_retry_action():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { planHtml } from "./marvis/static/js/v2/plan_view.js";
+
+        const html = planHtml({
+          id: "plan-1",
+          goal: "Retry failed step",
+          status: "failed",
+          steps: [
+            {
+              id: "step-1",
+              index: 0,
+              title: "Run risky step",
+              status: "failed",
+              tool_ref: { plugin: "_sample", tool: "echo" },
+              inputs: { message: "try again <safe>" },
+              depends_on: [],
+              review_verdicts: [],
+            },
+          ],
+        });
+
+        assert.ok(html.includes('data-retry-step="step-1"'));
+        assert.ok(html.includes('data-retry-inputs-for="step-1"'));
+        assert.ok(html.includes('&quot;message&quot;: &quot;try again &lt;safe&gt;&quot;'));
+        assert.ok(html.includes("重试步骤"));
+        assert.equal(html.includes('data-confirm-step="step-1"'), false);
         """
     )
 

@@ -10,6 +10,7 @@ from marvis.validation.binning import compute_psi
 from marvis.validation.effectiveness import (
     _should_reverse_eval_bins,
     build_effectiveness_result,
+    compute_auc,
     compute_bin_tables,
     compute_monthly_ks,
     compute_monthly_psi,
@@ -136,6 +137,11 @@ def test_overall_auc_keeps_declared_positive_score_direction():
     assert train.tail_lift_5pct == pytest.approx(5.0)
 
 
+def test_compute_auc_returns_neutral_for_degenerate_labels():
+    assert compute_auc([0.1, 0.2, 0.3], [1, 1, 1]) == pytest.approx(0.5)
+    assert compute_auc([], []) == pytest.approx(0.5)
+
+
 def test_roc_ks_curve_population_at_ks_uses_rank_position_not_fpr():
     rows = []
     for split, month in [("train", "202503"), ("test", "202505"), ("oot", "202507")]:
@@ -242,8 +248,12 @@ def test_psi_stability_table_uses_shared_compute_psi_smoothing():
     psi_rows = compute_psi_stability_table(sample=sample, config=_config(bin_count=2))
 
     assert psi_rows[0].actual_pct == pytest.approx(0.0)
-    assert psi_rows[0].psi == pytest.approx(
-        compute_psi([psi_rows[0].expected_pct], [psi_rows[0].actual_pct])
+    assert psi_rows[0].psi > 0
+    assert sum(row.psi for row in psi_rows) == pytest.approx(
+        compute_psi(
+            [row.expected_pct for row in psi_rows],
+            [row.actual_pct for row in psi_rows],
+        )
     )
 
 

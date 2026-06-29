@@ -19,6 +19,7 @@ from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
+from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "feature"})
 
@@ -40,7 +41,7 @@ class ModelingProposal:
     counts: dict[str, int]
     recipe: str = "lgb"  # primary recipe (the one tuned, if lgb is among recipes)
     recipes: list[str] = field(default_factory=lambda: ["lgb"])  # all recipes to train + compare
-    seed: int = 23
+    seed: int = DEFAULT_RANDOM_SEED
     target_type: str = "binary"  # derived: _regressor⇒continuous, *multiclass*⇒multiclass, else binary
     notes: list[str] = field(default_factory=list)
     template_id: str = "modeling"
@@ -98,20 +99,34 @@ _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重",
 
 
 def build_modeling_proposal(
-    registry, backend, task_id: str, source_dir, *, seed: int = 23,
+    registry, backend, task_id: str, source_dir, *, seed: int = DEFAULT_RANDOM_SEED,
     recipe: str | None = None, recipes: list[str] | None = None,
     target_type: str | None = None,
     sample_weight_col: str | None = None,
+    anchor_id: str | None = None,
+    join_feature_ids: list[str] | None = None,
+    target_col: str | None = None,
 ) -> ModelingProposal:
     datasets = _resolve_datasets(registry, task_id, source_dir)
-    joined = len(datasets) > 1
-    if joined:
+    by_id = {dataset.id: dataset for dataset in datasets}
+    join_feature_ids = [str(item_id) for item_id in (join_feature_ids or []) if str(item_id)]
+    if anchor_id:
+        if anchor_id not in by_id:
+            raise ModelingSetupError("选择的样本主表不存在;请重新确认文件角色。")
+        dataset = by_id[anchor_id]
+        join_feature_ids = [
+            item_id for item_id in join_feature_ids if item_id in by_id and item_id != anchor_id
+        ]
+        joined = bool(join_feature_ids)
+    elif len(datasets) > 1:
         ranked = propose_roles(datasets)
         dataset = ranked[0]
         join_feature_ids = [item.id for item in ranked[1:]]
+        joined = bool(join_feature_ids)
     else:
         dataset = datasets[0]
         join_feature_ids = []
+        joined = False
     path = registry.resolve_path(dataset.id)
     requested_target_type = _normalize_target_type(target_type)
     if recipes:
@@ -131,7 +146,7 @@ def build_modeling_proposal(
             f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配;请重新选择同一目标类型的算法。"
         )
     target_type = requested_target_type or derived_target_type
-    setup = detect_setup(backend, path, target_type=target_type)
+    setup = detect_setup(backend, path, configured_target=str(target_col or ""), target_type=target_type)
     if not setup.target_col:
         if target_type == "continuous":
             raise ModelingSetupError("未能识别连续型目标列;请确认数据含数值目标列(如 income/amount)后重试。")

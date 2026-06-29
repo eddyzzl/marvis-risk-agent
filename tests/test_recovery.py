@@ -204,7 +204,7 @@ def test_reclaim_stale_running_tasks_skips_recent_active_agent_job_within_stale_
         "metrics generated",
         expected=TaskStatus.COMPUTING_METRICS,
     )
-    repo.start_job(task.id, "report")
+    job_id = repo.start_job(task.id, "report")
 
     # With a one-hour stale window a just-updated task is not yet stale, so it must
     # NOT be treated as interrupted: no premature "server restart" notice is
@@ -215,6 +215,9 @@ def test_reclaim_stale_running_tasks_skips_recent_active_agent_job_within_stale_
     assert reclaimed == 0
     assert loaded.status == TaskStatus.WRITING_ARTIFACTS
     assert repo.list_agent_messages(task.id) == []
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT status, error_name FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row == ("queued", None)
 
 
 def test_reclaim_stale_running_tasks_finalizes_agent_draft_message_for_writing_artifacts_job(tmp_path):

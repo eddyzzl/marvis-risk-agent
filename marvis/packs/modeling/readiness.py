@@ -17,8 +17,8 @@ MIN_MODELING_ROWS = 1000
 BAD_RATE_LOW_WARN = 0.005
 BAD_RATE_HIGH_WARN = 0.50
 ACCEPT_ONLY_WARNING = (
-    "样本疑似仅含已批准客群；拒绝推断未实现，效果指标存在接受偏差，"
-    "解读时注意只代表已批准人群"
+    "样本疑似仅含已批准客群；建议使用 reject_inference 工具或敏感性分析校正接受偏差，"
+    "否则效果指标只代表已批准人群"
 )
 
 _DECISION_COLUMNS = {

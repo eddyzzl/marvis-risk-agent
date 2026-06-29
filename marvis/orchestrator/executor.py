@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +16,7 @@ from marvis.orchestrator.contracts import (
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.reviewer import FinalReview
+from marvis.orchestrator.safety import is_safety_step
 from marvis.plugins.runner import ToolResult
 
 
@@ -54,6 +57,13 @@ class PlanExecutor:
         tier = resolve_tier(plan.tier)
         if plan.status in {PlanStatus.DONE, PlanStatus.FAILED, PlanStatus.CANCELLED}:
             return ExecutionResult(plan.id, plan.status, None, None)
+        if plan.status == PlanStatus.REVIEW:
+            return ExecutionResult(
+                plan.id,
+                PlanStatus.REVIEW,
+                self._repo.latest_plan_summary_ref(plan.id),
+                None,
+            )
         if plan.status not in {
             PlanStatus.CONFIRMED,
             PlanStatus.AWAITING_CONFIRM,
@@ -88,6 +98,7 @@ class PlanExecutor:
                             "type": "no_progress",
                             "reason": "failure",
                             "trigger_step_id": no_progress_step.id,
+                            "tool_ref": no_progress_step.tool_ref.label(),
                         },
                     )
                 self._set_plan_status(plan, PlanStatus.FAILED)
@@ -97,7 +108,10 @@ class PlanExecutor:
             if step is None:
                 if plan.novel_mode == "explore" and self._try_append_explore_segment(plan, tier):
                     continue
-                break
+                result = self._finalize(plan, tier)
+                if result.status == PlanStatus.RUNNING:
+                    continue
+                return result
             if step.needs_confirmation and not self._repo.is_step_confirmed(step.id):
                 self._set_step_status(step, StepStatus.AWAITING_CONFIRM)
                 self._set_plan_status(plan, PlanStatus.AWAITING_CONFIRM)
@@ -110,12 +124,9 @@ class PlanExecutor:
                 and last.status == StepStatus.DONE
                 and last.decision_point
                 and tier.decision_point_replan
-                and not _is_safety_step(last)
+                and not is_safety_step(last)
             ):
                 self._try_replan(plan, last, reason="decision_point", tier=tier)
-
-        plan = self._repo.load_plan(plan_id)
-        return self._finalize(plan)
 
     def _next_ready_step(self, plan: Plan) -> PlanStep | None:
         complete = {
@@ -135,16 +146,42 @@ class PlanExecutor:
         return None
 
     def _execute_step(self, plan: Plan, step: PlanStep) -> None:
+        run_id = None
         try:
             self._set_step_status(step, StepStatus.RUNNING)
             resolved_inputs = self._resolve_refs(step.inputs)
+            run_id = self._repo.start_step_run(
+                plan_id=plan.id,
+                step_id=step.id,
+                tool_ref=step.tool_ref.label(),
+                inputs=resolved_inputs,
+            )
             result = self._invoke_step(plan, step, resolved_inputs)
             if not result.ok:
+                self._finish_step_run(
+                    run_id,
+                    status="failed",
+                    error=result.error or "step failed",
+                    error_kind=result.error_kind,
+                    duration_ms=result.duration_ms,
+                )
                 self._handle_step_failure(step, result)
                 return
 
             output = result.output or {}
             self._set_step_status(step, StepStatus.CHECKING)
+            step.output_ref = self._repo.store_step_output(
+                step.id,
+                output,
+                evidence=self._step_evidence(step, resolved_inputs),
+            )
+            self._finish_step_run(
+                run_id,
+                status="succeeded",
+                output_ref=step.output_ref,
+                duration_ms=result.duration_ms,
+            )
+            self._repo.update_step(step)
             deterministic = self._reviewer.deterministic_check(step, output)
             step.review_verdicts.append(deterministic)
             if not deterministic.passed:
@@ -160,17 +197,37 @@ class PlanExecutor:
 
             critique = self._reviewer.llm_critique(step, output, plan.goal)
             step.review_verdicts.append(critique)
-            step.output_ref = self._repo.store_step_output(step.id, output)
             step.status = StepStatus.DONE
             self._repo.update_step(step)
-            self._dispatch_feature_computed(plan, step, output)
-            self._dispatch(
-                "step.completed",
-                {"plan_id": plan.id, "step_id": step.id},
-                task_id=plan.task_id,
-            )
+            self._dispatch_step_completed(plan, step, output)
         except Exception as exc:
+            if run_id is not None:
+                try:
+                    self._finish_step_run(
+                        run_id,
+                        status="failed",
+                        error=str(exc),
+                        error_kind=exc.__class__.__name__,
+                    )
+                except Exception as finish_exc:
+                    step.error = f"{exc}; step run finalization failed: {finish_exc}"
+                    self._set_step_status(step, StepStatus.FAILED)
+                    return
             self._handle_step_exception(step, exc)
+
+    def _finish_step_run(self, run_id: str, **kwargs) -> None:
+        self._repo.finish_step_run(run_id, **kwargs)
+
+    def _step_evidence(self, step: PlanStep, resolved_inputs: dict) -> dict:
+        seed = resolved_inputs.get("seed")
+        return {
+            "tool_name": step.tool_ref.label(),
+            "input_hash": _payload_hash(resolved_inputs),
+            "input_summary": _bounded_input_summary(resolved_inputs),
+            "parent_output_refs": _parent_output_refs(self._repo, step),
+            "random_seed": seed if isinstance(seed, int) else None,
+            "renderer_hint": step.tool_ref.tool,
+        }
 
     def _invoke_step(self, plan: Plan, step: PlanStep, resolved_inputs: dict) -> ToolResult:
         policy = self._failure_policy(step)
@@ -237,7 +294,7 @@ class PlanExecutor:
             return {key: self._resolve_value(item) for key, item in value.items()}
         return value
 
-    def _finalize(self, plan: Plan) -> ExecutionResult:
+    def _finalize(self, plan: Plan, tier: CapabilityTier) -> ExecutionResult:
         incomplete = [
             step
             for step in plan.steps
@@ -247,7 +304,6 @@ class PlanExecutor:
             self._set_plan_status(plan, PlanStatus.FAILED)
             return ExecutionResult(plan.id, PlanStatus.FAILED, None, None)
 
-        self._set_plan_status(plan, PlanStatus.REVIEW)
         outputs = {
             step.id: self._repo.load_step_output(step.id)
             for step in plan.steps
@@ -256,7 +312,15 @@ class PlanExecutor:
         review = self._reviewer.final_review(plan, outputs, plan.goal)
         summary_ref = self._repo.store_plan_summary(plan.id, review)
         if review.goal_doubt:
+            self._set_plan_status(plan, PlanStatus.REVIEW)
             return ExecutionResult(plan.id, PlanStatus.REVIEW, summary_ref, review)
+        if (
+            not review.goal_met
+            and _final_review_failure_replannable(review)
+            and self._try_final_review_replan(plan, review, tier)
+        ):
+            return ExecutionResult(plan.id, PlanStatus.RUNNING, summary_ref, review)
+        self._set_plan_status(plan, PlanStatus.REVIEW)
         final_status = PlanStatus.DONE if review.goal_met else PlanStatus.FAILED
         self._set_plan_status(plan, final_status)
         self._dispatch(
@@ -267,11 +331,95 @@ class PlanExecutor:
         return ExecutionResult(plan.id, final_status, summary_ref, review)
 
     def _recover_inflight_steps(self, plan: Plan) -> None:
+        running_runs: dict[str, list[dict]] = {}
+        for run in self._repo.list_running_step_runs(plan.id):
+            running_runs.setdefault(str(run["step_id"]), []).append(run)
         for step in plan.steps:
-            if step.status in {StepStatus.RUNNING, StepStatus.CHECKING}:
-                step.status = StepStatus.PENDING
-                step.error = None
-                self._repo.update_step(step)
+            step_runs = running_runs.get(step.id, [])
+            if step.status == StepStatus.RUNNING:
+                latest_output_ref = step.output_ref or (
+                    self._repo.latest_step_output_ref(step.id) if step_runs else None
+                )
+                if latest_output_ref:
+                    step.output_ref = latest_output_ref
+                    self._recover_step_runs(
+                        step_runs,
+                        status="succeeded",
+                        output_ref=latest_output_ref,
+                    )
+                    self._recover_checking_step(plan, step)
+                    continue
+                step.error = (
+                    "interrupted during running before output was persisted; "
+                    "explicit retry required"
+                )
+                self._recover_step_runs(
+                    step_runs,
+                    status="interrupted",
+                    error=step.error,
+                    error_kind="ServerRestart",
+                )
+                self._set_step_status(step, StepStatus.FAILED)
+            elif step.status == StepStatus.CHECKING:
+                latest_output_ref = step.output_ref or (
+                    self._repo.latest_step_output_ref(step.id) if step_runs else None
+                ) or (
+                    self._repo.latest_succeeded_step_run_output_ref(step.id)
+                )
+                if latest_output_ref:
+                    step.output_ref = latest_output_ref
+                    self._recover_step_runs(
+                        step_runs,
+                        status="succeeded",
+                        output_ref=latest_output_ref,
+                    )
+                else:
+                    self._recover_step_runs(
+                        step_runs,
+                        status="interrupted",
+                        error="interrupted during checking before output was persisted",
+                        error_kind="ServerRestart",
+                    )
+                self._recover_checking_step(plan, step)
+
+    def _recover_step_runs(self, runs: list[dict], **kwargs) -> None:
+        for run in runs:
+            run_id = str(run.get("id") or "")
+            if run_id:
+                try:
+                    self._finish_step_run(run_id, **kwargs)
+                except Exception:
+                    continue
+
+    def _recover_checking_step(self, plan: Plan, step: PlanStep) -> None:
+        version = _step_output_version(step)
+        if version is None:
+            step.error = "interrupted during checking before output was persisted"
+            self._set_step_status(step, StepStatus.FAILED)
+            return
+        try:
+            output = self._repo.load_step_output(step.id, version=version)
+        except KeyError:
+            step.error = "interrupted during checking before output was persisted"
+            self._set_step_status(step, StepStatus.FAILED)
+            return
+        deterministic = self._reviewer.deterministic_check(step, output)
+        step.review_verdicts.append(deterministic)
+        if not deterministic.passed:
+            failed = ToolResult(
+                ok=False,
+                output=None,
+                error="; ".join(deterministic.reasons),
+                error_kind="postcheck",
+                duration_ms=0,
+            )
+            self._handle_step_failure(step, failed, apply_policy=False)
+            return
+        critique = self._reviewer.llm_critique(step, output, plan.goal)
+        step.review_verdicts.append(critique)
+        step.status = StepStatus.DONE
+        self._repo.update_step(step)
+        self._dispatch_step_completed(plan, step, output)
 
     def _failure_policy(self, step: PlanStep) -> str:
         tools = getattr(self._runner, "_tools", None)
@@ -302,6 +450,18 @@ class PlanExecutor:
             if field in output:
                 payload[field] = output[field]
         self._dispatch("feature.computed", payload, task_id=plan.task_id)
+
+    def _dispatch_step_completed(self, plan: Plan, step: PlanStep, output: dict) -> None:
+        self._dispatch_feature_computed(plan, step, output)
+        self._dispatch(
+            "step.completed",
+            {
+                "plan_id": plan.id,
+                "step_id": step.id,
+                **_review_warning_payload(step),
+            },
+            task_id=plan.task_id,
+        )
 
     def _should_failure_replan(
         self,
@@ -344,6 +504,7 @@ class PlanExecutor:
                     "type": "replan",
                     "reason": reason,
                     "trigger_step_id": trigger_step.id,
+                    "tool_ref": trigger_step.tool_ref.label(),
                 },
             )
             self._dispatch(
@@ -357,6 +518,50 @@ class PlanExecutor:
             # planner cannot replan — that is NOT a flow error; swallow it and let the plan
             # continue to its confirmation gate. PlanningError covers ReplanError + invalid
             # replans; LLMSettingsError covers "no enabled model".
+            return False
+
+    def _try_final_review_replan(
+        self,
+        plan: Plan,
+        review: FinalReview,
+        tier: CapabilityTier,
+    ) -> bool:
+        if self._planner is None or not tier.decision_point_replan:
+            return False
+        if plan.replan_count >= tier.max_replan_iterations:
+            return False
+        trigger = _last_executed_step(plan)
+        if trigger is None:
+            return False
+        try:
+            new_plan = self._planner.replan(
+                plan,
+                completed_summaries=self._summaries(plan),
+                observation={
+                    "reason": "final_review",
+                    "summary": review.summary,
+                    "open_items": review.open_items,
+                    "goal_met": review.goal_met,
+                },
+                reason="final_review",
+                tier=tier,
+            )
+            self._repo.replace_remaining_steps(
+                plan.id,
+                new_plan,
+                loop_event={
+                    "type": "replan",
+                    "reason": "final_review",
+                    "trigger_step_id": trigger.id,
+                },
+            )
+            self._dispatch(
+                "plan.replanned",
+                {"plan_id": plan.id, "reason": "final_review", "trigger_step_id": trigger.id},
+                task_id=plan.task_id,
+            )
+            return True
+        except (KeyError, PlanningError, LLMSettingsError):
             return False
 
     def replan_from_instruction(self, plan_id: str, instruction: str) -> bool:
@@ -512,11 +717,73 @@ def _dig(value: dict, path: str):
     return current
 
 
+def _payload_hash(payload: dict) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _bounded_input_summary(payload: dict) -> dict:
+    summary = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[key] = value
+        elif isinstance(value, list):
+            summary[key] = {"type": "list", "len": len(value), "sample": value[:5]}
+        elif isinstance(value, dict):
+            summary[key] = {"type": "dict", "keys": sorted(str(item) for item in value.keys())[:20]}
+        else:
+            summary[key] = {"type": type(value).__name__}
+    return summary
+
+
+def _parent_output_refs(repo, step: PlanStep) -> list[str]:
+    refs = []
+    for dep_id in step.depends_on:
+        try:
+            ref = repo.latest_step_output_ref(dep_id)
+        except Exception:
+            ref = None
+        if ref:
+            refs.append(ref)
+    return refs
+
+
 def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
     for step in plan.steps:
         if step.id == step_id:
             return step
     return None
+
+
+def _last_executed_step(plan: Plan) -> PlanStep | None:
+    executed = [
+        step
+        for step in plan.steps
+        if step.status in {StepStatus.DONE, StepStatus.SKIPPED}
+    ]
+    return max(executed, key=lambda step: (step.index, step.id), default=None)
+
+
+def _review_warning_payload(step: PlanStep) -> dict[str, Any]:
+    warnings = [
+        {
+            "reviewer": verdict.reviewer,
+            "reasons": list(verdict.reasons),
+        }
+        for verdict in step.review_verdicts
+        if not verdict.passed
+    ]
+    return {
+        "review_warning_count": len(warnings),
+        "review_warnings": warnings,
+    }
+
+
+def _final_review_failure_replannable(review: FinalReview) -> bool:
+    return not any(
+        "invalid " in item and " threshold" in item
+        for item in review.open_items
+    )
 
 
 def _has_deterministic_failure(step: PlanStep) -> bool:
@@ -528,10 +795,23 @@ def _has_deterministic_failure(step: PlanStep) -> bool:
 
 def _is_fatal_error(error: str | None) -> bool:
     lowered = str(error or "").lower()
-    return "schema" in lowered or "contract" in lowered
+    return any(
+        marker in lowered
+        for marker in (
+            "schema",
+            "contract",
+            "explicit retry required",
+            "interrupted during running",
+        )
+    )
 
 
-def _is_safety_step(step: PlanStep) -> bool:
-    if step.tool_ref.tool == "execute_join":
-        return True
-    return any(check.kind == "range" for check in step.post_checks)
+def _step_output_version(step: PlanStep) -> int | None:
+    ref = str(step.output_ref or "")
+    prefix = f"metrics:{step.id}:v"
+    if not ref.startswith(prefix):
+        return None
+    version_text = ref[len(prefix):]
+    if not version_text.isdigit():
+        return None
+    return int(version_text)

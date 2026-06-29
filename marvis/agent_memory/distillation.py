@@ -248,7 +248,7 @@ def build_distill_prompt(category: str, scope_key: str, members: list[Any], stru
 def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dict:
     metrics = {}
     for metric in ("ks", "auc", "psi"):
-        values = [float(payload[metric]) for payload in payloads if payload.get(metric) is not None]
+        values = _numeric_metric_values(payloads, metric)
         if values:
             metrics[metric] = {"min": min(values), "max": max(values)}
     return {
@@ -259,6 +259,19 @@ def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dic
         "source_task_ids": sorted({str(payload.get("source_task_id")) for payload in payloads if payload.get("source_task_id")}),
         "support": support,
     }
+
+
+def _numeric_metric_values(payloads: list[dict[str, Any]], metric: str) -> list[float]:
+    values = []
+    for payload in payloads:
+        value = payload.get(metric)
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return values
 
 
 def _template_summary(category: str, structured: dict) -> str:

@@ -9,6 +9,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 
@@ -24,6 +25,26 @@ _MODEL_SUFFIX = {
 }
 
 
+def write_artifact_file(
+    out_dir: Path,
+    filename: str,
+    writer,
+    *,
+    validator=None,
+) -> Path:
+    artifact = TransactionalArtifactStore(Path(out_dir)).stage(filename)
+    try:
+        writer(artifact.path)
+        if validator is not None:
+            validator(artifact.path)
+        final_path = artifact.promote()
+        artifact.commit()
+        return final_path
+    except Exception:
+        artifact.rollback()
+        raise
+
+
 def save_model(
     model,
     algorithm: str,
@@ -32,6 +53,7 @@ def save_model(
     feature_list,
     params,
     woe_maps=None,
+    scorecard_table=None,
 ) -> ModelArtifact:
     algorithm = str(algorithm)
     if algorithm not in _MODEL_SUFFIX:
@@ -40,24 +62,22 @@ def save_model(
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}{_MODEL_SUFFIX[algorithm]}"
-    target = out_dir / model_path
     if algorithm in {"lgb", "xgb", "catboost"}:
-        joblib.dump(model, target)
+        write_artifact_file(out_dir, model_path, lambda path: joblib.dump(model, path))
     elif algorithm == "lgb_regressor":
-        model.save_model(target)
+        write_artifact_file(out_dir, model_path, model.save_model)
     elif algorithm == "scorecard" and not isinstance(model, dict):
-        joblib.dump(
-            {
-                "model": model,
-                "woe_maps": woe_maps or {},
-                "params": dict(params),
-                "features": tuple(feature_list),
-            },
-            target,
-        )
+        payload = {
+            "model": model,
+            "woe_maps": woe_maps or {},
+            "params": dict(params),
+            "features": tuple(feature_list),
+            "scorecard_table": list(scorecard_table or []),
+        }
+        write_artifact_file(out_dir, model_path, lambda path: joblib.dump(payload, path))
     else:
-        joblib.dump(model, target)
-    return ModelArtifact(
+        write_artifact_file(out_dir, model_path, lambda path: joblib.dump(model, path))
+    artifact = ModelArtifact(
         id=artifact_id,
         experiment_id="",
         algorithm=algorithm,
@@ -67,7 +87,75 @@ def save_model(
         params=dict(params),
         woe_maps=woe_maps,
         created_at=datetime.now(UTC).isoformat(),
+        scorecard_table=tuple(dict(item) for item in (scorecard_table or [])),
     )
+    persist_model_meta(out_dir, artifact)
+    return artifact
+
+
+def persist_model_meta(out_dir: Path, artifact: ModelArtifact, *, config=None) -> Path:
+    out_dir = Path(out_dir)
+    meta = {
+        "artifact_id": artifact.id,
+        "algorithm": artifact.algorithm,
+        "model_path": artifact.model_path,
+        "pmml_path": artifact.pmml_path,
+        "feature_list": list(artifact.feature_list),
+        "params": _jsonable(artifact.params),
+        "seed": _config_seed(config) if config is not None else _seed_from_params(artifact.params),
+        "dataset_id": getattr(config, "dataset_id", None),
+        "target_col": getattr(config, "target_col", None),
+        "split_col": getattr(config, "split_col", None),
+        "split_values": _jsonable(getattr(config, "split_values", None)),
+        "target_type": getattr(config, "target_type", None),
+        "recipe_id": getattr(config, "recipe_id", None),
+        "scorecard_table": _jsonable(artifact.scorecard_table),
+        "created_at": artifact.created_at,
+    }
+    meta_path = out_dir / f"{artifact.id}.model_meta.json"
+    payload = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False, default=str)
+    store = TransactionalArtifactStore(out_dir)
+    staged = [store.stage(meta_path.name), store.stage("model_meta.json")]
+    try:
+        for artifact_file in staged:
+            artifact_file.path.write_text(payload + "\n", encoding="utf-8")
+        for artifact_file in staged:
+            artifact_file.promote()
+        for artifact_file in staged:
+            artifact_file.commit()
+    except Exception:
+        for artifact_file in reversed(staged):
+            artifact_file.rollback()
+        raise
+    return meta_path
+
+
+def _config_seed(config) -> int | None:
+    value = getattr(config, "seed", None)
+    return int(value) if value is not None else None
+
+
+def _seed_from_params(params: dict) -> int | None:
+    for key in ("seed", "random_state", "random_seed"):
+        value = dict(params or {}).get(key)
+        if value not in (None, ""):
+            return int(value)
+    return None
+
+
+def _jsonable(value):
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+    return value
 
 
 def load_model(artifact: ModelArtifact, *, base_dir: Path):
@@ -103,6 +191,7 @@ def export_pmml(
     out_path: Path,
     *,
     base_dir: Path,
+    target_col: str | None = None,
 ) -> Path:
     if artifact.algorithm not in {"lr", "lgb", "xgb", "scorecard"}:
         raise ModelingError(f"PMML export is not supported for algorithm: {artifact.algorithm}")
@@ -114,7 +203,12 @@ def export_pmml(
 
     model = load_model(artifact, base_dir=base_dir)
     schema_sample = _read_schema_sample(Path(dataset_path), list(artifact.feature_list))
-    target_name = _target_name(Path(dataset_path), list(artifact.feature_list))
+    target_name = _target_name(
+        Path(dataset_path),
+        list(artifact.feature_list),
+        target_col=target_col,
+        ignored_fields=_pmml_ignored_fields(artifact),
+    )
     if artifact.algorithm == "scorecard":
         pipeline = _scorecard_pmml_pipeline(
             model,
@@ -123,16 +217,23 @@ def export_pmml(
             schema_sample,
         )
     else:
+        if not (hasattr(model, "fit") and (hasattr(model, "predict_proba") or hasattr(model, "predict"))):
+            raise ModelingError(
+                "PMML export requires a sklearn-compatible fitted model object; "
+                "native LightGBM/XGBoost Booster artifacts require a dedicated JPMML export path."
+            )
         pipeline = make_pmml_pipeline(
             model,
             active_fields=list(artifact.feature_list),
             target_fields=[target_name],
         )
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    sklearn2pmml(pipeline, out_path.as_posix(), with_repr=True)
-    Model.load(out_path.as_posix())
-    return out_path
+    return write_artifact_file(
+        out_path.parent,
+        out_path.name,
+        lambda path: sklearn2pmml(pipeline, path.as_posix(), with_repr=True),
+        validator=lambda path: Model.load(path.as_posix()),
+    )
 
 
 def _scorecard_pmml_pipeline(
@@ -222,7 +323,16 @@ def _read_schema_sample(path: Path, columns: list[str]) -> pd.DataFrame:
     raise ModelingError(f"unsupported dataset format for PMML export: {path.suffix}")
 
 
-def _target_name(path: Path, feature_list: list[str]) -> str:
+def _target_name(
+    path: Path,
+    feature_list: list[str],
+    *,
+    target_col: str | None = None,
+    ignored_fields: set[str] | None = None,
+) -> str:
+    explicit = str(target_col or "").strip()
+    if explicit:
+        return explicit
     suffix = path.suffix.lower()
     if suffix == ".parquet":
         columns = list(pd.read_parquet(path).columns)
@@ -231,7 +341,16 @@ def _target_name(path: Path, feature_list: list[str]) -> str:
     else:
         return "target"
     features = set(feature_list)
-    return next((column for column in columns if column not in features), "target")
+    ignored = set(ignored_fields or set())
+    ignored.update({"split", "model_flag", "sample_weight", "weight"})
+    return next((column for column in columns if column not in features and column not in ignored), "target")
 
 
-__all__ = ["export_pmml", "load_model", "save_model"]
+def _pmml_ignored_fields(artifact: ModelArtifact) -> set[str]:
+    params = dict(artifact.params or {})
+    ignored = {str(params.get(key) or "").strip() for key in ("sample_weight_col", "split_col")}
+    ignored.update(str(item or "").strip() for item in params.get("passthrough_cols") or [])
+    return {item for item in ignored if item}
+
+
+__all__ = ["export_pmml", "load_model", "persist_model_meta", "save_model", "write_artifact_file"]

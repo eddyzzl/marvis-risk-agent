@@ -1,5 +1,6 @@
 import pytest
 
+import marvis.db as db_module
 from marvis.db import TaskRepository, _ensure_column, connect, init_db
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
@@ -211,6 +212,60 @@ def test_update_report_values_merges_and_increments_revision(tmp_path):
     assert repo.get_task(task.id).report_values_revision == 1
 
 
+def test_update_report_values_with_audit_records_changed_keys(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+
+    revision = repo.update_report_values_with_audit(
+        task.id,
+        {"TEXT:report_title": "新标题"},
+        expected_revision=0,
+        audit={
+            "kind": "report.values.update",
+            "target_ref": task.id,
+            "outcome": "succeeded",
+            "detail": {"keys": ["TEXT:report_title"], "expected_revision": 0},
+        },
+    )
+
+    assert revision == 1
+    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "新标题"}, 1)
+    audit = db_module.PluginRepository(db_path).list_audit(kind="report.values.update")[0]
+    assert audit["target_ref"] == task.id
+    assert audit["detail"]["keys"] == ["TEXT:report_title"]
+
+
+def test_update_report_values_with_audit_rolls_back_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.update_report_values_with_audit(
+            task.id,
+            {"TEXT:report_title": "新标题"},
+            expected_revision=0,
+            audit={
+                "kind": "report.values.update",
+                "target_ref": task.id,
+                "outcome": "succeeded",
+            },
+        )
+
+    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "旧标题"}, 0)
+
+
 def test_update_report_values_rejects_conflict(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -292,6 +347,40 @@ def test_update_agent_report_conclusions_allows_only_final_three_keys(tmp_path):
         )
 
 
+def test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(run_mode="agent"))
+    values = {
+        "TEXT:pressure_test_summary": "压力测试显示整体稳定。",
+        "TEXT:pressure_impact_recommendation": "建议持续监控关键数据源。",
+        "TEXT:final_validation_conclusion": "从当前验证结果看，模型可复现性、区分效果和稳定性整体满足验证要求。",
+    }
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.update_agent_report_conclusions_with_audit(
+            task.id,
+            values,
+            expected_revision=0,
+            audit={
+                "kind": "report.agent_conclusions.confirm",
+                "target_ref": task.id,
+                "outcome": "succeeded",
+            },
+        )
+
+    assert repo.get_report_values(task.id) == ({}, 0)
+
+
 def test_agent_messages_round_trip_with_metadata(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -318,6 +407,23 @@ def test_agent_messages_round_trip_with_metadata(tmp_path):
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["metadata"]["model_id"] == "m1"
     assert messages[1]["metadata"]["checks"] == 4
+
+
+def test_agent_messages_can_list_after_cursor(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(run_mode="agent"))
+
+    first = repo.add_agent_message(task.id, role="user", stage="chat", content="first")
+    second = repo.add_agent_message(task.id, role="assistant", stage="scan", content="second")
+    third = repo.add_agent_message(task.id, role="assistant", stage="scan", content="third")
+
+    messages = repo.list_agent_messages(task.id, after_id=first["id"])
+
+    assert [message["id"] for message in messages] == [second["id"], third["id"]]
+    assert repo.has_agent_message(task.id, first["id"]) is True
+    assert repo.has_agent_message(task.id, "missing-message") is False
 
 
 def test_agent_message_can_be_updated_for_streaming_chunks(tmp_path):

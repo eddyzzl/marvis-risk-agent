@@ -392,6 +392,17 @@ def test_draft_handlers_load_run_promote_reject_and_validate_json_inputs():
         });
         assert.ok(messages.at(-1).includes("JSON 格式无效"));
 
+        runInputs.value = "[]";
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-run-draft]" ? { dataset: { runDraft: "draft-1" } } : null;
+            },
+          },
+          preventDefault() {},
+        });
+        assert.ok(messages.at(-1).includes("运行输入必须是 JSON 对象"));
+
         detach();
         assert.equal(listeners.click, undefined);
         assert.equal(listeners.change, undefined);

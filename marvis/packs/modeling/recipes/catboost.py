@@ -9,6 +9,7 @@ import numpy as np
 from catboost import CatBoostClassifier
 
 from marvis.data.labels import resolve_modeling_splits
+from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
@@ -75,8 +76,8 @@ def _save_catboost_model(
     out_dir.mkdir(parents=True, exist_ok=True)
     artifact_id = f"artifact_{uuid.uuid4().hex}"
     model_path = f"{artifact_id}.pkl"
-    joblib.dump(model, out_dir / model_path)
-    return ModelArtifact(
+    write_artifact_file(out_dir, model_path, lambda path: joblib.dump(model, path))
+    artifact = ModelArtifact(
         id=artifact_id,
         experiment_id="",
         algorithm="catboost",
@@ -87,6 +88,8 @@ def _save_catboost_model(
         woe_maps=None,
         created_at=datetime.now(UTC).isoformat(),
     )
+    persist_model_meta(out_dir, artifact, config=config)
+    return artifact
 
 
 def _catboost_importance(

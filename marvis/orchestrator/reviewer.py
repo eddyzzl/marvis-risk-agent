@@ -7,6 +7,7 @@ import operator
 import re
 from typing import Any
 
+from marvis.agent.json_reply import load_json_object
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStep,
@@ -51,22 +52,34 @@ class Reviewer:
 
     def llm_critique(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict:
         try:
+            prompt = json.dumps(
+                {
+                    "goal": goal,
+                    "step": step.title,
+                    "output_summary": _summarize_output(output),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             raw = self._llm_factory().complete(
                 system_prompt=CRITIC_SYS,
-                user_prompt=json.dumps(
-                    {
-                        "goal": goal,
-                        "step": step.title,
-                        "output_summary": _summarize_output(output),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+                user_prompt=prompt,
                 stream=False,
             )
-            passed, reasons = _parse_soft_verdict(str(raw))
+            passed, reasons, ok = _parse_soft_verdict(raw)
+            if not ok:
+                raw = self._llm_factory().complete(
+                    system_prompt=CRITIC_SYS,
+                    user_prompt=_retry_json_prompt(
+                        prompt,
+                        raw,
+                        '{"passed": true|false, "reasons": ["..."]}',
+                    ),
+                    stream=False,
+                )
+                passed, reasons, _ok = _parse_soft_verdict(raw)
         except Exception as exc:
-            passed, reasons = True, [f"llm critique unavailable: {exc}"]
+            passed, reasons = False, [f"llm critique unavailable: {exc}"]
         return ReviewVerdict(
             reviewer="llm_critic",
             passed=passed,
@@ -80,11 +93,14 @@ class Reviewer:
             for step in plan.steps
             if step.status not in {StepStatus.DONE, StepStatus.SKIPPED}
         ]
+        criteria_failures = _evaluate_success_criteria(plan.success_criteria, outputs)
         summary, llm_items, goal_doubt = self._llm_summarize(goal, plan, outputs)
+        if criteria_failures:
+            summary = f"{summary} 成功标准未达成: {'; '.join(criteria_failures)}"
         return FinalReview(
-            goal_met=not incomplete,
+            goal_met=not incomplete and not criteria_failures and not goal_doubt,
             summary=summary,
-            open_items=incomplete + llm_items,
+            open_items=incomplete + criteria_failures + llm_items,
             goal_doubt=goal_doubt,
         )
 
@@ -95,24 +111,36 @@ class Reviewer:
         outputs: dict[str, dict],
     ) -> tuple[str, list[str], bool]:
         try:
+            prompt = json.dumps(
+                {
+                    "goal": goal,
+                    "plan_id": plan.id,
+                    "step_count": len(plan.steps),
+                    "outputs": _summarize_output(outputs),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             raw = self._llm_factory().complete(
                 system_prompt=CRITIC_SYS,
-                user_prompt=json.dumps(
-                    {
-                        "goal": goal,
-                        "plan_id": plan.id,
-                        "step_count": len(plan.steps),
-                        "outputs": _summarize_output(outputs),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
+                user_prompt=prompt,
                 stream=False,
             )
-            data = json.loads(str(raw))
+            data, error = load_json_object(raw)
+            if data is None:
+                raw = self._llm_factory().complete(
+                    system_prompt=CRITIC_SYS,
+                    user_prompt=_retry_json_prompt(
+                        prompt,
+                        raw,
+                        '{"summary": "...", "open_items": [], "goal_doubt": false}',
+                    ),
+                    stream=False,
+                )
+                data, error = load_json_object(raw)
         except Exception:
             return "Plan execution reviewed.", [], False
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or error is not None:
             return "Plan execution reviewed.", [], False
         summary = str(data.get("summary") or "Plan execution reviewed.")
         open_items = [
@@ -233,19 +261,26 @@ def _dig(value: dict, path: str):
     return current
 
 
-def _parse_soft_verdict(raw: str) -> tuple[bool, list[str]]:
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return True, ["llm critique returned non-json"]
+def _retry_json_prompt(original_prompt: str, raw_reply, expected_shape: str) -> str:
+    return (
+        f"{original_prompt}\n\n"
+        f"Previous reply was not parseable JSON:\n{raw_reply}\n\n"
+        f"Return only a JSON object matching this shape: {expected_shape}"
+    )
+
+
+def _parse_soft_verdict(raw) -> tuple[bool, list[str], bool]:
+    data, error = load_json_object(raw)
+    if data is None:
+        return False, ["llm critique returned non-json"], False
     if not isinstance(data, dict):
-        return True, ["llm critique returned non-object"]
+        return False, ["llm critique returned non-object"], False
     reasons = [
         str(item)
         for item in data.get("reasons") or []
         if isinstance(item, str)
     ]
-    return bool(data.get("passed", True)), reasons
+    return bool(data.get("passed", True)), reasons, error is None
 
 
 def _summarize_output(output) -> dict:
@@ -262,6 +297,87 @@ def _summarize_output(output) -> dict:
         else:
             summary[key] = {"type": type(value).__name__}
     return summary
+
+
+def _evaluate_success_criteria(
+    criteria: list[dict[str, Any]],
+    outputs: dict[str, dict],
+) -> list[str]:
+    failures: list[str] = []
+    observed_target_type = _first_metric_value(outputs, "target_type")
+    for criterion in criteria or []:
+        if not isinstance(criterion, dict):
+            continue
+        target_type = str(criterion.get("target_type") or "").strip()
+        if (
+            target_type
+            and observed_target_type is not None
+            and str(observed_target_type) != target_type
+        ):
+            continue
+        metric = str(criterion.get("metric") or criterion.get("field") or "").strip()
+        if not metric:
+            continue
+        values = _numeric_metric_values(outputs, metric)
+        label = str(criterion.get("label") or metric)
+        if not values:
+            failures.append(f"{label} missing for success criterion")
+            continue
+        aggregate = str(criterion.get("aggregate") or "max").lower()
+        value = min(values) if aggregate == "min" else max(values)
+        minimum, min_error = _coerce_threshold(criterion.get("min"), label, "min")
+        maximum, max_error = _coerce_threshold(criterion.get("max"), label, "max")
+        if min_error or max_error:
+            failures.extend(item for item in (min_error, max_error) if item)
+            continue
+        if minimum is not None and value < minimum:
+            failures.append(f"{label}={value:.4g} < {minimum:.4g}")
+        if maximum is not None and value > maximum:
+            failures.append(f"{label}={value:.4g} > {maximum:.4g}")
+    return failures
+
+
+def _coerce_threshold(
+    raw_value: Any,
+    label: str,
+    threshold_name: str,
+) -> tuple[float | None, str | None]:
+    if raw_value is None:
+        return None, None
+    try:
+        return float(raw_value), None
+    except (TypeError, ValueError):
+        return None, f"{label} invalid {threshold_name} threshold: {raw_value!r}"
+
+
+def _numeric_metric_values(value, metric: str) -> list[float]:
+    values: list[float] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == metric and isinstance(item, (int, float)) and not isinstance(item, bool):
+                values.append(float(item))
+            else:
+                values.extend(_numeric_metric_values(item, metric))
+    elif isinstance(value, list | tuple):
+        for item in value:
+            values.extend(_numeric_metric_values(item, metric))
+    return values
+
+
+def _first_metric_value(value, metric: str):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == metric:
+                return item
+            found = _first_metric_value(item, metric)
+            if found is not None:
+                return found
+    elif isinstance(value, list | tuple):
+        for item in value:
+            found = _first_metric_value(item, metric)
+            if found is not None:
+                return found
+    return None
 
 
 def _now_iso() -> str:

@@ -4,6 +4,7 @@ import pytest
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
+import marvis.db as db_module
 from marvis.packs.modeling.prepare import ModelingError, _make_split, prepare_modeling_frame
 
 
@@ -51,10 +52,48 @@ def test_prepare_modeling_frame_uses_existing_split_and_selected_columns(tmp_pat
         seed=3,
     )
     out = backend.read_frame(registry.resolve_path(result.id))
+    result_path = registry.resolve_path(result.id)
 
     assert result.role == "derived"
+    assert result_path.parent.name == "modeling"
+    assert not (result_path.parent / ".staging").exists()
     assert list(out.columns) == ["x1", "x2", "y", "split"]
     assert out["split"].tolist() == ["train", "train", "test", "oot"]
+
+
+def test_prepare_modeling_frame_audit_failure_rolls_back_dataset_and_file(tmp_path, monkeypatch):
+    frame = pd.DataFrame({
+        "x1": [1, 2, 3, 4],
+        "x2": [10, 20, 30, 40],
+        "y": [0, 1, 0, 1],
+        "split": ["train", "train", "test", "oot"],
+    })
+    backend, registry, dataset = _register_frame(tmp_path, frame)
+    original_write_audit = db_module._write_audit_row
+
+    def fail_modeling_dataset_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.dataset.derived":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_modeling_dataset_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        prepare_modeling_frame(
+            registry,
+            backend,
+            dataset.id,
+            target_col="y",
+            feature_cols=["x1", "x2"],
+            split_col="split",
+            split_config=None,
+            seed=3,
+            audit_kind="modeling.dataset.derived",
+        )
+
+    assert [stored.id for stored in registry.list_for_task("task-1")] == [dataset.id]
+    assert not list((tmp_path / "datasets" / "task-1" / "modeling").glob("*.parquet"))
+    assert not (tmp_path / "datasets" / "task-1" / "modeling" / ".staging").exists()
 
 
 def test_prepare_modeling_frame_auto_split_is_seed_reproducible(tmp_path):

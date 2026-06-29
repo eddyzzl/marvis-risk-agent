@@ -62,26 +62,26 @@ def _allocate_strata(n: int, sizes: list[int]) -> list[int]:
     total = sum(sizes)
     if total == 0:
         return [0 for _ in sizes]
-    allocations = [min(size, max(1, round(n * size / total))) for size in sizes]
-    while sum(allocations) > n:
-        candidates = [
-            index
-            for index, allocation in enumerate(allocations)
-            if allocation > 1
-        ]
+    target = min(int(n), total)
+    allocations = [0 for _ in sizes]
+    positive = [index for index, size in enumerate(sizes) if size > 0]
+    if target >= len(positive):
+        for index in positive:
+            allocations[index] = 1
+    else:
+        for index in sorted(positive, key=lambda item: (-sizes[item], item))[:target]:
+            allocations[index] = 1
+        return allocations
+
+    raw = [target * size / total for size in sizes]
+    while sum(allocations) < target:
+        candidates = [index for index, size in enumerate(sizes) if allocations[index] < size]
         if not candidates:
             break
-        index = max(candidates, key=lambda item: allocations[item])
-        allocations[index] -= 1
-    while sum(allocations) < n:
-        candidates = [
-            index
-            for index, size in enumerate(sizes)
-            if allocations[index] < size
-        ]
-        if not candidates:
-            break
-        index = max(candidates, key=lambda item: sizes[item] - allocations[item])
+        index = max(
+            candidates,
+            key=lambda item: (raw[item] - allocations[item], sizes[item] - allocations[item], -item),
+        )
         allocations[index] += 1
     return allocations
 

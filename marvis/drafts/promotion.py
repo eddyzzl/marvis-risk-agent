@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from marvis.artifacts import TransactionalDirectoryStore
 from marvis.drafts.contracts import DraftTool, PromotionCheck
 from marvis.drafts.errors import PromotionError
+from marvis.plugins.errors import DuplicatePluginError, PluginNotFoundError
 from marvis.plugins.loader import compute_checksum
 from marvis.plugins.manifest import PluginManifest, ToolSpec, manifest_to_dict
 
@@ -57,30 +59,103 @@ def promote_draft(
     if not check.passed:
         raise PromotionError(f"cannot promote: {', '.join(check.problems)}")
     plugin_name = _plugin_name(draft)
-    dest = Path(plugins_dir) / plugin_name
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / "__init__.py").write_text("", encoding="utf-8")
-    (dest / "tools.py").write_text(draft.code, encoding="utf-8")
-    manifest = _manifest_from_draft(draft, plugin_name, checksum=compute_checksum(dest))
-    (dest / "manifest.json").write_text(
+    plugins_root = Path(plugins_dir)
+    staged = TransactionalDirectoryStore(plugins_root).stage(plugin_name)
+    staged.path.mkdir(parents=True, exist_ok=False)
+    (staged.path / "__init__.py").write_text("", encoding="utf-8")
+    (staged.path / "tools.py").write_text(draft.code, encoding="utf-8")
+    manifest = _manifest_from_draft(draft, plugin_name, checksum=compute_checksum(staged.path))
+    _raise_if_duplicate_same_version(registry, manifest)
+    (staged.path / "manifest.json").write_text(
         _manifest_json(manifest),
         encoding="utf-8",
     )
-    registry.register(manifest, enabled=True)
-    drafts.set_status(draft.id, "promoted")
-    if hasattr(registry, "_repo"):
-        registry._repo.write_audit(
-            kind="draft.promote",
-            target_ref=draft.id,
-            outcome="succeeded",
-            detail={"plugin": manifest.name, "tests": check.test_result},
+    try:
+        staged.activate()
+        _register_promoted_draft(
+            registry=registry,
+            drafts=drafts,
+            manifest=manifest,
+            draft=draft,
+            check=check,
         )
+        staged.commit()
+    except Exception:
+        staged.rollback()
+        raise
     return manifest
 
 
+def _register_promoted_draft(
+    *,
+    registry,
+    drafts,
+    manifest: PluginManifest,
+    draft: DraftTool,
+    check: PromotionCheck,
+) -> None:
+    plugin_audit = {
+        "kind": "plugin.register",
+        "target_ref": manifest.name,
+        "outcome": "succeeded",
+        "detail": {
+            "version": manifest.version,
+            "builtin": manifest.builtin,
+            "enabled": True,
+        },
+    }
+    audit = {
+        "kind": "draft.promote",
+        "target_ref": draft.id,
+        "outcome": "succeeded",
+        "detail": {"plugin": manifest.name, "tests": check.test_result},
+    }
+    registry_repo = getattr(registry, "_repo", None)
+    drafts_repo = getattr(drafts, "_repo", None)
+    promote_with_audits = getattr(registry_repo, "promote_draft_with_plugin_audits", None)
+    if (
+        callable(promote_with_audits)
+        and getattr(registry_repo, "db_path", None) == getattr(drafts_repo, "db_path", None)
+        and hasattr(registry, "_plugins")
+    ):
+        promote_with_audits(
+            manifest,
+            enabled=True,
+            draft_id=draft.id,
+            plugin_audit=plugin_audit,
+            draft_audit=audit,
+        )
+        registry._plugins[manifest.name] = (manifest, True)
+        return
+
+    registry.register(manifest, enabled=True)
+    set_status_with_audit = getattr(drafts, "set_status_with_audit", None)
+    if callable(set_status_with_audit):
+        set_status_with_audit(draft.id, "promoted", audit=audit)
+    else:
+        drafts.set_status(draft.id, "promoted")
+        if hasattr(registry, "_repo"):
+            registry._repo.write_audit(
+                kind="draft.promote",
+                target_ref=draft.id,
+                outcome="succeeded",
+                detail={"plugin": manifest.name, "tests": check.test_result},
+            )
+
+
 def reject_draft(draft: DraftTool, *, drafts, reason: str, audit_repo=None) -> None:
-    drafts.set_status(draft.id, "rejected")
-    if audit_repo is not None:
+    audit = {
+        "kind": "draft.reject",
+        "target_ref": draft.id,
+        "outcome": "succeeded",
+        "detail": {"reason": str(reason)},
+    }
+    set_status_with_audit = getattr(drafts, "set_status_with_audit", None)
+    if callable(set_status_with_audit):
+        set_status_with_audit(draft.id, "rejected", audit=audit)
+    else:
+        drafts.set_status(draft.id, "rejected")
+    if audit_repo is not None and not callable(set_status_with_audit):
         audit_repo.write_audit(
             kind="draft.reject",
             target_ref=draft.id,
@@ -129,6 +204,15 @@ def _plugin_name(draft: DraftTool) -> str:
     if not name or not re.match(r"^[A-Za-z_]", name):
         name = f"draft_{name}"
     return name[:64]
+
+
+def _raise_if_duplicate_same_version(registry, manifest: PluginManifest) -> None:
+    try:
+        existing = registry.get(manifest.name)
+    except PluginNotFoundError:
+        return
+    if existing.version == manifest.version:
+        raise DuplicatePluginError(f"{manifest.name}@{manifest.version} already registered")
 
 
 def _matches(output, expected) -> bool:

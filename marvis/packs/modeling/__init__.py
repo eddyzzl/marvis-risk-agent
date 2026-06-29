@@ -19,6 +19,7 @@ from marvis.packs.modeling.scenarios import (
     list_scenarios,
 )
 from marvis.packs.modeling.prepare import prepare_modeling_frame
+from marvis.packs.modeling.reject_inference import reject_inference
 from marvis.packs.modeling.select import SelectionResult, select_features
 
 __all__ = [
@@ -38,5 +39,6 @@ __all__ = [
     "list_scenarios",
     "modeling_readiness",
     "prepare_modeling_frame",
+    "reject_inference",
     "select_features",
 ]

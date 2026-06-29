@@ -174,6 +174,13 @@ function defaultShowError(message) {
   console.error(message);
 }
 
+function defaultConfirmRollback() {
+  if (typeof confirm === "function") {
+    return confirm("确认回滚这条记忆沉淀吗？");
+  }
+  return false;
+}
+
 export function attachMemoryHandlers(root, deps = {}) {
   if (!root || typeof root.addEventListener !== "function") {
     throw new Error("attachMemoryHandlers requires a stable event root");
@@ -183,6 +190,7 @@ export function attachMemoryHandlers(root, deps = {}) {
     getMemoryDistillation: getMemoryDistillationApi,
     refreshMemories: async () => {},
     rollbackMemoryDistillation: rollbackMemoryDistillationApi,
+    confirmRollback: defaultConfirmRollback,
     showError: defaultShowError,
     showMessage: defaultShowMessage,
     ...deps,
@@ -203,6 +211,9 @@ export function attachMemoryHandlers(root, deps = {}) {
     const rollbackButton = closest(target, "[data-rollback-memory-distillation]");
     if (rollbackButton?.dataset?.rollbackMemoryDistillation) {
       event.preventDefault?.();
+      if (!actions.confirmRollback(rollbackButton.dataset.rollbackMemoryDistillation)) {
+        return;
+      }
       try {
         await actions.rollbackMemoryDistillation(rollbackButton.dataset.rollbackMemoryDistillation);
         await actions.refreshMemories(refreshQuery());

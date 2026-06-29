@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.packs.modeling.report_compute import ReportSectionStatus
 
 
@@ -15,6 +16,9 @@ MODEL_REPORT_SHEETS = [
     "样本分析",
     "Vintage",
     "特征重要性",
+    "评分卡",
+    "评分分段",
+    "概率校准",
     "oot分箱评估_十分箱",
     "单变量分析",
     "压力测试",
@@ -29,17 +33,19 @@ class ModelReportPayload:
     sample_analysis: list[dict] | None
     vintage: dict | None
     feature_importance: list[dict]
-    univariate: list[dict]
-    oot_bin_table: list[dict]
-    stress_product_removal: dict
-    stress_low_pricing: dict | None
-    narratives: dict
-    section_status: list[ReportSectionStatus]
+    scorecard_table: list[dict] = field(default_factory=list)
+    score_bands: list[dict] = field(default_factory=list)
+    calibration: list[dict] = field(default_factory=list)
+    univariate: list[dict] = field(default_factory=list)
+    oot_bin_table: list[dict] = field(default_factory=list)
+    stress_product_removal: dict = field(default_factory=dict)
+    stress_low_pricing: dict | None = None
+    narratives: dict = field(default_factory=dict)
+    section_status: list[ReportSectionStatus] = field(default_factory=list)
 
 
 def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     workbook.remove(workbook.active)
     _write_summary(workbook, payload)
@@ -56,6 +62,9 @@ def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
         _unavailable_reason(payload, "vintage"),
     )
     _write_section_sheet(workbook, "特征重要性", payload.feature_importance, None)
+    _write_section_sheet(workbook, "评分卡", payload.scorecard_table, None)
+    _write_section_sheet(workbook, "评分分段", payload.score_bands, None)
+    _write_section_sheet(workbook, "概率校准", payload.calibration, None)
     _write_section_sheet(
         workbook,
         "oot分箱评估_十分箱",
@@ -64,8 +73,15 @@ def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
     )
     _write_section_sheet(workbook, "单变量分析", payload.univariate, None)
     _write_stress_sheet(workbook, payload)
-    workbook.save(out_path)
-    return out_path
+    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
+    try:
+        workbook.save(artifact.path)
+        final_path = artifact.promote()
+        artifact.commit()
+        return final_path
+    except Exception:
+        artifact.rollback()
+        raise
 
 
 def _write_summary(workbook: Workbook, payload: ModelReportPayload) -> None:

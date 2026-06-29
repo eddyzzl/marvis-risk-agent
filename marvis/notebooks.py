@@ -1,13 +1,25 @@
+import asyncio
+from dataclasses import asdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import inspect
 import json
+import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import threading
 from typing import Any
 
 from nbclient import NotebookClient
 from nbclient.exceptions import CellExecutionError
 import nbformat
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - exercised only in stripped runtimes.
+    psutil = None
 
 from marvis.notebook_cancellation import (
     NotebookCancellationToken,
@@ -29,6 +41,15 @@ class NotebookRunResult:
     error_value: str | None
     step_events: dict[str, Any] | None = None
     cancelled: bool = False
+    resource_usage: dict[str, Any] | None = None
+
+
+class NotebookResourceLimitExceeded(RuntimeError):
+    """Raised when the notebook kernel exceeds the configured RSS budget."""
+
+
+class NotebookSubprocessTimeout(TimeoutError):
+    """Raised when the isolated notebook worker exceeds the wall-clock timeout."""
 
 
 _LIVE_SESSIONS_LOCK = threading.Lock()
@@ -47,6 +68,8 @@ class NotebookExecutionSession:
         progress_path: Path | None = None,
         execution_cwd: Path | None = None,
         cancellation_token: NotebookCancellationToken | None = None,
+        memory_limit_mb: int | None = None,
+        resource_poll_interval_seconds: float = 0.5,
     ) -> None:
         self.notebook_path = notebook_path
         self.executed_path = executed_path
@@ -56,6 +79,8 @@ class NotebookExecutionSession:
         self.progress_path = progress_path
         self.execution_cwd = execution_cwd
         self.cancellation_token = cancellation_token
+        self.memory_limit_mb = _normalize_memory_limit_mb(memory_limit_mb)
+        self.resource_poll_interval_seconds = max(0.05, float(resource_poll_interval_seconds))
         self.notebook = nbformat.read(notebook_path, as_version=4)
         self.plan = notebook_step_plan(self.notebook)
         self.cell_events: dict[int, dict[str, Any]] = {}
@@ -178,16 +203,13 @@ class NotebookExecutionSession:
         cleanup = getattr(self.client, "_cleanup_kernel", None)
         if callable(cleanup):
             try:
-                cleanup()
+                _consume_awaitable(cleanup())
                 return
             except Exception:
                 pass
         kernel_manager = getattr(self.client, "km", None)
         if kernel_manager is not None:
-            try:
-                kernel_manager.shutdown_kernel(now=True)
-            except Exception:
-                pass
+            _call_kernel_method(kernel_manager, "shutdown_kernel", now=True)
 
     def _build_client(self):
         callbacks = {
@@ -216,12 +238,25 @@ class NotebookExecutionSession:
             return client
 
     def _run_with_result(self, execute, *, log_path: Path) -> NotebookRunResult:
+        monitor = _NotebookResourceMonitor(
+            client_getter=lambda: self.client,
+            memory_limit_mb=self.memory_limit_mb,
+            interval_seconds=self.resource_poll_interval_seconds,
+            on_limit=self._stop_kernel_for_resource_limit,
+        )
         try:
-            execute()
+            with monitor:
+                execute()
         except CellExecutionError:
             nbformat.write(self.notebook, self.executed_path)
             failed_cell_index = _failed_cell_index(self.notebook)
             error_name, error_value = _error_output(self.notebook)
+            if monitor.memory_limit_exceeded:
+                return self._resource_limit_result(
+                    log_path=log_path,
+                    failed_cell_index=failed_cell_index,
+                    resource_usage=monitor.snapshot(),
+                )
             if self.cancellation_token is not None and self.cancellation_token.is_cancelled():
                 _write_cancel_log(log_path)
                 return NotebookRunResult(
@@ -231,6 +266,7 @@ class NotebookExecutionSession:
                     error_value="notebook execution cancelled",
                     step_events=self._step_events(),
                     cancelled=True,
+                    resource_usage=monitor.snapshot(),
                 )
             _write_failure_log(log_path, failed_cell_index, error_name, error_value)
             return NotebookRunResult(
@@ -239,6 +275,7 @@ class NotebookExecutionSession:
                 error_name=error_name,
                 error_value=error_value,
                 step_events=self._step_events(),
+                resource_usage=monitor.snapshot(),
             )
         except NotebookCancelled as error:
             nbformat.write(self.notebook, self.executed_path)
@@ -250,10 +287,17 @@ class NotebookExecutionSession:
                 error_value=str(error),
                 step_events=self._step_events(),
                 cancelled=True,
+                resource_usage=monitor.snapshot(),
             )
         except Exception as error:
             nbformat.write(self.notebook, self.executed_path)
             failed_cell_index = _failed_cell_index(self.notebook)
+            if monitor.memory_limit_exceeded:
+                return self._resource_limit_result(
+                    log_path=log_path,
+                    failed_cell_index=failed_cell_index,
+                    resource_usage=monitor.snapshot(),
+                )
             error_name = error.__class__.__name__
             error_value = str(error)
             if self.cancellation_token is not None and self.cancellation_token.is_cancelled():
@@ -265,6 +309,7 @@ class NotebookExecutionSession:
                     error_value="notebook execution cancelled",
                     step_events=self._step_events(),
                     cancelled=True,
+                    resource_usage=monitor.snapshot(),
                 )
             _write_failure_log(log_path, failed_cell_index, error_name, error_value)
             return NotebookRunResult(
@@ -273,8 +318,16 @@ class NotebookExecutionSession:
                 error_name=error_name,
                 error_value=error_value,
                 step_events=self._step_events(),
+                resource_usage=monitor.snapshot(),
             )
 
+        if monitor.memory_limit_exceeded:
+            nbformat.write(self.notebook, self.executed_path)
+            return self._resource_limit_result(
+                log_path=log_path,
+                failed_cell_index=_failed_cell_index(self.notebook),
+                resource_usage=monitor.snapshot(),
+            )
         self._finalize_pending_cell_completions()
         nbformat.write(self.notebook, self.executed_path)
         log_path.write_text("succeeded\n", encoding="utf-8")
@@ -285,7 +338,33 @@ class NotebookExecutionSession:
             error_name=None,
             error_value=None,
             step_events=self._step_events(),
+            resource_usage=monitor.snapshot(),
         )
+
+    def _resource_limit_result(
+        self,
+        *,
+        log_path: Path,
+        failed_cell_index: int | None,
+        resource_usage: dict[str, Any],
+    ) -> NotebookRunResult:
+        error_value = _resource_limit_message(resource_usage)
+        _write_resource_limit_log(log_path, failed_cell_index, error_value, resource_usage)
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=failed_cell_index,
+            error_name=NotebookResourceLimitExceeded.__name__,
+            error_value=error_value,
+            step_events=self._step_events(),
+            resource_usage=resource_usage,
+        )
+
+    def _stop_kernel_for_resource_limit(self) -> None:
+        kernel_manager = getattr(self.client, "km", None)
+        if kernel_manager is None:
+            return
+        _call_kernel_method(kernel_manager, "interrupt_kernel")
+        _call_kernel_method(kernel_manager, "shutdown_kernel", now=True)
 
     def _record_cell_start(self, **kwargs) -> None:
         self._raise_if_cancelled()
@@ -370,6 +449,118 @@ class NotebookExecutionSession:
             raise RuntimeError("notebook execution session is closed")
 
 
+class _NotebookResourceMonitor:
+    def __init__(
+        self,
+        *,
+        client_getter,
+        memory_limit_mb: int | None,
+        interval_seconds: float,
+        on_limit,
+    ) -> None:
+        self._client_getter = client_getter
+        self._memory_limit_mb = memory_limit_mb
+        self._memory_limit_bytes = (
+            int(memory_limit_mb) * 1024 * 1024 if memory_limit_mb is not None else None
+        )
+        self._interval_seconds = interval_seconds
+        self._on_limit = on_limit
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._kernel_pid: int | None = None
+        self._peak_rss_bytes: int | None = None
+        self._memory_limit_exceeded = False
+        self._monitor_started = False
+        self._monitor_degraded = False
+        self._monitor_error: str | None = None
+
+    @property
+    def memory_limit_exceeded(self) -> bool:
+        with self._lock:
+            return self._memory_limit_exceeded
+
+    def __enter__(self):
+        if self._memory_limit_bytes is None:
+            return self
+        self._thread = threading.Thread(
+            target=self._run,
+            name="marvis-notebook-resource-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        with self._lock:
+            if (
+                self._memory_limit_bytes is not None
+                and not self._monitor_started
+                and not self._memory_limit_exceeded
+                and self._monitor_error is None
+            ):
+                self._monitor_degraded = True
+                self._monitor_error = "kernel pid unavailable"
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "memory_limit_mb": self._memory_limit_mb,
+                "peak_rss_mb": _bytes_to_mb(self._peak_rss_bytes),
+                "kernel_pid": self._kernel_pid,
+                "memory_limit_exceeded": self._memory_limit_exceeded,
+                "monitor_started": self._monitor_started,
+                "monitor_degraded": self._monitor_degraded,
+                "monitor_error": self._monitor_error,
+            }
+
+    def _run(self) -> None:
+        if psutil is None:
+            self._set_degraded("psutil unavailable")
+            return
+        process = None
+        while not self._stop.is_set():
+            if process is None:
+                pid = _kernel_pid(self._client_getter())
+                if pid is None:
+                    self._stop.wait(self._interval_seconds)
+                    continue
+                try:
+                    process = psutil.Process(pid)
+                except Exception as exc:
+                    self._set_degraded(f"kernel process unavailable: {exc}")
+                    return
+                with self._lock:
+                    self._kernel_pid = int(pid)
+                    self._monitor_started = True
+            try:
+                rss = _process_tree_rss(process)
+            except Exception as exc:
+                self._set_degraded(f"kernel rss unavailable: {exc}")
+                return
+            with self._lock:
+                self._peak_rss_bytes = max(self._peak_rss_bytes or 0, rss)
+                exceeded = (
+                    self._memory_limit_bytes is not None
+                    and rss > self._memory_limit_bytes
+                )
+                if exceeded:
+                    self._memory_limit_exceeded = True
+            if exceeded:
+                self._on_limit()
+                _terminate_process_tree(process)
+                return
+            self._stop.wait(self._interval_seconds)
+
+    def _set_degraded(self, message: str) -> None:
+        with self._lock:
+            self._monitor_degraded = True
+            self._monitor_error = message
+
+
 def register_live_notebook_session(
     task_id: str,
     session: NotebookExecutionSession,
@@ -438,6 +629,144 @@ def prepare_execution_notebook_v3(
     return output_notebook
 
 
+def _normalize_memory_limit_mb(memory_limit_mb: int | None) -> int | None:
+    if memory_limit_mb is None:
+        return None
+    value = int(memory_limit_mb)
+    if value <= 0:
+        return None
+    return value
+
+
+def _kernel_pid(client: Any) -> int | None:
+    kernel_manager = getattr(client, "km", None)
+    if kernel_manager is None:
+        return None
+    provisioner = getattr(kernel_manager, "provisioner", None)
+    for owner in (provisioner, kernel_manager):
+        if owner is None:
+            continue
+        pid = _as_pid(getattr(owner, "pid", None))
+        if pid is not None:
+            return pid
+        process = getattr(owner, "process", None)
+        pid = _as_pid(getattr(process, "pid", None))
+        if pid is not None:
+            return pid
+    return None
+
+
+def _as_pid(value: Any) -> int | None:
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _process_tree_rss(process) -> int:
+    rss = int(process.memory_info().rss)
+    for child in process.children(recursive=True):
+        try:
+            rss += int(child.memory_info().rss)
+        except Exception:
+            continue
+    return rss
+
+
+def _terminate_process_tree(process) -> None:
+    try:
+        children = list(process.children(recursive=True))
+    except Exception:
+        children = []
+    targets = children + [process]
+    for target in targets:
+        try:
+            target.terminate()
+        except Exception:
+            pass
+    wait_procs = getattr(psutil, "wait_procs", None) if psutil is not None else None
+    alive = []
+    if callable(wait_procs):
+        try:
+            _, alive = wait_procs(targets, timeout=2.0)
+        except Exception:
+            alive = targets
+    else:
+        for target in targets:
+            try:
+                target.wait(timeout=2.0)
+            except Exception:
+                alive.append(target)
+    for target in alive:
+        try:
+            target.kill()
+        except Exception:
+            pass
+
+
+def _call_kernel_method(kernel_manager: Any, method_name: str, **kwargs) -> None:
+    method = getattr(kernel_manager, method_name, None)
+    if not callable(method):
+        return
+    try:
+        result = method(**kwargs)
+    except TypeError:
+        if not kwargs:
+            return
+        try:
+            result = method()
+        except Exception:
+            return
+    except Exception:
+        return
+    try:
+        _consume_awaitable(result)
+    except Exception:
+        pass
+
+
+def _consume_awaitable(value: Any) -> None:
+    if not inspect.isawaitable(value):
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(value)
+        return
+    errors: list[BaseException] = []
+
+    def run_in_thread() -> None:
+        try:
+            asyncio.run(value)
+        except BaseException as exc:  # pragma: no cover - re-raised below.
+            errors.append(exc)
+
+    thread = threading.Thread(
+        target=run_in_thread,
+        name="marvis-notebook-async-cleanup",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=5.0)
+    if errors:
+        raise errors[0]
+
+
+def _bytes_to_mb(value: int | None) -> float | None:
+    if value is None:
+        return None
+    return round(value / (1024 * 1024), 3)
+
+
+def _resource_limit_message(resource_usage: dict[str, Any]) -> str:
+    limit = resource_usage.get("memory_limit_mb")
+    peak = resource_usage.get("peak_rss_mb")
+    if peak is None:
+        return f"notebook kernel RSS exceeded memory limit {limit} MB"
+    return f"notebook kernel RSS {peak} MB exceeded memory limit {limit} MB"
+
+
 def _failed_cell_index(notebook: nbformat.NotebookNode) -> int | None:
     for cell_index, cell in enumerate(notebook.cells):
         if cell.cell_type != "code":
@@ -478,6 +807,29 @@ def _write_failure_log(
     )
 
 
+def _write_resource_limit_log(
+    log_path: Path,
+    failed_cell_index: int | None,
+    error_value: str,
+    resource_usage: dict[str, Any],
+) -> None:
+    log_path.write_text(
+        "\n".join(
+            [
+                "failed",
+                f"failed_cell_index={failed_cell_index}",
+                f"error_name={NotebookResourceLimitExceeded.__name__}",
+                f"error_value={error_value}",
+                f"memory_limit_mb={resource_usage.get('memory_limit_mb')}",
+                f"peak_rss_mb={resource_usage.get('peak_rss_mb')}",
+                f"kernel_pid={resource_usage.get('kernel_pid')}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _write_cancel_log(log_path: Path) -> None:
     log_path.write_text("cancelled\n", encoding="utf-8")
 
@@ -491,7 +843,22 @@ def run_notebook(
     progress_path: Path | None = None,
     execution_cwd: Path | None = None,
     cancellation_token: NotebookCancellationToken | None = None,
+    memory_limit_mb: int | None = None,
+    resource_poll_interval_seconds: float = 0.5,
+    isolated: bool = False,
 ) -> NotebookRunResult:
+    if isolated and cancellation_token is None:
+        return _run_notebook_in_subprocess(
+            notebook_path=notebook_path,
+            executed_path=executed_path,
+            log_path=log_path,
+            timeout=timeout,
+            kernel_name=kernel_name,
+            progress_path=progress_path,
+            execution_cwd=execution_cwd,
+            memory_limit_mb=memory_limit_mb,
+            resource_poll_interval_seconds=resource_poll_interval_seconds,
+        )
     session = NotebookExecutionSession(
         notebook_path=notebook_path,
         executed_path=executed_path,
@@ -501,11 +868,241 @@ def run_notebook(
         progress_path=progress_path,
         execution_cwd=execution_cwd,
         cancellation_token=cancellation_token,
+        memory_limit_mb=memory_limit_mb,
+        resource_poll_interval_seconds=resource_poll_interval_seconds,
     )
     try:
         return session.execute_notebook(keep_alive=False)
     finally:
         session.close()
+
+
+def _run_notebook_in_subprocess(
+    *,
+    notebook_path: Path,
+    executed_path: Path,
+    log_path: Path,
+    timeout: int,
+    kernel_name: str,
+    progress_path: Path | None,
+    execution_cwd: Path | None,
+    memory_limit_mb: int | None,
+    resource_poll_interval_seconds: float,
+) -> NotebookRunResult:
+    job = {
+        "notebook_path": str(Path(notebook_path)),
+        "executed_path": str(Path(executed_path)),
+        "log_path": str(Path(log_path)),
+        "timeout": int(timeout),
+        "kernel_name": kernel_name,
+        "progress_path": None if progress_path is None else str(Path(progress_path)),
+        "execution_cwd": None if execution_cwd is None else str(Path(execution_cwd)),
+        "memory_limit_mb": memory_limit_mb,
+        "resource_poll_interval_seconds": float(resource_poll_interval_seconds),
+    }
+    started = datetime.now(timezone.utc).isoformat()
+    process = subprocess.Popen(
+        [sys.executable, "-m", "marvis.notebook_worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        env=_notebook_worker_env(),
+        cwd=str(execution_cwd or Path(notebook_path).parent),
+        start_new_session=(os.name != "nt"),
+    )
+    try:
+        stdout, stderr = process.communicate(json.dumps(job, ensure_ascii=False), timeout=int(timeout) + 5)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        stdout, stderr = process.communicate()
+        _write_subprocess_timeout_artifacts(
+            notebook_path=Path(notebook_path),
+            executed_path=Path(executed_path),
+            log_path=Path(log_path),
+            timeout=int(timeout),
+        )
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=None,
+            error_name=NotebookSubprocessTimeout.__name__,
+            error_value=f"isolated notebook worker timed out after {timeout}s",
+            resource_usage={
+                "subprocess_isolated": True,
+                "worker_pid": process.pid,
+                "worker_started_at": started,
+                "worker_returncode": process.returncode,
+                "stdout_tail": _tail_text(stdout),
+                "stderr_tail": _tail_text(stderr),
+            },
+        )
+    protocol = _parse_notebook_worker_result(stdout)
+    if protocol is None:
+        _write_failure_log(
+            Path(log_path),
+            None,
+            "NotebookWorkerProtocolError",
+            f"worker returned invalid protocol with exit code {process.returncode}",
+        )
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=None,
+            error_name="NotebookWorkerProtocolError",
+            error_value=f"worker returned invalid protocol with exit code {process.returncode}",
+            resource_usage={
+                "subprocess_isolated": True,
+                "worker_pid": process.pid,
+                "worker_started_at": started,
+                "worker_returncode": process.returncode,
+                "stdout_tail": _tail_text(stdout),
+                "stderr_tail": _tail_text(stderr),
+            },
+        )
+    if not protocol.get("ok"):
+        error_value = str(protocol.get("error") or "isolated notebook worker failed")
+        _write_failure_log(Path(log_path), None, "NotebookWorkerError", error_value)
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=None,
+            error_name="NotebookWorkerError",
+            error_value=error_value,
+            resource_usage={
+                "subprocess_isolated": True,
+                "worker_pid": process.pid,
+                "worker_started_at": started,
+                "worker_returncode": process.returncode,
+                "stdout_tail": _tail_text(stdout),
+                "stderr_tail": _tail_text(stderr),
+            },
+        )
+    result_payload = protocol.get("result")
+    if not isinstance(result_payload, dict):
+        _write_failure_log(Path(log_path), None, "NotebookWorkerProtocolError", "worker result missing")
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=None,
+            error_name="NotebookWorkerProtocolError",
+            error_value="worker result missing",
+            resource_usage={
+                "subprocess_isolated": True,
+                "worker_pid": process.pid,
+                "worker_started_at": started,
+                "worker_returncode": process.returncode,
+            },
+        )
+    resource_usage = dict(result_payload.get("resource_usage") or {})
+    resource_usage.update({
+        "subprocess_isolated": True,
+        "worker_pid": process.pid,
+        "worker_started_at": started,
+        "worker_returncode": process.returncode,
+    })
+    return NotebookRunResult(
+        succeeded=bool(result_payload.get("succeeded")),
+        failed_cell_index=result_payload.get("failed_cell_index"),
+        error_name=result_payload.get("error_name"),
+        error_value=result_payload.get("error_value"),
+        step_events=result_payload.get("step_events"),
+        cancelled=bool(result_payload.get("cancelled")),
+        resource_usage=resource_usage,
+    )
+
+
+def notebook_run_result_to_dict(result: NotebookRunResult) -> dict:
+    return asdict(result)
+
+
+def notebook_run_result_from_dict(payload: dict) -> NotebookRunResult:
+    return NotebookRunResult(
+        succeeded=bool(payload.get("succeeded")),
+        failed_cell_index=payload.get("failed_cell_index"),
+        error_name=payload.get("error_name"),
+        error_value=payload.get("error_value"),
+        step_events=payload.get("step_events"),
+        cancelled=bool(payload.get("cancelled")),
+        resource_usage=payload.get("resource_usage") if isinstance(payload.get("resource_usage"), dict) else None,
+    )
+
+
+def _parse_notebook_worker_result(stdout: str) -> dict[str, Any] | None:
+    line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    if not line:
+        return None
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_subprocess_timeout_artifacts(
+    *,
+    notebook_path: Path,
+    executed_path: Path,
+    log_path: Path,
+    timeout: int,
+) -> None:
+    executed_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not executed_path.exists():
+        notebook = nbformat.read(notebook_path, as_version=4)
+        nbformat.write(notebook, executed_path)
+    _write_failure_log(
+        log_path,
+        None,
+        NotebookSubprocessTimeout.__name__,
+        f"isolated notebook worker timed out after {timeout}s",
+    )
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _notebook_worker_env() -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in {
+            "CONDA_PREFIX",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "PATH",
+            "PYTHONHASHSEED",
+            "PYTHONIOENCODING",
+            "PYTHONPATH",
+            "PYTHONUTF8",
+            "REQUESTS_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+        }
+        and value
+    }
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _tail_text(value: str | None, *, limit: int = 4000) -> str:
+    return "" if value is None else value[-limit:]
 
 
 def _write_step_events(

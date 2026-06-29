@@ -16,7 +16,7 @@ tests (the platform may have no LLM configured yet).
 
 from __future__ import annotations
 
-import json
+from marvis.agent.json_reply import load_json_object
 
 _ACTIONS = ("confirm", "adjust", "replan", "clarify")
 
@@ -35,9 +35,26 @@ _SYSTEM = (
 
 def route_instruction(client, *, gate_context, instruction, tables=None):
     """Ask the injected LLM to classify one free-text gate instruction."""
+    prompt = _format(gate_context, instruction, tables or [])
     raw = client.complete(
         system_prompt=_SYSTEM,
-        user_prompt=_format(gate_context, instruction, tables or []),
+        user_prompt=prompt,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+        stream=False,
+    )
+    route, ok = _parse_route(raw)
+    if ok:
+        return route
+    retry_prompt = (
+        f"{prompt}\n\n"
+        f"【上一次返回无法解析】\n{raw}\n\n"
+        '请严格只返回 JSON 对象:{"action":"confirm|adjust|replan|clarify","params":{},'
+        '"constraint":"","reason":"一句话中文"}。'
+    )
+    raw = client.complete(
+        system_prompt=_SYSTEM,
+        user_prompt=retry_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
         stream=False,
@@ -56,12 +73,14 @@ def _format(gate_context, instruction, tables):
 
 def parse_route(raw):
     """Normalize the LLM reply; default to a safe clarify on junk or empty adjust."""
-    try:
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("route is not a JSON object")
-    except (ValueError, TypeError):
-        return {"action": "clarify", "params": {}, "constraint": "", "reason": "无法解析指令,请换种说法。"}
+    route, _ok = _parse_route(raw)
+    return route
+
+
+def _parse_route(raw) -> tuple[dict, bool]:
+    data, error = load_json_object(raw)
+    if data is None:
+        return {"action": "clarify", "params": {}, "constraint": "", "reason": "无法解析指令,请换种说法。"}, False
     action = str(data.get("action") or "").strip().lower()
     if action not in _ACTIONS:
         action = "clarify"
@@ -72,7 +91,7 @@ def parse_route(raw):
     if action == "adjust" and not params:
         action = "clarify"
         reason = reason or "没识别到要调整的参数,请写明参数名和取值。"
-    return {"action": action, "params": params, "constraint": constraint, "reason": reason}
+    return {"action": action, "params": params, "constraint": constraint, "reason": reason}, error is None
 
 
 __all__ = ["route_instruction", "parse_route"]

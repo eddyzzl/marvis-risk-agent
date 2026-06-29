@@ -41,6 +41,14 @@ def test_feature_auc_matches_sklearn_rank_auc():
     assert feature_auc(scores, np.ones_like(target)) == 0.5
 
 
+def test_feature_metrics_reports_direction_agnostic_auc_for_single_features():
+    values = np.array([0.1, 0.2, 0.8, 0.9], dtype=float)
+    target = np.array([1, 1, 0, 0])
+
+    assert feature_auc(values, target) == pytest.approx(0.0)
+    assert feature_metrics(values, target, feature="protective", bins=2).auc == pytest.approx(1.0)
+
+
 def test_compute_psi_and_feature_psi_use_shared_edges_and_smoothing():
     psi = compute_psi(np.array([0.5, 0.5]), np.array([0.75, 0.25]))
     zero_safe = compute_psi(np.array([1.0, 0.0]), np.array([0.5, 0.5]))
@@ -56,6 +64,18 @@ def test_compute_psi_and_feature_psi_use_shared_edges_and_smoothing():
     assert feature_value >= 0
     with pytest.raises(FeatureError):
         compute_psi(np.array([0.5]), np.array([0.5, 0.5]))
+
+
+def test_compute_psi_renormalizes_after_zero_bucket_smoothing():
+    expected = np.array([1.0, 0.0])
+    actual = np.array([0.5, 0.5])
+
+    normalized_expected = np.array([1.0, 1e-6])
+    normalized_expected = normalized_expected / normalized_expected.sum()
+    expected_value = float(np.sum((actual - normalized_expected) * np.log(actual / normalized_expected)))
+
+    assert compute_psi(expected, actual) == pytest.approx(expected_value)
+    assert compute_psi(np.zeros(2), np.zeros(2), smoothing=0.0) == 0.0
 
 
 def test_feature_lift_and_feature_metrics_ranges():

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import os
 from pathlib import Path
 
 import pandas as pd
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.dedup import two_level_dedup
@@ -13,12 +15,13 @@ from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
+from marvis.safe_paths import assert_within
 from marvis.settings import build_settings
 
 
 def tool_ingest_excel(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    path = Path(str(inputs["path"]))
+    path = _resolve_material_path(str(inputs["path"]), ctx)
     requested_sheets = inputs.get("sheets") or list_sheets(path)
     role = str(inputs.get("role") or "feature")
     out_dir = runtime.datasets_root / ctx.task_id / "excel"
@@ -42,6 +45,39 @@ def tool_ingest_excel(inputs: dict, ctx) -> dict:
             "warnings": [],
         })
     return {"datasets": datasets, "reports": reports}
+
+
+def _resolve_material_path(raw_path: str, ctx) -> Path:
+    path = Path(raw_path).expanduser()
+    resolved = path.resolve(strict=True)
+    roots = _allowed_material_roots(ctx)
+    if any(_path_is_within(root, resolved) for root in roots):
+        return resolved
+    allowed = ", ".join(str(root) for root in roots)
+    raise PermissionError(
+        f"Excel path must be under an allowed material root: {allowed}. "
+        "Set RMC_MATERIAL_ROOTS to allow another local material directory."
+    )
+
+
+def _allowed_material_roots(ctx) -> tuple[Path, ...]:
+    roots = [Path(ctx.workspace), Path.home()]
+    extra_roots = os.environ.get("RMC_MATERIAL_ROOTS", "")
+    roots.extend(Path(raw).expanduser() for raw in extra_roots.split(os.pathsep) if raw)
+    resolved: list[Path] = []
+    for root in roots:
+        candidate = root.resolve()
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return tuple(resolved)
+
+
+def _path_is_within(root: Path, candidate: Path) -> bool:
+    try:
+        assert_within(root, candidate)
+    except PermissionError:
+        return False
+    return True
 
 
 def tool_infer_schema(inputs: dict, ctx) -> dict:
@@ -190,17 +226,45 @@ def tool_clean_format(inputs: dict, ctx) -> dict:
             raise KeyError(f"unknown column: {column}")
         frame[column] = _apply_clean_op(frame[column], op)
         changed_columns.append(column)
-    out_path = runtime.datasets_root / ctx.task_id / "clean" / f"{dataset.id}_clean.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(out_path, index=False)
-    result = runtime.registry.register_existing(
-        out_path,
-        task_id=ctx.task_id,
+    result = _register_derived_frame(
+        runtime,
+        ctx,
+        frame,
+        subdir="clean",
+        filename=f"{dataset.id}_clean.parquet",
         role=dataset.role,
         anchor_target=dataset.id,
-        seed=_seed(ctx),
     )
     return {"dataset_id": result.id, "changed_columns": changed_columns}
+
+
+def _register_derived_frame(
+    runtime,
+    ctx,
+    frame: pd.DataFrame,
+    *,
+    subdir: str,
+    filename: str,
+    role: str,
+    anchor_target: str,
+):
+    artifact_store = TransactionalArtifactStore(runtime.datasets_root / ctx.task_id / subdir)
+    artifact = artifact_store.stage(filename)
+    try:
+        frame.to_parquet(artifact.path, index=False)
+        final_path = artifact.promote()
+        result = runtime.registry.register_existing(
+            final_path,
+            task_id=ctx.task_id,
+            role=role,
+            anchor_target=anchor_target,
+            seed=_seed(ctx),
+        )
+        artifact.commit()
+        return result
+    except Exception:
+        artifact.rollback()
+        raise
 
 
 def tool_dedup_rows(inputs: dict, ctx) -> dict:
@@ -222,15 +286,14 @@ def tool_dedup_rows(inputs: dict, ctx) -> dict:
     if strategy and report.has_conflicts and keys:
         keep = "first" if str(strategy) == "first" else "last"
         deduped = deduped.drop_duplicates(subset=keys, keep=keep, ignore_index=True)
-    out_path = runtime.datasets_root / ctx.task_id / "dedup" / f"{dataset.id}_dedup.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    deduped.to_parquet(out_path, index=False)
-    result = runtime.registry.register_existing(
-        out_path,
-        task_id=ctx.task_id,
+    result = _register_derived_frame(
+        runtime,
+        ctx,
+        deduped,
+        subdir="dedup",
+        filename=f"{dataset.id}_dedup.parquet",
         role=dataset.role,
         anchor_target=dataset.id,
-        seed=_seed(ctx),
     )
     return {
         "dataset_id": result.id,

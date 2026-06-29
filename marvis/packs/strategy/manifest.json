@@ -17,7 +17,8 @@
           "mob_col": {"type": "string", "minLength": 1},
           "bad_col": {"type": "string", "minLength": 1},
           "mob_max": {"type": "integer", "minimum": 1},
-          "ref_mob": {"type": "integer", "minimum": 1}
+          "ref_mob": {"type": "integer", "minimum": 1},
+          "drop_nan_labels": {"type": "boolean"}
         },
         "required": ["dataset_id", "cohort_col", "mob_col", "bad_col"],
         "additionalProperties": false
@@ -29,9 +30,10 @@
           "mob_axis": {"type": "array", "items": {"type": "integer"}},
           "curves": {"type": "object"},
           "counts": {"type": "object"},
-          "summary": {"type": "object"}
+          "summary": {"type": "object"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0}
         },
-        "required": ["cohorts", "mob_axis", "curves", "counts", "summary"],
+        "required": ["cohorts", "mob_axis", "curves", "counts", "summary", "nan_labels_dropped"],
         "additionalProperties": false
       },
       "determinism": "deterministic",
@@ -135,9 +137,26 @@
       "output_schema": {
         "type": "object",
         "properties": {
-          "strategy_id": {"type": "string"}
+          "strategy_id": {"type": "string"},
+          "strategy_type": {"type": "string"},
+          "score_col": {"type": ["string", "null"]},
+          "default_decision": {},
+          "description": {"type": "string"},
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "condition": {"type": "string"},
+                "decision": {"type": "string"},
+                "value": {}
+              },
+              "required": ["condition", "decision"],
+              "additionalProperties": false
+            }
+          }
         },
-        "required": ["strategy_id"],
+        "required": ["strategy_id", "strategy_type", "score_col", "default_decision", "description", "rules"],
         "additionalProperties": false
       },
       "determinism": "deterministic",

@@ -13,9 +13,18 @@ function pct(value) {
 
 function cellText(value) {
   if (value && typeof value === "object") {
-    return JSON.stringify(value);
+    return readableObjectText(value);
   }
   return String(value ?? "");
+}
+
+function readableObjectText(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => cellText(item)).join("；");
+  }
+  return Object.entries(value)
+    .map(([key, item]) => `${key}: ${cellText(item)}`)
+    .join("；");
 }
 
 function outputRefKind(value) {

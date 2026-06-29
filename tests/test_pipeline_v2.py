@@ -1437,7 +1437,12 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
                 f"#!{sys.executable}",
                 "import sys",
                 "import pandas as pd",
-                "pd.DataFrame({'x1': [1, 2], 'y': [0, 1]}).to_json(sys.argv[4], orient='table')",
+                "pd.DataFrame({",
+                "    'x1': [9007199254740993, 9007199254740995],",
+                "    'y': [0, 1],",
+                "    'missing': [float('nan'), 1.5],",
+                "    'as_of': pd.to_datetime(['2026-01-01', '2026-01-02']),",
+                "}).to_pickle(sys.argv[4])",
             ]
         ),
         encoding="utf-8",
@@ -1451,7 +1456,10 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
 
     sample = _load_sample(sample_path, fallback_python=fallback_python)
 
-    assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}
+    assert sample["x1"].tolist() == [9007199254740993, 9007199254740995]
+    assert sample["y"].tolist() == [0, 1]
+    assert pd.isna(sample["missing"].iloc[0])
+    assert str(sample["as_of"].dtype).startswith("datetime64")
 
 
 def test_load_sample_supports_excel_files(tmp_path: Path):

@@ -7,6 +7,8 @@ from marvis.feature.binning import (
     equal_frequency_edges,
     equal_width_edges,
     manual_edges,
+    monotonic_direction,
+    monotonic_edges,
     tree_edges,
 )
 from marvis.feature.errors import BinningError
@@ -73,6 +75,24 @@ def test_chimerge_edges_reduce_to_max_bins_and_keep_open_endpoints():
     assert edges[-1] == float("inf")
     assert len(edges) <= 4
     assert np.all(np.diff(edges) > 0)
+
+
+def test_monotonic_edges_merge_adjacent_bad_rate_violations():
+    values = np.arange(1, 13, dtype=float)
+    target = np.array([0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1])
+    edges = np.array([float("-inf"), 2.5, 4.5, 6.5, float("inf")])
+
+    direction = monotonic_direction(values, target, edges, direction="auto")
+    adjusted = monotonic_edges(values, target, edges, direction=direction)
+    assigned = assign_bins(values, adjusted)
+    bad_rates = [
+        float(np.mean(target[assigned == index]))
+        for index in range(len(adjusted) - 1)
+    ]
+
+    assert direction == "increasing"
+    assert adjusted.tolist() == [float("-inf"), 2.5, 6.5, float("inf")]
+    assert all(left <= right for left, right in zip(bad_rates, bad_rates[1:]))
 
 
 def test_tree_edges_find_supervised_split_and_handle_constant_target():

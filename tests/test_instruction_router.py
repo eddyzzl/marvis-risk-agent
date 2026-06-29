@@ -17,8 +17,26 @@ class _FakeLLM:
         return self.payload
 
 
+class _SequencedLLM:
+    def __init__(self, payloads: list[str]):
+        self.payloads = list(payloads)
+        self.calls: list[dict] = []
+
+    def complete(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+        if len(self.calls) <= len(self.payloads):
+            return self.payloads[len(self.calls) - 1]
+        return self.payloads[-1]
+
+
 def test_parse_route_adjust_extracts_params():
     out = parse_route('{"action":"adjust","params":{"n_trials":20},"reason":"调大搜索"}')
+    assert out["action"] == "adjust"
+    assert out["params"] == {"n_trials": 20}
+
+
+def test_parse_route_extracts_json_from_markdown():
+    out = parse_route('模型判断如下:\n```json\n{"action":"adjust","params":{"n_trials":20},"reason":"调大搜索"}\n```')
     assert out["action"] == "adjust"
     assert out["params"] == {"n_trials": 20}
 
@@ -50,3 +68,14 @@ def test_route_instruction_passes_context_and_instruction_to_llm():
     prompt = fake.calls[0]["user_prompt"]
     assert "特征筛选完成" in prompt
     assert "可以,继续" in prompt
+
+
+def test_route_instruction_retries_once_after_unparseable_reply():
+    fake = _SequencedLLM(["not json", '{"action":"adjust","params":{"n_trials":30},"reason":"重试可解析"}'])
+
+    out = route_instruction(fake, gate_context="调参节点", instruction="n_trials 到 30")
+
+    assert out["action"] == "adjust"
+    assert out["params"] == {"n_trials": 30}
+    assert len(fake.calls) == 2
+    assert "上一次返回无法解析" in fake.calls[1]["user_prompt"]

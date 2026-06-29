@@ -43,6 +43,14 @@ class ModelMetrics:
     overfit_train_test_gap: float
     overfit_train_oot_gap: float | None
     overfit_flag: bool
+    weighted_train_ks: float | None = None
+    weighted_test_ks: float | None = None
+    weighted_oot_ks: float | None = None
+    weighted_train_auc: float | None = None
+    weighted_test_auc: float | None = None
+    weighted_oot_auc: float | None = None
+    weighted_psi_test_vs_train: float | None = None
+    weighted_psi_oot_vs_train: float | None = None
     train_rmse: float | None = None
     test_rmse: float | None = None
     oot_rmse: float | None = None
@@ -75,6 +83,7 @@ class ModelArtifact:
     woe_maps: dict[str, Any] | None
     created_at: str
     feature_importance: tuple[tuple[str, float], ...] = ()
+    scorecard_table: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

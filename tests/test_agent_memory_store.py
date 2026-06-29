@@ -243,6 +243,29 @@ def test_store_creates_active_memory_and_audits_create_and_retrieve(tmp_path):
     assert events[1]["task_id"] == "task-next"
 
 
+def test_store_redacts_allowed_active_memory_before_persisting(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    candidate = MemoryCandidate(
+        memory_type="user_preference",
+        summary="用户偏好后续把摘要发到 eddy@example.com。",
+        payload={"preference": "回访银行卡 6222000000001234 的客群时先做汇总。"},
+        source_task_id="task-privacy",
+        confidence="medium",
+    )
+
+    entry = store.create(candidate, task_id="task-privacy")
+
+    assert entry.status == "active"
+    assert "eddy@example.com" not in entry.summary
+    assert "[REDACTED_EMAIL]" in entry.summary
+    assert "6222000000001234" not in entry.payload["preference"]
+    assert "6222********1234" in entry.payload["preference"]
+    events = store.list_events(entry.id)
+    assert events[0]["details"]["redacted_count"] >= 2
+
+
 def test_store_batch_records_retrieval_audit_events(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -320,6 +343,8 @@ def test_store_audits_use_disable_enable_and_delete_with_redaction(tmp_path):
     assert disabled.status == "disabled"
     assert store.list_entries() == []
     assert [item.id for item in store.list_entries(status="disabled")] == [entry.id]
+    with pytest.raises(ValueError, match="only active memory entries can be recorded as used"):
+        store.record_use(entry.id, task_id="task-disabled")
 
     enabled = store.set_status(entry.id, "active", task_id="admin-task")
     assert enabled.status == "active"

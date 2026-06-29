@@ -117,6 +117,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           reloadSkills,
           removePlugin,
           rollbackMemoryDistillation,
+          retryStep,
           runPlan,
           searchDraftWeb,
           setPluginEnabled,
@@ -151,6 +152,9 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/run");
         await confirmStep("plan/1", "step/a");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/confirm");
+        await retryStep("plan/1", "step/a", { message: "new" });
+        assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/steps/step%2Fa/retry");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { inputs: { message: "new" } });
         await cancelPlan("plan/1");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1/cancel");
 

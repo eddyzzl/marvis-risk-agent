@@ -3,6 +3,7 @@ import pytest
 from marvis.db import PluginRepository, init_db
 from marvis.plugins.errors import (
     DuplicatePluginError,
+    ManifestError,
     PluginNotFoundError,
     ToolNotFoundError,
 )
@@ -10,7 +11,7 @@ from marvis.plugins.manifest import ToolRef, parse_manifest
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 
 
-def _manifest(version: str = "0.1.0", *, tool_name: str = "echo"):
+def _manifest(version: str = "0.1.0", *, tool_name: str = "echo", python_requires: str = ""):
     return parse_manifest(
         {
             "name": "_sample",
@@ -18,6 +19,7 @@ def _manifest(version: str = "0.1.0", *, tool_name: str = "echo"):
             "display_name": "Sample Echo Pack",
             "description": "Runtime smoke-test pack",
             "module": "marvis.packs._sample.tools",
+            "python_requires": python_requires,
             "tools": [
                 {
                     "name": tool_name,
@@ -40,7 +42,7 @@ def _manifest(version: str = "0.1.0", *, tool_name: str = "echo"):
                 }
             ],
             "hooks": [],
-            "permissions": [],
+            "permissions": ["read:input"],
         },
         builtin=True,
     )
@@ -178,6 +180,80 @@ def test_tool_registry_resolves_enabled_tools_and_rejects_disabled_or_wrong_vers
     registry.set_enabled("_sample", False)
     with pytest.raises(PluginNotFoundError):
         tools.resolve(ToolRef("_sample", "echo"))
+
+
+def test_tool_registry_rejects_plugins_with_incompatible_python_requires(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    registry = PluginRegistry(PluginRepository(db_path))
+    registry.register(_manifest(python_requires=">=999.0"), enabled=True)
+    tools = ToolRegistry(registry)
+
+    with pytest.raises(ToolNotFoundError, match="requires Python"):
+        tools.resolve(ToolRef("_sample", "echo"))
+    assert tools.catalog_for_planner() == []
+
+
+def test_parse_manifest_requires_side_effects_to_be_declared_in_permissions():
+    with pytest.raises(ManifestError, match="side_effects not declared"):
+        parse_manifest(
+            {
+                "name": "unsafe_pack",
+                "version": "0.1.0",
+                "display_name": "Unsafe Pack",
+                "description": "Missing permissions",
+                "module": "unsafe_pack.tools",
+                "tools": [
+                    {
+                        "name": "write_data",
+                        "summary": "Writes a dataset",
+                        "input_schema": {"type": "object", "additionalProperties": False},
+                        "output_schema": {"type": "object", "additionalProperties": False},
+                        "determinism": "deterministic",
+                        "timeout_seconds": 10,
+                        "failure_policy": "fail",
+                        "entrypoint": "run",
+                        "side_effects": ["write:dataset"],
+                    }
+                ],
+                "hooks": [],
+                "permissions": ["read:dataset"],
+            },
+            builtin=False,
+        )
+
+
+def test_parse_manifest_rejects_unknown_permissions_and_side_effects():
+    base = {
+        "name": "bad_vocab_pack",
+        "version": "0.1.0",
+        "display_name": "Bad Vocabulary Pack",
+        "description": "Unknown permission values",
+        "module": "bad_vocab.tools",
+        "tools": [
+            {
+                "name": "run",
+                "summary": "Run",
+                "input_schema": {"type": "object", "additionalProperties": False},
+                "output_schema": {"type": "object", "additionalProperties": False},
+                "determinism": "deterministic",
+                "timeout_seconds": 10,
+                "failure_policy": "fail",
+                "entrypoint": "run",
+                "side_effects": [],
+            }
+        ],
+        "hooks": [],
+        "permissions": ["write:anything"],
+    }
+
+    with pytest.raises(ManifestError, match="unknown permission"):
+        parse_manifest(base, builtin=False)
+
+    base["permissions"] = ["read:dataset"]
+    base["tools"][0]["side_effects"] = ["write:anything"]
+    with pytest.raises(ManifestError, match="unknown permission"):
+        parse_manifest(base, builtin=False)
 
 
 def test_tool_registry_catalog_for_planner_is_compact_and_safe(tmp_path):

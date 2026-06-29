@@ -187,6 +187,19 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert backtest.output["backtest_id"]
     assert backtest.output["approval_rate"] == pytest.approx(4 / 6)
     assert "by_segment" in backtest.output
+    strategy_audits = PluginRepository(
+        build_settings(tmp_path / "workspace").db_path
+    ).list_audit()
+    assert any(
+        audit["kind"] == "strategy.create"
+        and audit["target_ref"] == built.output["strategy_id"]
+        for audit in strategy_audits
+    )
+    assert any(
+        audit["kind"] == "strategy.backtest"
+        and audit["target_ref"] == backtest.output["backtest_id"]
+        for audit in strategy_audits
+    )
     assert tradeoff.ok is True, tradeoff.error
     assert [point["cutoff"] for point in tradeoff.output["points"]] == [600.0, 700.0]
     assert tradeoff.output["recommended"]["cutoff"] in {600.0, 700.0}
@@ -219,6 +232,37 @@ def test_tradeoff_view_gates_nan_label(tmp_path):
 
     confirmed = runner.invoke(
         ToolRef("strategy", "tradeoff_view"),
+        {**base_inputs, "drop_nan_labels": True},
+        task_id=task.id,
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["nan_labels_dropped"] == 1
+
+
+def test_vintage_curve_gates_nan_label(tmp_path):
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "cohort": ["202601", "202601", "202602"],
+        "mob": [0, 1, 0],
+        "bad": [0.0, float("nan"), 1.0],
+    })
+    path = tmp_path / "vintage_nan_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
+    base_inputs = {
+        "dataset_id": dataset.id,
+        "cohort_col": "cohort",
+        "mob_col": "mob",
+        "bad_col": "bad",
+    }
+
+    blocked = runner.invoke(ToolRef("strategy", "vintage_curve"), dict(base_inputs), task_id=task.id)
+    assert blocked.ok is False
+    assert blocked.error_kind == "nan_label_not_confirmed"
+    assert blocked.error_detail["n_nan"] == 1
+
+    confirmed = runner.invoke(
+        ToolRef("strategy", "vintage_curve"),
         {**base_inputs, "drop_nan_labels": True},
         task_id=task.id,
     )

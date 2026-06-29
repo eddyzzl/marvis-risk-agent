@@ -4,6 +4,9 @@ import json
 from typing import Any
 
 
+SCALAR_SCHEMA_TYPES = {"string", "number", "integer", "boolean", "null"}
+
+
 def summarize_output(output: dict, tool_spec, *, max_chars: int = 600) -> dict:
     properties = _schema_properties(getattr(tool_spec, "output_schema", {}))
     summary: dict[str, Any] = {}
@@ -13,7 +16,7 @@ def summarize_output(output: dict, tool_spec, *, max_chars: int = 600) -> dict:
         value = output[field]
         if _is_scalar_schema(spec) or _is_scalar(value):
             summary[field] = _truncate_value(value, 120)
-        elif spec.get("type") == "array" or isinstance(value, list):
+        elif _schema_has_type(spec, "array") or isinstance(value, list):
             items = value if isinstance(value, list) else []
             summary[field] = {
                 "len": len(items),
@@ -39,7 +42,17 @@ def _schema_properties(schema: dict) -> dict:
 
 
 def _is_scalar_schema(schema: dict) -> bool:
-    return schema.get("type") in {"string", "number", "integer", "boolean", "null"}
+    declared = schema.get("type") if isinstance(schema, dict) else None
+    if isinstance(declared, list):
+        return bool(declared) and all(item in SCALAR_SCHEMA_TYPES for item in declared)
+    return declared in SCALAR_SCHEMA_TYPES
+
+
+def _schema_has_type(schema: dict, *types: str) -> bool:
+    declared = schema.get("type") if isinstance(schema, dict) else None
+    if isinstance(declared, list):
+        return any(item in types for item in declared)
+    return declared in types
 
 
 def _is_scalar(value) -> bool:

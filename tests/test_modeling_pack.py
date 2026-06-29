@@ -1,13 +1,21 @@
+import json
+import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import nbformat
 import pandas as pd
+import pytest
+from openpyxl import load_workbook
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.modeling.experiment import ExperimentStore
+from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
+from marvis.packs.modeling.tools import _ModelArtifactScorer, _effective_seed
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -71,31 +79,296 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     manifest = plugin_registry.get("modeling")
     tool_names = {tool.name for tool in manifest.tools}
     train_tool = next(tool for tool in manifest.tools if tool.name == "train_model")
+    choose_tool = next(tool for tool in manifest.tools if tool.name == "choose_modeling_spec")
+    configure_tool = next(tool for tool in manifest.tools if tool.name == "configure_tuning")
+    tune_tool = next(tool for tool in manifest.tools if tool.name == "tune_hyperparameters")
+    calibrate_tool = next(tool for tool in manifest.tools if tool.name == "calibrate_model")
+    export_tool = next(tool for tool in manifest.tools if tool.name == "export_pmml")
     handoff_tool = next(tool for tool in manifest.tools if tool.name == "handoff_to_validation")
+    post_training_tool = next(tool for tool in manifest.tools if tool.name == "post_training_action")
+    reject_tool = next(tool for tool in manifest.tools if tool.name == "reject_inference")
+    select_tool = next(tool for tool in manifest.tools if tool.name == "select_features")
+    select_experiment_tool = next(tool for tool in manifest.tools if tool.name == "select_experiment")
     report_tool = next(tool for tool in manifest.tools if tool.name == "generate_model_report")
 
     assert tool_names == {
         "check_data_quality",
         "modeling_readiness",
+        "reject_inference",
         "prepare_modeling_frame",
         "make_split",
         "screen_features",
         "select_features",
+        "choose_modeling_spec",
+        "configure_tuning",
         "tune_hyperparameters",
         "train_model",
         "train_models",
         "compare_experiments",
+        "select_experiment",
+        "calibrate_model",
         "export_pmml",
         "handoff_to_validation",
+        "post_training_action",
         "generate_model_report",
         "generate_model_reports",
     }
-    assert "reject_inference" not in tool_names
     assert train_tool.determinism == "stochastic"
+    assert reject_tool.determinism == "deterministic"
+    assert "seed" not in reject_tool.input_schema["properties"]
+    assert {"read:dataset", "write:dataset"} <= set(reject_tool.side_effects)
     assert {"write:model", "write:dataset"} <= set(train_tool.side_effects)
+    assert "monotone_constraints" in train_tool.input_schema["properties"]
+    assert choose_tool.determinism == "deterministic"
+    assert "metric_policy" in choose_tool.output_schema["required"]
+    assert "params" in configure_tool.input_schema["properties"]
+    assert "params" in configure_tool.output_schema["required"]
+    assert "params" in tune_tool.input_schema["properties"]
+    assert "oot_stability_penalty" not in tune_tool.input_schema["properties"]
+    assert "OOT metrics are reported but not used" in tune_tool.summary
+    assert calibrate_tool.determinism == "deterministic"
+    assert {"read:model", "read:dataset", "write:model"} <= set(calibrate_tool.side_effects)
+    assert select_tool.input_schema["properties"]["space"]["enum"] == ["raw", "woe"]
+    assert "warnings" in select_tool.output_schema["required"]
+    assert "selected_experiment_id" in select_experiment_tool.output_schema["required"]
+    assert "LR modeling artifact" not in export_tool.summary
+    assert "lr/lgb/xgb/scorecard" in export_tool.summary
     assert "write:task" in handoff_tool.side_effects
+    assert "write:task" in post_training_tool.side_effects
+    assert "actions" in post_training_tool.output_schema["required"]
     assert "model_id" in report_tool.input_schema["properties"]
     assert "llm" in report_tool.side_effects
+
+
+def test_modeling_tool_seed_fallback_uses_shared_default():
+    class Ctx:
+        seed = None
+
+    assert _effective_seed({}, Ctx()) == DEFAULT_RANDOM_SEED
+    assert _effective_seed({"seed": 0}, Ctx()) == 0
+    Ctx.seed = 17
+    assert _effective_seed({}, Ctx()) == 17
+
+
+def test_reject_inference_tool_registers_augmented_dataset(tmp_path):
+    runner, _plugin_registry, registry, backend, settings, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.9, 0.8],
+        "bad": [0, 1, None, None],
+        "decision": ["approved", "approved", "rejected", "rejected"],
+    })
+    path = tmp_path / "reject_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    result = runner.invoke(
+        ToolRef("modeling", "reject_inference"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "bad",
+            "decision_col": "decision",
+            "score_col": "score",
+            "reject_bad_rate": 0.5,
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["target_col"] == "__reject_inference_target__"
+    assert result.output["sample_weight_col"] == "__reject_inference_weight__"
+    augmented_path = registry.resolve_path(result.output["result_dataset_id"])
+    augmented = backend.read_frame(augmented_path)
+    assert augmented_path.parent.name == "modeling"
+    assert not (augmented_path.parent / ".staging").exists()
+    assert "__reject_inference_source__" in augmented.columns
+    assert augmented["__reject_inference_source__"].tolist().count("rejected_inferred") == 2
+    assert result.output["diagnostics"]["rejected_rows"] == 2
+    audit = PluginRepository(settings.db_path).list_audit(
+        kind="modeling.reject_inference.created",
+    )[0]
+    assert audit["target_ref"] == result.output["result_dataset_id"]
+    assert audit["detail"]["source_dataset_id"] == dataset.id
+
+
+def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"max_iter": 200},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    calibrated = runner.invoke(
+        ToolRef("modeling", "calibrate_model"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": dataset.id,
+            "method": "sigmoid",
+            "split": "test",
+            "min_samples": 20,
+            "n_bins": 5,
+        },
+        task_id=task.id,
+    )
+
+    assert calibrated.ok is True, calibrated.error
+    assert Path(calibrated.output["calibration_path"]).exists()
+    assert calibrated.output["sample_count"] == 60
+    assert calibrated.output["pmml_includes_calibration"] is False
+    assert {row["score_type"] for row in calibrated.output["reliability_curve"]} == {"raw", "calibrated"}
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact is not None
+    assert artifact.params["calibration"]["method"] == "sigmoid"
+    assert artifact.params["calibration"]["sample_count"] == 60
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    assert not (base_dir / ".staging").exists()
+    meta = json.loads((base_dir / f"{artifact.id}.model_meta.json").read_text(encoding="utf-8"))
+    assert meta["params"]["calibration"]["path"] == f"{artifact.id}.calibration.sigmoid.joblib"
+    calibration_audit = PluginRepository(settings.db_path).list_audit(
+        kind="modeling.artifact.calibrate",
+    )[0]
+    assert calibration_audit["target_ref"] == artifact.id
+    assert calibration_audit["detail"]["sample_count"] == 60
+
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    scorer = _ModelArtifactScorer(artifact, base_dir=base_dir)
+    raw_scores = scorer.score(frame, use_calibration=False)
+    calibrated_scores = scorer.score(frame)
+    assert all(0.0 <= score <= 1.0 for score in calibrated_scores)
+    assert any(abs(raw - calibrated) > 1e-9 for raw, calibrated in zip(raw_scores, calibrated_scores, strict=False))
+
+    report = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "dataset_id": dataset.id,
+        },
+        task_id=task.id,
+    )
+
+    assert report.ok is True, report.error
+    assert report.output["calibration"][0]["method"] == "sigmoid"
+    report_audit = PluginRepository(settings.db_path).list_audit(
+        kind="modeling.report.generated",
+    )[0]
+    assert report_audit["target_ref"] == trained.output["experiment_id"]
+    assert report_audit["detail"]["artifact_id"] == artifact.id
+    workbook = load_workbook(report.output["report_path"])
+    assert workbook["概率校准"]["A1"].value == "score_type"
+    assert workbook["概率校准"]["B2"].value == "sigmoid"
+    headers = [cell.value for cell in workbook["概率校准"][1]]
+    assert {"bin", "avg_predicted_pd", "observed_bad_rate"} <= set(headers)
+
+    handed_off = runner.invoke(
+        ToolRef("modeling", "handoff_to_validation"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": dataset.id,
+        },
+        task_id=task.id,
+    )
+
+    assert handed_off.ok is True, handed_off.error
+    handoff_audit = PluginRepository(settings.db_path).list_audit(
+        kind="modeling.validation_handoff.create",
+    )[0]
+    assert handoff_audit["target_ref"] == handed_off.output["validation_task_id"]
+    validation_task = TaskRepository(settings.db_path).get_task(handed_off.output["validation_task_id"])
+    material_dir = Path(validation_task.source_dir)
+    notebook_text = (material_dir / "scoring_notebook.ipynb").read_text(encoding="utf-8")
+    assert (material_dir / "calibration.joblib").exists()
+    assert "RMC_CALIBRATION_FILENAME" in notebook_text
+    assert "RMC_SCORE_VERSION" in notebook_text
+    assert "_rmc_apply_calibration" in notebook_text
+    notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
+    namespace = {"RMC_SAMPLE_PATH": str(material_dir / "sample.parquet")}
+    cwd = Path.cwd()
+    try:
+        os.chdir(material_dir)
+        exec(notebook.cells[0].source, namespace)  # noqa: S102 - execute generated local notebook source under test
+    finally:
+        os.chdir(cwd)
+    notebook_scores = namespace["RMC_SCORE_FN"](namespace["RMC_SAMPLE_DF"])
+    assert all(0.0 <= float(score) <= 1.0 for score in notebook_scores)
+    assert any(
+        abs(float(left) - float(right)) > 1e-9
+        for left, right in zip(notebook_scores, raw_scores, strict=False)
+    )
+
+
+def test_select_features_supports_woe_space_on_train_split(tmp_path):
+    runner, _plugin_registry, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_features"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "space": "woe",
+            "split_col": "split",
+            "split_value": "train",
+            "iv_min": 0.0,
+            "corr_max": 0.99,
+            "vif_max": 1000,
+            "scorecard_max_bins": 4,
+            "enforce_monotonic": True,
+            "sign_check": True,
+        },
+        task_id=task.id,
+    )
+
+    assert selected.ok is True, selected.error
+    assert set(selected.output["selected"]) <= {"x1", "x2"}
+    assert isinstance(selected.output["warnings"], list)
+    for feature in ("x1", "x2"):
+        assert selected.output["scores"][feature]["space"] == "woe"
+        assert selected.output["scores"][feature]["bin_count"] >= 1
+        assert selected.output["scores"][feature]["monotonic_direction"] in {"increasing", "decreasing"}
+
+
+def test_train_model_applies_top_level_monotone_constraints_for_tree_models(tmp_path):
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    recipes = {
+        "lgb": ({"num_boost_round": 2, "num_leaves": 4}, [1, -1]),
+        "xgb": ({"num_boost_round": 2, "max_depth": 2}, "(1,-1)"),
+    }
+    for recipe, (params, expected_constraints) in recipes.items():
+        trained = runner.invoke(
+            ToolRef("modeling", "train_model"),
+            {
+                "dataset_id": dataset.id,
+                "recipe": recipe,
+                "features": ["x1", "x2"],
+                "target_col": "y",
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "params": params,
+                "monotone_constraints": {"x1": 1, "x2": -1},
+                "seed": 23,
+            },
+            task_id=task.id,
+        )
+
+        assert trained.ok is True, trained.error
+        artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+        assert artifact is not None
+        assert artifact.params["monotone_constraints"] == expected_constraints
 
 
 def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
@@ -129,6 +402,11 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
     assert prepared.ok is True, prepared.error
     assert "result_dataset_id" in prepared.output
     assert prepared.output["split_counts"] == {"oot": 40, "test": 60, "train": 140}
+    prepared_audit = PluginRepository(settings.db_path).list_audit(
+        kind="modeling.dataset.derived",
+    )[0]
+    assert prepared_audit["target_ref"] == prepared.output["result_dataset_id"]
+    assert prepared_audit["detail"]["tool"] == "prepare_modeling_frame"
 
     selected = runner.invoke(
         ToolRef("modeling", "select_features"),
@@ -220,6 +498,12 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
     )
 
     assert compared.ok is True, compared.error
+    scorecard_artifact = ModelingRepository(settings.db_path).get_model_artifact(
+        train_outputs["scorecard"]["artifact_id"]
+    )
+    assert scorecard_artifact is not None
+    assert scorecard_artifact.scorecard_table
+    assert {"feature", "bin_label", "points"} <= set(scorecard_artifact.scorecard_table[0])
     assert [row["recipe"] for row in compared.output["experiments"]] == [
         "lgb",
         "xgb",
@@ -233,6 +517,18 @@ def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
         assert rows_by_recipe[recipe]["capabilities"]["reason"] is None
         assert exported_by_recipe[recipe].ok is True, exported_by_recipe[recipe].error
         assert Path(exported_by_recipe[recipe].output["pmml_path"]).exists()
+        meta_path = (
+            Path(settings.tasks_dir)
+            / task.id
+            / "modeling_artifacts"
+            / f"{train_outputs[recipe]['artifact_id']}.model_meta.json"
+        )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["pmml_path"] == f"{train_outputs[recipe]['artifact_id']}.pmml"
+    pmml_audits = PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.pmml")
+    assert {audit["target_ref"] for audit in pmml_audits} >= {
+        output["artifact_id"] for output in train_outputs.values()
+    }
     assert handed_off.ok is True, handed_off.error
     assert scorecard_handed_off.ok is True, scorecard_handed_off.error
     validation_task = TaskRepository(settings.db_path).get_task(
@@ -391,6 +687,70 @@ def test_tune_skips_random_search_for_non_lgb_recipe():
         assert out == {"best_params": {}, "best_metrics": {}, "n_trials": 0, "trials": []}
 
 
+def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
+    from marvis.packs.modeling.errors import ModelingError
+    from marvis.packs.modeling.tools import tool_choose_modeling_spec
+
+    out = tool_choose_modeling_spec(
+        {
+            "target_col": "bad",
+            "features": ["x1", "weight", "x2"],
+            "recipe": "lgb",
+            "recipes": ["lgb", "catboost"],
+            "target_type": "binary",
+            "sample_weight_col": "weight",
+            "sample_weight_candidates": ["weight", "sample_weight"],
+            "n_trials": 9,
+            "params": {"learning_rate": 0.03},
+            "seed": 17,
+        },
+        SimpleNamespace(seed=None),
+    )
+
+    assert out["recipe"] == "lgb"
+    assert out["recipes"] == ["lgb", "catboost"]
+    assert out["target_type"] == "binary"
+    assert out["sample_weight_col"] == "weight"
+    assert out["feature_cols"] == ["x1", "x2"]
+    assert out["params"]["sample_weight_col"] == "weight"
+    assert out["params"]["learning_rate"] == 0.03
+    assert "lgb" in out["eligible_algorithms"]
+    assert any(item["recipe"] == "lgb_regressor" for item in out["disabled_algorithms"])
+
+    with pytest.raises(ModelingError, match="cannot be mixed"):
+        tool_choose_modeling_spec(
+            {"recipe": "lgb", "recipes": ["lgb", "lgb_regressor"], "seed": 17},
+            SimpleNamespace(seed=None),
+        )
+
+
+def test_configure_tuning_preserves_manual_controls_and_disables_non_lgb():
+    from marvis.packs.modeling.tools import tool_configure_tuning
+
+    lgb = tool_configure_tuning(
+        {
+            "recipe": "lgb",
+            "target_type": "binary",
+            "n_trials": 7,
+            "seed": 13,
+            "sample_weight_col": "weight",
+            "params": {"learning_rate": 0.03, "monotone_constraints": {"x1": 1, "x2": -1}},
+        },
+        SimpleNamespace(seed=None),
+    )
+    assert lgb["tune_enabled"] is True
+    assert lgb["n_trials"] == 7
+    assert lgb["sample_weight_col"] == "weight"
+    assert lgb["params"]["sample_weight_col"] == "weight"
+    assert lgb["params"]["learning_rate"] == 0.03
+    assert lgb["params"]["monotone_constraints"] == {"x1": 1, "x2": -1}
+
+    lr = tool_configure_tuning({"recipe": "lr", "seed": 13, "n_trials": 7}, SimpleNamespace(seed=None))
+    assert lr["tune_enabled"] is False
+    assert lr["n_trials"] == 0
+    assert lr["params"] == {}
+
+
 def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     """G2 multi-algorithm: train_models trains every requested recipe and returns
     all experiments + the best by OOT KS. lgb consumes the tuned params; lr trains
@@ -499,6 +859,37 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert catboost_row["capabilities"]["native_model_supported"] is True
     assert catboost_row["capabilities"]["pmml_supported"] is False
     assert "sklearn2pmml" in catboost_row["capabilities"]["reason"]
+    catboost_experiment_id = next(
+        exp_id
+        for exp_id in trained.output["experiment_ids"]
+        if store.get(exp_id).recipe_id == "catboost"
+    )
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": catboost_experiment_id,
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert selected.output["selected_experiment_id"] == catboost_experiment_id
+    assert selected.output["artifact_id"] == artifacts["catboost"].id
+    assert selected.output["selection_metric"] == "manual"
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": selected.output["selected_experiment_id"],
+            "sample_dataset_id": prepared.output["result_dataset_id"],
+            "actions": ["export_pmml", "handoff_to_validation"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    assert post_training.output["artifact_id"] == artifacts["catboost"].id
+    assert post_training.output["capabilities"]["native_model_supported"] is True
+    assert {item["status"] for item in post_training.output["actions"]} == {"skipped"}
 
 
 def test_pick_best_experiment_is_target_type_aware():
@@ -519,6 +910,30 @@ def test_pick_best_experiment_is_target_type_aware():
     best, metric = _pick_best_experiment(multiclass, target_type="multiclass")
     assert best["experiment_id"] == "mc-b"
     assert metric == "oot_macro_auc"
+
+
+def test_pick_best_comparison_row_prefers_delivery_ready_candidate():
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "catboost-best",
+            "recipe": "catboost",
+            "oot_ks": 0.52,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+        {
+            "id": "lgb-deliverable",
+            "recipe": "lgb",
+            "oot_ks": 0.48,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+    ]
+
+    best, metric = _pick_best_comparison_row(rows, target_type="binary")
+
+    assert best["id"] == "lgb-deliverable"
+    assert metric == "oot_ks"
 
 
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):

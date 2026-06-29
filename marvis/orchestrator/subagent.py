@@ -92,17 +92,22 @@ class SubAgentDispatcher:
             context_budget=DEFAULT_SUBAGENT_BUDGET,
             status=AgentStatus.SPAWNED,
         )
-        self._repo.upsert_sub_agent(sub)
-        self._repo.write_audit(
-            kind="subagent.spawn",
-            target_ref=sub.id,
-            outcome="succeeded",
-            detail={
+        audit = {
+            "kind": "subagent.spawn",
+            "target_ref": sub.id,
+            "outcome": "succeeded",
+            "detail": {
                 "parent_step_id": step.id,
                 "scope": sub.scope,
                 "tools": [ref.label() for ref in sub.granted_tools],
             },
-        )
+        }
+        upsert_with_audit = getattr(self._repo, "upsert_sub_agent_with_audit", None)
+        if callable(upsert_with_audit):
+            upsert_with_audit(sub, audit=audit)
+        else:
+            self._repo.upsert_sub_agent(sub)
+            self._repo.write_audit(**audit)
         return sub
 
     def run(self, sub: SubAgent, *, goal_inputs: dict) -> ToolResult:
@@ -134,17 +139,41 @@ class SubAgentDispatcher:
             mini_plan.status = PlanStatus.CONFIRMED
             self._repo.create_plan(mini_plan)
             execution = self._executor_factory(restricted).run(mini_plan.id)
+            execution_status = _execution_status(execution)
+            if execution_status != PlanStatus.DONE:
+                message = f"sub-agent plan {mini_plan.id} ended with status {execution_status.value}"
+                self._set_status_with_audit(
+                    sub.id,
+                    AgentStatus.FAILED,
+                    audit={
+                        "kind": "subagent.run",
+                        "target_ref": sub.id,
+                        "outcome": "failed",
+                        "detail": {
+                            "plan_id": mini_plan.id,
+                            "status": execution_status.value,
+                            "error": message,
+                        },
+                    },
+                )
+                return ToolResult(
+                    ok=False,
+                    output=None,
+                    error=message,
+                    error_kind="paused" if execution_status in {PlanStatus.AWAITING_CONFIRM, PlanStatus.REVIEW} else "execution",
+                    duration_ms=_duration_ms(started),
+                )
             result_ref = execution.summary_ref
-            self._repo.set_sub_agent_status(
+            self._set_status_with_audit(
                 sub.id,
                 AgentStatus.RETURNED,
                 result_ref=result_ref,
-            )
-            self._repo.write_audit(
-                kind="subagent.run",
-                target_ref=sub.id,
-                outcome="succeeded",
-                detail={"plan_id": mini_plan.id, "result_ref": result_ref},
+                audit={
+                    "kind": "subagent.run",
+                    "target_ref": sub.id,
+                    "outcome": "succeeded",
+                    "detail": {"plan_id": mini_plan.id, "result_ref": result_ref},
+                },
             )
             return ToolResult(
                 ok=True,
@@ -154,12 +183,15 @@ class SubAgentDispatcher:
                 duration_ms=_duration_ms(started),
             )
         except Exception as exc:
-            self._repo.set_sub_agent_status(sub.id, AgentStatus.FAILED)
-            self._repo.write_audit(
-                kind="subagent.run",
-                target_ref=sub.id,
-                outcome="failed",
-                detail={"error": str(exc)},
+            self._set_status_with_audit(
+                sub.id,
+                AgentStatus.FAILED,
+                audit={
+                    "kind": "subagent.run",
+                    "target_ref": sub.id,
+                    "outcome": "failed",
+                    "detail": {"error": str(exc)},
+                },
             )
             return ToolResult(
                 ok=False,
@@ -169,6 +201,26 @@ class SubAgentDispatcher:
                 duration_ms=_duration_ms(started),
             )
 
+    def _set_status_with_audit(
+        self,
+        sub_id: str,
+        status: AgentStatus,
+        *,
+        audit: dict,
+        result_ref: str | None = None,
+    ) -> None:
+        set_with_audit = getattr(self._repo, "set_sub_agent_status_with_audit", None)
+        if callable(set_with_audit):
+            set_with_audit(sub_id, status, result_ref=result_ref, audit=audit)
+        else:
+            self._repo.set_sub_agent_status(sub_id, status, result_ref=result_ref)
+            self._repo.write_audit(**audit)
+
 
 def _duration_ms(started: float) -> int:
     return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _execution_status(execution) -> PlanStatus:
+    raw = getattr(execution, "status", PlanStatus.DONE)
+    return raw if isinstance(raw, PlanStatus) else PlanStatus(str(raw))

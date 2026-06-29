@@ -12,7 +12,7 @@ export const defaultBranding = {
   platformName: "MARVIS-全能风控智能体",
   browserTitle: "MARVIS-全能风控智能体",
   primaryColor: "#303034",
-  logoUrl: "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+  logoUrl: "static/brand/marvis-logo.png?v=20260624-gauge",
   workspaceLogoUrl: "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
   faviconUrl: "static/brand/marvis-favicon.png?v=20260624-gauge",
   // Real validator name -> display alias, supplied per-workspace by brand.json.

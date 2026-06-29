@@ -27,7 +27,27 @@ def feature_ks(scores: np.ndarray, target: np.ndarray) -> float:
     return float(np.max(np.abs(cum_bad[change_points] - cum_good[change_points])))
 
 
-def feature_auc(scores: np.ndarray, target: np.ndarray) -> float:
+def weighted_feature_ks(scores: np.ndarray, target: np.ndarray, weights: np.ndarray) -> float:
+    scores_arr, target_arr, weight_arr = _finite_binary_weighted_triples(scores, target, weights)
+    if scores_arr.size == 0:
+        return 0.0
+    order = np.argsort(scores_arr, kind="mergesort")
+    sorted_scores = scores_arr[order]
+    sorted_target = target_arr[order]
+    sorted_weight = weight_arr[order]
+    bad_weight = np.where(sorted_target == 1, sorted_weight, 0.0)
+    good_weight = np.where(sorted_target == 0, sorted_weight, 0.0)
+    total_bad = float(bad_weight.sum())
+    total_good = float(good_weight.sum())
+    if total_bad <= 0 or total_good <= 0:
+        return 0.0
+    cum_bad = np.cumsum(bad_weight) / total_bad
+    cum_good = np.cumsum(good_weight) / total_good
+    change_points = np.r_[np.where(np.diff(sorted_scores) != 0)[0], len(sorted_scores) - 1]
+    return float(np.max(np.abs(cum_bad[change_points] - cum_good[change_points])))
+
+
+def feature_auc(scores: np.ndarray, target: np.ndarray, *, direction_agnostic: bool = False) -> float:
     scores_arr, target_arr = _finite_binary_pairs(scores, target)
     pos = scores_arr[target_arr == 1]
     neg = scores_arr[target_arr == 0]
@@ -36,7 +56,37 @@ def feature_auc(scores: np.ndarray, target: np.ndarray) -> float:
     ranks = rankdata(scores_arr)
     pos_ranks = ranks[target_arr == 1]
     auc = (pos_ranks.sum() - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+    if direction_agnostic:
+        auc = max(auc, 1 - auc)
     return float(auc)
+
+
+def weighted_feature_auc(scores: np.ndarray, target: np.ndarray, weights: np.ndarray) -> float:
+    scores_arr, target_arr, weight_arr = _finite_binary_weighted_triples(scores, target, weights)
+    total_bad = float(weight_arr[target_arr == 1].sum())
+    total_good = float(weight_arr[target_arr == 0].sum())
+    if total_bad <= 0 or total_good <= 0:
+        return 0.5
+    order = np.argsort(scores_arr, kind="mergesort")
+    sorted_scores = scores_arr[order]
+    sorted_target = target_arr[order]
+    sorted_weight = weight_arr[order]
+    numerator = 0.0
+    cumulative_good = 0.0
+    start = 0
+    n = sorted_scores.size
+    while start < n:
+        end = start + 1
+        while end < n and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        group_target = sorted_target[start:end]
+        group_weight = sorted_weight[start:end]
+        group_bad = float(group_weight[group_target == 1].sum())
+        group_good = float(group_weight[group_target == 0].sum())
+        numerator += group_bad * cumulative_good + 0.5 * group_bad * group_good
+        cumulative_good += group_good
+        start = end
+    return float(numerator / (total_bad * total_good))
 
 
 def feature_lift(scores: np.ndarray, target: np.ndarray, *, bins: int = 10) -> list[float]:
@@ -109,6 +159,12 @@ def compute_psi(
         raise FeatureError("PSI distributions must be non-negative")
     expected = np.where(expected <= 0, smoothing, expected)
     actual = np.where(actual <= 0, smoothing, actual)
+    expected_total = float(expected.sum())
+    actual_total = float(actual.sum())
+    if expected_total <= 0 or actual_total <= 0:
+        return 0.0
+    expected = expected / expected_total
+    actual = actual / actual_total
     psi = float(np.sum((actual - expected) * np.log(actual / expected)))
     return max(0.0, psi)
 
@@ -127,6 +183,22 @@ def feature_psi(
     )
 
 
+def weighted_feature_psi(
+    base_values: np.ndarray,
+    compare_values: np.ndarray,
+    edges: np.ndarray,
+    *,
+    base_weights: np.ndarray,
+    compare_weights: np.ndarray,
+    smoothing: float = 1e-6,
+) -> float:
+    return compute_psi(
+        _weighted_bin_distribution(base_values, edges, base_weights),
+        _weighted_bin_distribution(compare_values, edges, compare_weights),
+        smoothing=smoothing,
+    )
+
+
 def feature_metrics(
     values: np.ndarray,
     target: np.ndarray,
@@ -137,14 +209,17 @@ def feature_metrics(
 ) -> FeatureMetrics:
     values_arr = np.asarray(values, dtype=float)
     edges = equal_frequency_edges(values_arr, bins)
-    binning = compute_woe_iv(values_arr, target, edges, feature=feature)
+    try:
+        iv = compute_woe_iv(values_arr, target, edges, feature=feature).total_iv
+    except FeatureError:
+        iv = 0.0
     lift = feature_lift(values_arr, target, bins=bins)
     psi = feature_psi(values_arr, compare_values, edges) if compare_values is not None else None
     return FeatureMetrics(
         feature=feature,
-        iv=binning.total_iv,
+        iv=iv,
         ks=feature_ks(values_arr, target),
-        auc=feature_auc(values_arr, target),
+        auc=feature_auc(values_arr, target, direction_agnostic=True),
         psi=psi,
         missing_rate=float(np.mean(~np.isfinite(values_arr))),
         unique_count=int(np.unique(values_arr[np.isfinite(values_arr)]).size),
@@ -161,6 +236,25 @@ def _bin_distribution(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return counts / counts.sum()
 
 
+def _weighted_bin_distribution(values: np.ndarray, edges: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    values_arr = np.asarray(values, dtype=float)
+    weight_arr = np.asarray(weights, dtype=float)
+    if values_arr.shape != weight_arr.shape:
+        raise FeatureError("values and weights must have the same shape")
+    assigned = assign_bins(values_arr, edges)
+    valid = (assigned >= 0) & np.isfinite(weight_arr)
+    if not np.any(valid):
+        return np.zeros(len(edges) - 1, dtype=float)
+    clipped_weights = np.clip(weight_arr[valid], 0.0, None)
+    counts = np.bincount(
+        assigned[valid],
+        weights=clipped_weights,
+        minlength=len(edges) - 1,
+    ).astype(float)
+    total = float(counts.sum())
+    return counts / total if total > 0 else np.zeros(len(edges) - 1, dtype=float)
+
+
 def _finite_binary_pairs(scores: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     scores_arr = np.asarray(scores, dtype=float)
     target_arr = np.asarray(target, dtype=float)
@@ -174,6 +268,25 @@ def _finite_binary_pairs(scores: np.ndarray, target: np.ndarray) -> tuple[np.nda
     return scores_arr, target_arr.astype(int)
 
 
+def _finite_binary_weighted_triples(
+    scores: np.ndarray,
+    target: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    scores_arr = np.asarray(scores, dtype=float)
+    target_arr = np.asarray(target, dtype=float)
+    weight_arr = np.asarray(weights, dtype=float)
+    if scores_arr.shape != target_arr.shape or scores_arr.shape != weight_arr.shape:
+        raise FeatureError("scores, target, and weights must have the same shape")
+    mask = np.isfinite(scores_arr) & np.isfinite(target_arr) & np.isfinite(weight_arr) & (weight_arr >= 0)
+    scores_arr = scores_arr[mask]
+    target_arr = target_arr[mask]
+    weight_arr = weight_arr[mask]
+    if target_arr.size and not np.all(np.isin(target_arr, [0, 1])):
+        raise FeatureError("target must be binary 0/1")
+    return scores_arr, target_arr.astype(int), weight_arr
+
+
 __all__ = [
     "compute_psi",
     "feature_auc",
@@ -182,4 +295,7 @@ __all__ = [
     "feature_metrics",
     "feature_psi",
     "head_tail_lift",
+    "weighted_feature_auc",
+    "weighted_feature_ks",
+    "weighted_feature_psi",
 ]

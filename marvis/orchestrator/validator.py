@@ -4,6 +4,7 @@ from copy import deepcopy
 import re
 
 from marvis.orchestrator.contracts import Plan, PlanStep
+from marvis.orchestrator.safety import is_draft_run_step, is_safety_step
 from marvis.plugins.errors import (
     PluginNotFoundError,
     SchemaValidationError,
@@ -128,17 +129,31 @@ class PlanValidator:
         return problems
 
     def _check_join_gates(self, plan: Plan) -> list[str]:
-        return [
-            f"join step {step.title} must require confirmation (INV-3)"
-            for step in plan.steps
-            if step.tool_ref.tool == "execute_join" and not step.needs_confirmation
-        ]
+        problems = []
+        for step in plan.steps:
+            if step.tool_ref.tool != "execute_join":
+                continue
+            if not step.needs_confirmation:
+                problems.append(f"join step {step.title} must require confirmation (INV-3)")
+            check_kinds = {check.kind for check in step.post_checks}
+            if "rowcount" not in check_kinds:
+                problems.append(f"join step {step.title} must include rowcount post_check (INV-2)")
+            invariant_rules = {
+                str(check.spec.get("rule") or "").replace(" ", "")
+                for check in step.post_checks
+                if check.kind == "invariant"
+            }
+            if "joined_rows<=anchor_rows" not in invariant_rules:
+                problems.append(
+                    f"join step {step.title} must include joined_rows<=anchor_rows invariant (INV-2)"
+                )
+        return problems
 
     def _check_draft_run_gates(self, plan: Plan) -> list[str]:
         return [
             f"draft run step {step.title} must require confirmation"
             for step in plan.steps
-            if _is_draft_run_step(step) and not step.needs_confirmation
+            if is_draft_run_step(step) and not step.needs_confirmation
         ]
 
     def _check_post_check_kinds(self, plan: Plan) -> list[str]:
@@ -190,7 +205,7 @@ class PlanValidator:
         return [
             f"decision_point is not allowed on safety step {step.title}"
             for step in plan.steps
-            if step.decision_point and _is_safety_step(step)
+            if step.decision_point and is_safety_step(step)
         ]
 
     def _resolve_step_tool(self, step: PlanStep):
@@ -272,18 +287,6 @@ def _metric_fields_in_schema(schema: dict, *, prefix: str = "") -> set[str]:
             for variant in variants:
                 fields.update(_metric_fields_in_schema(variant, prefix=prefix))
     return fields
-
-
-def _is_safety_step(step: PlanStep) -> bool:
-    if step.tool_ref.tool == "execute_join" or _is_draft_run_step(step):
-        return True
-    if step.tool_ref.plugin == "strategy" and step.tool_ref.tool == "backtest_strategy":
-        return False
-    return any(check.kind == "range" for check in step.post_checks)
-
-
-def _is_draft_run_step(step: PlanStep) -> bool:
-    return step.tool_ref.plugin == "drafts" and step.tool_ref.tool == "run_draft"
 
 
 def _has_cycle(steps: list[PlanStep]) -> bool:

@@ -74,7 +74,7 @@ def draft_script(
     if determinism not in DETERMINISM_CHOICES:
         raise AuthoringError("determinism must be deterministic or stochastic")
     code = str(spec["code"])
-    _static_safety_scan(code)
+    assert_draft_code_safe(code)
     if f"def {spec['name']}" not in code:
         raise AuthoringError("code must define the named tool function")
     return DraftTool(
@@ -93,7 +93,7 @@ def draft_script(
     )
 
 
-def _static_safety_scan(code: str) -> None:
+def assert_draft_code_safe(code: str) -> None:
     hits = [snippet for snippet in _BANNED_SNIPPETS if snippet in code]
     if hits:
         raise AuthoringError(f"draft code contains banned calls: {', '.join(hits)}")
@@ -152,4 +152,4 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-__all__ = ["TOOL_TEMPLATE", "draft_script"]
+__all__ = ["TOOL_TEMPLATE", "assert_draft_code_safe", "draft_script"]

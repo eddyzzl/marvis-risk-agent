@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 
-VERSION_RE = re.compile(r"^V?(\d+)\.(\d+)\.(\d+)$")
+VERSION_RE = re.compile(
+    r"^V?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"(?:-(?P<pre>[0-9A-Za-z][0-9A-Za-z.-]*))?$"
+)
+_PRE_RELEASE_ALIASES = {"a": "alpha", "alpha": "alpha", "b": "beta", "beta": "beta", "rc": "rc"}
+_PEP440_PRE_RELEASE = {"alpha": "a", "beta": "b", "rc": "rc"}
 RELEASE_FILES = (
     Path("pyproject.toml"),
     Path("marvis/__init__.py"),
@@ -20,15 +25,15 @@ RELEASE_FILES = (
 
 
 def normalize_version(value: str) -> str:
-    match = VERSION_RE.fullmatch(value.strip())
-    if not match:
-        raise ValueError("version must match V<MAJOR>.<MINOR>.<PATCH>")
-    major, minor, patch = match.groups()
-    return f"V{int(major)}.{int(minor)}.{int(patch)}"
+    major, minor, patch, pre = _parse_version(value)
+    suffix = f"-{pre}" if pre else ""
+    return f"V{major}.{minor}.{patch}{suffix}"
 
 
 def bump_version_tag(current_tag: str, bump: str) -> str:
     normalized = normalize_version(current_tag)
+    if "-" in normalized:
+        raise ValueError("bump only supports stable V<MAJOR>.<MINOR>.<PATCH> tags; use --version for pre-releases")
     major, minor, patch = (int(part) for part in normalized[1:].split("."))
     if bump == "major":
         major, minor, patch = major + 1, 0, 0
@@ -42,9 +47,13 @@ def bump_version_tag(current_tag: str, bump: str) -> str:
 
 
 def update_release_text(text: str, old_plain: str, new_plain: str) -> str:
+    old_python = python_version(old_plain)
+    new_python = python_version(new_plain)
     replacements = (
-        (f'version = "{old_plain}"', f'version = "{new_plain}"'),
-        (f'__version__ = "{old_plain}"', f'__version__ = "{new_plain}"'),
+        (f'version = "{old_plain}"', f'version = "{new_python}"'),
+        (f'version = "{old_python}"', f'version = "{new_python}"'),
+        (f'__version__ = "{old_plain}"', f'__version__ = "{new_python}"'),
+        (f'__version__ = "{old_python}"', f'__version__ = "{new_python}"'),
         (f"current V{old_plain} release", f"current V{new_plain} release"),
         (f"当前 V{old_plain} 版本", f"当前 V{new_plain} 版本"),
         (f"MARVIS 本地运行手册（V{old_plain}）", f"MARVIS 本地运行手册（V{new_plain}）"),
@@ -55,6 +64,34 @@ def update_release_text(text: str, old_plain: str, new_plain: str) -> str:
     for old, new in replacements:
         updated = updated.replace(old, new)
     return updated
+
+
+def python_version(value: str) -> str:
+    major, minor, patch, pre = _parse_version(value)
+    base = f"{major}.{minor}.{patch}"
+    if not pre:
+        return base
+    name, number = pre.split(".", 1)
+    return f"{base}{_PEP440_PRE_RELEASE[name]}{number}"
+
+
+def _parse_version(value: str) -> tuple[int, int, int, str | None]:
+    match = VERSION_RE.fullmatch(value.strip())
+    if not match:
+        raise ValueError(
+            "version must match V<MAJOR>.<MINOR>.<PATCH> or V<MAJOR>.<MINOR>.<PATCH>-<alpha|beta|rc>.<N>"
+        )
+    pre = _normalize_prerelease(match.group("pre"))
+    return int(match.group("major")), int(match.group("minor")), int(match.group("patch")), pre
+
+
+def _normalize_prerelease(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parts = value.lower().split(".")
+    if len(parts) != 2 or parts[0] not in _PRE_RELEASE_ALIASES or not parts[1].isdigit():
+        raise ValueError("pre-release suffix must match alpha.N, beta.N, or rc.N")
+    return f"{_PRE_RELEASE_ALIASES[parts[0]]}.{int(parts[1])}"
 
 
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -74,7 +111,7 @@ def git_output(*args: str) -> str:
 def latest_version_tag() -> str:
     tags = git_output("tag", "--list", "V[0-9]*", "--sort=-v:refname").splitlines()
     for tag in tags:
-        if VERSION_RE.fullmatch(tag):
+        if VERSION_RE.fullmatch(tag) and "-" not in normalize_version(tag):
             return tag
     raise RuntimeError("no existing V<MAJOR>.<MINOR>.<PATCH> tag found")
 

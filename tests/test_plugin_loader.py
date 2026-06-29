@@ -108,6 +108,7 @@ def test_install_plugin_zip_registers_with_platform_checksum(tmp_path):
     installed_dir = tmp_path / "installed" / "sample_pack"
     assert manifest.checksum == compute_checksum(installed_dir)
     assert registry.get("sample_pack").checksum == compute_checksum(installed_dir)
+    assert not (tmp_path / "installed" / ".staging").exists()
 
 
 def test_install_plugin_rejects_duplicate_name_and_version(tmp_path):
@@ -194,6 +195,8 @@ def test_install_plugin_rolls_back_existing_files_when_register_fails(tmp_path, 
         install_plugin(zip_v2, installed_root, registry)
 
     assert installed_tool.read_text(encoding="utf-8") == original_content
+    assert not (installed_root / ".staging").exists()
+    assert not any(path.name.endswith(".bak") for path in installed_root.iterdir())
 
 
 def test_load_manifest_missing_file_raises_manifest_error(tmp_path):

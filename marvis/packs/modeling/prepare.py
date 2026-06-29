@@ -7,7 +7,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.artifacts import TransactionalArtifactStore
 from marvis.feature.candidates import candidate_numeric_features
+from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
 
 
@@ -29,7 +31,9 @@ def prepare_modeling_frame(
     split_col: str | None,
     split_config: dict | None,
     passthrough_cols: list[str] | None = None,
-    seed: int = 0,
+    seed: int = DEFAULT_RANDOM_SEED,
+    audit_kind: str | None = None,
+    audit_detail: dict[str, Any] | None = None,
 ):
     dataset = registry.get(dataset_id)
     dataset_path = registry.resolve_path(dataset.id)
@@ -63,15 +67,41 @@ def prepare_modeling_frame(
         prepared = prepared[_unique([*feature_cols, *passthrough, target_col, SPLIT_COLUMN])].copy()
 
     out_path = _output_path(registry, dataset)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    prepared.to_parquet(out_path, index=False)
-    return registry.register_existing(
-        out_path,
-        task_id=dataset.task_id,
-        role="derived",
-        anchor_target=dataset.id,
-        seed=seed,
-    )
+    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
+    try:
+        prepared.to_parquet(artifact.path, index=False)
+        final_path = artifact.promote()
+        register_kwargs = {
+            "task_id": dataset.task_id,
+            "role": "derived",
+            "anchor_target": dataset.id,
+            "seed": seed,
+        }
+        if audit_kind:
+            detail = {
+                "source_dataset_id": dataset.id,
+                "target_col": target_col,
+                "feature_count": len(feature_cols),
+                "split_col": split_col or SPLIT_COLUMN,
+                **dict(audit_detail or {}),
+            }
+            registered = registry.register_existing_with_audit(
+                final_path,
+                audit_factory=lambda registered: {
+                    "kind": audit_kind,
+                    "target_ref": registered.id,
+                    "outcome": "succeeded",
+                    "detail": detail,
+                },
+                **register_kwargs,
+            )
+        else:
+            registered = registry.register_existing(final_path, **register_kwargs)
+        artifact.commit()
+        return registered
+    except Exception:
+        artifact.rollback()
+        raise
 
 
 def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int) -> pd.DataFrame:

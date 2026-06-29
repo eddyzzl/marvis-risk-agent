@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import time
 
 import nbformat
 import pytest
@@ -37,6 +39,34 @@ def test_run_notebook_executes_relative_to_notebook_directory(tmp_path: Path):
     assert result.succeeded is True
     assert (notebook_dir / output_name).read_text(encoding="utf-8") == "ok"
     assert not (tmp_path / output_name).exists()
+
+
+def test_run_notebook_isolated_executes_in_worker_process(tmp_path: Path):
+    notebook_dir = tmp_path / "notebooks"
+    notebook_dir.mkdir()
+    notebook_path = notebook_dir / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    output_name = "isolated-output.txt"
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "from pathlib import Path\n"
+                f"Path({output_name!r}).write_text('ok', encoding='utf-8')"
+            )
+        ],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    nbformat.write(notebook, notebook_path)
+
+    result = run_notebook(notebook_path, executed_path, log_path, timeout=60, isolated=True)
+
+    assert result.succeeded is True
+    assert result.resource_usage is not None
+    assert result.resource_usage["subprocess_isolated"] is True
+    assert (notebook_dir / output_name).read_text(encoding="utf-8") == "ok"
+    assert executed_path.exists()
+    assert log_path.read_text(encoding="utf-8") == "succeeded\n"
 
 
 def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
@@ -596,6 +626,92 @@ def test_run_notebook_preserves_artifacts_on_timeout(tmp_path: Path):
     assert "timeout" in log_text.lower() or "timed out" in log_text.lower()
 
 
+def test_run_notebook_isolated_cell_timeout_preserves_artifacts(tmp_path: Path):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    notebook = nbformat.v4.new_notebook(
+        cells=[nbformat.v4.new_code_cell("import time\ntime.sleep(10)")],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    nbformat.write(notebook, notebook_path)
+
+    result = run_notebook(notebook_path, executed_path, log_path, timeout=1, isolated=True)
+
+    assert result.succeeded is False
+    assert result.error_name == "CellTimeoutError"
+    assert result.resource_usage is not None
+    assert result.resource_usage["subprocess_isolated"] is True
+    assert executed_path.exists()
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "CellTimeoutError" in log_text
+    assert "timed out" in log_text
+
+
+def test_run_notebook_isolated_parent_timeout_kills_worker_and_preserves_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(
+        nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell("while True: pass")]),
+        notebook_path,
+    )
+    killed = {"value": False}
+
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def communicate(self, input=None, timeout=None):
+            if input is not None and timeout is not None:
+                raise subprocess.TimeoutExpired(["python"], timeout)
+            return "partial stdout", "partial stderr"
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("marvis.notebooks.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr("marvis.notebooks._kill_process_tree", lambda process: killed.update(value=True))
+
+    result = run_notebook(notebook_path, executed_path, log_path, timeout=1, isolated=True)
+
+    assert result.succeeded is False
+    assert result.error_name == "NotebookSubprocessTimeout"
+    assert killed["value"] is True
+    assert executed_path.exists()
+    assert "NotebookSubprocessTimeout" in log_path.read_text(encoding="utf-8")
+
+
+def test_run_notebook_isolated_worker_error_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), notebook_path)
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 1
+
+        def communicate(self, input=None, timeout=None):
+            return json.dumps({"ok": False, "error": "worker boom"}) + "\n", ""
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr("marvis.notebooks.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+
+    result = run_notebook(notebook_path, executed_path, log_path, timeout=1, isolated=True)
+
+    assert result.succeeded is False
+    assert result.error_name == "NotebookWorkerError"
+    assert result.error_value == "worker boom"
+    assert "worker boom" in log_path.read_text(encoding="utf-8")
+
+
 def test_run_notebook_returns_cancelled_when_token_is_cancelled(tmp_path: Path):
     notebook_path = tmp_path / "source.ipynb"
     executed_path = tmp_path / "executed.ipynb"
@@ -620,6 +736,102 @@ def test_run_notebook_returns_cancelled_when_token_is_cancelled(tmp_path: Path):
     assert result.error_name == "NotebookCancelled"
     assert executed_path.exists()
     assert log_path.read_text(encoding="utf-8") == "cancelled\n"
+
+
+def test_run_notebook_stops_kernel_when_rss_exceeds_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    notebook = nbformat.v4.new_notebook(
+        cells=[nbformat.v4.new_code_cell("x = 'large allocation'")],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    nbformat.write(notebook, notebook_path)
+    calls = {
+        "process_pid": None,
+        "interrupts": 0,
+        "shutdowns": [],
+        "terminates": 0,
+    }
+
+    class FakeMemoryInfo:
+        rss = 2 * 1024 * 1024
+
+    class FakeProcess:
+        def __init__(self, pid):
+            calls["process_pid"] = pid
+
+        def memory_info(self):
+            return FakeMemoryInfo()
+
+        def children(self, recursive):
+            return []
+
+        def terminate(self):
+            calls["terminates"] += 1
+
+        def kill(self):
+            raise AssertionError("process should terminate without kill fallback")
+
+    class FakePsutil:
+        @staticmethod
+        def Process(pid):
+            return FakeProcess(pid)
+
+        @staticmethod
+        def wait_procs(targets, timeout):
+            return list(targets), []
+
+    class FakeKernelManager:
+        def __init__(self):
+            self.provisioner = type("FakeProvisioner", (), {"pid": 12345})()
+
+        def interrupt_kernel(self):
+            calls["interrupts"] += 1
+
+        def shutdown_kernel(self, *, now):
+            calls["shutdowns"].append(now)
+
+    class FakeNotebookClient:
+        def __init__(self, notebook, timeout, kernel_name, **callbacks):
+            self.km = FakeKernelManager()
+
+        def execute(self, *, cwd):
+            deadline = time.monotonic() + 2.0
+            while not calls["shutdowns"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            raise RuntimeError("kernel stopped")
+
+    monkeypatch.setattr("marvis.notebooks.psutil", FakePsutil)
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=60,
+        memory_limit_mb=1,
+        resource_poll_interval_seconds=0.01,
+    )
+
+    assert result.succeeded is False
+    assert result.error_name == "NotebookResourceLimitExceeded"
+    assert result.resource_usage is not None
+    assert result.resource_usage["memory_limit_exceeded"] is True
+    assert result.resource_usage["memory_limit_mb"] == 1
+    assert result.resource_usage["peak_rss_mb"] == 2.0
+    assert result.resource_usage["kernel_pid"] == 12345
+    assert calls["process_pid"] == 12345
+    assert calls["interrupts"] == 1
+    assert calls["shutdowns"] == [True, True]
+    assert calls["terminates"] == 1
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "NotebookResourceLimitExceeded" in log_text
+    assert "memory_limit_mb=1" in log_text
+    assert executed_path.exists()
 
 
 def test_live_notebook_session_reuses_kernel_for_appended_cells(tmp_path: Path):

@@ -3,6 +3,7 @@ import sys
 import pytest
 
 from marvis.db import DraftRepository, PluginRepository, init_db
+import marvis.db as db_module
 from marvis.drafts import DraftTool
 from marvis.drafts.promotion import (
     PromotionError,
@@ -10,6 +11,7 @@ from marvis.drafts.promotion import (
     reject_draft,
     validate_for_promotion,
 )
+from marvis.plugins.errors import PluginNotFoundError
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -96,6 +98,42 @@ def test_validate_and_promote_draft_registers_formal_plugin(tmp_path):
     assert any(item["plugin"] == manifest.name and item["tool"] == "calc_margin" for item in catalog)
     assert drafts.get(draft.id).status == "promoted"
     assert (plugins_dir / manifest.name / "manifest.json").exists()
+    assert not (plugins_dir / ".staging").exists()
+
+
+def test_promote_draft_rolls_back_plugin_and_files_when_draft_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sandbox, drafts, plugin_registry, plugins_dir = _runtime(tmp_path)
+    draft = _draft()
+    drafts.add(draft)
+    check = validate_for_promotion(
+        draft,
+        sandbox=sandbox,
+        test_cases=[{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}],
+    )
+    status_before_promote = drafts.get(draft.id).status
+    original_write_audit = db_module._write_audit_row
+
+    def fail_draft_promote_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "draft.promote":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_draft_promote_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        promote_draft(draft, registry=plugin_registry, drafts=drafts, plugins_dir=plugins_dir, check=check)
+
+    assert status_before_promote == "tested"
+    assert drafts.get(draft.id).status == status_before_promote
+    assert PluginRepository(plugins_dir.parent / "app.sqlite").get_plugin("draft_calc_margin") is None
+    with pytest.raises(PluginNotFoundError):
+        plugin_registry.get("draft_calc_margin")
+    assert not (plugins_dir / "draft_calc_margin").exists()
+    assert not (plugins_dir / ".staging").exists()
+    assert not any(path.name.endswith(".bak") for path in plugins_dir.iterdir())
 
 
 def test_validate_for_promotion_rejects_malformed_test_case_without_running(tmp_path):
@@ -130,3 +168,52 @@ def test_promote_draft_rejects_failed_check_and_reject_marks_status(tmp_path):
 
     reject_draft(draft, drafts=drafts, reason="not useful")
     assert drafts.get(draft.id).status == "rejected"
+
+
+def test_reject_draft_rolls_back_status_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _sandbox, drafts, _plugin_registry, _plugins_dir = _runtime(tmp_path)
+    draft = _draft()
+    drafts.add(draft)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        reject_draft(draft, drafts=drafts, reason="not useful")
+
+    assert drafts.get(draft.id).status == "draft"
+
+
+def test_draft_repository_rolls_back_promoted_status_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DraftRepository(db_path)
+    draft = _draft(status="tested")
+    repo.save_draft(draft)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.set_status_with_audit(
+            draft.id,
+            "promoted",
+            audit={
+                "kind": "draft.promote",
+                "target_ref": draft.id,
+                "outcome": "succeeded",
+                "detail": {"plugin": "draft_calc_margin"},
+            },
+        )
+
+    assert repo.get_draft(draft.id).status == "tested"

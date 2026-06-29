@@ -42,6 +42,27 @@ def test_sample_dataset_stratified_keeps_each_class_represented(tmp_path):
     assert sample["segment"].value_counts()["major"] >= sample["segment"].value_counts()["minor"]
 
 
+def test_sample_dataset_stratified_keeps_requested_size_when_n_less_than_strata(tmp_path):
+    path = tmp_path / "sample.csv"
+    pd.DataFrame({
+        "id": range(10),
+        "segment": [f"s{index}" for index in range(10)],
+    }).to_csv(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    sample = sample_dataset(
+        backend,
+        path,
+        3,
+        strategy="stratified",
+        stratify_col="segment",
+        seed=7,
+    )
+
+    assert sample.shape[0] == 3
+    assert sample["segment"].nunique() == 3
+
+
 def test_sample_dataset_rejects_invalid_strategies_and_columns(tmp_path):
     path = tmp_path / "sample.csv"
     pd.DataFrame({"id": [1, 2]}).to_csv(path, index=False)

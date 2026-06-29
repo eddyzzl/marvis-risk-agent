@@ -10,7 +10,15 @@ from __future__ import annotations
 from dataclasses import replace as _dataclass_replace
 from types import SimpleNamespace
 
-from marvis.agent.plan_driver import PlanDriver, is_confirm, render_tool_output
+import pytest
+
+from marvis.agent.plan_driver import (
+    DriverError,
+    PlanDriver,
+    _parse_dedup_instruction,
+    is_confirm,
+    render_tool_output,
+)
 from marvis.db import PlanRepository, init_db
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.executor import PlanExecutor
@@ -78,6 +86,58 @@ def _gated_modeling_plan() -> Plan:
     )
 
 
+def _gated_modeling_weight_plan() -> Plan:
+    return Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("spec", index=0, tool="choose_modeling_spec", phase="建模"),
+            _step("screen", index=1, tool="screen_features", depends_on=["spec"], phase="特征"),
+            _step(
+                "tune",
+                index=2,
+                tool="tune_hyperparameters",
+                depends_on=["spec", "screen"],
+                needs_confirmation=True,
+                phase="建模",
+            ),
+        ],
+    )
+
+
+def _gated_join_dedup_plan() -> Plan:
+    steps = [
+        _step("propose", index=0, tool="propose_join", phase="拼接"),
+        _step("confirm", index=1, tool="confirm_join", depends_on=["propose"], phase="拼接"),
+        _step(
+            "execute",
+            index=2,
+            tool="execute_join",
+            depends_on=["confirm"],
+            needs_confirmation=True,
+            phase="拼接",
+        ),
+    ]
+    steps = [_dataclass_replace(step, plan_id="plan-join") for step in steps]
+    plan = Plan(
+        id="plan-join",
+        task_id="task-join",
+        goal="join",
+        source="template",
+        template_id="data_join",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=steps,
+    )
+    plan.steps[1].inputs = {"join_plan_id": "join-1", "dedup_strategies": {}}
+    return plan
+
+
 def _driver(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -111,6 +171,9 @@ def test_driver_runs_to_first_gate_and_shows_prior_step(tmp_path):
     assert msg.metadata["step_id"] == "tune"
     assert msg.metadata["plan_id"] == "plan-1"
     assert msg.metadata["run_seq"] == 0
+    assert msg.metadata["output_refs"] == {"screen": "metrics:screen:v1"}
+    assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "adjust", "replan", "clarify", "halt"]
+    assert msg.metadata["gate_envelope"]["target_step_id"] == "tune"
     assert any(t["title"].startswith("入选特征") for t in msg.metadata["tables"])
     # only screen has executed so far
     loaded = repo.load_plan("plan-1")
@@ -149,6 +212,14 @@ def test_driver_resume_non_confirm_holds_at_gate(tmp_path):
     assert {s.id: s.status for s in loaded.steps}["tune"] == StepStatus.AWAITING_CONFIRM
 
 
+def test_manual_dedup_instruction_respects_negation():
+    assert _parse_dedup_instruction("用 first 去重") == "first"
+    assert _parse_dedup_instruction("请用 last 去重") == "last"
+    assert _parse_dedup_instruction("别用 first 去重") is None
+    assert _parse_dedup_instruction("不要用 last 策略") is None
+    assert _parse_dedup_instruction("do not use first dedup") is None
+
+
 def test_driver_plan_overview_gate_waits_for_kaishi(tmp_path):
     """A freshly-built (VALIDATED) plan does not run until 开始 is confirmed
     (spec §9 #2 plan-level overview gate)."""
@@ -184,6 +255,136 @@ def test_screen_gate_carries_structured_screen_payload(tmp_path):
     assert screen["thresholds"] == {"leakage_ks": 0.40, "max_missing_rate": 0.95}
 
 
+def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {"sample_weight_col": "", "feature_cols": ["x1", "x2"]}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": ["weight", "sample_weight"],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    setup = turn.messages[0].metadata.get("modeling_setup")
+    assert setup == {
+        "step_id": "spec",
+        "step_title": "spec",
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "sample_weight_col": "",
+        "sample_weight_candidates": ["weight", "sample_weight"],
+    }
+    envelope = turn.messages[0].metadata["gate_envelope"]
+    assert "adjust" in envelope["allowed_actions"]
+    sample_weight_control = next(control for control in envelope["controls"] if control["id"] == "sample_weight_col")
+    assert sample_weight_control["schema"]["enum"] == ["", "weight", "sample_weight"]
+
+
+def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {"sample_weight_col": "", "feature_cols": ["x1", "x2"]}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": ["weight", "sample_weight"],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "weight",
+            "sample_weight_candidates": ["weight", "sample_weight"],
+        },
+        {"selected": ["x1", "x2"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整样本权重",
+        run_seq=1,
+        adjust_params={"sample_weight_col": "weight"},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == [
+        "choose_modeling_spec",
+        "screen_features",
+        "choose_modeling_spec",
+        "screen_features",
+    ]
+    assert runner.calls[2][1]["sample_weight_col"] == "weight"
+    assert repo.load_plan("plan-1").steps[2].status == StepStatus.AWAITING_CONFIRM
+    assert turn.messages[-1].metadata["modeling_setup"]["sample_weight_col"] == "weight"
+
+
+def test_driver_sample_weight_adjust_rejects_unknown_candidate_without_reset(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {"sample_weight_col": "", "feature_cols": ["x1", "x2"]}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": ["weight"],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整样本权重",
+        run_seq=1,
+        adjust_params={"sample_weight_col": "not_a_candidate"},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 2
+    assert "不在已检测候选列中" in turn.messages[-1].content
+    loaded_spec = _dataclass_replace(repo.load_plan("plan-1").steps[0])
+    assert loaded_spec.inputs["sample_weight_col"] == ""
+
+
+def test_plan_overview_message_carries_gate_envelope(tmp_path):
+    driver, _repo = _driver(tmp_path)
+
+    msg = driver._plan_overview_message(_gated_modeling_plan())
+
+    assert msg.metadata["gate_envelope"]["kind"] == "plan_overview"
+    assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "replan", "clarify", "halt"]
+
+
 def test_render_screen_shows_metric_columns_and_buckets():
     """Enriched screen render: per-feature KS/IV/missing columns + leakage/suspected/
     unusable buckets with reasons (not just a list of feature names)."""
@@ -214,9 +415,17 @@ def test_resume_with_selection_overrides_screen_output(tmp_path):
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)  # pause at tune gate; screen DONE with [sig1, sig2]
 
-    driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, selection=["sig1"])
+    driver.resume(
+        plan_id="plan-1",
+        user_text="确认",
+        run_seq=1,
+        selection=["sig1"],
+        expected_step_id="tune",
+    )
 
     assert repo.load_step_output("screen")["selected"] == ["sig1"]
+    screen_step = next(step for step in repo.load_plan("plan-1").steps if step.id == "screen")
+    assert screen_step.output_ref == "metrics:screen:v2"
 
 
 def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path):
@@ -229,6 +438,7 @@ def test_resume_selection_constrained_to_known_and_allows_force_select(tmp_path)
     driver.resume(
         plan_id="plan-1", user_text="确认", run_seq=1,
         selection=["sig1", "leak_col", "never_screened"],  # force-select leakage; drop unknown
+        expected_step_id="tune",
     )
 
     assert repo.load_step_output("screen")["selected"] == ["sig1", "leak_col"]
@@ -241,9 +451,77 @@ def test_resume_empty_or_unknown_selection_keeps_proposed(tmp_path):
     repo.confirm_plan("plan-1")
     driver._run_and_handle("plan-1", run_seq=0)
 
-    driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, selection=["never_screened"])
+    driver.resume(
+        plan_id="plan-1",
+        user_text="确认",
+        run_seq=1,
+        selection=["never_screened"],
+        expected_step_id="tune",
+    )
 
     assert repo.load_step_output("screen")["selected"] == ["sig1", "sig2"]
+
+
+def test_resume_structured_screen_control_rejects_stale_or_missing_gate_token(tmp_path):
+    driver, _repo = _driver(tmp_path)
+    driver._repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="缺少待确认步骤校验"):
+        driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, selection=["sig1"])
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="确认",
+            run_seq=1,
+            selection=["sig1"],
+            expected_step_id="old-gate",
+        )
+
+
+def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_join_dedup_plan())
+    runner = FakeRunner([
+        {"joins": [{"feature_id": "feat-1"}]},
+        {"needs_dedup": ["feat-1"]},
+        {"needs_dedup": []},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-join")
+    driver._run_and_handle("plan-join", run_seq=0)
+
+    with pytest.raises(DriverError, match="缺少待确认步骤校验"):
+        driver.resume(
+            plan_id="plan-join",
+            user_text="确认",
+            run_seq=1,
+            dedup_strategies={"feat-1": "first"},
+        )
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(
+            plan_id="plan-join",
+            user_text="确认",
+            run_seq=1,
+            dedup_strategies={"feat-1": "first"},
+            expected_step_id="old-gate",
+        )
+
+    turn = driver.resume(
+        plan_id="plan-join",
+        user_text="确认",
+        run_seq=1,
+        dedup_strategies={"feat-1": "first"},
+        expected_step_id="execute",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == ["propose_join", "confirm_join", "confirm_join"]
+    assert runner.calls[-1][1]["dedup_strategies"] == {"feat-1": "first"}
 
 
 class FakeRouterLLM:
@@ -290,6 +568,169 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     assert runner.calls[1][1].get("leakage_ks") == 0.3  # the declared override reached the tool
     assert "保留 **3** 个" in turn.messages[-1].content  # the recomputed screen output is shown
     assert any("调整参数" in m.content for m in turn.messages)
+
+
+def test_driver_manual_adjust_params_reruns_without_llm_router(tmp_path):
+    """Manual-mode structured controls can re-run a gate dependency without relying on
+    an LLM to parse free text."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4, "max_missing_rate": 0.95}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        {"selected": ["sig1", "sig2"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整筛选阈值",
+        run_seq=1,
+        adjust_params={"leakage_ks": 0.3},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 2
+    assert runner.calls[1][1]["leakage_ks"] == 0.3
+    assert "保留 **2** 个" in turn.messages[-1].content
+
+
+def test_driver_adjust_resets_downstream_outputs_before_final_gate(tmp_path):
+    """Adjusting an upstream dependency at the final gate must re-run dependent
+    train/compare steps, not mix new tune results with stale model outputs."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("tune", index=0, tool="tune_hyperparameters", phase="建模"),
+            _step("train", index=1, tool="train_models", depends_on=["tune"], phase="建模"),
+            _step("compare", index=2, tool="compare_experiments", depends_on=["train"], phase="建模"),
+            _step(
+                "report",
+                index=3,
+                tool="generate_model_report",
+                depends_on=["tune", "train", "compare"],
+                needs_confirmation=True,
+                phase="报告",
+            ),
+        ],
+    )
+    plan.steps[0].inputs = {"n_trials": 8}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"best_params": {"num_leaves": 31}, "best_metrics": {"test_ks": 0.41}, "n_trials": 8},
+        {"best_experiment_id": "exp-old", "best_recipe": "lgb", "experiments": [
+            {"experiment_id": "exp-old", "recipe": "lgb", "metrics": {"oot_ks": 0.39}},
+        ]},
+        {"experiments": [{"recipe": "lgb", "capabilities": {"pmml_supported": True}}]},
+        {"best_params": {"num_leaves": 63}, "best_metrics": {"test_ks": 0.45}, "n_trials": 12},
+        {"best_experiment_id": "exp-new", "best_recipe": "lgb", "experiments": [
+            {"experiment_id": "exp-new", "recipe": "lgb", "metrics": {"oot_ks": 0.43}},
+        ]},
+        {"experiments": [{"recipe": "lgb", "capabilities": {"pmml_supported": True}}]},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    assert [call[0] for call in runner.calls] == ["tune_hyperparameters", "train_models", "compare_experiments"]
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="把调参轮数改成 12",
+        run_seq=1,
+        adjust_params={"n_trials": 12},
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == [
+        "tune_hyperparameters",
+        "train_models",
+        "compare_experiments",
+        "tune_hyperparameters",
+        "train_models",
+        "compare_experiments",
+    ]
+    assert runner.calls[3][1]["n_trials"] == 12
+    assert repo.load_step_output("tune")["best_params"] == {"num_leaves": 63}
+    assert repo.load_step_output("train")["best_experiment_id"] == "exp-new"
+    loaded = repo.load_plan("plan-1")
+    assert {step.id: step.status for step in loaded.steps}["report"] == StepStatus.AWAITING_CONFIRM
+
+
+def test_driver_adjust_rejects_invalid_structured_threshold_without_reset(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        {"selected": ["sig1", "sig2"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整筛选阈值",
+        run_seq=1,
+        adjust_params={"leakage_ks": 1.5},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 1
+    loaded_screen = _dataclass_replace(repo.load_plan("plan-1").steps[0])
+    assert loaded_screen.inputs["leakage_ks"] == 0.4
+    assert "leakage_ks 必须是 0 到 1 之间的数字" in turn.messages[-1].content
+
+
+def test_driver_adjust_with_unmatched_params_does_not_rerun_or_claim_success(tmp_path):
+    """If the router extracts a parameter no dependency declares, the driver should ask
+    for a clearer instruction instead of resetting steps and saying it adjusted."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        {"selected": ["sig1", "sig2"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    llm = FakeRouterLLM('{"action":"adjust","params":{"unknown_param":123},"constraint":"","reason":"调参数"}')
+    driver = PlanDriver(repo, executor, llm_client=llm)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+    turn = driver.resume(plan_id="plan-1", user_text="unknown_param 调成 123", run_seq=1)
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 1
+    assert repo.load_step_output("screen")["selected"] == ["sig1"]
+    assert "没有识别到可调整的参数" in turn.messages[-1].content
+    assert "已按指令调整参数" not in turn.messages[-1].content
 
 
 def test_driver_replan_instruction_routes_to_structural_replan(tmp_path):
@@ -362,9 +803,98 @@ def test_is_confirm_matches_common_phrasings():
     assert not is_confirm("把 age 去掉")
 
 
+def test_is_confirm_rejects_negated_or_contrasting_confirm_phrases():
+    assert not is_confirm("好的但先别执行")
+    assert not is_confirm("可以，不过先不要继续")
+    assert not is_confirm("ok 先暂停一下")
+    assert not is_confirm("不开始")
+    assert not is_confirm("do not proceed")
+    assert is_confirm("没问题，继续")
+
+
 def test_render_registry_has_modeling_renderers_and_generic_fallback():
     text, tables = render_tool_output("screen_features", {"selected": ["a"], "leakage": [], "suspected": [], "n_screened": 3})
     assert "特征筛选完成" in text
+    spec_text, spec_tables = render_tool_output(
+        "choose_modeling_spec",
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb", "catboost"],
+            "sample_weight_col": "weight",
+            "feature_count": 12,
+            "n_trials": 9,
+            "metric_policy": "higher OOT KS",
+            "eligible_algorithms": ["lgb", "catboost"],
+            "disabled_algorithms": [{"recipe": "lgb_regressor", "reason": "family mismatch"}],
+        },
+    )
+    assert "建模规格已生成" in spec_text
+    assert spec_tables[0]["title"] == "建模规格"
+    tuning_text, tuning_tables = render_tool_output(
+        "configure_tuning",
+        {
+            "recipe": "lgb",
+            "target_type": "binary",
+            "tune_enabled": True,
+            "n_trials": 9,
+            "sample_weight_col": "weight",
+            "params": {"sample_weight_col": "weight"},
+            "reason": "LightGBM 使用有界随机搜索。",
+        },
+    )
+    assert "调参配置已生成" in tuning_text
+    assert tuning_tables[0]["title"] == "调参配置"
+    report_text, report_tables = render_tool_output(
+        "generate_model_report",
+        {
+            "report_path": "/tmp/model_report.xlsx",
+            "section_status": [
+                {"section": "sample_analysis", "available": True, "reason": None},
+                {"section": "vintage", "available": False, "reason": "缺少业务列/字典: mob_observe_cols"},
+            ],
+        },
+    )
+    assert "1 个缺输入/跳过" in report_text
+    assert report_tables[0]["title"] == "报告章节状态"
+    delivery_text, delivery_tables = render_tool_output(
+        "post_training_action",
+        {
+            "native_model_path": "/tmp/model.pkl",
+            "capabilities": {"pmml_supported": False, "handoff_supported": False, "native_model_supported": True, "reason": "CatBoost 不支持 PMML"},
+            "actions": [
+                {"action": "export_pmml", "status": "skipped", "reason": "CatBoost 不支持 PMML"},
+                {"action": "handoff_to_validation", "status": "skipped", "reason": "sample_dataset_id is required"},
+            ],
+        },
+    )
+    assert "跳过 2 个" in delivery_text
+    assert delivery_tables[0]["title"] == "训练后交付状态"
+    assert any("CatBoost 不支持 PMML" in row for row in delivery_tables[0]["rows"])
+    strategy_text, strategy_tables = render_tool_output(
+        "build_strategy",
+        {
+            "strategy_id": "strategy-1",
+            "strategy_type": "approval",
+            "score_col": "score",
+            "default_decision": "approve",
+            "rules": [{"condition": "score < 600", "decision": "reject", "value": None}],
+        },
+    )
+    assert "策略候选已生成" in strategy_text
+    assert strategy_tables[0]["title"] == "策略规则(按顺序命中)"
+    vintage_text, vintage_tables = render_tool_output(
+        "vintage_curve",
+        {
+            "cohorts": ["202601"],
+            "mob_axis": [0, 1],
+            "curves": {"202601": [0.0, 0.2]},
+            "counts": {"202601": 10},
+            "summary": {"trend": "stable", "at_ref": {"202601": 0.2}},
+        },
+    )
+    assert "Vintage 曲线完成" in vintage_text
+    assert vintage_tables[0]["title"] == "Vintage 累计坏账率"
     text2, _ = render_tool_output("some_unknown_tool", {"status": "ok", "rows": 10})
     assert "已完成" in text2
 

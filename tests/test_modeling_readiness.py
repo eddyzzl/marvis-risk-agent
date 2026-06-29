@@ -162,7 +162,7 @@ def test_modeling_readiness_warns_for_accept_only_samples(tmp_path):
     result = modeling_readiness(backend, dataset, path, target_col="y", split_col="split")
 
     assert result["ready"] is True
-    assert any("拒绝推断未实现" in warning for warning in result["warnings"])
+    assert any("建议使用 reject_inference 工具" in warning for warning in result["warnings"])
 
 
 def test_quality_issue_contract_round_trips():

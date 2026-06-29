@@ -68,17 +68,20 @@ from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, TaskRepository
-from marvis.agent.auto_drive import decide_gate
-from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
-from marvis.agent.join_setup import JoinSetupError, build_join_proposal
-from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
-from marvis.agent.plan_driver import PlanDriver, is_confirm
+from marvis.agent.plan_driver import DriverError
+from marvis.agent.turn_handlers import (
+    DRIVER_AGENT_TASK_TYPES,
+    DriverTurnRuntime,
+    dispatch_driver_turn as dispatch_plan_driver_turn,
+)
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_MODELING,
+    TASK_TYPE_STRATEGY,
     TASK_TYPE_VALIDATION,
+    TASK_TYPE_VINTAGE,
     FileArtifact,
     FileRole,
     TaskCreate,
@@ -89,7 +92,7 @@ from marvis.execution_environment import (
     load_execution_environment,
 )
 from marvis.files import scan_source_dir
-from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import (
     LLMSettingsError,
     resolve_llm_model,
@@ -1147,10 +1150,12 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
 
 
 @router.get("/tasks/{task_id}/agent/messages")
-def get_agent_messages(task_id: str, request: Request) -> dict:
+def get_agent_messages(task_id: str, request: Request, after_id: str | None = None) -> dict:
     repo = _repo(request)
     _get_task_or_404(repo, task_id)
-    return {"messages": repo.list_agent_messages(task_id)}
+    cursor_found = bool(after_id and repo.has_agent_message(task_id, after_id))
+    messages = repo.list_agent_messages(task_id, after_id=after_id)
+    return {"messages": messages, "incremental": cursor_found}
 
 
 @router.post("/tasks/{task_id}/agent/start", status_code=202)
@@ -1210,7 +1215,8 @@ def post_agent_message(
         return _dispatch_driver_turn(
             request, repo, task, user_text=content, agent_client=agent_client,
             acceptance_mode=payload.acceptance_mode, selection=payload.selection,
-            dedup_strategies=payload.dedup_strategies,
+            dedup_strategies=payload.dedup_strategies, adjust_params=payload.adjust_params,
+            expected_step_id=payload.expected_step_id,
         )
     conversation = repo.list_agent_messages(task_id)
     pending_report_draft = _latest_pending_agent_report_draft(conversation)
@@ -1618,11 +1624,28 @@ def _confirm_agent_report_conclusions(
         _, expected_revision = repo.get_report_values(task_id)
     job_id = _start_task_job(repo, task_id, "report")
     try:
-        revision = repo.update_agent_report_conclusions(
-            task_id,
-            text_values,
-            expected_revision=expected_revision,
-        )
+        update_conclusions = getattr(repo, "update_agent_report_conclusions_with_audit", None)
+        if callable(update_conclusions):
+            revision = update_conclusions(
+                task_id,
+                text_values,
+                expected_revision=expected_revision,
+                audit={
+                    "kind": "report.agent_conclusions.confirm",
+                    "target_ref": task_id,
+                    "outcome": "succeeded",
+                    "detail": {
+                        "keys": sorted(text_values),
+                        "expected_revision": expected_revision,
+                    },
+                },
+            )
+        else:
+            revision = repo.update_agent_report_conclusions(
+                task_id,
+                text_values,
+                expected_revision=expected_revision,
+            )
     except ConflictError as exc:
         _fail_queued_job(repo, job_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1692,11 +1715,28 @@ def update_report_fields(
             detail="If-Match must be an integer",
         ) from exc
     try:
-        revision = repo.update_report_values(
-            task_id,
-            payload.text_values,
-            expected_revision=expected_revision,
-        )
+        update_values = getattr(repo, "update_report_values_with_audit", None)
+        if callable(update_values):
+            revision = update_values(
+                task_id,
+                payload.text_values,
+                expected_revision=expected_revision,
+                audit={
+                    "kind": "report.values.update",
+                    "target_ref": task_id,
+                    "outcome": "succeeded",
+                    "detail": {
+                        "keys": sorted(payload.text_values),
+                        "expected_revision": expected_revision,
+                    },
+                },
+            )
+        else:
+            revision = repo.update_report_values(
+                task_id,
+                payload.text_values,
+                expected_revision=expected_revision,
+            )
         values, _ = repo.get_report_values(task_id)
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3017,356 +3057,6 @@ def _agent_has_stop_ack_message(repo: TaskRepository, task_id: str) -> bool:
     return False
 
 
-def _modeling_data_runtime(settings):
-    datasets_root = getattr(settings, "datasets_dir", settings.workspace / "datasets")
-    data_repo = DatasetRepository(settings.db_path)
-    backend = DataBackend(datasets_root)
-    registry = DatasetRegistry(data_repo, backend, datasets_root)
-    return backend, registry
-
-
-# A plan in one of these statuses is finished — re-engaging the task must build a
-# FRESH plan, not resume the old one (resuming a terminal plan just replays its final
-# done/failed message forever).
-_TERMINAL_PLAN_STATUS_VALUES = frozenset({"done", "failed", "cancelled"})
-
-
-def _active_plan(plan_repo, task_id: str):
-    """The latest NON-terminal plan for the task, or None. Used so a driver turn
-    resumes an in-flight plan but starts a new one once the previous plan finished."""
-    for plan in reversed(plan_repo.list_plans_for_task(task_id)):
-        status = getattr(plan.status, "value", plan.status)
-        if status not in _TERMINAL_PLAN_STATUS_VALUES:
-            return plan
-    return None
-
-
-def _run_join_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
-    """Drive a data_join task through the generic PlanDriver, synchronously.
-
-    The deterministic JOIN flow (propose -> confirm -> execute, with a forced
-    confirmation gate) is short, so it runs inline on the app's already-wired plan
-    engine — same thread as the request, so the repos' per-call sqlite connections
-    stay safe and there is no engine to reconstruct. First turn: discover/register
-    the task's data files and propose anchor/feature roles, then start the plan
-    (runs to the confirm gate). Later turns: resume the task's plan at its gate.
-    No LLM is required (the reviewer degrades gracefully). Messages are append-only.
-    """
-    state = request.app.state
-    plan_repo = state.plan_repo
-    driver = PlanDriver(
-        plan_repo, state.plan_executor, planner=state.planner, validator=state.plan_validator,
-        llm_client=_driver_llm_client(request, task),
-    )
-    if user_text is not None:
-        # The C1 control form posts a structured "[C1]{...}" payload — show a
-        # friendly line in the transcript instead of the raw JSON (the original
-        # text is still parsed below for the role assignment).
-        display = "已确认文件角色与目标列。" if user_text.startswith("[C1]") else user_text
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=display, metadata={"intent": "data_join"}
-        )
-    try:
-        active = _active_plan(plan_repo, task.id)
-        if active is not None:
-            # An in-flight plan exists → resume at the C2 diagnostics gate.
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
-            _append_driver_messages(repo, task.id, turn)
-            return _join_turn_response(repo, task.id)
-        # No plan yet → C1 file-role assignment gate (spec §3).
-        conversation = repo.list_agent_messages(task.id)
-        c1_state = _latest_c1_state(conversation)
-        _, registry = _modeling_data_runtime(state.settings)
-        if c1_state is None:
-            # First turn: propose roles + target, pause for the user to confirm/adjust.
-            proposal = build_join_proposal(registry, task.id, task.source_dir)
-            _append_c1_message(repo, task.id, proposal)
-            return _join_turn_response(repo, task.id)
-        # User is replying to C1: finalize roles, then build + run the join plan.
-        assignment = _parse_c1_reply(user_text, c1_state)
-        if assignment is None:
-            repo.add_agent_message(
-                task.id, role="assistant", stage="chat",
-                content="请确认文件角色与目标列:无误就回复「确认」,或用下方控件调整后点「确认角色」。",
-                metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
-            )
-            return _join_turn_response(repo, task.id)
-        if not assignment["anchor_id"]:
-            return _append_join_error(repo, task.id, "请先指定样本锚表(通常是含目标列的那张),再确认。")
-        if not assignment["feature_ids"]:
-            repo.add_agent_message(
-                task.id, role="assistant", stage="chat",
-                content="已确认样本表与目标列。只有一张表,无需拼接(数据拼接阶段已跳过)。",
-                metadata={"join_skip": True},
-            )
-            return _join_turn_response(repo, task.id)
-        turn = driver.start(
-            task_id=task.id, template_id="data_join",
-            slots={"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
-            tier=_task_tier(request, task),
-        )
-        _append_driver_messages(repo, task.id, turn)
-        return _join_turn_response(repo, task.id)
-    except JoinSetupError as exc:
-        return _append_join_error(repo, task.id, str(exc))
-    except Exception as exc:  # surface as an assistant message rather than a 500
-        return _append_join_error(repo, task.id, f"数据拼接出错：{exc}")
-
-
-def _append_driver_messages(repo: TaskRepository, task_id: str, turn) -> None:
-    for message in turn.messages:
-        repo.add_agent_message(
-            task_id, role="assistant", stage="chat", content=message.content, metadata=dict(message.metadata)
-        )
-
-
-def _join_turn_response(repo: TaskRepository, task_id: str) -> dict:
-    return {"task_id": task_id, "status": "ok", "messages": repo.list_agent_messages(task_id)}
-
-
-def _latest_c1_state(conversation: list[dict]) -> dict | None:
-    for message in reversed(conversation):
-        if message.get("role") == "assistant":
-            c1 = (message.get("metadata") or {}).get("join_c1")
-            if isinstance(c1, dict):
-                return c1
-    return None
-
-
-def _c1_table(c1_state: dict) -> list[dict]:
-    rows = [
-        [
-            f.get("name", ""),
-            str(f.get("row_count", "")),
-            str(f.get("n_cols", "")),
-            "是" if f.get("has_target") else "否",
-            f.get("candidate_target") or "—",
-            "样本主表" if f.get("proposed_role") == "anchor" else "特征表",
-        ]
-        for f in c1_state.get("files") or []
-    ]
-    return [{
-        "title": "输入文件(请确认角色与目标列)",
-        "columns": ["文件", "行数", "列数", "含目标列", "候选目标列", "提议角色"],
-        "rows": rows,
-    }]
-
-
-def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
-    files = proposal.files
-    anchor = next((f for f in files if f.proposed_role == "anchor"), None)
-    feature_names = [f.name for f in files if f.proposed_role == "feature"]
-    if proposal.skip:
-        text = (
-            f"我发现 {len(files)} 个数据文件。提议**样本主表 = `{anchor.name if anchor else '?'}`**"
-            + (f",目标列 = `{proposal.target_col}`" if proposal.target_col else "(未识别目标列,请指定)")
-            + "。只有一张表,确认后将跳过拼接。请确认,或用下方控件调整。"
-        )
-    else:
-        text = (
-            f"我发现 {len(files)} 个数据文件,先确认每张的**角色与目标列**(样本是锚,只贴列不改行,**1:1**):\n"
-            f"- 提议**样本主表** = `{anchor.name if anchor else '?'}`"
-            + (f"(目标列 `{proposal.target_col}`)" if proposal.target_col else "(未识别目标列,请指定)")
-            + "\n- 提议**特征表** = "
-            + (", ".join(f"`{name}`" for name in feature_names) or "(无)")
-            + "\n确认无误回复「确认」;要改就用下方控件选好角色/目标列后点「确认角色」。"
-        )
-    c1_state = {
-        "files": [
-            {
-                "dataset_id": f.dataset_id,
-                "name": f.name,
-                "row_count": f.row_count,
-                "n_cols": f.n_cols,
-                "has_target": f.has_target,
-                "candidate_target": f.candidate_target,
-                "proposed_role": f.proposed_role,
-                "columns": f.columns,
-            }
-            for f in files
-        ],
-        "anchor_id": proposal.anchor_id,
-        "feature_ids": proposal.feature_ids,
-        "target_col": proposal.target_col,
-        "skip": proposal.skip,
-    }
-    repo.add_agent_message(
-        task_id, role="assistant", stage="chat", content=text,
-        metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
-    )
-
-
-def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
-    text = (user_text or "").strip()
-    # Structured assignment from the C1 control form: "[C1]{json}".
-    if text.startswith("[C1]"):
-        try:
-            payload = json.loads(text[len("[C1]"):])
-        except (ValueError, TypeError):
-            return None
-        anchor_id = payload.get("anchor_id")
-        feature_ids = [
-            fid for fid in (payload.get("feature_ids") or []) if fid and fid != anchor_id
-        ]
-        return {
-            "anchor_id": anchor_id,
-            "feature_ids": feature_ids,
-            "target_col": payload.get("target_col"),
-        }
-    # Plain confirmation → use the proposed roles as-is.
-    if is_confirm(text):
-        return {
-            "anchor_id": c1_state.get("anchor_id"),
-            "feature_ids": list(c1_state.get("feature_ids") or []),
-            "target_col": c1_state.get("target_col"),
-        }
-    return None
-
-
-def _append_join_error(repo: TaskRepository, task_id: str, detail: str) -> dict:
-    repo.add_agent_message(task_id, role="assistant", stage="chat", content=detail, metadata={"error": True})
-    return {"task_id": task_id, "status": "error", "messages": repo.list_agent_messages(task_id)}
-
-
-def _run_feature_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
-    """Drive a feature_analysis task: compute the selected per-feature metrics and
-    show the wide table (spec §1 form A — standalone analysis report, no screening
-    gate). Runs synchronously on the wired plan engine; manual mode = the user reads
-    the table (no LLM). One step, no gate, so the plan completes in a single run.
-    """
-    state = request.app.state
-    plan_repo = state.plan_repo
-    driver = PlanDriver(
-        plan_repo, state.plan_executor, planner=state.planner, validator=state.plan_validator,
-        llm_client=_driver_llm_client(request, task),
-    )
-    if user_text is not None:
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=user_text, metadata={"intent": "feature_analysis"}
-        )
-    try:
-        active = _active_plan(plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
-            _append_driver_messages(repo, task.id, turn)
-            return _join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(state.settings)
-        proposal = build_feature_proposal(
-            registry, backend, task.id, task.source_dir, metrics=_feature_metrics(task)
-        )
-        repo.add_agent_message(
-            task.id, role="assistant", stage="chat",
-            content=(
-                f"分析数据集 `{proposal.dataset_name}`(目标列 `{proposal.target_col}`,"
-                f"{len(proposal.features)} 个候选特征):"
-            ),
-            metadata={"intent": "feature_analysis"},
-        )
-        turn = driver.start(
-            task_id=task.id, template_id=proposal.template_id,
-            slots=proposal.template_slots(),
-            tier=_task_tier(request, task),
-        )
-        _append_driver_messages(repo, task.id, turn)
-        return _join_turn_response(repo, task.id)
-    except FeatureSetupError as exc:
-        return _append_join_error(repo, task.id, str(exc))
-    except Exception as exc:  # surface as an assistant message rather than a 500
-        return _append_join_error(repo, task.id, f"特征分析出错：{exc}")
-
-
-def _feature_metrics(task: TaskRecord) -> list[str]:
-    """Optional feature metrics the user selected at creation (e.g. ``vif``), stored
-    on the task. Empty → base per-feature metrics only (spec §2: 选了才算)."""
-    return [str(item).strip() for item in (getattr(task, "metrics", None) or []) if str(item).strip()]
-
-
-def _modeling_recipes(task: TaskRecord) -> list[str] | None:
-    """Recipes the user chose for a modeling task (manual-mode multi-select, stored on
-    the task). None → modeling_setup recommends / defaults (the agent-mode path, where
-    no options are shown). Multiple → train each and pick the best (G2 multi-algorithm)."""
-    recipes = [str(item).strip() for item in (getattr(task, "recipes", None) or []) if str(item).strip()]
-    return recipes or None
-
-
-def _modeling_target_type(task: TaskRecord) -> str | None:
-    target_type = str(getattr(task, "target_type", "") or "").strip()
-    return target_type or None
-
-
-def _run_modeling_driver_turn(request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None, selection: list | None = None, dedup_strategies: dict | None = None) -> dict:
-    """Drive a modeling task through the generic PlanDriver: leakage-aware screen ->
-    [confirm features] -> tune+train -> [confirm model] -> model-development report.
-    Replaces the bespoke ModelingSession prototype. Synchronous on the wired plan
-    engine; manual mode = the user confirms each gate via a control button (no LLM).
-    """
-    state = request.app.state
-    plan_repo = state.plan_repo
-    driver = PlanDriver(
-        plan_repo, state.plan_executor, planner=state.planner, validator=state.plan_validator,
-        llm_client=_driver_llm_client(request, task),
-    )
-    if user_text is not None:
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=user_text, metadata={"intent": "modeling"}
-        )
-    try:
-        active = _active_plan(plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(plan_id=active.id, user_text=user_text or "", selection=selection, dedup_strategies=dedup_strategies)
-            _append_driver_messages(repo, task.id, turn)
-            return _join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(state.settings)
-        proposal = build_modeling_proposal(
-            registry, backend, task.id, task.source_dir,
-            target_type=_modeling_target_type(task),
-            recipes=_modeling_recipes(task),
-            sample_weight_col=getattr(task, "sample_weight_col", "") or None,
-        )
-        counts = proposal.counts
-        bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""
-        note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
-        repo.add_agent_message(
-            task.id, role="assistant", stage="chat",
-            content=(
-                f"开始建模:样本 `{proposal.dataset_name}`,目标列 `{proposal.target_col}`{bad},"
-                f"切分 `{proposal.split_col}` train/test/oot="
-                f"{counts.get('train', 0)}/{counts.get('test', 0)}/{counts.get('oot', 0)},"
-                f"候选特征 {len(proposal.feature_cols)} 个。先做泄漏感知特征筛选,随后请确认特征集。"
-                f"{note_text}"
-            ),
-            metadata={"intent": "modeling"},
-        )
-        turn = driver.start(
-            task_id=task.id,
-            template_id=proposal.template_id,
-            slots=proposal.template_slots(),
-            tier=_task_tier(request, task),
-        )
-        _append_driver_messages(repo, task.id, turn)
-        return _join_turn_response(repo, task.id)
-    except ModelingSetupError as exc:
-        return _append_join_error(repo, task.id, str(exc))
-    except Exception as exc:  # surface as an assistant message rather than a 500
-        return _append_join_error(repo, task.id, f"建模出错：{exc}")
-
-
-# --- agent-mode auto-drive ---------------------------------------------------
-# Manual mode = the user clicks 「确认」 at each gate. Agent mode = an LLM operates
-# those same gates. A configured LLM is therefore MANDATORY in agent mode (the user's
-# invariant: no LLM must error, never silently run the manual flow). The deterministic
-# turn functions above are reused verbatim — agent mode just feeds them the 「确认」 the
-# LLM decides on, gate after gate, until the flow finishes / halts / hits the cap.
-_AGENT_MAX_GATES = 8
-
-# Maps a driver task_type to its synchronous turn function (all share the
-# (request, repo, task, *, user_text) signature).
-_DRIVER_TURN_FUNCS = {
-    TASK_TYPE_MODELING: _run_modeling_driver_turn,
-    TASK_TYPE_DATA_JOIN: _run_join_driver_turn,
-    TASK_TYPE_FEATURE_ANALYSIS: _run_feature_driver_turn,
-}
-
 
 def _resolve_driver_agent_client(request, task: TaskRecord, payload):
     """Agent mode hands the manual gate-controls to an LLM, so a configured LLM is
@@ -3392,53 +3082,12 @@ def _driver_llm_client(request, task: TaskRecord):
         return None
 
 
-def _latest_open_gate(messages: list[dict]) -> dict | None:
-    """The latest assistant message iff it is a confirmation gate awaiting a reply —
-    the plan-level overview gate (``metadata.kind == 'plan_overview'``), a per-step
-    driver gate (``metadata.kind == 'gate'``), or the JOIN C1 file-role gate
-    (``metadata.join_c1``). A terminal/error/skip message is not an open gate."""
-    last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant"), None)
-    if last_assistant is None:
-        return None
-    meta = last_assistant.get("metadata") or {}
-    if meta.get("error") or meta.get("join_skip"):
-        return None
-    if meta.get("kind") in ("gate", "plan_overview") or "join_c1" in meta:
-        return last_assistant
-    return None
-
-
-def _agent_autodrive_turn(request, repo: TaskRepository, task: TaskRecord, *, client) -> None:
-    """Let the LLM operate the gates the user would click in manual mode: while the
-    latest message is an open gate, ask the LLM to confirm/halt and re-run the turn
-    with its reply. Bounded by ``_AGENT_MAX_GATES`` so a confirm loop can't run away."""
-    turn_fn = _DRIVER_TURN_FUNCS[task.task_type]
-    for _ in range(_AGENT_MAX_GATES):
-        gate = _latest_open_gate(repo.list_agent_messages(task.id))
-        if gate is None:
-            return  # flow finished (done / skip / error) — nothing left to operate
-        try:
-            decision = decide_gate(client, gate=gate)
-        except LLMClientError as exc:
-            repo.add_agent_message(
-                task.id, role="assistant", stage="chat",
-                content=f"⚠️ 自动决策失败（{exc}），请手动确认或重试。",
-                metadata={"intent": "agent_error"},
-            )
-            return
-        repo.add_agent_message(
-            task.id, role="assistant", stage="chat", content=f"🤖 {decision['reason']}",
-            metadata={"intent": "agent_decision", "action": decision["action"]},
-        )
-        if decision["action"] != "confirm":
-            return  # halt — leave the gate for the user
-        turn_fn(request, repo, task, user_text="确认")
-
 
 def _dispatch_driver_turn(
     request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None,
     agent_client, acceptance_mode: str | None = None, selection: list | None = None,
-    dedup_strategies: dict | None = None,
+    dedup_strategies: dict | None = None, adjust_params: dict | None = None,
+    expected_step_id: str | None = None,
 ) -> dict:
     """Run one driver turn. ``acceptance_mode`` controls the agent-mode behavior at
     gates (spec §6, two 受控度): AUTO(自动审查) lets the LLM auto-drive ALL gates;
@@ -3447,14 +3096,24 @@ def _dispatch_driver_turn(
     stops at the gate for the control button. ``selection`` carries an edited feature
     set from the §4 screening table; ``dedup_strategies`` carries the per-feature dedup
     map from the §4 join dedup picker."""
-    result = _DRIVER_TURN_FUNCS[task.task_type](
-        request, repo, task, user_text=user_text, selection=selection,
-        dedup_strategies=dedup_strategies,
+    runtime = DriverTurnRuntime(
+        settings=request.app.state.settings,
+        plan_repo=request.app.state.plan_repo,
+        plan_executor=request.app.state.plan_executor,
+        planner=request.app.state.planner,
+        plan_validator=request.app.state.plan_validator,
+        llm_client=_driver_llm_client(request, task),
+        tier=_task_tier(request, task),
     )
-    if agent_client is not None and _agent_auto_accept(acceptance_mode):
-        _agent_autodrive_turn(request, repo, task, client=agent_client)
-        return _join_turn_response(repo, task.id)
-    return result
+    try:
+        return dispatch_plan_driver_turn(
+            runtime, repo, task, user_text=user_text, agent_client=agent_client,
+            auto_accept_enabled=_agent_auto_accept(acceptance_mode), selection=selection,
+            dedup_strategies=dedup_strategies, adjust_params=adjust_params,
+            expected_step_id=expected_step_id,
+        )
+    except DriverError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _dispatch_agent_validation_job(
@@ -3947,9 +3606,7 @@ def _agent_validation_results_with_overfitting_check(validation_results):
 # endpoints in BOTH manual (user operates the controls, no LLM) and agent (an LLM
 # operates them) mode. Validation, in contrast, only uses these endpoints in agent
 # mode — its manual mode is the separate scan/notebook flow.
-_DRIVER_AGENT_TASK_TYPES = frozenset(
-    {TASK_TYPE_DATA_JOIN, TASK_TYPE_FEATURE_ANALYSIS, TASK_TYPE_MODELING}
-)
+_DRIVER_AGENT_TASK_TYPES = DRIVER_AGENT_TASK_TYPES
 
 
 def _require_agent_task(task: TaskRecord) -> None:
@@ -3961,15 +3618,21 @@ def _require_agent_task(task: TaskRecord) -> None:
 
 
 # Agent task types that have a wired conversational backend today.
-# validation -> validation agent (default path); modeling -> modeling agent.
-# Other welcome-page entries (data_join / feature_analysis / strategy / vintage)
-# are advertised in the create flow but their dedicated agents are not built yet.
+# validation -> validation agent (default path); driver task types share the
+# PlanDriver backend.
 # This is an ALLOWLIST, not a denylist: any task_type not listed here rejects
 # explicitly instead of silently falling through to the validation agent on a
 # goal prompt written for a different workflow. New task types must be added here
 # as their agent flow is wired (see docs/plans/v2-completion-plan.md SS8 step 0).
 _WIRED_AGENT_TASK_TYPES = frozenset(
-    {TASK_TYPE_VALIDATION, TASK_TYPE_MODELING, TASK_TYPE_DATA_JOIN, TASK_TYPE_FEATURE_ANALYSIS}
+    {
+        TASK_TYPE_VALIDATION,
+        TASK_TYPE_MODELING,
+        TASK_TYPE_DATA_JOIN,
+        TASK_TYPE_FEATURE_ANALYSIS,
+        TASK_TYPE_STRATEGY,
+        TASK_TYPE_VINTAGE,
+    }
 )
 
 
@@ -3979,7 +3642,7 @@ def _require_wired_agent_task_type(task: TaskRecord) -> None:
             status_code=501,
             detail=(
                 f"任务类型 '{task.task_type}' 的 Agent 流程尚未接入"
-                "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析）"
+                "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / Vintage风险分析）"
             ),
         )
 

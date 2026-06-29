@@ -66,6 +66,12 @@ class AgentMessageRequest(BaseModel):
     # Optional per-feature dedup strategy map (feature_id -> first|last) from the §4
     # join dedup picker; re-confirms confirm_join to resolve non-unique-key conflicts.
     dedup_strategies: dict[str, str] | None = None
+    # Optional structured parameter overrides from manual controls (for example the
+    # feature-screening leakage/missing thresholds). These bypass LLM text routing.
+    adjust_params: dict[str, object] | None = None
+    # Optional optimistic-lock token for structured gate controls. The frontend sends
+    # the gate step id it rendered; the backend rejects stale tabs/buttons.
+    expected_step_id: str | None = None
 
 
 class AgentModelRequest(BaseModel):

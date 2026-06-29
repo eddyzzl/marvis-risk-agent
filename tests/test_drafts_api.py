@@ -222,7 +222,15 @@ def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, 
             distilled="Use WOE bins. Validate PSI drift.",
             created_at="2026-06-20T00:00:00Z",
         )
-        client.app.state.draft_repo.save_learning_note(note)
+        client.app.state.draft_repo.save_learning_note_with_audit(
+            note,
+            audit={
+                "kind": "draft.learning_note.create",
+                "target_ref": note.id,
+                "outcome": "succeeded",
+                "detail": {"query": note.query, "source_count": len(note.sources)},
+            },
+        )
         return {"learning_note_id": note.id, "query": note.query, "source_count": 1}
 
     monkeypatch.setattr("marvis.routers.drafts.tool_distill_learning", fake_distill)
@@ -276,7 +284,19 @@ def test_draft_author_endpoint_creates_draft_from_saved_learning_note(tmp_path, 
             source="web_learning",
             learning_note_id="note-1",
         )
-        client.app.state.draft_registry.add(draft)
+        client.app.state.draft_registry.add_with_audit(
+            draft,
+            audit={
+                "kind": "draft.author",
+                "target_ref": draft.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": draft.task_id,
+                    "learning_note_id": draft.learning_note_id,
+                    "source": draft.source,
+                },
+            },
+        )
         return {"draft_id": draft.id, "name": draft.name, "has_schema": True}
 
     monkeypatch.setattr("marvis.routers.drafts.tool_draft_script", fake_author)

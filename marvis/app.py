@@ -16,13 +16,14 @@ from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.api import router as api_router
+from marvis.artifacts.recovery import reconcile_workspace_artifacts
 from marvis.branding import (
     DEFAULT_BRANDING,
     load_branding,
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.db import DraftRepository, PlanRepository, PluginRepository, init_db
+from marvis.db import DraftRepository, PlanRepository, PluginRepository, init_db, sqlite_health
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
@@ -38,7 +39,7 @@ from marvis.orchestrator.templates import clear_user_templates, load_builtin_tem
 from marvis.orchestrator.templates.skills import load_user_skill_templates
 from marvis.orchestrator.validator import PlanValidator
 from marvis.plugins.hooks import HookDispatcher
-from marvis.plugins.loader import load_builtin_packs
+from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
@@ -147,9 +148,11 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
     init_db(settings.db_path)
     reclaim_stale_running_tasks(settings.db_path)
+    artifact_recovery_report = reconcile_workspace_artifacts(settings)
 
     app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
+    app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     _configure_orchestrator(app, settings)
 
@@ -196,8 +199,8 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, object]:
+        return {"status": "ok", **sqlite_health(settings.db_path)}
 
     @app.get("/branding/assets/{asset_path:path}")
     def branding_asset(asset_path: str) -> FileResponse:
@@ -223,8 +226,10 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     plugin_repo = PluginRepository(settings.db_path)
     plugin_registry = PluginRegistry(plugin_repo)
+    packs_root = Path(__file__).parent / "packs"
+    sync_builtin_packs(plugin_repo, packs_root)
     plugin_registry.load_from_db()
-    load_builtin_packs(plugin_registry, Path(__file__).parent / "packs")
+    load_builtin_packs(plugin_registry, packs_root)
     tool_registry = ToolRegistry(plugin_registry)
     environment = load_execution_environment(settings.workspace)
     python_executable = environment.python_executable or sys.executable

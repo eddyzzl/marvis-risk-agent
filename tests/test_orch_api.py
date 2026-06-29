@@ -6,7 +6,14 @@ from fastapi.testclient import TestClient
 from marvis.app import create_app
 from marvis.db import PlanRepository, TaskRepository, connect, init_db
 from marvis.domain import TaskCreate
-from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStatus, PlanStep, SubAgent
+from marvis.orchestrator.contracts import (
+    AgentStatus,
+    Plan,
+    PlanStatus,
+    PlanStep,
+    StepStatus,
+    SubAgent,
+)
 from marvis.routers.plans import router
 from marvis.plugins.manifest import ToolRef
 
@@ -195,12 +202,16 @@ def test_step_output_endpoint_returns_stored_structured_output(tmp_path):
     repo = client.app.state.plan_repo
     repo.create_plan(_plan(status=PlanStatus.VALIDATED))
     repo.store_step_output("step-1", {"auc": 0.74, "notes": ["ok"]})
+    repo.store_step_output("step-1", {"auc": 0.81, "notes": ["new"]})
 
     response = client.get("/api/step-outputs/step-1")
+    versioned = client.get("/api/step-outputs/step-1:v1")
     missing = client.get("/api/step-outputs/missing-step")
 
     assert response.status_code == 200
-    assert response.json() == {"auc": 0.74, "notes": ["ok"]}
+    assert response.json() == {"auc": 0.81, "notes": ["new"]}
+    assert versioned.status_code == 200
+    assert versioned.json() == {"auc": 0.74, "notes": ["ok"]}
     assert missing.status_code == 404
 
 
@@ -268,6 +279,61 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     cancelled = cancel_client.post("/api/plans/plan-1/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["plan"]["status"] == "cancelled"
+
+
+def test_plan_retry_failed_step_endpoint_reopens_plan_and_runs(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.FAILED, task_id=task_id)
+    plan.steps[0].status = StepStatus.FAILED
+    plan.steps[0].error = "interrupted during running before output was persisted"
+    repo.create_plan(plan)
+
+    response = client.post("/api/plans/plan-1/steps/step-1/retry")
+
+    assert response.status_code == 202
+    assert response.json()["reset_step_ids"] == ["step-1"]
+    assert response.json()["job_id"]
+    assert client.app.state.plan_executor.calls == ["plan-1"]
+    assert repo.load_plan("plan-1").steps[0].status == StepStatus.PENDING
+    assert repo.load_plan("plan-1").status == PlanStatus.RUNNING
+    assert _job_statuses(repo.db_path) == ["succeeded"]
+
+
+def test_plan_retry_failed_step_endpoint_accepts_replacement_inputs(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.FAILED, task_id=task_id)
+    plan.steps[0].status = StepStatus.FAILED
+    repo.create_plan(plan)
+
+    response = client.post(
+        "/api/plans/plan-1/steps/step-1/retry",
+        json={"inputs": {"message": "retry after threshold edit"}},
+    )
+
+    assert response.status_code == 202
+    loaded = repo.load_plan("plan-1")
+    assert loaded.steps[0].inputs == {"message": "retry after threshold edit"}
+    assert loaded.status == PlanStatus.RUNNING
+
+
+def test_plan_retry_failed_step_endpoint_rejects_non_object_inputs(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    plan = _plan(status=PlanStatus.FAILED, task_id=task_id)
+    plan.steps[0].status = StepStatus.FAILED
+    repo.create_plan(plan)
+
+    response = client.post(
+        "/api/plans/plan-1/steps/step-1/retry",
+        json={"inputs": ["not", "an", "object"]},
+    )
+
+    assert response.status_code == 422
 
 
 def test_plan_confirm_dispatches_plan_confirmed_hook(tmp_path):
@@ -341,7 +407,9 @@ def test_create_app_can_create_standard_modeling_template_plan_from_goal(tmp_pat
     plan = response.json()["plan"]
     assert plan["template_id"] == "standard_modeling"
     assert plan["status"] == "validated"
-    assert plan["steps"][-1]["tool_ref"] == {"plugin": "modeling", "tool": "generate_model_report", "version": ""}
+    tools = [step["tool_ref"]["tool"] for step in plan["steps"]]
+    assert "generate_model_report" in tools
+    assert plan["steps"][-1]["tool_ref"] == {"plugin": "modeling", "tool": "post_training_action", "version": ""}
     assert plan["steps"][-1]["needs_confirmation"] is True
 
 
@@ -422,7 +490,7 @@ def test_create_app_can_create_strategy_analysis_plan_from_goal(tmp_path):
         "backtest_strategy",
         "tradeoff_view",
     ]
-    assert plan["steps"][0]["needs_confirmation"] is True
+    assert [step["title"] for step in plan["steps"] if step["needs_confirmation"]] == ["回测策略"]
     assert [step["title"] for step in plan["steps"] if step["decision_point"]] == ["回测策略"]
 
 

@@ -86,6 +86,61 @@ def chimerge_edges(
     return edges.astype(float)
 
 
+def monotonic_direction(
+    values: np.ndarray,
+    target: np.ndarray,
+    edges: np.ndarray,
+    *,
+    direction: str = "auto",
+) -> str:
+    """Resolve the bad-rate monotonic direction for a binned binary target."""
+    arr, tgt = _finite_pairs(values, target)
+    edge_arr = np.asarray(edges, dtype=float)
+    if arr.size == 0:
+        return _normalize_direction(direction, default="increasing")
+    stats = [stat for stat in _bin_stats(arr, tgt, edge_arr) if stat["count"] > 0]
+    return _resolve_monotonic_direction(direction, arr, tgt, stats)
+
+
+def monotonic_edges(
+    values: np.ndarray,
+    target: np.ndarray,
+    edges: np.ndarray,
+    *,
+    direction: str = "auto",
+) -> np.ndarray:
+    """Merge adjacent bins until bin bad rates are monotonic.
+
+    The merge is a post-processing step over an existing edge proposal. It keeps
+    the original open endpoints and only removes inner split points.
+    """
+    arr, tgt = _finite_pairs(values, target)
+    edge_arr = np.asarray(edges, dtype=float)
+    if edge_arr.ndim != 1 or edge_arr.size < 2:
+        raise BinningError("edges must be a one-dimensional array with at least 2 values")
+    if np.any(np.diff(edge_arr) <= 0):
+        raise BinningError("edges must be strictly increasing")
+    if arr.size == 0:
+        return edge_arr.astype(float)
+
+    stats = _bin_stats(arr, tgt, edge_arr)
+    edge_arr = _edges_without_empty_bins(edge_arr, stats)
+    stats = [stat for stat in stats if stat["count"] > 0]
+    if len(stats) <= 1:
+        return np.array([-np.inf, np.inf], dtype=float)
+
+    resolved_direction = _resolve_monotonic_direction(direction, arr, tgt, stats)
+    while len(stats) > 1 and not _stats_monotonic(stats, resolved_direction):
+        index = _least_distinct_violating_pair(stats, resolved_direction)
+        stats[index] = _merge_stats(stats[index], stats[index + 1])
+        del stats[index + 1]
+        edge_arr = np.delete(edge_arr, index + 1)
+
+    edge_arr[0] = -np.inf
+    edge_arr[-1] = np.inf
+    return edge_arr.astype(float)
+
+
 def tree_edges(
     values: np.ndarray,
     target: np.ndarray,
@@ -208,6 +263,73 @@ def _merge_stats(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
     }
 
 
+def _resolve_monotonic_direction(
+    direction: str,
+    values: np.ndarray,
+    target: np.ndarray,
+    stats: list[dict[str, int]],
+) -> str:
+    normalized = _normalize_direction(direction, default="")
+    if normalized:
+        return normalized
+    rates = [_bad_rate(stat) for stat in stats]
+    increasing_violation = _total_direction_violation(rates, "increasing")
+    decreasing_violation = _total_direction_violation(rates, "decreasing")
+    if increasing_violation < decreasing_violation:
+        return "increasing"
+    if decreasing_violation < increasing_violation:
+        return "decreasing"
+    if np.std(values) > 0 and np.std(target) > 0:
+        corr = float(np.corrcoef(values, target)[0, 1])
+        if np.isfinite(corr) and corr < 0:
+            return "decreasing"
+    return "increasing"
+
+
+def _normalize_direction(direction: str, *, default: str) -> str:
+    value = str(direction or "auto").strip().lower()
+    aliases = {
+        "auto": "",
+        "asc": "increasing",
+        "up": "increasing",
+        "increasing": "increasing",
+        "desc": "decreasing",
+        "down": "decreasing",
+        "decreasing": "decreasing",
+    }
+    if value not in aliases:
+        raise BinningError("direction must be auto, increasing, or decreasing")
+    return aliases[value] or default
+
+
+def _stats_monotonic(stats: list[dict[str, int]], direction: str) -> bool:
+    rates = [_bad_rate(stat) for stat in stats]
+    if direction == "increasing":
+        return all(left <= right for left, right in zip(rates, rates[1:]))
+    return all(left >= right for left, right in zip(rates, rates[1:]))
+
+
+def _least_distinct_violating_pair(stats: list[dict[str, int]], direction: str) -> int:
+    rates = [_bad_rate(stat) for stat in stats]
+    if direction == "increasing":
+        violating = [index for index, (left, right) in enumerate(zip(rates, rates[1:])) if left > right]
+    else:
+        violating = [index for index, (left, right) in enumerate(zip(rates, rates[1:])) if left < right]
+    if not violating:
+        return _least_distinct_adjacent_pair(stats)
+    return min(violating, key=lambda index: _adjacent_chi2(stats[index], stats[index + 1]))
+
+
+def _total_direction_violation(rates: list[float], direction: str) -> float:
+    if direction == "increasing":
+        return float(sum(max(0.0, left - right) for left, right in zip(rates, rates[1:])))
+    return float(sum(max(0.0, right - left) for left, right in zip(rates, rates[1:])))
+
+
+def _bad_rate(stat: dict[str, int]) -> float:
+    return float(stat["bad"] / stat["count"]) if stat["count"] else 0.0
+
+
 def _validate_bin_count(bin_count: int) -> None:
     if int(bin_count) < 1:
         raise BinningError("bin_count must be at least 1")
@@ -219,5 +341,7 @@ __all__ = [
     "equal_frequency_edges",
     "equal_width_edges",
     "manual_edges",
+    "monotonic_direction",
+    "monotonic_edges",
     "tree_edges",
 ]

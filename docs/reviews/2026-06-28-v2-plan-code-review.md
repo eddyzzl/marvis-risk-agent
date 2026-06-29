@@ -1,5 +1,7 @@
 # V2 plans/code review - 2026-06-28
 
+> **状态更新（2026-06-28 后续修复后）**：本文主体是较早一轮 plan/code review 快照，下面的部分 finding 已在后续修复中关闭。当前最终验证基线为 `1641 passed, 2 warnings`，strategy / vintage 已接入真实 PlanDriver，不再是 `data-coming-soon` / 501 占位路径；保留原文是为了追溯当时的计划差距与修复动机。
+
 ## 0. 审查范围
 
 - 仓库：`/Users/eddyz/zzl/projects/ai/agent/risk_manager-v2`
@@ -59,15 +61,15 @@
 - P1-3：新增任务级 `target_type` 字段，从 API/schema/DB 到 modeling setup 全链路持久化；服务端拒绝跨目标类型 recipe；前端按算法 family 互斥并随创建任务提交 `payload.target_type`。
 - P1-4/G4：`train_models` 的 best selection 和候选表改成 target-type-aware；`compare_experiments` 增加训练后动作能力矩阵，明确 PMML/验证移交当前只支持 LR，其它模型保留原生模型/报告。
 - P1-5：manifest 加入 `mlp`，`load_model()` 支持 MLP joblib artifact。
-- P2-1/P3-2：strategy/vintage 欢迎卡改成 unavailable + `aria-disabled`，可点击 toast 但不再显示为可用入口。
+- P2-1/P3-2：原审查时 strategy/vintage 被改成 unavailable；后续修复已进一步接入真实 PlanDriver，欢迎卡恢复为可用入口并移除 `data-coming-soon` 残留。
 - P2-4：非二分类模型报告保留固定 workbook skeleton，binary-only sheet 标 `n/a/非二分类不适用`，额外写目标类型指标 sheet。
 - P2-5：设置弹窗退役旧 `计划与执行` runtime workbench 挂载；`mountV2` 只保留插件、Workflow 模板、能力档位三个设置型面板，改用 `governanceExtensionMount`。
 - P2-6：`make_split` 样本分析只读取月/渠道等必要分组列，不再整表读入。
 - P1-2/P2-3：在 PlanDriver 尚无条件 step 语义前，Feature/Modeling 遇到多个数据文件改为 fail-fast，明确要求先走数据拼接并使用拼接结果，避免静默选单表训练/分析。
 
-当前代码比上一轮明显更接近计划：`data_join / feature_analysis / modeling` 已经走通用 `PlanDriver`，JOIN 的 C1/C2、强确认、去重策略和 1:1 保护基本成型；manual 模式下的 feature 勾选、join 去重、步骤栏确认也已经接上后端；`strategy/vintage` 卡片已改为 unavailable 样式和 `aria-disabled`，点击只弹出暂未开放提示，不会打开创建弹窗。
+当前后续修复后的代码比上一轮明显更接近计划：`data_join / feature_analysis / modeling / strategy / vintage` 已经走通用 `PlanDriver`，JOIN 的 C1/C2、强确认、去重策略和 1:1 保护基本成型；manual 模式下的 feature 勾选、join 去重、步骤栏确认、strategy 回测确认、vintage 曲线也已经接上后端。
 
-但当前仍不能按 `docs/roadmap.md` 宣称完整 V2。它更准确的状态是：3 个入口切片可用，JOIN/PlanDriver 底座较稳；Strategy/Vintage 仍是未开发占位；Feature/Modeling 的多表自动组合仍需要 PlanDriver 支持条件 step 后再做完整 JOIN→FEATURE→MODELING 编排，本轮已改成 fail-fast 防止错误使用单表。
+但当前仍不能按 `docs/roadmap.md` 宣称完整 V2。它更准确的状态是：5 个入口切片可用，JOIN/PlanDriver 底座较稳；Feature/Modeling 的多表自动组合仍需要 PlanDriver 支持条件 step 后再做完整 JOIN→FEATURE→MODELING 编排，本轮已改成 fail-fast 防止错误使用单表。
 
 这次用户修改主要集中在“非二分类 target 时的 screen_features 不再保留常量/全缺失列”。方向正确；本轮已补齐 dev-row/OOT 排除和 `ranked`/`top_k` 契约。
 
@@ -81,13 +83,13 @@
 
 处理建议：保留这条路径，不再重复做一套任务专用 driver；后续缺口应往模板/阶段组合/工具能力里补。
 
-### 3.2 Strategy/Vintage 已禁用可用样式并点击阻断
+### 3.2 Strategy/Vintage 后续已接入 PlanDriver
 
-- `marvis/static/index.html` 中 strategy/vintage 卡片保留展示，但改为 `welcome-task-card unavailable` + `aria-disabled="true"`。
-- `marvis/static/app.js` 对 unavailable/coming-soon 会 toast 并 return，不打开创建弹窗。
-- 后端 `marvis/api.py:3956-3964` 对未接入类型仍 501。
+- `marvis/static/index.html` 中 strategy/vintage 卡片为 `welcome-task-card available`，不再有 `data-coming-soon`。
+- `marvis/static/app.js` 的 plan rail task types 包含 `strategy` / `vintage`。
+- 后端 agent allowlist 已包含 `strategy` / `vintage`，真实 driver turn 与 manual/agent-mode 测试均已覆盖。
 
-处理建议：保留后端 allowlist 作为最终防线；对外口径仍应避免把 strategy/vintage 作为已完成入口宣传。
+处理建议：保留后端 allowlist 作为最终防线；对外口径可以说 strategy/vintage 已有 MVP 工作流，但滚动率、FPD、入催回收率等更完整风险分析仍属于后续扩展。
 
 ## 4. P1 / 高优先级问题
 

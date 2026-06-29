@@ -15,6 +15,12 @@ export const runPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/run`,
 export const confirmStep = (planId, stepId) => (
   apiPost(`/api/plans/${pathPart(planId)}/steps/${pathPart(stepId)}/confirm`, {})
 );
+export const retryStep = (planId, stepId, inputs) => (
+  apiPost(
+    `/api/plans/${pathPart(planId)}/steps/${pathPart(stepId)}/retry`,
+    inputs === undefined ? {} : { inputs },
+  )
+);
 export const cancelPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/cancel`, {});
 
 export const listPlugins = (includeDisabled = false) => (

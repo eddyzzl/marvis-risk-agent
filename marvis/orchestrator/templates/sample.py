@@ -10,6 +10,19 @@ from marvis.orchestrator.templates import (
 from marvis.plugins.manifest import ToolRef
 
 
+# Modeling templates should not hard-fail every project on one fixed KS target.
+# Business acceptance thresholds belong in a configurable policy/report gate; the
+# workflow still reports OOT KS/AUC and section status, but completion is based on
+# successful execution and explicit user/agent decisions.
+_BINARY_MODELING_SUCCESS_CRITERIA = ()
+
+_JOIN_EXECUTE_POST_CHECKS = (
+    PostCheck("nonempty", {"field": "result_dataset_id"}),
+    PostCheck("rowcount", {"field": "joined_rows", "min": 1}),
+    PostCheck("invariant", {"rule": "joined_rows<=anchor_rows"}),
+)
+
+
 SAMPLE_ECHO = WorkflowTemplate(
     id="sample_echo",
     title="Sample Echo Workflow",
@@ -185,24 +198,54 @@ STANDARD_MODELING = WorkflowTemplate(
             post_checks=(PostCheck("nonempty", {"field": "experiments"}),),
         ),
         StepTemplate(
+            title="选择实验",
+            tool_ref=ToolRef("modeling", "select_experiment"),
+            inputs_template={
+                "experiment_ids": ["$ref:训练模型.output.experiment_id"],
+                "target_type": "binary",
+            },
+            depends_on_titles=("训练模型", "对比实验"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selected_experiment_id"}),
+                PostCheck("nonempty", {"field": "artifact_id"}),
+            ),
+            needs_confirmation=True,
+        ),
+        StepTemplate(
             title="生成模型开发报告",
             tool_ref=ToolRef("modeling", "generate_model_report"),
             inputs_template={
-                "experiment_id": "$ref:训练模型.output.experiment_id",
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "dataset_id": "{slot:dataset_id}",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
                 "project_meta": "{slot:project_meta}",
             },
-            depends_on_titles=("训练模型", "对比实验"),
+            depends_on_titles=("选择实验",),
             post_checks=(
                 PostCheck("nonempty", {"field": "report_path"}),
                 PostCheck("nonempty", {"field": "section_status"}),
             ),
             needs_confirmation=True,
         ),
+        StepTemplate(
+            title="模型交付动作",
+            tool_ref=ToolRef("modeling", "post_training_action"),
+            inputs_template={
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
+                "sample_dataset_id": "{slot:dataset_id}",
+                "actions": ["export_pmml", "handoff_to_validation"],
+            },
+            depends_on_titles=("选择实验", "生成模型开发报告"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "artifact_id"}),
+                PostCheck("nonempty", {"field": "actions"}),
+            ),
+            needs_confirmation=True,
+        ),
     ),
     default_autonomy=1,
+    success_criteria=_BINARY_MODELING_SUCCESS_CRITERIA,
     source="builtin",
 )
 
@@ -261,7 +304,7 @@ DATA_JOIN = WorkflowTemplate(
                 "join_plan_id": "$ref:拼接诊断.output.join_plan_id",
             },
             depends_on_titles=("拼接诊断", "确认拼接"),
-            post_checks=(PostCheck("nonempty", {"field": "result_dataset_id"}),),
+            post_checks=_JOIN_EXECUTE_POST_CHECKS,
             # 强制确认门(INV-3):execute_join 必须 needs_confirmation。执行器暂停在真正左连接之前,
             # 驱动展示拼接诊断(命中率/膨胀/键指纹),用户确认后才执行;引擎层另有 JoinNotConfirmedError 兜底。
             needs_confirmation=True,
@@ -299,6 +342,8 @@ MODELING = WorkflowTemplate(
         SlotSpec("target_type", False, "task_context", "Target type: binary, continuous, or multiclass"),
         SlotSpec("holdout_values", False, "task_context", "OOT split value(s) held out of the leakage screen"),
         SlotSpec("sample_weight_col", False, "task_context", "Optional sample-weight column for fit/sample weighting"),
+        SlotSpec("sample_weight_candidates", False, "task_context", "Detected sample-weight candidate columns"),
+        SlotSpec("tuning_params", False, "task_context", "Optional fixed tuning/training params chosen by the user or agent"),
         SlotSpec("passthrough_cols", False, "task_context", "Non-feature columns to preserve in the modeling frame"),
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
@@ -322,22 +367,64 @@ MODELING = WorkflowTemplate(
             phase="特征",
         ),
         StepTemplate(
+            title="选择建模规格",
+            tool_ref=ToolRef("modeling", "choose_modeling_spec"),
+            inputs_template={
+                "target_col": "{slot:target_col}",
+                "features": "$ref:切分样本.output.feature_cols",
+                "target_type": "{slot:target_type}",
+                "recipe": "{slot:recipe}",
+                "recipes": "{slot:recipes}",
+                "sample_weight_col": "{slot:sample_weight_col}",
+                "sample_weight_candidates": "{slot:sample_weight_candidates}",
+                "n_trials": 12,
+                "params": "{slot:tuning_params}",
+                "seed": "{slot:seed}",
+            },
+            depends_on_titles=("切分样本",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "recipe"}),
+                PostCheck("nonempty", {"field": "recipes"}),
+            ),
+            phase="建模",
+        ),
+        StepTemplate(
             title="特征筛选",
             tool_ref=ToolRef("modeling", "screen_features"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "{slot:feature_cols}",
+                "features": "$ref:选择建模规格.output.feature_cols",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "holdout_values": "{slot:holdout_values}",
-                "target_type": "{slot:target_type}",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "leakage_ks": 0.4,
+                "max_missing_rate": 0.95,
             },
-            depends_on_titles=("切分样本",),
+            depends_on_titles=("切分样本", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             # G1 门:确认切分(train/test/oot 计数、按月/渠道分布)后再筛特征
             #(执行器暂停在本步前,驱动展示"切分样本"产出的样本分析)
             needs_confirmation=True,
             phase="特征",
+        ),
+        StepTemplate(
+            title="配置调参",
+            tool_ref=ToolRef("modeling", "configure_tuning"),
+            inputs_template={
+                "recipe": "$ref:选择建模规格.output.recipe",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
+                "n_trials": "$ref:选择建模规格.output.n_trials",
+                "params": "$ref:选择建模规格.output.params",
+                "seed": "$ref:选择建模规格.output.seed",
+            },
+            depends_on_titles=("选择建模规格", "特征筛选"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "reason"}),
+            ),
+            needs_confirmation=True,
+            phase="建模",
         ),
         StepTemplate(
             title="调参",
@@ -348,15 +435,16 @@ MODELING = WorkflowTemplate(
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
-                "recipe": "{slot:recipe}",
-                "sample_weight_col": "{slot:sample_weight_col}",
-                "seed": "{slot:seed}",
+                "recipe": "$ref:配置调参.output.recipe",
+                "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
+                "seed": "$ref:配置调参.output.seed",
+                "params": "$ref:配置调参.output.params",
                 # Bounded random search so the synchronous driver turn stays
                 # responsive; users can request a wider search later (G3). Non-lgb
                 # recipes skip the search and train with their own defaults.
-                "n_trials": 12,
+                "n_trials": "$ref:配置调参.output.n_trials",
             },
-            depends_on_titles=("切分样本", "特征筛选"),
+            depends_on_titles=("切分样本", "特征筛选", "配置调参"),
             # best_params must be present + a dict, but MAY be empty: only lgb runs the random
             # search; every other recipe (lr/xgb/scorecard/mlp/regressor/multiclass) skips it
             # and trains with its own defaults ({}), so "nonempty" would wrongly fail them.
@@ -374,17 +462,17 @@ MODELING = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "train_models"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "recipes": "{slot:recipes}",
+                "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
                 "params": "$ref:调参.output.best_params",
-                "sample_weight_col": "{slot:sample_weight_col}",
-                "seed": "{slot:seed}",
-                "target_type": "{slot:target_type}",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
+                "seed": "$ref:选择建模规格.output.seed",
+                "target_type": "$ref:选择建模规格.output.target_type",
             },
-            depends_on_titles=("切分样本", "特征筛选", "调参"),
+            depends_on_titles=("切分样本", "选择建模规格", "特征筛选", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -397,10 +485,25 @@ MODELING = WorkflowTemplate(
             phase="建模",
         ),
         StepTemplate(
+            title="选择实验",
+            tool_ref=ToolRef("modeling", "select_experiment"),
+            inputs_template={
+                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "target_type": "$ref:选择建模规格.output.target_type",
+            },
+            depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selected_experiment_id"}),
+                PostCheck("nonempty", {"field": "artifact_id"}),
+            ),
+            needs_confirmation=True,
+            phase="建模",
+        ),
+        StepTemplate(
             title="生成模型开发报告",
             tool_ref=ToolRef("modeling", "generate_model_report"),
             inputs_template={
-                "experiment_id": "$ref:训练模型.output.best_experiment_id",
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "dataset_id": "{slot:dataset_id}",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
@@ -408,7 +511,7 @@ MODELING = WorkflowTemplate(
             },
             # depends on 调参 too so the model gate shows the trials leaderboard (G4)
             # alongside the trained-model metrics before the report is finalized.
-            depends_on_titles=("切分样本", "调参", "训练模型", "对比实验"),
+            depends_on_titles=("切分样本", "调参", "训练模型", "选择实验"),
             post_checks=(
                 PostCheck("nonempty", {"field": "report_path"}),
                 PostCheck("nonempty", {"field": "section_status"}),
@@ -417,8 +520,25 @@ MODELING = WorkflowTemplate(
             needs_confirmation=True,
             phase="报告",
         ),
+        StepTemplate(
+            title="模型交付动作",
+            tool_ref=ToolRef("modeling", "post_training_action"),
+            inputs_template={
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
+                "sample_dataset_id": "{slot:dataset_id}",
+                "actions": ["export_pmml", "handoff_to_validation"],
+            },
+            depends_on_titles=("选择实验", "生成模型开发报告"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "artifact_id"}),
+                PostCheck("nonempty", {"field": "actions"}),
+            ),
+            needs_confirmation=True,
+            phase="交付",
+        ),
     ),
     default_autonomy=1,
+    success_criteria=_BINARY_MODELING_SUCCESS_CRITERIA,
     source="builtin",
 )
 
@@ -440,6 +560,8 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         SlotSpec("target_type", False, "task_context", "Target type: binary, continuous, or multiclass"),
         SlotSpec("holdout_values", False, "task_context", "OOT split value(s) held out of the leakage screen"),
         SlotSpec("sample_weight_col", False, "task_context", "Optional sample-weight column for fit/sample weighting"),
+        SlotSpec("sample_weight_candidates", False, "task_context", "Detected sample-weight candidate columns"),
+        SlotSpec("tuning_params", False, "task_context", "Optional fixed tuning/training params chosen by the user or agent"),
         SlotSpec("passthrough_cols", False, "task_context", "Non-feature columns to preserve in the modeling frame"),
         SlotSpec("business_columns", False, "task_context", "Optional model report business-column mapping"),
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
@@ -475,7 +597,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("data_ops", "execute_join"),
             inputs_template={"join_plan_id": "$ref:拼接诊断.output.join_plan_id"},
             depends_on_titles=("拼接诊断", "确认拼接"),
-            post_checks=(PostCheck("nonempty", {"field": "result_dataset_id"}),),
+            post_checks=_JOIN_EXECUTE_POST_CHECKS,
             needs_confirmation=True,
             phase="数据准备",
         ),
@@ -496,20 +618,62 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             phase="特征",
         ),
         StepTemplate(
+            title="选择建模规格",
+            tool_ref=ToolRef("modeling", "choose_modeling_spec"),
+            inputs_template={
+                "target_col": "{slot:target_col}",
+                "features": "$ref:切分样本.output.feature_cols",
+                "target_type": "{slot:target_type}",
+                "recipe": "{slot:recipe}",
+                "recipes": "{slot:recipes}",
+                "sample_weight_col": "{slot:sample_weight_col}",
+                "sample_weight_candidates": "{slot:sample_weight_candidates}",
+                "n_trials": 12,
+                "params": "{slot:tuning_params}",
+                "seed": "{slot:seed}",
+            },
+            depends_on_titles=("切分样本",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "recipe"}),
+                PostCheck("nonempty", {"field": "recipes"}),
+            ),
+            phase="建模",
+        ),
+        StepTemplate(
             title="特征筛选",
             tool_ref=ToolRef("modeling", "screen_features"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "$ref:切分样本.output.feature_cols",
+                "features": "$ref:选择建模规格.output.feature_cols",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "holdout_values": "$ref:切分样本.output.holdout_values",
-                "target_type": "{slot:target_type}",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "leakage_ks": 0.4,
+                "max_missing_rate": 0.95,
             },
-            depends_on_titles=("切分样本",),
+            depends_on_titles=("切分样本", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             needs_confirmation=True,
             phase="特征",
+        ),
+        StepTemplate(
+            title="配置调参",
+            tool_ref=ToolRef("modeling", "configure_tuning"),
+            inputs_template={
+                "recipe": "$ref:选择建模规格.output.recipe",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
+                "n_trials": "$ref:选择建模规格.output.n_trials",
+                "params": "$ref:选择建模规格.output.params",
+                "seed": "$ref:选择建模规格.output.seed",
+            },
+            depends_on_titles=("选择建模规格", "特征筛选"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "reason"}),
+            ),
+            needs_confirmation=True,
+            phase="建模",
         ),
         StepTemplate(
             title="调参",
@@ -520,12 +684,13 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
-                "recipe": "{slot:recipe}",
-                "sample_weight_col": "{slot:sample_weight_col}",
-                "seed": "{slot:seed}",
-                "n_trials": 12,
+                "recipe": "$ref:配置调参.output.recipe",
+                "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
+                "seed": "$ref:配置调参.output.seed",
+                "params": "$ref:配置调参.output.params",
+                "n_trials": "$ref:配置调参.output.n_trials",
             },
-            depends_on_titles=("切分样本", "特征筛选"),
+            depends_on_titles=("切分样本", "特征筛选", "配置调参"),
             post_checks=(PostCheck("schema", {
                 "type": "object",
                 "properties": {"best_params": {"type": "object"}},
@@ -539,17 +704,17 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "train_models"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "recipes": "{slot:recipes}",
+                "recipes": "$ref:选择建模规格.output.recipes",
                 "features": "$ref:特征筛选.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
                 "params": "$ref:调参.output.best_params",
-                "sample_weight_col": "{slot:sample_weight_col}",
-                "seed": "{slot:seed}",
-                "target_type": "{slot:target_type}",
+                "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
+                "seed": "$ref:选择建模规格.output.seed",
+                "target_type": "$ref:选择建模规格.output.target_type",
             },
-            depends_on_titles=("切分样本", "特征筛选", "调参"),
+            depends_on_titles=("切分样本", "选择建模规格", "特征筛选", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -562,16 +727,31 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             phase="建模",
         ),
         StepTemplate(
+            title="选择实验",
+            tool_ref=ToolRef("modeling", "select_experiment"),
+            inputs_template={
+                "experiment_ids": "$ref:训练模型.output.experiment_ids",
+                "target_type": "$ref:选择建模规格.output.target_type",
+            },
+            depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "selected_experiment_id"}),
+                PostCheck("nonempty", {"field": "artifact_id"}),
+            ),
+            needs_confirmation=True,
+            phase="建模",
+        ),
+        StepTemplate(
             title="生成模型开发报告",
             tool_ref=ToolRef("modeling", "generate_model_report"),
             inputs_template={
-                "experiment_id": "$ref:训练模型.output.best_experiment_id",
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "business_columns": "{slot:business_columns}",
                 "feature_dictionary_id": "{slot:feature_dictionary_id}",
                 "project_meta": "{slot:project_meta}",
             },
-            depends_on_titles=("切分样本", "调参", "训练模型", "对比实验"),
+            depends_on_titles=("切分样本", "调参", "训练模型", "选择实验"),
             post_checks=(
                 PostCheck("nonempty", {"field": "report_path"}),
                 PostCheck("nonempty", {"field": "section_status"}),
@@ -579,8 +759,25 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             needs_confirmation=True,
             phase="报告",
         ),
+        StepTemplate(
+            title="模型交付动作",
+            tool_ref=ToolRef("modeling", "post_training_action"),
+            inputs_template={
+                "experiment_id": "$ref:选择实验.output.selected_experiment_id",
+                "sample_dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "actions": ["export_pmml", "handoff_to_validation"],
+            },
+            depends_on_titles=("切分样本", "选择实验", "生成模型开发报告"),
+            post_checks=(
+                PostCheck("nonempty", {"field": "artifact_id"}),
+                PostCheck("nonempty", {"field": "actions"}),
+            ),
+            needs_confirmation=True,
+            phase="交付",
+        ),
     ),
     default_autonomy=1,
+    success_criteria=_BINARY_MODELING_SUCCESS_CRITERIA,
     source="builtin",
 )
 
@@ -669,7 +866,7 @@ FEATURE_ANALYSIS_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("data_ops", "execute_join"),
             inputs_template={"join_plan_id": "$ref:拼接诊断.output.join_plan_id"},
             depends_on_titles=("拼接诊断", "确认拼接"),
-            post_checks=(PostCheck("nonempty", {"field": "result_dataset_id"}),),
+            post_checks=_JOIN_EXECUTE_POST_CHECKS,
             needs_confirmation=True,
             phase="数据准备",
         ),
@@ -796,7 +993,6 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
             },
             depends_on_titles=(),
             post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
-            needs_confirmation=True,
         ),
         StepTemplate(
             title="回测策略",
@@ -815,6 +1011,7 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
                 PostCheck("range", {"field": "expected_profit"}),
             ),
             decision_point=True,
+            needs_confirmation=True,
         ),
         StepTemplate(
             title="生成策略权衡视图",
@@ -832,6 +1029,39 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
     source="builtin",
 )
 
+VINTAGE_ANALYSIS = WorkflowTemplate(
+    id="vintage_analysis",
+    title="Vintage 风险分析",
+    goal_patterns=("风险分析", "vintage", "vintage analysis", "账龄分析"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered vintage dataset id"),
+        SlotSpec("cohort_col", True, "task_context", "Cohort/month column"),
+        SlotSpec("mob_col", True, "task_context", "Month-on-book column"),
+        SlotSpec("bad_col", True, "task_context", "Binary bad/default target column"),
+        SlotSpec("mob_max", False, "task_context", "Maximum MOB to render"),
+        SlotSpec("ref_mob", False, "task_context", "Reference MOB for trend summary"),
+    ),
+    steps=(
+        StepTemplate(
+            title="计算 Vintage 曲线",
+            tool_ref=ToolRef("strategy", "vintage_curve"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "cohort_col": "{slot:cohort_col}",
+                "mob_col": "{slot:mob_col}",
+                "bad_col": "{slot:bad_col}",
+                "mob_max": "{slot:mob_max}",
+                "ref_mob": "{slot:ref_mob}",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "cohorts"}),),
+            decision_point=True,
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
 _register_builtin_template(SAMPLE_ECHO)
 _register_builtin_template(MODEL_VALIDATION)
 _register_builtin_template(STANDARD_MODELING)
@@ -842,3 +1072,4 @@ _register_builtin_template(FEATURE_ANALYSIS)
 _register_builtin_template(FEATURE_ANALYSIS_WITH_JOIN)
 _register_builtin_template(FEATURE_DERIVATION)
 _register_builtin_template(STRATEGY_ANALYSIS)
+_register_builtin_template(VINTAGE_ANALYSIS)

@@ -30,6 +30,11 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
         str(inputs["dataset_id"]),
         columns=[str(inputs["cohort_col"]), str(inputs["mob_col"]), str(inputs["bad_col"])],
     )
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame,
+        str(inputs["bad_col"]),
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
     curve = vintage_curve(
         frame,
         cohort_col=str(inputs["cohort_col"]),
@@ -43,6 +48,7 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
         "curves": _jsonable(curve.curves),
         "counts": _jsonable(curve.counts),
         "summary": vintage_summary(curve, ref_mob=int(inputs.get("ref_mob", 6))),
+        "nan_labels_dropped": nan_labels_dropped,
     }
 
 
@@ -92,8 +98,28 @@ def tool_build_strategy(inputs: dict, ctx) -> dict:
         description=str(inputs.get("description") or ""),
     )
     if runtime.strategies.get_strategy(strategy.id) is None:
-        runtime.strategies.create_strategy(ctx.task_id, strategy)
-    return {"strategy_id": strategy.id}
+        runtime.strategies.create_strategy_with_audit(
+            ctx.task_id,
+            strategy,
+            audit={
+                "kind": "strategy.create",
+                "target_ref": strategy.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": str(ctx.task_id),
+                    "strategy_type": strategy.strategy_type,
+                    "rule_count": len(strategy.rules),
+                },
+            },
+        )
+    return {
+        "strategy_id": strategy.id,
+        "strategy_type": strategy.strategy_type,
+        "score_col": strategy.score_col,
+        "default_decision": strategy.default_decision,
+        "description": strategy.description,
+        "rules": [_jsonable(rule) for rule in strategy.rules],
+    }
 
 
 def tool_backtest_strategy(inputs: dict, ctx) -> dict:
@@ -116,7 +142,24 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     )
     backtest_id = _backtest_id(str(inputs["dataset_id"]), result)
     if runtime.strategies.get_backtest(backtest_id) is None:
-        runtime.strategies.save_backtest(backtest_id, strategy.id, str(inputs["dataset_id"]), result)
+        runtime.strategies.save_backtest_with_audit(
+            backtest_id,
+            strategy.id,
+            str(inputs["dataset_id"]),
+            result,
+            audit={
+                "kind": "strategy.backtest",
+                "target_ref": backtest_id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": str(ctx.task_id),
+                    "strategy_id": strategy.id,
+                    "dataset_id": str(inputs["dataset_id"]),
+                    "approval_rate": result.approval_rate,
+                    "expected_profit": result.expected_profit,
+                },
+            },
+        )
     payload = _jsonable(result)
     payload["backtest_id"] = backtest_id
     payload["nan_labels_dropped"] = nan_labels_dropped

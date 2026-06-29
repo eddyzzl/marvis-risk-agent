@@ -47,6 +47,7 @@ def reclaim_stale_running_tasks(
     ).isoformat()
     orphan_placeholders = ",".join(["?"] * len(ORPHAN_RECLAIM_STATUSES))
     with connect(db_path) as conn:
+        reclaimed_task_ids = _stale_task_ids(conn, orphan_placeholders, cutoff)
         agent_task_ids = _interrupted_agent_task_ids(
             conn, orphan_placeholders, cutoff
         )
@@ -71,18 +72,25 @@ def reclaim_stale_running_tasks(
         )
         _finalize_interrupted_agent_messages(conn, agent_task_ids)
         _add_agent_restart_notices(conn, agent_task_ids)
-        conn.execute(
-            """
-            UPDATE jobs
-               SET status = 'failed',
-                   error_name = 'ServerRestart',
-                   error_value = 'process exited while job was running',
-                   finished_at = ?
-             WHERE status IN ('queued', 'running')
-            """,
-            (_now(),),
+        _fail_interrupted_jobs(
+            conn,
+            task_ids=sorted(set(reclaimed_task_ids) | set(agent_task_ids)),
+            cutoff=cutoff,
         )
         return cursor.rowcount
+
+
+def _stale_task_ids(conn, orphan_placeholders: str, cutoff: str) -> list[str]:
+    rows = conn.execute(
+        f"""
+        SELECT id
+          FROM tasks
+         WHERE updated_at <= ?
+           AND status IN ({orphan_placeholders})
+        """,
+        (cutoff, *(status.value for status in ORPHAN_RECLAIM_STATUSES)),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
 
 
 def _interrupted_agent_task_ids(
@@ -108,6 +116,30 @@ def _interrupted_agent_task_ids(
         (*(status.value for status in ORPHAN_RECLAIM_STATUSES), cutoff, cutoff),
     ).fetchall()
     return [str(row[0]) for row in rows]
+
+
+def _fail_interrupted_jobs(conn, *, task_ids: list[str], cutoff: str) -> None:
+    params = [_now()]
+    if task_ids:
+        placeholders = ",".join(["?"] * len(task_ids))
+        scope = f"(task_id IN ({placeholders}) OR created_at <= ?)"
+        params.extend(task_ids)
+        params.append(cutoff)
+    else:
+        scope = "created_at <= ?"
+        params.append(cutoff)
+    conn.execute(
+        f"""
+        UPDATE jobs
+           SET status = 'failed',
+               error_name = 'ServerRestart',
+               error_value = 'process exited while job was running',
+               finished_at = ?
+         WHERE status IN ('queued', 'running')
+           AND {scope}
+        """,
+        params,
+    )
 
 
 def _finalize_interrupted_agent_messages(

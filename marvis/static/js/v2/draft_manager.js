@@ -74,6 +74,14 @@ function parseJsonField(root, selector, fallback) {
   }
 }
 
+function parseJsonObjectField(root, selector, fallback) {
+  const value = parseJsonField(root, selector, fallback);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("运行输入必须是 JSON 对象");
+  }
+  return value;
+}
+
 function showDetail(root, payload) {
   const slot = root?.querySelector?.("[data-draft-detail]");
   if (slot) {
@@ -451,7 +459,7 @@ export function attachDraftHandlers(root, deps = {}) {
     if (runButton?.dataset?.runDraft) {
       event.preventDefault?.();
       try {
-        const inputs = parseJsonField(root, "[data-draft-run-inputs]", {});
+        const inputs = parseJsonObjectField(root, "[data-draft-run-inputs]", {});
         await actions.runDraft(runButton.dataset.runDraft, inputs);
         showDetail(root, await actions.getDraft(runButton.dataset.runDraft));
       } catch (error) {

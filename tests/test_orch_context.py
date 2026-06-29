@@ -32,6 +32,31 @@ def test_summarize_output_keeps_scalars_and_shapes_large_arrays():
     assert summary["details"] == {"type": "object", "keys": ["a", "b"]}
 
 
+def test_summarize_output_handles_json_schema_union_types():
+    tool = SimpleNamespace(output_schema={
+        "type": "object",
+        "properties": {
+            "score_col": {"type": ["string", "null"]},
+            "recommended": {"type": ["object", "null"]},
+            "points": {"type": ["array", "null"]},
+        },
+    })
+
+    summary = summarize_output(
+        {
+            "score_col": "score",
+            "recommended": {"cutoff": 620, "bad_rate": 0.1},
+            "points": [{"cutoff": 600}, {"cutoff": 620}, {"cutoff": 640}],
+        },
+        tool,
+        max_chars=500,
+    )
+
+    assert summary["score_col"] == "score"
+    assert summary["recommended"] == {"type": "object", "keys": ["bad_rate", "cutoff"]}
+    assert summary["points"] == {"len": 3, "head": [{"cutoff": 600}, {"cutoff": 620}]}
+
+
 def test_summarize_failure_is_bounded():
     summary = summarize_failure("x" * 100, "schema", max_chars=12)
 

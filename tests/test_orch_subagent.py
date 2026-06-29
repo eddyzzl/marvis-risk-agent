@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from marvis.db import PlanRepository, PluginRepository, init_db
+from marvis.db import PlanRepository, PluginRepository, connect, init_db
+import marvis.db as db_module
 from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStatus, PlanStep
 from marvis.orchestrator.subagent import SubAgentDispatcher
 from marvis.orchestrator.templates import load_builtin_templates
@@ -101,6 +102,28 @@ def test_subagent_spawn_persists_minimal_grants_and_audit(tmp_path):
     assert repo.list_audit(kind="subagent.spawn")[0]["target_ref"] == sub.id
 
 
+def test_subagent_spawn_rolls_back_when_audit_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    dispatcher = SubAgentDispatcher(repo, FakePlanner(), lambda _registry: None, None, FakeIntentRouter())
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        dispatcher.spawn(_step(), parent_task_id="task-1")
+
+    with connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM sub_agents").fetchone()[0]
+    assert count == 0
+
+
 def test_subagent_spawn_rejects_empty_grants(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -143,6 +166,40 @@ def test_subagent_run_uses_template_path_and_restricted_registry(tmp_path):
     assert repo.get_sub_agent(sub.id).status == AgentStatus.RETURNED
 
 
+def test_subagent_run_does_not_return_when_final_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    load_builtin_templates()
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+
+    def executor_factory(_restricted_registry):
+        return SimpleNamespace(run=lambda _plan_id: SimpleNamespace(summary_ref="artifact:summary"))
+
+    dispatcher = SubAgentDispatcher(
+        repo,
+        FakePlanner(),
+        executor_factory,
+        _tool_registry(tmp_path),
+        FakeIntentRouter(kind="template"),
+    )
+    sub = dispatcher.spawn(_step(), parent_task_id="task-1")
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        dispatcher.run(sub, goal_inputs={"message": "hi"})
+
+    loaded = repo.get_sub_agent(sub.id)
+    assert loaded.status == AgentStatus.RUNNING
+    assert loaded.result_ref is None
+
+
 def test_subagent_run_confirms_mini_plan_before_executor_run(tmp_path):
     load_builtin_templates()
     db_path = tmp_path / "app.sqlite"
@@ -170,6 +227,37 @@ def test_subagent_run_confirms_mini_plan_before_executor_run(tmp_path):
 
     assert result.ok is True
     assert seen_statuses == [PlanStatus.CONFIRMED]
+
+
+def test_subagent_run_does_not_return_success_for_paused_inner_plan(tmp_path):
+    load_builtin_templates()
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+
+    def executor_factory(_restricted_registry):
+        return SimpleNamespace(
+            run=lambda _plan_id: SimpleNamespace(status=PlanStatus.AWAITING_CONFIRM, summary_ref=None),
+        )
+
+    dispatcher = SubAgentDispatcher(
+        repo,
+        FakePlanner(),
+        executor_factory,
+        _tool_registry(tmp_path),
+        FakeIntentRouter(kind="template"),
+    )
+    sub = dispatcher.spawn(_step(), parent_task_id="task-1")
+
+    result = dispatcher.run(sub, goal_inputs={"message": "hi"})
+
+    assert result.ok is False
+    assert result.error_kind == "paused"
+    assert "awaiting_confirm" in result.error
+    assert repo.get_sub_agent(sub.id).status == AgentStatus.FAILED
+    audit = repo.list_audit(kind="subagent.run")[0]
+    assert audit["outcome"] == "failed"
+    assert audit["detail"]["status"] == PlanStatus.AWAITING_CONFIRM.value
 
 
 def test_subagent_run_uses_restricted_planner_factory_for_novel_plans(tmp_path):

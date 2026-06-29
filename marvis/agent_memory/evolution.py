@@ -12,6 +12,9 @@ class EvolutionManager:
         if existing is None:
             return self._store.create_distillation(candidate)
         if self._is_meaningful_update(existing, candidate):
+            replace_with_audit = getattr(self._store, "replace_active_distillation_with_audit", None)
+            if callable(replace_with_audit):
+                return replace_with_audit(existing.id, candidate)
             created = self._store.create_distillation(candidate)
             self._store.set_superseded(existing.id, by=created.id)
             return created
@@ -23,6 +26,13 @@ class EvolutionManager:
         if active is None or active.id != target.id:
             raise ValueError("only the active head distillation can be rolled back")
         predecessor = self._store.find_superseded_by(distillation_id)
+        rollback_with_audit = getattr(self._store, "rollback_active_distillation_with_audit", None)
+        if callable(rollback_with_audit):
+            rollback_with_audit(
+                distillation_id,
+                predecessor_id=None if predecessor is None else predecessor.id,
+            )
+            return
         if predecessor is not None:
             self._store.clear_superseded(predecessor.id)
         self._store.set_status_distillation(distillation_id, "rolled_back")

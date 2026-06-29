@@ -15,17 +15,28 @@ class ExperimentStore:
 
     def create(self, task_id: str, recipe_id: str, config: TrainConfig) -> str:
         experiment_id = f"experiment_{uuid.uuid4().hex}"
-        self._repo.create_experiment(
-            Experiment(
-                id=experiment_id,
-                task_id=task_id,
-                recipe_id=recipe_id,
-                config=config,
-                metrics=None,
-                artifact_id=None,
-                status="created",
-                created_at=datetime.now(UTC).isoformat(),
-            )
+        experiment = Experiment(
+            id=experiment_id,
+            task_id=task_id,
+            recipe_id=recipe_id,
+            config=config,
+            metrics=None,
+            artifact_id=None,
+            status="created",
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        self._repo.create_experiment_with_audit(
+            experiment,
+            audit={
+                "kind": "modeling.experiment.create",
+                "target_ref": experiment_id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": task_id,
+                    "recipe_id": recipe_id,
+                    "dataset_id": config.dataset_id,
+                },
+            },
         )
         return experiment_id
 
@@ -36,19 +47,46 @@ class ExperimentStore:
             experiment_id=experiment_id,
             feature_importance=result.feature_importance,
         )
-        self._repo.create_model_artifact(artifact)
-        self._repo.attach_experiment_result(
+        self._repo.attach_experiment_result_with_artifact_and_audit(
             experiment_id,
+            artifact=artifact,
             metrics=result.metrics,
-            artifact_id=artifact.id,
             status="trained",
+            audit={
+                "kind": "modeling.experiment.trained",
+                "target_ref": experiment_id,
+                "outcome": "succeeded",
+                "detail": {
+                    "artifact_id": artifact.id,
+                    "algorithm": artifact.algorithm,
+                    "feature_count": len(artifact.feature_list),
+                },
+            },
         )
 
     def set_artifact_pmml_path(self, artifact_id: str, pmml_path: str) -> None:
-        self._repo.set_model_artifact_pmml_path(artifact_id, pmml_path)
+        self._repo.set_model_artifact_pmml_path_with_audit(
+            artifact_id,
+            pmml_path,
+            audit={
+                "kind": "modeling.artifact.pmml",
+                "target_ref": artifact_id,
+                "outcome": "succeeded",
+                "detail": {"pmml_path": pmml_path},
+            },
+        )
 
     def set_status(self, experiment_id: str, status: str) -> None:
-        self._repo.set_experiment_status(experiment_id, status)
+        self._repo.set_experiment_status_with_audit(
+            experiment_id,
+            status,
+            audit={
+                "kind": "modeling.experiment.status",
+                "target_ref": experiment_id,
+                "outcome": "succeeded",
+                "detail": {"status": status},
+            },
+        )
 
     def get(self, experiment_id: str) -> Experiment:
         experiment = self._repo.get_experiment(experiment_id)

@@ -73,6 +73,7 @@ def _plan() -> Plan:
                 trigger_step_id="step-1",
             )
         ],
+        success_criteria=[{"metric": "oot_ks", "min": 0.3331}],
     )
 
 
@@ -94,6 +95,7 @@ def test_plan_contract_round_trips_to_json_safe_dict():
             "trigger_step_id": "step-1",
         }
     ]
+    assert payload["success_criteria"] == [{"metric": "oot_ks", "min": 0.3331}]
     assert payload["steps"][0]["status"] == "awaiting_confirm"
     assert payload["steps"][0]["decision_point"] is True
     assert payload["steps"][0]["tool_ref"] == {
@@ -130,6 +132,7 @@ def test_adaptive_contract_defaults_do_not_change_plain_dag_behavior():
     assert plan.tier == "balanced"
     assert plan.replan_count == 0
     assert plan.loop_events == []
+    assert plan.success_criteria == []
 
 
 def test_subagent_contract_defaults_and_tool_refs():
@@ -150,6 +153,7 @@ def test_output_ref_parse_and_format():
     parsed = parse_output_ref("metrics:step-1")
 
     assert parsed == OutputRef(kind="metrics", value="step-1")
+    assert parse_output_ref("metrics:step-1:v2") == OutputRef(kind="metrics", value="step-1:v2")
     assert format_output_ref("artifact", "reports/final.docx") == "artifact:reports/final.docx"
 
 

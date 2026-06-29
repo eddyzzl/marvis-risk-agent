@@ -3,10 +3,12 @@ import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
-import { renderTierSettings } from "./js/v2/capability.js";
+import { createThemeController } from "./js/theme.js";
+import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
+import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
   columnHeatColors,
@@ -56,12 +58,9 @@ const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let globalBusyAction = null;
 let actionStatusOverride = null;
-let themePreference = "light";
-let currentTheme = "light";
-const browserChromeThemeColors = {
-  light: "#ffffff",
-  dark: "#181818",
-};
+const themeController = createThemeController({
+  onChange: () => renderSettingsState(),
+});
 let taskSearchQuery = "";
 let taskSortMode = "created_desc";
 let taskGroupMode = "none";
@@ -202,8 +201,6 @@ const taskTypeDefinitions = {
     initialGoal: "请基于当前任务材料开始模型验证。先扫描材料并确认 Notebook、样本、PMML 和数据字典是否齐全；如果材料完备，再按平台证据逐步完成一致性、效果、稳定性、压力测试和报告草稿。",
   },
   strategy: {
-    available: false,
-    unavailableMessage: "该任务暂未开放，当前可用入口为数据拼接、特征分析、模型开发和模型验证。",
     label: "策略开发",
     dialogTitle: "创建策略开发任务",
     dialogSubtitle: "上传评分或申请数据，Agent 会构造规则、回测并比较策略收益。",
@@ -215,14 +212,12 @@ const taskTypeDefinitions = {
     sourcePlaceholder: "/path/to/strategy-data",
     reportFields: false,
     defaultRunMode: "",
-    manualEnabled: false,
-    manualModeDescription: "手动策略控件暂未接入；后续提供规则编辑、阈值调整和回测确认",
+    manualEnabled: true,
+    manualModeDescription: "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
     agentModeDescription: "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
     initialGoal: "请基于当前任务材料做策略开发。先识别评分列、目标列、客群字段和候选规则；如果缺少规则口径请先提问。随后生成 V2 Workflow，构造策略、执行回测、计算收益和 swap 分析，并给出阈值权衡建议。",
   },
   vintage: {
-    available: false,
-    unavailableMessage: "该任务暂未开放，当前可用入口为数据拼接、特征分析、模型开发和模型验证。",
     label: "风险分析",
     dialogTitle: "创建风险分析任务",
     dialogSubtitle: "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据，Agent 会生成风险观察和结论。",
@@ -234,10 +229,10 @@ const taskTypeDefinitions = {
     sourcePlaceholder: "/path/to/risk-analysis-data",
     reportFields: false,
     defaultRunMode: "",
-    manualEnabled: false,
-    manualModeDescription: "手动风险分析控件暂未接入；后续提供 Vintage、滚动率、FPD 与回收率图表",
-    agentModeDescription: "Agent 识别 Vintage、滚动率、FPD、入催回收率字段，生成风险观察和结论",
-    initialGoal: "请基于当前任务材料做风险分析。先识别资产Vintage&滚动率分析、FPD、入催回收率分析相关字段和目标口径；如果缺少字段请先提问。随后生成 V2 Workflow，计算资产Vintage曲线、滚动率、FPD 表现、入催回收率和风险观察。",
+    manualEnabled: true,
+    manualModeDescription: "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
+    agentModeDescription: "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
+    initialGoal: "请基于当前任务材料做风险分析。先识别 cohort、MOB 和坏账标签字段；如果缺少字段请先提问。随后生成 V2 Workflow，计算资产 Vintage 曲线并给出风险观察。",
   },
 };
 let activeTaskType = defaultTaskType;
@@ -539,6 +534,16 @@ function updateAlgorithmFieldVisibility() {
   _toggleConditionalField("createTaskTierField", Boolean(definition.tierField) && runMode === "agent");
 }
 
+function syncCreateTaskTierDefault() {
+  const select = $("createTaskTier");
+  if (!select) return;
+  const selected = getSelectedTier()
+    || (typeof localStorage !== "undefined" ? String(localStorage.getItem(selectedTierStorageKey) || "") : "");
+  if (selected && [...select.options].some((option) => option.value === selected)) {
+    select.value = selected;
+  }
+}
+
 function _toggleConditionalField(id, show) {
   const field = $(id);
   if (!field) return;
@@ -550,8 +555,21 @@ function resetModelAlgorithmChoices() {
   document.querySelectorAll('input[name="modelAlgorithm"], input[name="featureMetric"]').forEach((input) => {
     input.checked = false;
   });
+  const weightPolicy = $("modelSampleWeightPolicy");
+  if (weightPolicy) weightPolicy.value = "none";
   const weightInput = $("modelSampleWeightCol");
   if (weightInput) weightInput.value = "";
+  updateSampleWeightCreateState();
+}
+
+function updateSampleWeightCreateState() {
+  const policy = $("modelSampleWeightPolicy")?.value || "none";
+  const weightInput = $("modelSampleWeightCol");
+  if (!weightInput) return;
+  const explicit = policy === "explicit";
+  weightInput.disabled = !explicit;
+  weightInput.classList.toggle("is-disabled", !explicit);
+  if (!explicit) weightInput.value = "";
 }
 
 function modelRecipeFamily(recipe) {
@@ -578,6 +596,7 @@ function openTaskDialog(taskType = defaultTaskType) {
     input.checked = false;
   });
   resetModelAlgorithmChoices();
+  syncCreateTaskTierDefault();
   updateAlgorithmFieldVisibility();
   document.querySelectorAll(".run-mode-card").forEach((card) => {
     delete card.dataset.wasChecked;
@@ -593,10 +612,10 @@ function openTaskDialogFromCard(event) {
   const card = event.target.closest("[data-task-kind]");
   if (!card) return;
   const definition = taskTypeDefinition(card.dataset.taskKind || defaultTaskType);
-  // Temporarily disabled task types (data-coming-soon) show a notice instead of opening
-  // the create dialog. Re-enable by removing the data-coming-soon attribute in index.html.
-  if (card.dataset.comingSoon || definition.available === false) {
-    showComingSoonToast(definition.unavailableMessage || "新功能开发中，敬请期待");
+  if (definition.available === false) {
+    const message = definition.unavailableMessage || "新功能开发中，敬请期待";
+    showComingSoonToast(message);
+    setActionStatus(message, "info", "这个入口会继续展示在任务启动页，但当前不会打开创建弹窗。");
     return;
   }
   openTaskDialog(card.dataset.taskKind || defaultTaskType);
@@ -750,6 +769,7 @@ function bindRunModeDeselectableCards() {
   document.querySelectorAll('input[name="modelAlgorithm"]').forEach((input) => {
     input.addEventListener("change", () => normalizeModelAlgorithmFamilies(input));
   });
+  $("modelSampleWeightPolicy")?.addEventListener("change", updateSampleWeightCreateState);
 }
 
 function openExecutionEnvironmentDialog() {
@@ -1005,35 +1025,6 @@ function closeWordPreviewDialog() {
   $("wordPreviewFrame").src = "about:blank";
 }
 
-function systemTheme() {
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function syncBrowserChromeTheme(theme = currentTheme) {
-  const resolvedTheme = theme === "dark" ? "dark" : "light";
-  const isDark = resolvedTheme === "dark";
-  const themeColor = $("appThemeColor") || document.querySelector('meta[name="theme-color"]');
-  if (themeColor) themeColor.setAttribute("content", browserChromeThemeColors[resolvedTheme]);
-  $("brandFavicon")?.setAttribute("media", isDark ? "not all" : "all");
-  $("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");
-  $("brandAppleTouchIcon")?.setAttribute("media", isDark ? "not all" : "all");
-  $("brandAppleTouchIconDark")?.setAttribute("media", isDark ? "all" : "not all");
-}
-
-function applyTheme(theme) {
-  themePreference = ["light", "dark", "system"].includes(theme) ? theme : "light";
-  currentTheme = themePreference === "system" ? systemTheme() : themePreference;
-  document.body.dataset.theme = currentTheme;
-  syncBrowserChromeTheme(currentTheme);
-  $("themeModeLabel").textContent = "设置";
-  try {
-    localStorage.setItem("marvis_theme", themePreference);
-  } catch (_) {
-    // Local storage can be unavailable in restricted notebook browsers.
-  }
-  renderSettingsState();
-}
-
 function setCssNumber(name, value) {
   document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
 }
@@ -1273,22 +1264,6 @@ function toggleTaskSearch() {
   } else {
     openTaskSearch();
   }
-}
-
-function restoreTheme() {
-  try {
-    applyTheme(localStorage.getItem("marvis_theme") || "light");
-  } catch (_) {
-    applyTheme("light");
-  }
-}
-
-function watchSystemTheme() {
-  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-  if (!media?.addEventListener) return;
-  media.addEventListener("change", () => {
-    if (themePreference === "system") applyTheme("system");
-  });
 }
 
 function basePetMoodFromTask() {
@@ -1593,7 +1568,7 @@ function startPetDrag(event) {
 function renderSettingsState() {
   if ($("settingsSortSelect")) $("settingsSortSelect").value = taskSortMode;
   if ($("settingsGroupSelect")) $("settingsGroupSelect").value = taskGroupMode;
-  if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themePreference;
+  if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themeController.preference;
   if ($("settingsPetSelect")) $("settingsPetSelect").value = petPreference;
   renderExecutionEnvironmentSummary();
   renderLLMSettingsSummary();
@@ -1646,7 +1621,7 @@ function handleSettingsMenuChange(event) {
     return;
   }
   if (target.id === "settingsThemeSelect") {
-    applyTheme(target.value);
+    themeController.applyTheme(target.value);
   }
   if (target.id === "settingsPetSelect") {
     applyPetPreference(target.value, { explicit: true });
@@ -4061,6 +4036,7 @@ function refreshWorkflowStepperElapsedTimes() {
 // is still running. Validation tasks are untouched.
 const v2PlanCache = new Map();
 const v2PlanLastFetch = new Map();
+const v2PlanFetchErrors = new Map();
 // Short human subtitle per tool, mirroring the validation stepper's step hints.
 const PLAN_STEP_HINTS = {
   "data_ops.propose_join": "诊断匹配键 / 命中率 / 膨胀",
@@ -4110,6 +4086,26 @@ function planPhaseHint(phase, steps = []) {
   return `${titles.slice(0, 3).join("、")}等 ${titles.length} 个子任务`;
 }
 
+function planRetryInputsText(step) {
+  try {
+    return JSON.stringify(step?.inputs || {}, null, 2);
+  } catch (_) {
+    return "{}";
+  }
+}
+
+function planRetryControlHtml(step) {
+  const stepId = String(step?.id || "");
+  return `<details class="plan-step-retry" data-plan-step-retry="${escapeHtml(stepId)}">
+    <summary>编辑参数后重试</summary>
+    <label>
+      参数 JSON
+      <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>
+    </label>
+    <button type="button" class="button compact primary" data-plan-retry-step="${escapeHtml(stepId)}">使用这些参数重试</button>
+  </details>`;
+}
+
 function planSubstepGroupHtml(steps = [], parentNumber = "") {
   if (!steps.length) return "";
   return [
@@ -4137,6 +4133,7 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
       const download = isReportDone
         ? '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>'
         : "";
+      const retry = status === "failed" ? planRetryControlHtml(step) : "";
       const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
       return [
         `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,
@@ -4148,6 +4145,7 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
         "</span>",
         awaiting,
         download,
+        retry,
         "</div>",
       ].join("");
     }),
@@ -4155,11 +4153,8 @@ function planSubstepGroupHtml(steps = [], parentNumber = "") {
   ].join("");
 }
 
-// Only these wired driver task types drive the plan rail / analysis flow. strategy &
-// vintage are advertised welcome entries but NOT wired this round (spec §6 暂不接 +
-// backend 501): they must not render a dead "计划生成中…" rail, so they fall back to
-// the default handling like any other non-driver task.
-const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling"]);
+// Wired driver task types drive the plan rail / analysis flow.
+const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);
 function taskUsesPlanRail(task) {
   return PLAN_RAIL_TASK_TYPES.has(task?.task_type);
 }
@@ -4186,22 +4181,101 @@ function maybeFetchV2Plan(taskId) {
   if (now - (v2PlanLastFetch.get(taskId) || 0) < 900) return;
   v2PlanLastFetch.set(taskId, now);
   fetch(`/api/tasks/${encodeURIComponent(taskId)}/plans`)
-    .then((response) => (response.ok ? response.json() : null))
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
     .then((data) => {
       const plans = (data && data.plans) || [];
       const next = plans.length ? plans[plans.length - 1] : null;
-      const changed = JSON.stringify(v2PlanCache.get(taskId)) !== JSON.stringify(next);
+      const hadError = v2PlanFetchErrors.delete(taskId);
+      const changed = hadError || JSON.stringify(v2PlanCache.get(taskId)) !== JSON.stringify(next);
       v2PlanCache.set(taskId, next);
       if (changed && selectedTaskId === taskId) renderWorkflowStepper({ force: true });
     })
-    .catch(() => {});
+    .catch((error) => {
+      v2PlanFetchErrors.set(taskId, error?.message || "network");
+      if (selectedTaskId === taskId) renderWorkflowStepper({ force: true });
+    });
 }
 
-function planRailHtml(plan, { blocked = false } = {}) {
+function retryV2PlanFetch(taskId = selectedTaskId) {
+  if (!taskId) return;
+  v2PlanLastFetch.delete(taskId);
+  v2PlanFetchErrors.delete(taskId);
+  maybeFetchV2Plan(taskId);
+  renderWorkflowStepper({ force: true });
+}
+
+function parsePlanRetryInputs(form) {
+  const field = form?.querySelector?.(".plan-retry-inputs");
+  let value;
+  try {
+    value = JSON.parse(String(field?.value || "{}"));
+  } catch (_) {
+    throw new Error("重试参数必须是合法 JSON。");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("重试参数必须是 JSON 对象。");
+  }
+  return value;
+}
+
+async function retryV2PlanStep(button) {
+  const taskId = selectedTaskId;
+  const plan = v2PlanCache.get(taskId);
+  const stepId = button?.dataset?.planRetryStep || "";
+  if (!taskId || !plan?.id || !stepId) {
+    setActionStatus("缺少可重试的计划步骤，请刷新后重试。", "error");
+    return;
+  }
+  let inputs;
+  try {
+    inputs = parsePlanRetryInputs(button.closest("[data-plan-step-retry]"));
+  } catch (error) {
+    setActionStatus(error?.message || "重试参数无效。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api(`/api/plans/${encodeURIComponent(plan.id)}/steps/${encodeURIComponent(stepId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ inputs }),
+    });
+    setActionStatus("正在重试步骤...", "busy");
+    v2PlanLastFetch.delete(taskId);
+    v2PlanCache.delete(taskId);
+    renderWorkflowStepper({ force: true });
+    await refreshTasks();
+    await loadAgentMessages(taskId, { preserveOptimistic: true });
+    if (selectedTaskId === taskId) {
+      renderAll();
+      maybeFetchV2Plan(taskId);
+      window.setTimeout(() => retryV2PlanFetch(taskId), 1000);
+    }
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "重试步骤失败。", "error");
+  }
+}
+
+function planRailHtml(plan, { blocked = false, fetchError = "" } = {}) {
+  const fetchErrorBanner = fetchError
+    ? '<div class="plan-rail-fetch-error" role="status">'
+      + '<span>计划读取失败，当前显示的是上次缓存的计划。</span>'
+      + '<button type="button" class="button compact secondary" data-plan-rail-retry="1">重试</button>'
+      + "</div>"
+    : "";
   if (!plan || !(plan.steps || []).length) {
     // A driver task can fail setup before any plan is built (e.g. modeling with no
     // train/test/oot split column). Don't claim a plan is "生成中" forever — point
     // the user at the conversation message that explains what to fix.
+    if (fetchError) {
+      return '<div class="plan-rail-empty plan-rail-error">'
+        + '<strong>计划读取失败</strong>'
+        + '<button type="button" class="button compact secondary" data-plan-rail-retry="1">重试</button>'
+        + "</div>";
+    }
     return blocked
       ? '<div class="plan-rail-empty">尚未生成计划。请按对话中的提示处理后重新发起。</div>'
       : '<div class="plan-rail-empty">计划生成中…</div>';
@@ -4248,24 +4322,28 @@ function planRailHtml(plan, { blocked = false } = {}) {
     : "";
   // The report download now lives inline on the producing step row (see
   // planSubstepGroupHtml), not as a floating button at the rail bottom.
-  return phasesHtml + startControl;
+  return fetchErrorBanner + phasesHtml + startControl;
 }
 
 function renderWorkflowStepper({ force = false } = {}) {
+  const progressRail = $("progressRail");
   const railTitle = document.querySelector("#progressRail .step-rail-head h3");
   if (taskUsesPlanRail(selectedTask)) {
+    progressRail?.setAttribute("aria-label", "计划步骤");
     if (railTitle) railTitle.textContent = "计划步骤";
     maybeFetchV2Plan(selectedTaskId);
     const plan = v2PlanCache.get(selectedTaskId);
     const blocked = driverHasBlockingError();
-    const planSignature = JSON.stringify({ task: selectedTaskId, plan, blocked });
+    const fetchError = v2PlanFetchErrors.get(selectedTaskId) || "";
+    const planSignature = JSON.stringify({ task: selectedTaskId, plan, blocked, fetchError });
     if (force || renderSignatures.workflowStepper !== planSignature) {
       renderSignatures.workflowStepper = planSignature;
       const planStepper = $("workflowStepper");
-      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked });
+      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked, fetchError });
     }
     return;
   }
+  progressRail?.setAttribute("aria-label", "验证步骤");
   if (railTitle) railTitle.textContent = "验证步骤";
   const nextSignature = workflowStepperSignature(selectedTask);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
@@ -4787,8 +4865,20 @@ function renderCellByKind(spec, value, context) {
     }
     case "text":
     default:
+      if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(value) !== null) {
+        return { cls: "cell-number", html: escapeHtml(String(value ?? "")) };
+      }
       return { cls: "cell-text", html: escapeHtml(String(value ?? "")) };
   }
+}
+
+function metricHeaderShouldRightAlign(headerLabel) {
+  const label = String(headerLabel || "").trim();
+  if (!label) return false;
+  if (/(^id$|id$|编号|月份|日期|时间|参考月|特征|变量|字段|数据集|样本集|分组|类别|等级|区间|范围)/i.test(label)) {
+    return false;
+  }
+  return /^(KS|KS\(%\)|AUC|AUC\(%\)|PSI|IV|样本量|坏样本量|好样本量|逾期率|坏账率|通过率|命中率|缺失率|占比|比例|分数|评分|重要性|Gain|Split|Coverage|Lift|5%头部lift|5%尾部lift)$/i.test(label);
 }
 
 function renderMetricTable(table = {}) {
@@ -6540,10 +6630,11 @@ function stripChatInstructions(content) {
 // plan) and the gate confirm lives in the rail.
 function driverManualAnalysisHtml(messages) {
   const sections = [];
+  const latestScreenMessageId = latestInteractiveScreenMessageId(messages);
   for (const message of messages || []) {
     if (message?.role !== "assistant") continue;
     const meta = message.metadata || {};
-    if (meta.kind === "overview") continue; // the step rail is the plan
+    if (meta.kind === "overview" || meta.kind === "plan_overview") continue; // the step rail is the plan
     if (meta.error) {
       sections.push(
         `<section class="driver-analysis-section is-error">${renderAgentMarkdown(message.content || "")}</section>`,
@@ -6558,7 +6649,15 @@ function driverManualAnalysisHtml(messages) {
     if (meta.screen) {
       // §4 interactive screening: render the editable selection table instead of the
       // read-only metric tables, so the user can adjust the proposed feature set.
-      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageScreenTableHtml(message)}</section>`);
+      const interactive = String(message.id || "") === latestScreenMessageId;
+      sections.push(
+        `<section class="driver-analysis-section">${intro}${agentMessageModelingSetupHtml(message, { interactive })}${agentMessageScreenTableHtml(message, { interactive })}</section>`,
+      );
+      continue;
+    }
+    if (meta.modeling_setup) {
+      const interactive = meta.kind === "gate";
+      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageModelingSetupHtml(message, { interactive })}${agentMessageTablesHtml(message)}</section>`);
       continue;
     }
     if (meta.dedup) {
@@ -6573,6 +6672,16 @@ function driverManualAnalysisHtml(messages) {
     sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
+}
+
+function latestInteractiveScreenMessageId(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const meta = message.metadata || {};
+    if (meta.kind === "gate") return meta.screen ? String(message.id || "") : "";
+  }
+  return "";
 }
 
 function renderDriverManualAnalysis(messages) {
@@ -6753,6 +6862,94 @@ function agentMessageTablesHtml(message) {
   return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
 }
 
+function agentMessageModelingSetupHtml(message, options = {}) {
+  const setup = message?.metadata?.modeling_setup;
+  if (!setup || typeof setup !== "object") return "";
+  const messageId = message?.id ? String(message.id) : "";
+  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const candidates = Array.isArray(setup.sample_weight_candidates)
+    ? setup.sample_weight_candidates.map((value) => String(value)).filter(Boolean)
+    : [];
+  const selected = String(setup.sample_weight_col || "");
+  if (!candidates.length && !selected) return "";
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
+  const uniqueCandidates = [...new Set(selected ? [selected, ...candidates] : candidates)];
+  const optionRows = [
+    { value: "", label: "不使用权重" },
+    ...uniqueCandidates.map((value) => ({ value, label: value })),
+  ].map((option) => {
+    const checked = option.value === selected || (!selected && option.value === "");
+    return `<label class="modeling-weight-option">
+      <input type="radio" name="modelingWeight-${escapeHtml(messageId)}" class="modeling-weight-pick" value="${escapeHtml(option.value)}"${checked ? " checked" : ""}${disabledAttr} />
+      <span>${escapeHtml(option.label)}</span>
+    </label>`;
+  }).join("");
+  const recipeText = Array.isArray(setup.recipes) && setup.recipes.length
+    ? setup.recipes.map((recipe) => String(recipe)).join("/")
+    : "-";
+  return `<div class="modeling-setup-panel" data-modeling-weight-form="${escapeHtml(messageId)}" data-modeling-gate-step-id="${escapeHtml(gateStepId)}" data-modeling-current-weight="${escapeHtml(selected)}"${interactive ? "" : ' data-modeling-readonly="true"'}>
+    <div class="modeling-setup-head">
+      <span>建模规格</span>
+      <small>${escapeHtml(String(setup.target_type || "binary"))} · ${escapeHtml(recipeText)}</small>
+    </div>
+    <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
+    <div class="modeling-setup-foot">
+      <span>权重列不进入特征。</span>
+      <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用权重设置" : "历史规格"}</button>
+    </div>
+  </div>`;
+}
+
+async function submitModelingWeightAdjust(button) {
+  const form = button.closest(".modeling-setup-panel");
+  const taskId = selectedTaskId;
+  if (!form || !taskId) return;
+  if (form.dataset.modelingReadonly === "true") {
+    setActionStatus("这是历史建模规格,请使用最新待确认步骤调整。", "error");
+    return;
+  }
+  const picked = form.querySelector(".modeling-weight-pick:checked");
+  const sampleWeightCol = picked ? String(picked.value || "").trim() : "";
+  const current = String(form.dataset.modelingCurrentWeight || "").trim();
+  if (sampleWeightCol === current) {
+    setActionStatus("样本权重设置未变化。", "info");
+    return;
+  }
+  const expectedStepId = form.dataset.modelingGateStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: "调整样本权重",
+        adjust_params: { sample_weight_col: sampleWeightCol },
+        expected_step_id: expectedStepId,
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "调整样本权重失败", "error");
+  }
+}
+
+function handleModelingWeightAdjustClick(event) {
+  const button = event.target?.closest?.("[data-modeling-weight-adjust]");
+  if (!button) return;
+  event.preventDefault();
+  void submitModelingWeightAdjust(button);
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleModelingWeightAdjustClick);
+}
+
 // C1 file-role assignment form (data_join). Rendered from message.metadata.join_c1:
 // a role <select> per file (样本主表/特征表/忽略) + a target-column <select> + a
 // 确认角色 button that posts a structured "[C1]{...}" assignment the driver parses.
@@ -6868,10 +7065,13 @@ function screenPct(value) {
   const n = Number(value);
   return value === null || value === undefined || Number.isNaN(n) ? "n/a" : (n * 100).toFixed(1) + "%";
 }
-function agentMessageScreenTableHtml(message) {
+function agentMessageScreenTableHtml(message, options = {}) {
   const screen = message?.metadata?.screen;
   if (!screen || typeof screen !== "object") return "";
   const messageId = message?.id ? String(message.id) : "";
+  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const scores = screen.scores && typeof screen.scores === "object" ? screen.scores : {};
   const selectedSet = new Set((screen.selected || []).map((value) => String(value)));
   const badges = {
@@ -6885,13 +7085,13 @@ function agentMessageScreenTableHtml(message) {
     const stats = scores[name] && typeof scores[name] === "object" ? scores[name] : {};
     const ksValue = ks === undefined ? stats.ks : ks;
     const checked = selectedSet.has(name);
-    const disabled = category === "unusable"; // constant/sparse — no signal to select
+    const disabled = category === "unusable" || !interactive; // constant/sparse — no signal to select
     return `<tr class="screen-row screen-${category}">
       <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" value="${escapeHtml(name)}"${checked ? " checked" : ""}${disabled ? " disabled" : ""} /></td>
       <td class="screen-feat">${escapeHtml(name)}</td>
-      <td>${screenNum(ksValue)}</td>
-      <td>${screenNum(stats.iv)}</td>
-      <td>${screenPct(stats.missing_rate)}</td>
+      <td class="screen-num">${screenNum(ksValue)}</td>
+      <td class="screen-num">${screenNum(stats.iv)}</td>
+      <td class="screen-num">${screenPct(stats.missing_rate)}</td>
       <td>${badges[category] || ""}</td>
     </tr>`;
   };
@@ -6903,8 +7103,17 @@ function agentMessageScreenTableHtml(message) {
   for (const item of (screen.unusable || []).slice(0, 50)) rows.push(row(tuple(item)[0], null, "unusable"));
   const thresholds = screen.thresholds && typeof screen.thresholds === "object" ? screen.thresholds : {};
   const leakageKs = thresholds.leakage_ks ?? 0.4;
-  const note = `共筛 ${screen.n_screened ?? rows.length} 列;泄漏阈值 KS≥${leakageKs}。勾选=入选,可硬选泄漏/疑似列;确认后用所选特征训练。`;
-  return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}">
+  const maxMissingRate = thresholds.max_missing_rate ?? 0.95;
+  const note = interactive
+    ? `共筛 ${screen.n_screened ?? rows.length} 列;泄漏阈值 KS≥${leakageKs}。勾选=入选,可硬选泄漏/疑似列;确认后用所选特征训练。`
+    : `共筛 ${screen.n_screened ?? rows.length} 列;泄漏阈值 KS≥${leakageKs}。这是历史筛选结果,如需调整请使用最新待确认步骤。`;
+  const thresholdControls = `<div class="screen-threshold-controls">
+    <label>泄漏KS <input type="number" class="screen-threshold-input" data-screen-threshold="leakage_ks" min="0" max="1" step="0.01" value="${escapeHtml(String(leakageKs))}"${disabledAttr} required /></label>
+    <label>最大缺失率 <input type="number" class="screen-threshold-input" data-screen-threshold="max_missing_rate" min="0" max="1" step="0.01" value="${escapeHtml(String(maxMissingRate))}"${disabledAttr} required /></label>
+    <button type="button" class="button compact secondary screen-adjust"${interactive ? ` data-screen-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "重算" : "已归档"}</button>
+  </div>`;
+  return `<div class="screen-table-wrap" data-screen-form="${escapeHtml(messageId)}" data-screen-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-screen-readonly="true"'}>
+    ${thresholdControls}
     <div class="screen-table-scroll">
       <table class="screen-table">
         <thead><tr><th>选</th><th>特征</th><th>KS</th><th>IV</th><th>缺失率</th><th>类别</th></tr></thead>
@@ -6913,15 +7122,68 @@ function agentMessageScreenTableHtml(message) {
     </div>
     <div class="screen-table-foot">
       <span class="screen-note">${escapeHtml(note)}</span>
-      <button type="button" class="button compact primary screen-confirm" data-screen-confirm="${escapeHtml(messageId)}">确认所选特征</button>
+      <button type="button" class="button compact primary screen-confirm"${interactive ? ` data-screen-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "确认所选特征" : "历史结果"}</button>
     </div>
   </div>`;
+}
+
+async function submitScreenThresholdAdjust(button) {
+  const wrap = button.closest(".screen-table-wrap");
+  const taskId = selectedTaskId;
+  if (!wrap || !taskId) return;
+  if (wrap.dataset.screenReadonly === "true") {
+    setActionStatus("这是历史筛选结果,请使用最新待确认步骤调整。", "error");
+    return;
+  }
+  const adjustParams = {};
+  for (const input of wrap.querySelectorAll(".screen-threshold-input")) {
+    const key = input.getAttribute("data-screen-threshold");
+    if (!key) continue;
+    const rawValue = String(input.value || "").trim();
+    if (!rawValue) {
+      setActionStatus("阈值不能为空。", "error");
+      return;
+    }
+    const value = Number(rawValue);
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      setActionStatus("阈值需在 0 到 1 之间。", "error");
+      return;
+    }
+    adjustParams[key] = value;
+  }
+  if (!Object.keys(adjustParams).length) return;
+  const expectedStepId = wrap.dataset.screenStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: "调整筛选阈值",
+        adjust_params: adjustParams,
+        expected_step_id: expectedStepId,
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
+    });
+    agentMessages = result.messages || agentMessages;
+    renderAgentConversation();
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "重算特征筛选失败", "error");
+  }
 }
 
 async function submitScreenSelection(button) {
   const wrap = button.closest(".screen-table-wrap");
   const taskId = selectedTaskId;
   if (!wrap || !taskId) return;
+  if (wrap.dataset.screenReadonly === "true") {
+    setActionStatus("这是历史筛选结果,请使用最新待确认步骤确认。", "error");
+    return;
+  }
   const selection = [];
   for (const box of wrap.querySelectorAll(".screen-pick:checked")) {
     if (!box.disabled) selection.push(box.value);
@@ -6930,11 +7192,21 @@ async function submitScreenSelection(button) {
     setActionStatus("请至少勾选一个特征。", "error");
     return;
   }
+  const expectedStepId = wrap.dataset.screenStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    return;
+  }
   button.disabled = true;
   try {
     const result = await api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
-      body: JSON.stringify({ content: "确认", selection, acceptance_mode: agentAcceptanceModeValue() }),
+      body: JSON.stringify({
+        content: "确认",
+        selection,
+        expected_step_id: expectedStepId,
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
     });
     agentMessages = result.messages || agentMessages;
     renderAgentConversation();
@@ -6944,6 +7216,13 @@ async function submitScreenSelection(button) {
   }
 }
 
+function handleScreenAdjustClick(event) {
+  const button = event.target?.closest?.("[data-screen-adjust]");
+  if (!button) return;
+  event.preventDefault();
+  void submitScreenThresholdAdjust(button);
+}
+
 function handleScreenConfirmClick(event) {
   const button = event.target?.closest?.("[data-screen-confirm]");
   if (!button) return;
@@ -6951,6 +7230,7 @@ function handleScreenConfirmClick(event) {
   void submitScreenSelection(button);
 }
 if (typeof document !== "undefined") {
+  document.addEventListener("click", handleScreenAdjustClick);
   document.addEventListener("click", handleScreenConfirmClick);
 }
 
@@ -6964,6 +7244,7 @@ function agentMessageDedupPickerHtml(message) {
   const dedup = message?.metadata?.dedup;
   if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
   const messageId = message?.id ? String(message.id) : "";
+  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
   const strategies = Array.isArray(dedup.strategies) && dedup.strategies.length ? dedup.strategies : ["first", "last"];
   const rows = dedup.features
     .map((feature) => {
@@ -6979,7 +7260,7 @@ function agentMessageDedupPickerHtml(message) {
     </tr>`;
     })
     .join("");
-  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}">
+  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}">
     <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
     <table class="dedup-table">
       <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
@@ -7000,11 +7281,21 @@ async function submitDedupStrategies(button) {
     const fid = select.getAttribute("data-dedup-feature");
     if (fid) dedup_strategies[fid] = select.value;
   }
+  const expectedStepId = form.dataset.dedupGateStepId || "";
+  if (!expectedStepId) {
+    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    return;
+  }
   button.disabled = true;
   try {
     const result = await api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
-      body: JSON.stringify({ content: "确认", dedup_strategies, acceptance_mode: agentAcceptanceModeValue() }),
+      body: JSON.stringify({
+        content: "确认",
+        dedup_strategies,
+        expected_step_id: expectedStepId,
+        acceptance_mode: agentAcceptanceModeValue(),
+      }),
     });
     agentMessages = result.messages || agentMessages;
     renderAgentConversation();
@@ -7085,7 +7376,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
   return [
     `<article class="${className}"${idAttr}>`,
-    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentStageLabel(labelStage))}</div>` : "",
+    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
     role === "assistant"
       ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : agentMessageTablesHtml(message))
@@ -7113,6 +7404,27 @@ function agentStageLabel(_stage) {
   return agentValidatorAlias(selectedTask?.validator) || "Agent";
 }
 
+function agentMessageMetaLabel(message, labelStage = message?.stage) {
+  const pieces = [agentStageLabel(labelStage)];
+  const metadata = message?.metadata || {};
+  const step = agentMessagePlanStep(metadata);
+  const phase = metadata.phase || step?.phase || "";
+  const stepTitle = metadata.step_title || step?.title || "";
+  const runSeq = Number(metadata.run_seq);
+  if (phase) pieces.push(String(phase));
+  if (stepTitle) pieces.push(String(stepTitle));
+  if (Number.isFinite(runSeq) && runSeq > 0) pieces.push(`第 ${runSeq} 轮`);
+  return pieces.filter(Boolean).join(" · ");
+}
+
+function agentMessagePlanStep(metadata = {}) {
+  const stepId = metadata.step_id ? String(metadata.step_id) : "";
+  if (!stepId) return null;
+  const plan = v2PlanCache.get(selectedTaskId);
+  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  return steps.find((step) => String(step?.id || "") === stepId) || null;
+}
+
 function formatAgentMessageContent(content, { markdown = false } = {}) {
   if (markdown) return renderAgentMarkdown(content);
   return escapeHtml(content).replaceAll("\n", "<br>");
@@ -7121,6 +7433,20 @@ function formatAgentMessageContent(content, { markdown = false } = {}) {
 function shouldPreserveOptimisticAgentMessages(nextMessages = []) {
   const optimisticCount = agentMessages.filter((message) => message?.metadata?.optimistic).length;
   return optimisticCount > 0 && nextMessages.length < agentMessages.length;
+}
+
+function agentMessageCanPollIncrementally({ preserveOptimistic = false } = {}) {
+  if (preserveOptimistic || !agentMessages.length) return false;
+  return !agentMessages.some((message) => message?.metadata?.optimistic || message?.metadata?.streaming);
+}
+
+function mergeIncrementalAgentMessages(nextMessages = []) {
+  if (!nextMessages.length) return false;
+  const seen = new Set(agentMessages.map((message) => message.id).filter(Boolean));
+  const additions = nextMessages.filter((message) => !seen.has(message.id));
+  if (!additions.length) return false;
+  agentMessages = [...agentMessages, ...additions];
+  return true;
 }
 
 async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic = false } = {}) {
@@ -7132,9 +7458,16 @@ async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic =
     renderAgentConversation();
     return;
   }
-  const payload = await api(`api/tasks/${taskId}/agent/messages`);
+  const useIncremental = agentMessageCanPollIncrementally({ preserveOptimistic });
+  const lastMessageId = useIncremental ? agentMessages[agentMessages.length - 1]?.id : "";
+  const suffix = lastMessageId ? `?after_id=${encodeURIComponent(lastMessageId)}` : "";
+  const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`);
   if (selectedTaskId !== taskId) return;
   const nextMessages = payload.messages || [];
+  if (payload.incremental) {
+    if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
+    return;
+  }
   if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) return;
   agentMessages = nextMessages;
   renderAgentConversation();
@@ -7342,8 +7675,15 @@ async function createTask() {
       return null;
     }
     payload.target_type = [...families][0] || "binary";
-    const sampleWeightCol = $("modelSampleWeightCol")?.value.trim();
-    if (sampleWeightCol) payload.sample_weight_col = sampleWeightCol;
+    const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";
+    if (sampleWeightPolicy === "explicit") {
+      const sampleWeightCol = $("modelSampleWeightCol")?.value.trim();
+      if (!sampleWeightCol) {
+        setCreateStatus("请填写样本权重列，或改选不使用样本权重。", "error");
+        return null;
+      }
+      payload.sample_weight_col = sampleWeightCol;
+    }
   }
   // Manual feature analysis: optional metrics (e.g. VIF). Empty is valid — base
   // per-feature metrics are always computed (spec §2: 选了才算).
@@ -7865,6 +8205,20 @@ function scrollToManualWorkflowSection(stepId) {
 }
 
 function handleWorkflowStepperClick(event) {
+  const planRetryButton = event.target.closest("[data-plan-retry-step]");
+  if (planRetryButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    void retryV2PlanStep(planRetryButton);
+    return;
+  }
+  const retryButton = event.target.closest("[data-plan-rail-retry]");
+  if (retryButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    retryV2PlanFetch();
+    return;
+  }
   const actionButton = event.target.closest("[data-step-action]");
   if (actionButton) {
     event.preventDefault();
@@ -8088,6 +8442,7 @@ bindRunModeDeselectableCards();
 bindDialogBackdropDismissal();
 bindPlatformConfirmDialog();
 mountGovernanceExtensions();
+onSelectedTierChange(syncCreateTaskTierDefault);
 materialSourceController.bindTabs();
 materialSourceController.bindDropzone();
 const pet = $("petCompanion");
@@ -8133,8 +8488,8 @@ document.addEventListener("click", (event) => {
 document.addEventListener("click", closeSidebarSettingsOnOutsideClick);
 
 installFormControlFocusRingGuard();
-restoreTheme();
-watchSystemTheme();
+themeController.restoreTheme();
+themeController.watchSystemTheme();
 restoreTaskListSettings();
 restorePetPreference();
 restorePetPosition();

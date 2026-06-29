@@ -105,6 +105,19 @@ def _engine(tmp_path):
     return engine, registry, repo
 
 
+def test_join_engine_requires_audit_writer(tmp_path):
+    class RepoWithoutAudit:
+        pass
+
+    with pytest.raises(TypeError, match="write_audit"):
+        JoinEngine(
+            DataBackend(tmp_path),
+            ColumnAligner(DataBackend(tmp_path)),
+            FakeRegistry(tmp_path),
+            RepoWithoutAudit(),
+        )
+
+
 def test_join_engine_proposes_confirms_and_executes_unique_hash_join(tmp_path):
     engine, registry, repo = _engine(tmp_path)
     anchor = _write_dataset(
@@ -144,6 +157,8 @@ def test_join_engine_proposes_confirms_and_executes_unique_hash_join(tmp_path):
     assert repo.load_join_plan(plan.id).status == "executed"
     joined = pd.read_parquet(registry.resolve_path(result.id))
     assert joined["credit_limit"].tolist() == [1000, 2000]
+    assert list((tmp_path / "joined").glob("*.parquet")) == [registry.resolve_path(result.id)]
+    assert not (tmp_path / "joined" / ".staging").exists()
     assert [audit["kind"] for audit in repo.audits] == ["join.confirmed", "join.executed"]
     assert repo.audits[0]["target_ref"] == plan.id
     assert repo.audits[1]["detail"]["result_dataset_id"] == result.id
@@ -287,6 +302,37 @@ def test_join_engine_blocks_unconfirmed_and_requires_dedup_for_duplicate_keys(tm
     joined = pd.read_parquet(registry.resolve_path(result.id))
     assert result.row_count == anchor.row_count
     assert joined["balance"].tolist() == [10, 20]
+
+
+def test_join_engine_large_feature_table_uses_bounded_conflict_report(tmp_path, monkeypatch):
+    import marvis.data.join_engine as join_engine_module
+
+    monkeypatch.setattr(join_engine_module, "LARGE_ROW_THRESHOLD", 2)
+    engine, registry, _repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry,
+        tmp_path,
+        "anchor",
+        pd.DataFrame({"acct_num": ["A1", "B2", "C3"]}),
+    )
+    feature = _write_dataset(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({
+            "acct_no": ["A1", "A1", "B2", "B2", "C3"],
+            "balance": [10, 11, 20, 20, 30],
+        }),
+    )
+
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    report = plan.joins[0].diagnostics.conflict_report
+
+    assert report is not None
+    assert report.n_conflict_keys == 2
+    assert report.n_conflict_rows == 4
+    assert "balance" in report.conflict_columns
+    assert ("A1",) in report.sample_keys
 
 
 def test_join_engine_marks_shrink_when_no_key_pair_matches(tmp_path):

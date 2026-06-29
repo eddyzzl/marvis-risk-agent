@@ -30,9 +30,15 @@ def test_browser_chrome_uses_public_default_branding():
     assert '<link rel="manifest" href="static/manifest.webmanifest" />' in index_html
     assert 'id="brandLogo"' in index_html
     assert 'class="brand-mark"' in index_html
-    assert 'src="static/brand/marvis-workspace-logo.png' in index_html
+    brand_logo_start = index_html.index('id="brandLogo"')
+    brand_logo_end = index_html.index("/>", brand_logo_start)
+    brand_logo_markup = index_html[brand_logo_start:brand_logo_end]
+    assert 'src="static/brand/marvis-logo.png' in brand_logo_markup
     assert 'id="workspaceBrandLogo"' in index_html
-    assert 'src="static/brand/marvis-workspace-logo.png' in index_html
+    workspace_logo_start = index_html.index('id="workspaceBrandLogo"')
+    workspace_logo_end = index_html.index("/>", workspace_logo_start)
+    workspace_logo_markup = index_html[workspace_logo_start:workspace_logo_end]
+    assert 'src="static/brand/marvis-workspace-logo.png' in workspace_logo_markup
     assert 'id="platformName"' in index_html
     assert "MARVIS-全能风控智能体" in index_html
     assert "private-logo.svg" not in index_html
@@ -79,6 +85,7 @@ def test_app_entry_is_split_into_frontend_modules():
         "render-agent.js",
         "render-metrics.js",
         "state.js",
+        "theme.js",
         "ui-utils.js",
     ]:
         assert (STATIC_DIR / "js" / module_name).exists()
@@ -90,6 +97,7 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/render-agent.js"' in app_js
     assert 'from "./js/render-metrics.js"' in app_js
     assert 'from "./js/state.js"' in app_js
+    assert 'from "./js/theme.js"' in app_js
     assert 'from "./js/ui-utils.js"' in app_js
 
 
@@ -178,8 +186,9 @@ def test_unselected_workspace_shows_centered_welcome_only():
         card_start = welcome_markup.index(f'id="{card_id}"')
         card_end = welcome_markup.index("</button>", card_start)
         card_markup = welcome_markup[card_start:card_end]
-        assert 'class="welcome-task-card unavailable"' in card_markup
-        assert 'aria-disabled="true"' in card_markup
+        assert 'class="welcome-task-card available"' in card_markup
+        assert 'aria-describedby="welcomeComingSoonHint"' not in card_markup
+    assert "该任务暂未开放,点击后会显示敬请期待提示。" not in welcome_markup
     assert "validationWorkspace" in app_js
     assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in app_js
     assert 'classList.toggle("is-empty", !hasTaskContext)' in app_js
@@ -230,6 +239,10 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "--radius-md: 16px" in root_rule
     assert "--radius-lg: 16px" in root_rule
     assert "--radius-control: 10px" in root_rule
+    assert "--surface-subtle:" in root_rule
+    assert "--border-color:" in root_rule
+    assert "--tone-modeling:" in root_rule
+    assert "--tone-strategy:" in root_rule
     cards_rule = _css_rule(welcome_css, ".welcome-task-cards")
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in cards_rule
     assert "max-width: 1040px" in cards_rule
@@ -283,6 +296,8 @@ def test_unselected_workspace_shows_centered_welcome_only():
     assert "mix-blend-mode" not in welcome_css
     assert "body[data-theme=\"dark\"] .welcome-task-icon" not in welcome_css
     assert "body[data-theme=\"dark\"] .welcome-task-card.available:hover" not in welcome_css
+    assert "--tone: var(--tone-modeling)" in welcome_css
+    assert "--tone: var(--tone-vintage)" in welcome_css
 
 
 def test_empty_workspace_greeting_changes_by_local_time():

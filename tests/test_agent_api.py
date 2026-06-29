@@ -152,6 +152,34 @@ def test_agent_message_without_llm_config_returns_guidance(tmp_path):
     assert "请先在设置中配置至少一个启用的大模型" in response.json()["detail"]
 
 
+def test_agent_messages_endpoint_supports_after_id_cursor(tmp_path):
+    client = _client(tmp_path)
+    task_id = _create_task(client, tmp_path)
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    first = repo.add_agent_message(task_id, role="user", stage="chat", content="first")
+    second = repo.add_agent_message(task_id, role="assistant", stage="scan", content="second")
+
+    response = client.get(
+        f"/api/tasks/{task_id}/agent/messages",
+        params={"after_id": first["id"]},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["incremental"] is True
+    assert [message["id"] for message in payload["messages"]] == [second["id"]]
+
+    fallback_response = client.get(
+        f"/api/tasks/{task_id}/agent/messages",
+        params={"after_id": "missing-message"},
+    )
+
+    assert fallback_response.status_code == 200, fallback_response.text
+    fallback_payload = fallback_response.json()
+    assert fallback_payload["incremental"] is False
+    assert [message["id"] for message in fallback_payload["messages"]] == [first["id"], second["id"]]
+
+
 def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
     observed: dict = {}
 

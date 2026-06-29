@@ -122,6 +122,25 @@ def test_plan_repository_replaces_remaining_steps_and_increments_replan_count(tm
     assert repo.load_step_output("step-1") == {"echoed": "done"}
 
 
+def test_plan_repository_loop_event_without_type_does_not_rollback_replan(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _plan()
+    repo.create_plan(plan)
+
+    repo.replace_remaining_steps(
+        "plan-1",
+        _plan(_step("step-1", 0), _step("step-3", 1, title="Repaired")),
+        loop_event={"reason": "manual"},
+    )
+
+    loaded = repo.load_plan("plan-1")
+    assert loaded.replan_count == 1
+    assert loaded.loop_events[0].type == "unknown"
+    assert loaded.loop_events[0].reason == "manual"
+
+
 def test_plan_repository_appends_steps_and_lists_recent_failed_refs(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

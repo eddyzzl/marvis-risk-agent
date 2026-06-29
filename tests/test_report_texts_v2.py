@@ -119,6 +119,26 @@ def test_platform_generated_sample_period_text_values_use_split_stats():
     assert values["TEXT:oot_period"] == "20250701-20250831"
 
 
+def test_platform_generated_period_text_collapses_single_month_range():
+    base = _make_results()
+    results = replace(
+        base,
+        basic_info=replace(
+            base.basic_info,
+            split_summary=[
+                SplitRow("train", 100, 10, 0.1, period_start="202503", period_end="202503"),
+                SplitRow("test", 50, 5, 0.1, period_start="202503", period_end="202503"),
+                SplitRow("oot", 25, 2, 0.08, period_start="202504", period_end="202504"),
+            ],
+        ),
+    )
+
+    values = report_text_values_from_results(results)
+
+    assert values["TEXT:train_test_period"] == "202503"
+    assert values["TEXT:oot_period"] == "202504"
+
+
 def test_model_training_description_uses_algorithm_default_text():
     results = replace(_make_results(), algorithm="xgb")
 

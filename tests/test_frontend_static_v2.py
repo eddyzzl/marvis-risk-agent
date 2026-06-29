@@ -59,6 +59,57 @@ def _contrast_ratio(left: str, right: str) -> float:
     return (light + 0.05) / (dark + 0.05)
 
 
+def test_artifact_metrics_object_values_render_as_readable_key_values():
+    module_url = (STATIC_DIR / "js" / "v2" / "artifact_view.js").as_uri()
+    script = (
+        f"import({json.dumps(module_url)}).then((module) => {{"
+        "  const html = module.metricsHtml({ stats: { mean: 0.532, std: 0.042 } });"
+        "  process.stdout.write(html);"
+        "});"
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "mean: 0.532；std: 0.042" in result.stdout
+    assert '{"mean":0.532' not in result.stdout
+
+
+def test_v2_artifact_preview_uses_tabular_numeric_metrics():
+    css = _read_static("styles.css")
+
+    assert '[data-v2-artifact-view="true"] :is(.metrics-preview, .dataset-preview table)' in css
+    assert 'font-feature-settings: "tnum"' in css
+    assert '[data-v2-artifact-view="true"] .metrics-preview td' in css
+    assert "text-align: right" in css
+
+
+def test_agent_message_polling_uses_incremental_cursor_when_safe():
+    app_js = _read_static("app.js")
+
+    assert "function agentMessageCanPollIncrementally" in app_js
+    assert "message?.metadata?.optimistic || message?.metadata?.streaming" in app_js
+    assert "function mergeIncrementalAgentMessages" in app_js
+    assert "?after_id=${encodeURIComponent(lastMessageId)}" in app_js
+    assert "if (payload.incremental)" in app_js
+
+
+def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
+    app_js = _read_static("app.js")
+
+    assert "const v2PlanFetchErrors = new Map()" in app_js
+    assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in app_js
+    assert "计划读取失败" in app_js
+    assert "当前显示的是上次缓存的计划" in app_js
+    assert "const fetchErrorBanner = fetchError" in app_js
+    assert "return fetchErrorBanner + phasesHtml + startControl;" in app_js
+    assert "data-plan-rail-retry" in app_js
+    assert "function retryV2PlanFetch" in app_js
+
+
 def _agent_timeline_items_for(
     messages: list[dict],
     visible_stages: list[str],
@@ -393,6 +444,7 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
 
     assert "function planPhaseStatus" in app_js
     assert "function planPhaseHint" in app_js
+    assert "function planRetryControlHtml" in app_js
     assert "function planSubstepGroupHtml" in app_js
     assert "const phaseNumber = phaseIndex + 1;" in plan_renderer
     assert 'class="step plan-rail-step' in plan_renderer
@@ -406,8 +458,12 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert '<span class="plan-substep-copy">' in substeps_renderer
     assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
     assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
+    assert 'const retry = status === "failed" ? planRetryControlHtml(step) : "";' in substeps_renderer
     assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
     assert "descriptionHtml" in substeps_renderer
+    assert "retry" in substeps_renderer
+    assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in app_js
+    assert 'class="plan-retry-inputs"' in app_js
     assert ': "";' in substeps_renderer
     assert '<section class="plan-rail-phase"' not in plan_renderer
     assert "plan-rail-major-number" not in plan_renderer
@@ -423,9 +479,27 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert ".plan-substep-copy" in v2_css
     assert "display: grid" in _css_rule(v2_css, ".plan-substep-copy")
     assert "white-space: nowrap" in _css_rule(v2_css, ".plan-substep-copy small")
+    assert "grid-column: 1 / -1" in _css_rule(v2_css, ".plan-step-retry")
+    assert "width: 100%" in _css_rule(v2_css, ".plan-step-retry")
 
     assert ".plan-rail-phase" not in v2_css
     assert ".plan-rail-major-number" not in v2_css
+
+
+def test_plan_rail_retry_step_posts_edited_inputs():
+    app_js = _read_static("app.js")
+
+    retry_body = _slice_function(app_js, "async function retryV2PlanStep")
+    click_body = _slice_function(app_js, "function handleWorkflowStepperClick")
+
+    assert 'button?.dataset?.planRetryStep || ""' in retry_body
+    assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
+    assert "JSON.stringify({ inputs })" in retry_body
+    assert "v2PlanCache.delete(taskId)" in retry_body
+    assert "window.setTimeout(() => retryV2PlanFetch(taskId), 1000)" in retry_body
+    assert "[data-plan-retry-step]" in click_body
+    assert "void retryV2PlanStep(planRetryButton);" in click_body
+    assert "[data-plan-rail-retry]" in click_body
 
 
 def test_completed_report_actions_render_below_step_copy_with_office_colors():
@@ -889,12 +963,12 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
             "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
         ],
         "strategy": [
-            "手动策略控件暂未接入；后续提供规则编辑、阈值调整和回测确认",
+            "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
             "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
         ],
         "vintage": [
-            "手动风险分析控件暂未接入；后续提供 Vintage、滚动率、FPD 与回收率图表",
-            "Agent 识别 Vintage、滚动率、FPD、入催回收率字段，生成风险观察和结论",
+            "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
+            "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
         ],
     }
     for task_type, copy_items in expected_copy.items():
@@ -1139,9 +1213,12 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
 def test_workbench_uses_middle_output_and_right_step_rail_layout():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
 
     assert 'id="progressRail"' in index_html
     assert 'aria-label="验证步骤"' in index_html
+    assert 'progressRail?.setAttribute("aria-label", "计划步骤");' in app_js
+    assert 'progressRail?.setAttribute("aria-label", "验证步骤");' in app_js
     assert 'id="taskSnapshot"' in index_html
     assert index_html.index('id="scanSection"') < index_html.index('id="notebookSection"')
     assert index_html.index('id="notebookSection"') < index_html.index('id="metricSection"')
@@ -1439,7 +1516,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     assert "var(--accent" not in collapse_hover_rule
 
     search_input_rule = _css_rule(styles_css, "body.search-active .task-search input")
-    assert "border-color: var(--brand-primary)" in search_input_rule
+    assert "border-color: var(--button-outline-border)" in search_input_rule
     assert "box-shadow: 0 0 0 3px var(--brand-icon-ring)" in search_input_rule
     assert "var(--accent" not in search_input_rule
 
@@ -1593,8 +1670,8 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
     create_start = styles_css.index(".nav-action {")
     create_end = styles_css.index("}", create_start)
     create_rule = styles_css[create_start:create_end]
-    assert "color: #ffffff" in create_rule
-    assert "background: var(--brand-primary)" in create_rule
+    assert "color: var(--button-primary-text)" in create_rule
+    assert "background: var(--button-primary-bg)" in create_rule
     assert "border: 0" in create_rule
     assert "border-radius: var(--radius-control)" in create_rule
     assert "box-shadow: var(--button-solid-shadow)" in create_rule
@@ -1609,7 +1686,8 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
     create_hover_start = styles_css.index(".nav-action:hover,")
     create_hover_end = styles_css.index("}", create_hover_start)
     create_hover_rule = styles_css[create_hover_start:create_hover_end]
-    assert "background: var(--brand-primary-hover)" in create_hover_rule
+    assert "color: var(--button-primary-text-hover)" in create_hover_rule
+    assert "background: var(--button-primary-bg-hover)" in create_hover_rule
     assert "outline: none" in create_hover_rule
     assert "box-shadow: var(--button-solid-shadow-hover)" in create_hover_rule
     assert "0 8px 12px" not in create_hover_rule
@@ -2091,20 +2169,36 @@ def test_primary_step_action_hover_keeps_button_text_readable():
     assert "--button-secondary-shadow-hover:" in root_rule
     assert "0 3px 6px rgba(0, 0, 0, 0.06)" in root_rule
     assert "0 6px 10px rgba(0, 0, 0, 0.045)" in root_rule
+    assert "--button-primary-bg: var(--brand-primary)" in root_rule
+    assert "--button-primary-text: #ffffff" in root_rule
+    assert "--button-outline-border: var(--brand-primary)" in root_rule
+    assert "--button-outline-bg-hover: color-mix(in srgb, var(--brand-primary) 7%, transparent)" in root_rule
+
+    dark_theme_rule = _css_rule(styles_css, 'body[data-theme="dark"]')
+    assert "--button-primary-bg: #525258" in dark_theme_rule
+    assert "--button-primary-bg-hover: #5d5d64" in dark_theme_rule
+    assert "--button-primary-bg-active: #47474d" in dark_theme_rule
+    assert "--button-primary-text: #f2f2f2" in dark_theme_rule
+    assert "--button-outline-border: #96999f" in dark_theme_rule
+    assert "--button-outline-bg-hover: color-mix(in srgb, #96999f 12%, transparent)" in dark_theme_rule
+    assert "width:" not in dark_theme_rule
+    assert "height:" not in dark_theme_rule
+    assert "padding:" not in dark_theme_rule
+    assert "transform:" not in dark_theme_rule
 
     primary_rule = _css_rule(styles_css, ".button.primary")
-    assert "color: #ffffff" in primary_rule
-    assert "background: var(--brand-primary)" in primary_rule
-    assert "border-color: var(--brand-primary)" in primary_rule
+    assert "color: var(--button-primary-text)" in primary_rule
+    assert "background: var(--button-primary-bg)" in primary_rule
+    assert "border-color: var(--button-primary-border)" in primary_rule
     assert "box-shadow: var(--button-solid-shadow)" in primary_rule
 
     assert ".button.primary:hover:not(:disabled)" in styles_css
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
-    assert "color: #ffffff" in hover_rule
-    assert "background: var(--brand-primary-hover)" in hover_rule
-    assert "border-color: var(--brand-primary-hover)" in hover_rule
+    assert "color: var(--button-primary-text-hover)" in hover_rule
+    assert "background: var(--button-primary-bg-hover)" in hover_rule
+    assert "border-color: var(--button-primary-border-hover)" in hover_rule
     assert "box-shadow: var(--button-solid-shadow-hover)" in hover_rule
     assert "transform:" not in hover_rule
 
@@ -2121,7 +2215,7 @@ def test_primary_step_action_hover_keeps_button_text_readable():
     assert "box-shadow: var(--button-secondary-shadow-hover)" in secondary_hover_rule
 
 
-def test_brand_primary_token_drives_create_environment_and_model_buttons():
+def test_theme_button_tokens_drive_create_environment_and_model_buttons():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
@@ -2140,7 +2234,8 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     nav_start = styles_css.index(".nav-action {")
     nav_end = styles_css.index("}", nav_start)
     nav_rule = styles_css[nav_start:nav_end]
-    assert "background: var(--brand-primary)" in nav_rule
+    assert "color: var(--button-primary-text)" in nav_rule
+    assert "background: var(--button-primary-bg)" in nav_rule
     assert "border: 0" in nav_rule
     assert "box-shadow: var(--button-solid-shadow)" in nav_rule
     assert "0 7px 10px" not in nav_rule
@@ -2152,7 +2247,8 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     send_start = styles_css.index(".agent-send {")
     send_end = styles_css.index("}", send_start)
     send_rule = styles_css[send_start:send_end]
-    assert "background: var(--brand-primary)" in send_rule
+    assert "color: var(--button-primary-text)" in send_rule
+    assert "background: var(--button-primary-bg)" in send_rule
 
     assert 'id="refreshExecutionEnvironmentOptionsButton" class="button primary"' in index_html
     assert 'id="addLLMModelButton" class="button primary"' in index_html
@@ -2160,13 +2256,13 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     assert 'id="addLLMModelButton" class="button secondary"' not in index_html
 
     llm_add_rule = _css_rule(styles_css, ".llm-engine-add")
-    assert "color: var(--brand-primary)" in llm_add_rule
-    assert "border: 1px dashed var(--brand-primary)" in llm_add_rule
+    assert "color: var(--button-outline-text)" in llm_add_rule
+    assert "border: 1px dashed var(--button-outline-border)" in llm_add_rule
 
     llm_add_hover_rule = _css_rule(styles_css, ".llm-engine-add:hover")
-    assert "color: var(--brand-primary-hover)" in llm_add_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in llm_add_hover_rule
-    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in llm_add_hover_rule
+    assert "color: var(--button-outline-text-hover)" in llm_add_hover_rule
+    assert "border-color: var(--button-outline-border-hover)" in llm_add_hover_rule
+    assert "background: var(--button-outline-bg-hover)" in llm_add_hover_rule
 
     settings_action_width_start = styles_css.index(
         "#refreshExecutionEnvironmentOptionsButton.button.primary,"
@@ -2193,8 +2289,8 @@ def test_brand_primary_token_drives_create_environment_and_model_buttons():
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
-    assert "background: var(--brand-primary-hover)" in hover_rule
-    assert "border-color: var(--brand-primary-hover)" in hover_rule
+    assert "background: var(--button-primary-bg-hover)" in hover_rule
+    assert "border-color: var(--button-primary-border-hover)" in hover_rule
 
 
 def test_sidebar_task_card_is_two_line_compact_without_icon():
@@ -2757,9 +2853,15 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'value="lgb_multiclass"' in index_html
     assert 'data-recipe-family="continuous"' in index_html
     assert 'data-recipe-family="multiclass"' in index_html
+    assert 'id="modelSampleWeightPolicy"' in index_html
+    assert 'value="none">不使用样本权重' in index_html
+    assert 'value="explicit">指定权重列' in index_html
+    assert "updateSampleWeightCreateState" in app_js
     assert "algorithmField: true" in app_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
     assert 'payload.target_type = [...families][0] || "binary";' in app_js
+    assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in app_js
+    assert "请填写样本权重列，或改选不使用样本权重。" in app_js
     assert "payload.sample_weight_col = sampleWeightCol;" in app_js
     assert "normalizeModelAlgorithmFamilies" in app_js
     assert "二分类、回归与多分类算法不能混选。" in app_js
@@ -2767,25 +2869,27 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
 
 
-def test_coming_soon_task_types_are_disabled_with_notice():
-    """风险分析(vintage) + 策略开发(strategy) are temporarily disabled: their welcome cards
-    carry data-coming-soon, and a click surfaces a coming-soon toast instead of opening the
-    create dialog. Re-enable by removing data-coming-soon from the cards."""
+def test_strategy_and_vintage_welcome_cards_are_enabled():
+    """风险分析(vintage) + 策略开发(strategy) are wired PlanDriver entries."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
         start = index_html.index(f'id="{card_id}"')
         tag_end = index_html.index(">", start)
         tag = index_html[start:tag_end]
-        assert "data-coming-soon" in tag, card_id
-        assert 'class="welcome-task-card unavailable"' in tag, card_id
-        assert 'aria-disabled="true"' in tag, card_id
-    # the card-click handler short-circuits coming-soon cards to the toast (no dialog)
-    assert "card.dataset.comingSoon" in app_js
+        assert "data-coming-soon" not in tag, card_id
+        assert 'class="welcome-task-card available"' in tag, card_id
+        assert 'aria-describedby="welcomeComingSoonHint"' not in tag, card_id
+    assert 'available: false' not in app_js[app_js.index("const taskTypeDefinitions = {"):app_js.index("let activeTaskType")]
+    assert 'manualEnabled: false' not in app_js[app_js.index("const taskTypeDefinitions = {"):app_js.index("let activeTaskType")]
+    assert 'const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in app_js
+    # The toast path remains available for future explicitly unavailable task definitions.
+    assert "card.dataset.comingSoon" not in app_js
     assert "definition.available === false" in app_js
     assert "unavailableMessage" in app_js
     assert "function showComingSoonToast" in app_js
-    assert "该任务暂未开放" in app_js
+    assert 'setActionStatus(message, "info"' in app_js
+    assert "新功能开发中，敬请期待" in app_js
 
 
 def test_acceptance_chip_relabels_auto_accept_per_task_type():
@@ -3116,6 +3220,7 @@ def test_dialog_close_buttons_render_as_x_controls():
     dark_close_button_rule = _css_rule(styles_css, 'body[data-theme="dark"] .button.dialog-close-button')
     assert "border-color: transparent" in dark_close_button_rule
     assert "background: transparent" in dark_close_button_rule
+    assert "box-shadow: none" in dark_close_button_rule
 
     dark_close_button_hover_rule = _css_rule(
         styles_css,
@@ -3401,7 +3506,12 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "left: var(--collapsed-popover-left)" in collapsed_menu_rule
     assert "right: auto" in collapsed_menu_rule
     assert "bottom: 12px" in collapsed_menu_rule
-    assert "width: 268px" in collapsed_menu_rule
+    assert (
+        "width: min(calc(var(--rail-content-width, 314px) - 24px), "
+        "calc(100vw - var(--collapsed-popover-left) - 16px))"
+    ) in collapsed_menu_rule
+    assert "max-width: none" in collapsed_menu_rule
+    assert "width: 268px" not in collapsed_menu_rule
 
     assert "function renderSettingsState" in app_js
     assert "function handleSettingsMenuChange" in app_js
@@ -3414,18 +3524,20 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
 
 def test_appearance_setting_supports_light_dark_and_system_modes():
     app_js = _read_static("app.js")
+    theme_js = _read_static("js/theme.js")
     index_html = _read_static("index.html")
 
-    assert 'let themePreference = "light"' in app_js
-    assert "function systemTheme" in app_js
-    assert "function watchSystemTheme" in app_js
-    assert "function syncBrowserChromeTheme" in app_js
-    assert 'const browserChromeThemeColors = {' in app_js
-    assert 'light: "#ffffff"' in app_js
-    assert 'dark: "#181818"' in app_js
-    assert '$("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");' in app_js
-    assert 'themePreference === "system"' in app_js
-    assert 'localStorage.setItem("marvis_theme", themePreference)' in app_js
+    assert 'from "./js/theme.js"' in app_js
+    assert "const themeController = createThemeController" in app_js
+    assert "function systemTheme" in theme_js
+    assert "const watchSystemTheme = () =>" in theme_js
+    assert "function syncBrowserChromeTheme" in theme_js
+    assert 'const browserChromeThemeColors = {' in theme_js
+    assert 'light: "#ffffff"' in theme_js
+    assert 'dark: "#181818"' in theme_js
+    assert '$("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");' in theme_js
+    assert 'preference === "system"' in theme_js
+    assert 'localStorage.setItem("marvis_theme", preference)' in theme_js
     assert 'id="settingsThemeSelect"' in index_html
     assert 'value="system"' in index_html
     assert "跟随系统" in index_html
@@ -4204,6 +4316,23 @@ def test_metric_kpi_footer_values_are_centered_in_each_column():
     assert "text-align: center" in cell_rule
 
 
+def test_metric_tables_use_tabular_right_aligned_numeric_cells():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    table_start = styles_css.index(".metric-table-section .metric-table {")
+    table_end = styles_css.index("}", table_start)
+    table_rule = styles_css[table_start:table_end]
+    number_start = styles_css.index(".metric-table-section .metric-table td.cell-number {")
+    number_end = styles_css.index("}", number_start)
+    number_rule = styles_css[number_start:number_end]
+
+    assert "font-variant-numeric: tabular-nums" in table_rule
+    assert "text-align: right" in number_rule
+    assert "font-variant-numeric: tabular-nums" in number_rule
+    assert 'return { cls: "cell-number"' in app_js
+
+
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
@@ -4782,18 +4911,15 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
     for task_kind in [
         "feature_analysis",
         "data_join",
+        "vintage",
         "modeling",
         "validation",
+        "strategy",
     ]:
         task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
         class_start = cards_markup.rfind('class="', 0, task_index)
         class_end = cards_markup.index('"', class_start + len('class="'))
         assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card available"'
-    for task_kind in ["strategy", "vintage"]:
-        task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
-        class_start = cards_markup.rfind('class="', 0, task_index)
-        class_end = cards_markup.index('"', class_start + len('class="'))
-        assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card unavailable"'
 
 
 def test_agent_task_creation_prefills_conversation_composer_with_goal():
@@ -4814,8 +4940,8 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert "autoGrowComposerInput();" in helper_body
     assert "updateAgentSendDisabled();" in helper_body
     assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in app_js
-    assert "资产Vintage&滚动率分析、FPD、入催回收率分析相关字段" in app_js
-    assert "入催回收率和风险观察" in app_js
+    assert "先识别 cohort、MOB 和坏账标签字段" in app_js
+    assert "计算资产 Vintage 曲线并给出风险观察" in app_js
     assert "营利性测算" not in app_js
 
     # createTask() invokes the prefill once the task is created.
@@ -4824,6 +4950,13 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert "function seedV2GoalComposer" not in app_js
     assert "function openV2WorkspaceWithGoal" not in app_js
     assert "function showV2WorkspaceDialog" not in app_js
+
+
+def test_driver_manual_analysis_omits_plan_overview_messages():
+    app_js = _read_static("app.js")
+    body = _slice_function(app_js, "function driverManualAnalysisHtml")
+
+    assert 'meta.kind === "overview" || meta.kind === "plan_overview"' in body
 
 
 def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
@@ -5343,9 +5476,11 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "grid-template-columns: minmax(0, 1fr) auto" in plugin_upload_rule
     plugin_upload_action_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload::after")
     assert 'content: "选择文件"' in plugin_upload_action_rule
-    assert "border: 1px dashed var(--brand-primary)" in plugin_upload_action_rule
+    assert "border: 1px dashed var(--button-outline-border)" in plugin_upload_action_rule
+    assert "color: var(--button-outline-text)" in plugin_upload_action_rule
     skill_reload_rule = _css_rule(v2_css, ".governance-settings-dialog .skill-manager > button")
-    assert "background: var(--brand-primary)" in skill_reload_rule
+    assert "background: var(--button-primary-bg)" in skill_reload_rule
+    assert "color: var(--button-primary-text)" in skill_reload_rule
     assert "box-shadow: var(--button-solid-shadow)" in skill_reload_rule
     memory_toolbar_rule = _css_rule(v2_css, ".governance-settings-dialog .memory-manager-toolbar")
     assert "padding: 0 2px 2px" in memory_toolbar_rule
@@ -5435,22 +5570,24 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     send_start = styles_css.index(".agent-send {")
     send_end = styles_css.index("}", send_start)
     send_rule = styles_css[send_start:send_end]
-    assert "background: var(--brand-primary);" in send_rule
+    assert "color: var(--button-primary-text);" in send_rule
+    assert "background: var(--button-primary-bg);" in send_rule
     assert "0 3px 10px rgba(0, 0, 0, 0.18)" in send_rule
     send_hover_start = styles_css.index(".agent-send:hover:not(:disabled) {")
     send_hover_end = styles_css.index("}", send_hover_start)
     send_hover_rule = styles_css[send_hover_start:send_hover_end]
-    assert "background: var(--brand-primary-hover);" in send_hover_rule
+    assert "color: var(--button-primary-text-hover);" in send_hover_rule
+    assert "background: var(--button-primary-bg-hover);" in send_hover_rule
     assert "transform:" not in send_hover_rule
     assert "background: #a91017;" not in send_hover_rule
     send_active_rule = _css_rule(styles_css, ".agent-send:active:not(:disabled)")
-    assert "background: color-mix(in srgb, var(--brand-primary) 82%, #000000);" in send_active_rule
+    assert "background: var(--button-primary-bg-active);" in send_active_rule
 
     dark_send_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send')
     assert "background:" not in dark_send_rule
     assert 'body[data-theme="dark"] .agent-send:hover:not(:disabled)' not in styles_css
     dark_send_active_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send:active:not(:disabled)')
-    assert "background: color-mix(in srgb, var(--brand-primary) 82%, #000000);" in dark_send_active_rule
+    assert "background: var(--button-primary-bg-active);" in dark_send_active_rule
 
     disabled_start = styles_css.index(".agent-send:disabled {")
     disabled_end = styles_css.index("}", disabled_start)
@@ -5621,7 +5758,7 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "function agentMessagesHtml" in app_js
     assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
     assert "agentMessagesHtml(item.messages)" in app_js
-    assert "agentStageLabel(labelStage)" in app_js
+    assert "agentMessageMetaLabel(message, labelStage)" in app_js
     alias_start = app_js.index("function agentValidatorAlias")
     stage_label_start = app_js.index("function agentStageLabel", alias_start)
     stage_label_end = app_js.index("function formatAgentMessageContent", stage_label_start)
@@ -5644,6 +5781,20 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "restoreResultScrollDefaultOrder" in app_js
     assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
     assert 'if (message.stage === "chat" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
+
+
+def test_agent_message_meta_label_includes_plan_step_context():
+    app_js = _read_static("app.js")
+    meta_start = app_js.index("function agentMessageMetaLabel")
+    meta_end = app_js.index("function formatAgentMessageContent", meta_start)
+    meta_body = app_js[meta_start:meta_end]
+
+    assert "function agentMessagePlanStep" in meta_body
+    assert "metadata.step_id" in meta_body
+    assert "metadata.step_title || step?.title" in meta_body
+    assert "metadata.phase || step?.phase" in meta_body
+    assert "metadata.run_seq" in meta_body
+    assert "第 ${runSeq} 轮" in meta_body
 
 
 def test_agent_memory_has_no_permanent_task_top_block():

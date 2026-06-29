@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 
 from marvis.feature.binning import equal_frequency_edges
-from marvis.feature.metrics import feature_auc, feature_ks, feature_psi
+from marvis.feature.metrics import (
+    feature_auc,
+    feature_ks,
+    feature_psi,
+    weighted_feature_auc,
+    weighted_feature_ks,
+    weighted_feature_psi,
+)
 from marvis.packs.modeling.contracts import ModelMetrics, TrainConfig
 from marvis.packs.modeling.errors import ModelingError
 from marvis.validation.overfitting import overfitting_check
@@ -16,6 +23,7 @@ _SAMPLE_WEIGHT_PARAM_KEYS = frozenset({
     "sample_weight_column",
     "weight_col",
 })
+_MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
 
 def split_modeling_frame(
@@ -48,6 +56,44 @@ def model_params(params: dict | None) -> dict:
         for key, value in dict(params or {}).items()
         if str(key) not in _SAMPLE_WEIGHT_PARAM_KEYS
     }
+
+
+def normalized_monotone_constraints(config: TrainConfig) -> tuple[int, ...] | None:
+    raw = None
+    for key in _MONOTONE_CONSTRAINT_KEYS:
+        value = config.params.get(key)
+        if value not in (None, ""):
+            raw = value
+            break
+    if raw in (None, ""):
+        return None
+    features = tuple(str(feature) for feature in config.features)
+    if isinstance(raw, dict):
+        values = tuple(_constraint_value(raw.get(feature, 0), feature=feature) for feature in features)
+    elif isinstance(raw, str):
+        text = raw.strip().strip("()[]")
+        values = tuple(
+            _constraint_value(item.strip(), feature=f"index {index}")
+            for index, item in enumerate(text.split(","))
+            if item.strip()
+        )
+    else:
+        values = tuple(_constraint_value(item, feature=f"index {index}") for index, item in enumerate(raw))
+    if len(values) != len(features):
+        raise ModelingError(
+            f"monotone_constraints length {len(values)} does not match feature count {len(features)}"
+        )
+    return values
+
+
+def _constraint_value(value, *, feature: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ModelingError(f"monotone constraint for {feature} must be -1, 0, or 1") from exc
+    if number not in {-1, 0, 1}:
+        raise ModelingError(f"monotone constraint for {feature} must be -1, 0, or 1")
+    return number
 
 
 def sample_weight_col(config: TrainConfig) -> str:
@@ -111,6 +157,19 @@ def compute_model_metrics(
     test_auc = feature_auc(test_scores, test_target)
     oot_auc = None if oot_scores is None or oot_target is None else feature_auc(oot_scores, oot_target)
     edges = equal_frequency_edges(train_scores, 10)
+    weighted = _weighted_binary_metrics(
+        train_scores,
+        test_scores,
+        oot_scores,
+        train_target,
+        test_target,
+        oot_target,
+        train,
+        test,
+        oot,
+        config,
+        edges,
+    )
     gap_tt, gap_to, overfit_flag = overfitting_check(train_ks, test_ks, oot_ks)
     return ModelMetrics(
         train_ks=train_ks,
@@ -124,7 +183,62 @@ def compute_model_metrics(
         overfit_train_test_gap=gap_tt,
         overfit_train_oot_gap=gap_to,
         overfit_flag=overfit_flag,
+        **weighted,
     )
+
+
+def _weighted_binary_metrics(
+    train_scores: np.ndarray,
+    test_scores: np.ndarray,
+    oot_scores: np.ndarray | None,
+    train_target: np.ndarray,
+    test_target: np.ndarray,
+    oot_target: np.ndarray | None,
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    config: TrainConfig,
+    edges: np.ndarray,
+) -> dict[str, float | None]:
+    if not sample_weight_col(config):
+        return {}
+    train_weight = sample_weight_values(train, config)
+    test_weight = sample_weight_values(test, config)
+    oot_weight = sample_weight_values(oot, config) if oot is not None else None
+    return {
+        "weighted_train_ks": weighted_feature_ks(train_scores, train_target, train_weight),
+        "weighted_test_ks": weighted_feature_ks(test_scores, test_target, test_weight),
+        "weighted_oot_ks": (
+            None
+            if oot_scores is None or oot_target is None or oot_weight is None
+            else weighted_feature_ks(oot_scores, oot_target, oot_weight)
+        ),
+        "weighted_train_auc": weighted_feature_auc(train_scores, train_target, train_weight),
+        "weighted_test_auc": weighted_feature_auc(test_scores, test_target, test_weight),
+        "weighted_oot_auc": (
+            None
+            if oot_scores is None or oot_target is None or oot_weight is None
+            else weighted_feature_auc(oot_scores, oot_target, oot_weight)
+        ),
+        "weighted_psi_test_vs_train": weighted_feature_psi(
+            train_scores,
+            test_scores,
+            edges,
+            base_weights=train_weight,
+            compare_weights=test_weight,
+        ),
+        "weighted_psi_oot_vs_train": (
+            None
+            if oot_scores is None or oot_weight is None
+            else weighted_feature_psi(
+                train_scores,
+                oot_scores,
+                edges,
+                base_weights=train_weight,
+                compare_weights=oot_weight,
+            )
+        ),
+    }
 
 
 def compute_regression_metrics(
@@ -399,9 +513,14 @@ def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, flo
 
 
 __all__ = [
+    "artifact_params",
     "compute_model_metrics",
     "compute_multiclass_metrics",
     "compute_multiclass_model_metrics",
     "compute_regression_metrics",
+    "model_params",
+    "normalized_monotone_constraints",
+    "sample_weight_col",
+    "sample_weight_values",
     "split_modeling_frame",
 ]
