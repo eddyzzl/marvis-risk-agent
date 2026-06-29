@@ -202,6 +202,90 @@ def test_modeling_setup_weight_picker_renders_candidates():
     assert output == "ok"
 
 
+def test_model_delivery_panel_renderer_and_branch_are_wired():
+    app_js = _read("app.js")
+    module_js = _read("js/v2/model_delivery_panel.js")
+    css = _read("css/v2-workbench.css")
+    assert 'import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";' in app_js
+    assert "function agentMessageModelDeliveryHtml(message, options = {})" in app_js
+    assert "return renderModelDeliveryPanel(message, options);" in app_js
+    assert "if (meta.model_delivery)" in app_js
+    assert "agentMessageModelDeliveryHtml(message)" in app_js
+    assert "export function renderModelDeliveryPanel(message, options = {})" in module_js
+    assert "model-delivery-readiness-grid" in module_js
+    assert "candidateTable(delivery.candidates)" in module_js
+    assert "actionTable(delivery.actions)" in module_js
+    assert ".model-delivery-panel" in css
+    assert ".model-delivery-readiness-grid" in css
+    assert ".model-delivery-table" in css
+    assert ".model-delivery-status" in css
+
+
+def test_model_delivery_panel_renders_selection_and_actions():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{ renderModelDeliveryPanel }} from "./marvis/static/js/v2/model_delivery_panel.js";
+        const html = renderModelDeliveryPanel({{
+          id: "m-delivery",
+          metadata: {{
+            model_delivery: {{
+              source_tool: "post_training_action",
+              selected_experiment_id: "exp-lgb",
+              artifact_id: "art-lgb",
+              recipe: "lgb",
+              target_type: "binary",
+              selection_metric: "oot_ks",
+              selection_reason: "按 oot_ks 在 PMML/验证移交可用候选中自动选择。",
+              metrics: {{ oot_ks: 0.3123, test_ks: 0.2876, oot_auc: 0.721 }},
+              readiness: [
+                {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
+                {{ id: "pmml", label: "PMML", status: "succeeded", artifact: "/tmp/model.pmml" }},
+                {{ id: "validation_handoff", label: "验证移交", status: "succeeded", artifact: "task-validation" }},
+              ],
+              candidates: [
+                {{
+                  id: "exp-lgb",
+                  recipe: "lgb",
+                  selected: true,
+                  metrics: {{ oot_ks: 0.3123, test_ks: 0.2876 }},
+                  capabilities: {{ pmml_supported: true, handoff_supported: true, native_model_supported: true }},
+                }},
+                {{
+                  id: "exp-mlp",
+                  recipe: "mlp",
+                  selected: false,
+                  metrics: {{ oot_ks: 0.3321 }},
+                  capabilities: {{ pmml_supported: false, handoff_supported: false, native_model_supported: true, reason: "仅原生模型" }},
+                }},
+              ],
+              actions: [
+                {{ action: "export_pmml", status: "succeeded", pmml_path: "/tmp/model.pmml" }},
+                {{ action: "handoff_to_validation", status: "succeeded", validation_task_id: "task-validation" }},
+              ],
+              native_model_path: "/tmp/model.pkl",
+              pmml_path: "/tmp/model.pmml",
+              validation_task_id: "task-validation",
+            }},
+          }},
+        }});
+        assert.equal(html.includes("训练后交付"), true);
+        assert.equal(html.includes("交付项已就绪"), true);
+        assert.equal(html.includes("exp-lgb"), true);
+        assert.equal(html.includes("已选"), true);
+        assert.equal(html.includes("0.3123"), true);
+        assert.equal(html.includes("PMML"), true);
+        assert.equal(html.includes("验证移交"), true);
+        assert.equal(html.includes("model.pmml"), true);
+        assert.equal(html.includes("task-validation"), true);
+        assert.equal(renderModelDeliveryPanel({{ metadata: {{}} }}), "");
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_modeling_setup_weight_adjust_posts_structured_params():
     output = _run_node(
         f"""

@@ -12,6 +12,7 @@ import {
   renderModelingSetupPanel,
   submitModelingWeightAdjust as submitModelingWeightAdjustController,
 } from "./js/v2/modeling_setup_panel.js";
+import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import { renderSkillManager } from "./js/v2/skill_manager.js";
 import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
@@ -6743,6 +6744,10 @@ function driverManualAnalysisHtml(messages) {
       sections.push(`<section class="driver-analysis-section">${intro}${diagTables}${agentMessageDedupPickerHtml(message)}</section>`);
       continue;
     }
+    if (meta.model_delivery) {
+      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}</section>`);
+      continue;
+    }
     const tables = agentMessageTablesHtml(message);
     if (!String(message.content || "").trim() && !tables) continue;
     sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
@@ -6940,6 +6945,10 @@ function agentMessageTablesHtml(message) {
 
 function agentMessageModelingSetupHtml(message, options = {}) {
   return renderModelingSetupPanel(message, options);
+}
+
+function agentMessageModelDeliveryHtml(message, options = {}) {
+  return renderModelDeliveryPanel(message, options);
 }
 
 async function submitModelingWeightAdjust(button) {
@@ -7400,7 +7409,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
     role === "assistant"
-      ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : agentMessageTablesHtml(message))
+      ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}`)
       : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
     memoryReferencesHtml,

@@ -13,6 +13,7 @@ from typing import Any
 
 from marvis.agent.gate_payloads import (
     build_dedup_payload,
+    build_model_delivery_payload,
     build_modeling_setup_payload,
     build_screen_payload,
 )
@@ -28,6 +29,7 @@ class GateRenderResult:
     screen: dict | None = None
     dedup: dict | None = None
     modeling_setup: dict | None = None
+    model_delivery: dict | None = None
 
 
 def render_gate_dependencies(
@@ -65,6 +67,8 @@ def render_gate_dependencies(
         elif dep.tool_ref.tool == "choose_modeling_spec":
             modeling_spec_o = output if isinstance(output, dict) else None
             modeling_spec_step = dep
+        elif dep.tool_ref.tool in {"compare_experiments", "select_experiment", "post_training_action"}:
+            result.model_delivery = build_model_delivery_payload(output, dep)
     if modeling_spec_o is not None and modeling_spec_step is not None:
         result.modeling_setup = build_modeling_setup_payload(
             modeling_spec_o,

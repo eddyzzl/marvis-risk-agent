@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from marvis.agent.adjust_specs import adjust_param_error, has_sample_weight_adjust, has_screen_adjust
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gate_adapters import render_gate_dependencies
-from marvis.agent.gate_payloads import screen_known_features
+from marvis.agent.gate_payloads import build_model_delivery_payload, screen_known_features
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
@@ -512,6 +512,8 @@ class PlanDriver:
             meta["dedup"] = rendered.dedup
         if rendered.modeling_setup is not None:
             meta["modeling_setup"] = rendered.modeling_setup
+        if rendered.model_delivery is not None:
+            meta["model_delivery"] = rendered.model_delivery
         meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage("gate", "\n\n".join(parts), meta)
 
@@ -523,13 +525,19 @@ class PlanDriver:
         )
         parts = ["✅ 计划已全部完成。"]
         tables: list[dict] = []
+        output = None
         if terminal is not None:
             output = self._safe_output(terminal.id)
             if output is not None:
                 text, tables = render_tool_output(terminal.tool_ref.tool, output)
                 if text:
                     parts.append(text)
-        return DriverMessage("done", "\n\n".join(parts), {"plan_id": plan.id, "run_seq": run_seq, "tables": tables})
+        meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
+        if terminal is not None and output is not None:
+            delivery = build_model_delivery_payload(output, terminal)
+            if delivery is not None:
+                meta["model_delivery"] = delivery
+        return DriverMessage("done", "\n\n".join(parts), meta)
 
     def _compose_review_message(self, plan: Plan, *, run_seq) -> DriverMessage:
         return DriverMessage(

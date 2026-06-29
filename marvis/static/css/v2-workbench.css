@@ -1361,6 +1361,160 @@
   margin-left: auto;
 }
 
+/* Modeling comparison and delivery readiness. */
+.model-delivery-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface, #fff);
+}
+.model-delivery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+  background: var(--surface-soft, #f9fafb);
+}
+.model-delivery-head span {
+  font-weight: 600;
+}
+.model-delivery-head small {
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+.model-delivery-chip-grid,
+.model-delivery-readiness-grid,
+.model-delivery-metric-grid {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+.model-delivery-chip-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+.model-delivery-readiness-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.model-delivery-metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+}
+.model-delivery-chip,
+.model-delivery-readiness-card,
+.model-delivery-metric {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface, #fff);
+  font-size: 12px;
+}
+.model-delivery-chip span,
+.model-delivery-readiness-card span,
+.model-delivery-readiness-card small,
+.model-delivery-metric span {
+  color: var(--text-muted, #6b7280);
+}
+.model-delivery-chip strong,
+.model-delivery-readiness-card strong,
+.model-delivery-metric strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text, #111827);
+}
+.model-delivery-readiness-card code,
+.model-delivery-table code,
+.model-delivery-artifacts code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.model-delivery-readiness-card[data-readiness-kind="ready"],
+.model-delivery-status[data-readiness-kind="ready"] {
+  border-color: var(--success, #16a34a);
+}
+.model-delivery-readiness-card[data-readiness-kind="warning"],
+.model-delivery-status[data-readiness-kind="warning"] {
+  border-color: var(--warning, #f59e0b);
+}
+.model-delivery-readiness-card[data-readiness-kind="error"],
+.model-delivery-status[data-readiness-kind="error"] {
+  border-color: var(--danger, #dc2626);
+}
+.model-delivery-reason {
+  margin: 10px 12px 0;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 35%, var(--border-color, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: color-mix(in srgb, var(--accent, #2563eb) 6%, var(--surface, #fff));
+  color: var(--text, #111827);
+  font-size: 12px;
+}
+.model-delivery-metrics,
+.model-delivery-table-wrap {
+  padding-top: 10px;
+}
+.model-delivery-table-wrap {
+  overflow-x: auto;
+}
+.model-delivery-table {
+  width: calc(100% - 24px);
+  min-width: 620px;
+  margin: 8px 12px 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.model-delivery-table th,
+.model-delivery-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-color, var(--border, #eef0f2));
+  text-align: left;
+  vertical-align: top;
+}
+.model-delivery-table th {
+  color: var(--text-muted, #6b7280);
+  font-weight: 600;
+}
+.model-delivery-table td.model-delivery-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.model-delivery-table tr.is-selected {
+  background: color-mix(in srgb, var(--success, #16a34a) 7%, var(--surface, #fff));
+}
+.model-delivery-selected,
+.model-delivery-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+}
+.model-delivery-artifacts {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+.model-delivery-artifacts div {
+  display: grid;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-color, var(--border, #e5e7eb));
+  border-radius: var(--radius-control, 8px);
+  background: var(--surface-soft, #f9fafb);
+  font-size: 12px;
+}
+.model-delivery-artifacts span {
+  color: var(--text-muted, #6b7280);
+}
+
 /* §4 interactive feature-screening selection table (manual mode). */
 .screen-table-wrap {
   margin-top: 10px;

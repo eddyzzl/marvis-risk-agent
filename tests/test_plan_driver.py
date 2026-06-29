@@ -461,6 +461,147 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert controls["n_trials"]["bounds"] == {"min": 1, "max": 200}
 
 
+def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("compare", index=0, tool="compare_experiments", phase="建模"),
+            _step("select", index=1, tool="select_experiment", depends_on=["compare"], phase="建模"),
+            _step(
+                "report",
+                index=2,
+                tool="generate_model_report",
+                depends_on=["select"],
+                needs_confirmation=True,
+                phase="报告",
+            ),
+        ],
+    )
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"experiments": [{"id": "exp-lgb", "recipe": "lgb", "artifact_id": "art-lgb", "oot_ks": 0.31}]},
+        {
+            "selected_experiment_id": "exp-lgb",
+            "artifact_id": "art-lgb",
+            "recipe": "lgb",
+            "target_type": "binary",
+            "selection_metric": "oot_ks",
+            "selection_reason": "按 oot_ks 在 PMML/验证移交可用候选中自动选择。",
+            "metrics": {"oot_ks": 0.31, "test_ks": 0.29},
+            "capabilities": {
+                "pmml_supported": True,
+                "handoff_supported": True,
+                "native_model_supported": True,
+                "reason": "",
+            },
+            "experiments": [
+                {
+                    "id": "exp-lgb",
+                    "recipe": "lgb",
+                    "artifact_id": "art-lgb",
+                    "oot_ks": 0.31,
+                    "test_ks": 0.29,
+                    "capabilities": {
+                        "pmml_supported": True,
+                        "handoff_supported": True,
+                        "native_model_supported": True,
+                    },
+                },
+                {
+                    "id": "exp-mlp",
+                    "recipe": "mlp",
+                    "artifact_id": "art-mlp",
+                    "oot_ks": 0.33,
+                    "capabilities": {
+                        "pmml_supported": False,
+                        "handoff_supported": False,
+                        "native_model_supported": True,
+                        "reason": "DNN 仅支持原生模型。",
+                    },
+                },
+            ],
+        },
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    delivery = turn.messages[0].metadata["model_delivery"]
+    assert delivery["source_tool"] == "select_experiment"
+    assert delivery["selected_experiment_id"] == "exp-lgb"
+    assert delivery["artifact_id"] == "art-lgb"
+    assert delivery["metrics"] == {"oot_ks": 0.31, "test_ks": 0.29}
+    assert delivery["readiness"][0]["status"] == "ready"
+    assert delivery["readiness"][1]["status"] == "ready"
+    assert delivery["readiness"][2]["status"] == "ready"
+    assert [row["selected"] for row in delivery["candidates"]] == [True, False]
+    assert delivery["candidates"][1]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
+
+
+def test_done_message_carries_post_training_delivery_payload(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[_step("post", index=0, tool="post_training_action", phase="交付")],
+    )
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "experiment_id": "exp-lgb",
+            "artifact_id": "art-lgb",
+            "native_model_path": "/tmp/model.pkl",
+            "pmml_path": "/tmp/model.pmml",
+            "validation_task_id": "task-validation",
+            "capabilities": {
+                "pmml_supported": True,
+                "handoff_supported": True,
+                "native_model_supported": True,
+            },
+            "actions": [
+                {"action": "export_pmml", "status": "succeeded", "pmml_path": "/tmp/model.pmml"},
+                {
+                    "action": "handoff_to_validation",
+                    "status": "succeeded",
+                    "validation_task_id": "task-validation",
+                },
+            ],
+        }
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    delivery = turn.messages[0].metadata["model_delivery"]
+    assert turn.messages[0].stage == "done"
+    assert delivery["source_tool"] == "post_training_action"
+    assert delivery["native_model_path"] == "/tmp/model.pkl"
+    assert delivery["pmml_path"] == "/tmp/model.pmml"
+    assert delivery["validation_task_id"] == "task-validation"
+    assert [item["status"] for item in delivery["actions"]] == ["succeeded", "succeeded"]
+    assert [item["status"] for item in delivery["readiness"]] == ["ready", "succeeded", "succeeded"]
+
+
 def test_driver_sample_weight_adjust_reruns_modeling_spec_and_downstream_screen(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

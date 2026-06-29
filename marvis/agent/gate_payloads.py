@@ -136,6 +136,41 @@ def build_modeling_setup_payload(
     }
 
 
+def build_model_delivery_payload(output: dict, dep) -> dict | None:
+    """Structured modeling comparison/delivery payload for late-stage gates."""
+    o = output if isinstance(output, dict) else {}
+    if not o:
+        return None
+    tool = str(getattr(getattr(dep, "tool_ref", None), "tool", "") or "")
+    if tool not in {"compare_experiments", "select_experiment", "post_training_action"}:
+        return None
+    capabilities = _capabilities(o.get("capabilities"))
+    actions = _delivery_actions(o.get("actions"))
+    candidates = _experiment_candidates(o.get("experiments"))
+    selected_id = str(o.get("selected_experiment_id") or o.get("experiment_id") or "")
+    if selected_id:
+        candidates = _mark_selected_candidate(candidates, selected_id)
+    return {
+        "step_id": getattr(dep, "id", None),
+        "step_title": getattr(dep, "title", None),
+        "source_tool": tool,
+        "selected_experiment_id": selected_id,
+        "artifact_id": str(o.get("artifact_id") or ""),
+        "recipe": str(o.get("recipe") or ""),
+        "target_type": str(o.get("target_type") or ""),
+        "selection_metric": str(o.get("selection_metric") or ""),
+        "selection_reason": str(o.get("selection_reason") or ""),
+        "metrics": _metrics(o.get("metrics")),
+        "capabilities": capabilities,
+        "candidates": candidates,
+        "actions": actions,
+        "native_model_path": str(o.get("native_model_path") or ""),
+        "pmml_path": str(o.get("pmml_path") or ""),
+        "validation_task_id": str(o.get("validation_task_id") or ""),
+        "readiness": _delivery_readiness(o, capabilities, actions),
+    }
+
+
 def _split_summary(output: dict | None) -> dict | None:
     if not isinstance(output, dict):
         return None
@@ -172,8 +207,121 @@ def _split_summary(output: dict | None) -> dict | None:
     }
 
 
+def _metrics(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): val
+        for key, val in value.items()
+        if _is_delivery_metric_key(str(key)) and isinstance(val, (int, float, str, bool))
+    }
+
+
+def _is_delivery_metric_key(key: str) -> bool:
+    return key.startswith(("train_", "test_", "oot_")) or key in {
+        "ks",
+        "auc",
+        "rmse",
+        "mae",
+        "r2",
+        "accuracy",
+        "logloss",
+        "feature_count",
+        "n_features",
+    }
+
+
+def _capabilities(value) -> dict:
+    caps = value if isinstance(value, dict) else {}
+    return {
+        "pmml_supported": bool(caps.get("pmml_supported")),
+        "handoff_supported": bool(caps.get("handoff_supported")),
+        "native_model_supported": bool(caps.get("native_model_supported")),
+        "reason": str(caps.get("reason") or ""),
+    }
+
+
+def _experiment_candidates(value) -> list[dict]:
+    rows = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            continue
+        rows.append({
+            "id": str(item.get("id") or item.get("experiment_id") or ""),
+            "artifact_id": str(item.get("artifact_id") or ""),
+            "recipe": str(item.get("recipe") or ""),
+            "metrics": _metrics(item),
+            "capabilities": _capabilities(item.get("capabilities")),
+            "selected": False,
+        })
+    return rows
+
+
+def _mark_selected_candidate(candidates: list[dict], selected_id: str) -> list[dict]:
+    marked = []
+    for item in candidates:
+        row = dict(item)
+        row["selected"] = row.get("id") == selected_id
+        marked.append(row)
+    return marked
+
+
+def _delivery_actions(value) -> list[dict]:
+    actions = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            continue
+        actions.append({
+            "action": str(item.get("action") or ""),
+            "status": str(item.get("status") or ""),
+            "pmml_path": str(item.get("pmml_path") or ""),
+            "validation_task_id": str(item.get("validation_task_id") or ""),
+            "reason": str(item.get("reason") or ""),
+        })
+    return actions
+
+
+def _action(actions: list[dict], name: str) -> dict:
+    return next((item for item in actions if item.get("action") == name), {})
+
+
+def _delivery_readiness(output: dict, capabilities: dict, actions: list[dict]) -> list[dict]:
+    native_path = str(output.get("native_model_path") or "")
+    pmml_path = str(output.get("pmml_path") or "")
+    validation_task_id = str(output.get("validation_task_id") or "")
+    pmml_action = _action(actions, "export_pmml")
+    handoff_action = _action(actions, "handoff_to_validation")
+    readiness = [
+        {
+            "id": "native_model",
+            "label": "原生模型",
+            "status": "ready" if native_path or capabilities.get("native_model_supported") else "missing",
+            "artifact": native_path,
+            "reason": "",
+        },
+        {
+            "id": "pmml",
+            "label": "PMML",
+            "status": pmml_action.get("status")
+            or ("ready" if capabilities.get("pmml_supported") else "unsupported"),
+            "artifact": pmml_path or pmml_action.get("pmml_path", ""),
+            "reason": pmml_action.get("reason") or capabilities.get("reason", ""),
+        },
+        {
+            "id": "validation_handoff",
+            "label": "验证移交",
+            "status": handoff_action.get("status")
+            or ("ready" if capabilities.get("handoff_supported") else "unsupported"),
+            "artifact": validation_task_id or handoff_action.get("validation_task_id", ""),
+            "reason": handoff_action.get("reason") or capabilities.get("reason", ""),
+        },
+    ]
+    return readiness
+
+
 __all__ = [
     "build_dedup_payload",
+    "build_model_delivery_payload",
     "build_modeling_setup_payload",
     "build_screen_payload",
     "screen_known_features",

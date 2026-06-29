@@ -37,6 +37,7 @@ def test_v2_static_modules_are_packaged_and_present():
         "skill_manager.js",
         "workflow_create.js",
         "artifact_view.js",
+        "model_delivery_panel.js",
         "modeling_setup_panel.js",
         "capability.js",
         "memory_manager.js",
