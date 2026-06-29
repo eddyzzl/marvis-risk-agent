@@ -1667,6 +1667,9 @@
           "approval_package_path": {
             "type": "string"
           },
+          "approval_package_markdown_path": {
+            "type": "string"
+          },
           "capabilities": {
             "type": "object"
           },
@@ -1679,6 +1682,7 @@
           "artifact_id",
           "native_model_path",
           "approval_package_path",
+          "approval_package_markdown_path",
           "capabilities",
           "actions"
         ],

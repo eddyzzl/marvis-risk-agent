@@ -196,6 +196,7 @@ def build_model_delivery_payload(
         "pmml_path": str(o.get("pmml_path") or ""),
         "validation_task_id": str(o.get("validation_task_id") or ""),
         "approval_package_path": str(o.get("approval_package_path") or ""),
+        "approval_package_markdown_path": str(o.get("approval_package_markdown_path") or ""),
         "report": report,
         "readiness": _delivery_readiness(
             o,
@@ -726,6 +727,7 @@ def _delivery_readiness(
 ) -> list[dict]:
     native_path = str(output.get("native_model_path") or "")
     approval_package_path = str(output.get("approval_package_path") or "")
+    approval_package_markdown_path = str(output.get("approval_package_markdown_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
     validation_task_id = str(output.get("validation_task_id") or "")
     pmml_action = _action(actions, "export_pmml")
@@ -771,7 +773,7 @@ def _delivery_readiness(
             "id": "approval_package",
             "label": "审批包",
             "status": "ready",
-            "artifact": approval_package_path,
+            "artifact": approval_package_markdown_path or approval_package_path,
             "reason": "模型审批与交付证据已生成",
         })
     if isinstance(policy_signals, dict) and policy_signals:

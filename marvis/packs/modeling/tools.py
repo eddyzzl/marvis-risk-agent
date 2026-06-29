@@ -12,7 +12,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
@@ -1303,7 +1303,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 "reason": reason or "sample_dataset_id is required for validation handoff",
             })
 
-    approval_package_path = str(_write_approval_package(
+    approval_package = _write_approval_package(
         base_dir,
         experiment=experiment,
         artifact=artifact,
@@ -1313,14 +1313,15 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
         pmml_path=pmml_path,
         validation_task_id=validation_task_id,
         selection_policy_decision=selection_policy_decision,
-    ))
+    )
     return {
         "experiment_id": experiment.id,
         "artifact_id": artifact.id,
         "native_model_path": str(artifact.model_path),
         "pmml_path": pmml_path,
         "validation_task_id": validation_task_id,
-        "approval_package_path": approval_package_path,
+        "approval_package_path": str(approval_package["json_path"]),
+        "approval_package_markdown_path": str(approval_package["markdown_path"]),
         "capabilities": capabilities,
         "actions": actions,
     }
@@ -1360,7 +1361,7 @@ def _write_approval_package(
     pmml_path: str,
     validation_task_id: str,
     selection_policy_decision: dict,
-) -> Path:
+) -> dict[str, Path]:
     config = experiment.config
     payload = {
         "schema_version": 1,
@@ -1383,22 +1384,131 @@ def _write_approval_package(
         "selection_policy_decision": selection_policy_decision,
         "delivery_actions": _json_safe(actions),
         "artifacts": {
-            "native_model_path": artifact.model_path,
-            "pmml_path": pmml_path,
-            "validation_task_id": validation_task_id,
+            "native_model_path": str(artifact.model_path or ""),
+            "pmml_path": str(pmml_path or ""),
+            "validation_task_id": str(validation_task_id or ""),
         },
         "scorecard_table": _json_safe(_scorecard_table_rows(artifact)),
         "model_params": _json_safe(artifact.params),
     }
-    filename = f"{artifact.id}.approval_package.json"
-    return write_artifact_file(
-        base_dir,
-        filename,
-        lambda path: path.write_text(
-            json.dumps(_json_safe(payload), ensure_ascii=False, indent=2, sort_keys=True),
+    safe_payload = _json_safe(payload)
+    uow = ArtifactUnitOfWork()
+    json_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.json")
+    markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.approval_package.md")
+    try:
+        json_artifact.path.write_text(
+            json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
-        ),
+        )
+        markdown_artifact.path.write_text(
+            _approval_package_markdown(safe_payload),
+            encoding="utf-8",
+        )
+        return uow.finalize(lambda: {
+            "json_path": json_artifact.final_path,
+            "markdown_path": markdown_artifact.final_path,
+        })
+    except Exception:
+        uow.rollback()
+        raise
+
+
+def _approval_package_markdown(payload: dict) -> str:
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    policy = (
+        payload.get("selection_policy_decision")
+        if isinstance(payload.get("selection_policy_decision"), dict)
+        else {}
     )
+    artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+    actions = [item for item in (payload.get("delivery_actions") or []) if isinstance(item, dict)]
+    features = [str(item) for item in (payload.get("features") or []) if str(item)]
+    violations = [item for item in (policy.get("violations") or []) if isinstance(item, dict)]
+    lines = [
+        "# 模型审批包",
+        "",
+        "## 基本信息",
+        "",
+        f"- 实验ID: `{_md_inline(payload.get('experiment_id'))}`",
+        f"- 产物ID: `{_md_inline(payload.get('artifact_id'))}`",
+        f"- 算法: `{_md_inline(payload.get('algorithm'))}`",
+        f"- 目标类型: `{_md_inline(payload.get('target_type'))}`",
+        f"- 目标列: `{_md_inline(payload.get('target_col'))}`",
+        f"- 样本集: `{_md_inline(payload.get('sample_dataset_id') or payload.get('dataset_id'))}`",
+        f"- 特征数: {_md_inline(payload.get('feature_count'))}",
+        "",
+        "## 关键指标",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | ---: |",
+    ]
+    metric_rows = [
+        (key, value)
+        for key, value in metrics.items()
+        if key.startswith(("test_", "oot_", "psi_")) or key in {"overfit_flag"}
+    ]
+    if metric_rows:
+        for key, value in sorted(metric_rows):
+            lines.append(f"| {_md_cell(key)} | {_md_cell(_metric_display(value))} |")
+    else:
+        lines.append("| - | - |")
+    lines.extend([
+        "",
+        "## 策略执行",
+        "",
+        f"- 状态: `{_md_inline(policy.get('status') or 'not_requested')}`",
+        f"- Override原因: {_md_inline(policy.get('override_reason') or '-')}",
+    ])
+    if violations:
+        lines.extend(["", "| 违规项 | 说明 |", "| --- | --- |"])
+        for item in violations:
+            lines.append(
+                f"| {_md_cell(item.get('code') or '-')} | {_md_cell(item.get('message') or '-')} |"
+            )
+    lines.extend([
+        "",
+        "## 交付产物",
+        "",
+        "| 类型 | 路径/任务 |",
+        "| --- | --- |",
+        f"| 原生模型 | `{_md_cell(artifacts.get('native_model_path') or '-')}` |",
+        f"| PMML | `{_md_cell(artifacts.get('pmml_path') or '-')}` |",
+        f"| 验证任务 | `{_md_cell(artifacts.get('validation_task_id') or '-')}` |",
+    ])
+    if actions:
+        lines.extend(["", "## 交付动作", "", "| 动作 | 状态 | 说明 |", "| --- | --- | --- |"])
+        for item in actions:
+            lines.append(
+                f"| {_md_cell(item.get('action') or '-')} | "
+                f"{_md_cell(item.get('status') or '-')} | "
+                f"{_md_cell(item.get('reason') or item.get('pmml_path') or item.get('validation_task_id') or '-')} |"
+            )
+    lines.extend(["", "## 入模特征", ""])
+    preview = features[:50]
+    if preview:
+        for feature in preview:
+            lines.append(f"- `{_md_inline(feature)}`")
+        if len(features) > len(preview):
+            lines.append(f"- ... 另有 {len(features) - len(preview)} 个特征")
+    else:
+        lines.append("- -")
+    return "\n".join(lines) + "\n"
+
+
+def _metric_display(value) -> str:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)) and np.isfinite(float(value)):
+        return _format_number_token(float(value))
+    return "-" if value is None else str(value)
+
+
+def _md_inline(value) -> str:
+    return str(value if value is not None else "-").replace("`", "'")
+
+
+def _md_cell(value) -> str:
+    return _md_inline(value).replace("|", "\\|").replace("\n", " ")
 
 
 def tool_generate_model_report(inputs: dict, ctx) -> dict:

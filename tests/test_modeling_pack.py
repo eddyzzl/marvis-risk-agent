@@ -142,6 +142,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
     assert "llm" in report_tool.side_effects
     assert "selection_policy_decision" in post_training_tool.input_schema["properties"]
     assert "approval_package_path" in post_training_tool.output_schema["required"]
+    assert "approval_package_markdown_path" in post_training_tool.output_schema["required"]
 
 
 def test_modeling_tool_seed_fallback_uses_shared_default():
@@ -972,6 +973,13 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert approval_payload["selection_policy_decision"]["override_reason"].startswith("业务方本轮只验收")
     assert {item["status"] for item in approval_payload["delivery_actions"]} == {"skipped"}
     assert approval_payload["feature_count"] == 2
+    approval_markdown = Path(post_training.output["approval_package_markdown_path"])
+    assert approval_markdown.exists()
+    markdown_text = approval_markdown.read_text(encoding="utf-8")
+    assert "# 模型审批包" in markdown_text
+    assert "业务方本轮只验收" in markdown_text
+    assert "require_pmml" in markdown_text
+    assert "## 入模特征" in markdown_text
 
 
 def test_pick_best_experiment_is_target_type_aware():
