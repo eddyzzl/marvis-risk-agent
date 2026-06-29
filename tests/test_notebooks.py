@@ -337,6 +337,7 @@ def test_appended_system_cells_are_visible_before_execution(tmp_path: Path, monk
         timeout=60,
         kernel_name="python3",
         progress_path=progress_path,
+        allow_appended_execution=True,
     )
     try:
         pmml_index = session.append_code_cell(
@@ -850,6 +851,7 @@ def test_live_notebook_session_reuses_kernel_for_appended_cells(tmp_path: Path):
         log_path=log_path,
         timeout=60,
         kernel_name="python3",
+        allow_appended_execution=True,
     )
 
     try:
@@ -867,3 +869,29 @@ def test_live_notebook_session_reuses_kernel_for_appended_cells(tmp_path: Path):
     assert len(executed.cells) == 2
     assert executed.cells[-1].outputs[0]["text"] == "live=42\n"
     assert appended_log_path.read_text(encoding="utf-8") == "succeeded\n"
+
+
+def test_live_notebook_session_rejects_appended_cells_by_default(tmp_path: Path):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[nbformat.v4.new_code_cell("x = 1")],
+            metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+        ),
+        notebook_path,
+    )
+    session = NotebookExecutionSession(
+        notebook_path=notebook_path,
+        executed_path=executed_path,
+        log_path=log_path,
+        timeout=60,
+        kernel_name="python3",
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="appended-cell execution is disabled"):
+            session.execute_code_cell("x = 2")
+    finally:
+        session.close()

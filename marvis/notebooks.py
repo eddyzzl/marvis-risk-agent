@@ -70,6 +70,7 @@ class NotebookExecutionSession:
         cancellation_token: NotebookCancellationToken | None = None,
         memory_limit_mb: int | None = None,
         resource_poll_interval_seconds: float = 0.5,
+        allow_appended_execution: bool = False,
     ) -> None:
         self.notebook_path = notebook_path
         self.executed_path = executed_path
@@ -82,6 +83,8 @@ class NotebookExecutionSession:
         self.memory_limit_mb = _normalize_memory_limit_mb(memory_limit_mb)
         self.resource_poll_interval_seconds = max(0.05, float(resource_poll_interval_seconds))
         self.notebook = nbformat.read(notebook_path, as_version=4)
+        self.original_cell_count = len(self.notebook.cells)
+        self.allow_appended_execution = bool(allow_appended_execution)
         self.plan = notebook_step_plan(self.notebook)
         self.cell_events: dict[int, dict[str, Any]] = {}
         self.closed = False
@@ -123,6 +126,7 @@ class NotebookExecutionSession:
         metadata: dict[str, Any] | None = None,
         record_progress: bool = False,
     ) -> NotebookRunResult:
+        self._ensure_appended_execution_allowed()
         cell_index = self.append_code_cell(
             source,
             metadata=metadata,
@@ -142,6 +146,7 @@ class NotebookExecutionSession:
         record_progress: bool = False,
     ) -> int:
         self._ensure_open()
+        self._ensure_appended_execution_allowed()
         cell = nbformat.v4.new_code_cell(source)
         if metadata:
             cell.metadata.update(metadata)
@@ -166,6 +171,8 @@ class NotebookExecutionSession:
             raise ValueError(f"notebook cell index out of range: {cell_index}") from exc
         if cell.cell_type != "code":
             raise ValueError(f"notebook cell is not code: {cell_index}")
+        if cell_index >= self.original_cell_count:
+            self._ensure_appended_execution_allowed()
         target_log_path = log_path or self.log_path
         target_log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -447,6 +454,13 @@ class NotebookExecutionSession:
     def _ensure_open(self) -> None:
         if self.closed:
             raise RuntimeError("notebook execution session is closed")
+
+    def _ensure_appended_execution_allowed(self) -> None:
+        if not self.allow_appended_execution:
+            raise RuntimeError(
+                "live notebook appended-cell execution is disabled for this session; "
+                "use isolated notebook execution or create the session with explicit appended-cell permission"
+            )
 
 
 class _NotebookResourceMonitor:

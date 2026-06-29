@@ -1700,6 +1700,7 @@ def _notebook_step_v3(
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
             memory_limit_mb=notebook_memory_limit_mb,
+            allow_appended_execution=True,
         )
         result = live_session.execute_notebook(keep_alive=True)
     else:
