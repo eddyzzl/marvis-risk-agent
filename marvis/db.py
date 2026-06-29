@@ -2577,11 +2577,16 @@ def _set_join_plan_executed_row(
            SET status = 'executed',
                result_dataset_id = ?
          WHERE id = ?
+           AND status = 'draft'
         """,
         (result_dataset_id, plan_id),
     )
-    if cursor.rowcount == 0:
+    if cursor.rowcount != 0:
+        return
+    row = conn.execute("SELECT status FROM joins WHERE id = ?", (plan_id,)).fetchone()
+    if row is None:
         raise KeyError(plan_id)
+    raise ConflictError(f"join plan {plan_id} is already {row['status']}; cannot execute again")
 
 
 def _column_profile_to_dict(profile: ColumnProfile) -> dict:

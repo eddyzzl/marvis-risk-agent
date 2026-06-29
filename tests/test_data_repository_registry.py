@@ -16,6 +16,7 @@ from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
 import marvis.db as db_module
+from marvis.state_machine import ConflictError
 
 
 def _profile(name: str, role: str = "id") -> ColumnProfile:
@@ -124,6 +125,28 @@ def test_dataset_repository_round_trips_join_plans_and_updates_specs(tmp_path):
     assert executed.result_dataset_id == "derived-1"
     assert executed.joins[0].confirmed is True
     assert executed.joins[0].dedup_strategy == "first"
+
+
+def test_dataset_repository_rejects_reexecuting_join_plan(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    plan = JoinPlan(
+        id="join-1",
+        task_id="task-1",
+        anchor_dataset_id="anchor-1",
+        joins=[_join_spec(confirmed=True)],
+        status="draft",
+    )
+    repo.create_join_plan(plan)
+
+    repo.set_join_plan_executed(plan.id, "derived-1")
+    with pytest.raises(ConflictError, match="cannot execute again"):
+        repo.set_join_plan_executed(plan.id, "derived-2")
+
+    loaded = repo.load_join_plan(plan.id)
+    assert loaded.status == "executed"
+    assert loaded.result_dataset_id == "derived-1"
 
 
 def test_dataset_repository_rolls_back_join_spec_when_audit_write_fails(
@@ -238,6 +261,48 @@ def test_dataset_repository_records_join_result_dataset_and_audit(tmp_path):
     audit = db_module.PluginRepository(db_path).list_audit(kind="join.executed")[0]
     assert audit["target_ref"] == plan.id
     assert audit["detail"]["result_dataset_id"] == result.id
+
+
+def test_dataset_repository_rejects_second_join_result_dataset(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    plan = JoinPlan(
+        id="join-1",
+        task_id="task-1",
+        anchor_dataset_id="anchor-1",
+        joins=[_join_spec(confirmed=True)],
+        status="draft",
+    )
+    repo.create_join_plan(plan)
+    repo.record_join_result_with_audit(
+        plan.id,
+        _dataset("derived-1", role="derived"),
+        audit={
+            "kind": "join.executed",
+            "target_ref": plan.id,
+            "actor": "system",
+            "outcome": "succeeded",
+            "detail": {"task_id": plan.task_id, "result_dataset_id": "derived-1"},
+        },
+    )
+
+    with pytest.raises(ConflictError, match="cannot execute again"):
+        repo.record_join_result_with_audit(
+            plan.id,
+            _dataset("derived-2", role="derived"),
+            audit={
+                "kind": "join.executed",
+                "target_ref": plan.id,
+                "actor": "system",
+                "outcome": "succeeded",
+                "detail": {"task_id": plan.task_id, "result_dataset_id": "derived-2"},
+            },
+        )
+
+    loaded = repo.load_join_plan(plan.id)
+    assert loaded.result_dataset_id == "derived-1"
+    assert repo.get_dataset("derived-2") is None
 
 
 def test_dataset_repository_rolls_back_join_result_dataset_when_audit_fails(
