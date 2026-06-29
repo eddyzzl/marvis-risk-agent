@@ -496,7 +496,12 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
             "target_type": "binary",
             "selection_metric": "oot_ks",
             "selection_reason": "按 oot_ks 在 PMML/验证移交可用候选中自动选择。",
-            "metrics": {"oot_ks": 0.31, "test_ks": 0.29},
+            "metrics": {
+                "oot_ks": 0.31,
+                "test_ks": 0.29,
+                "psi_oot_vs_train": 0.06,
+                "feature_count": 18,
+            },
             "capabilities": {
                 "pmml_supported": True,
                 "handoff_supported": True,
@@ -510,6 +515,9 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
                     "artifact_id": "art-lgb",
                     "oot_ks": 0.31,
                     "test_ks": 0.29,
+                    "psi_oot_vs_train": 0.06,
+                    "feature_count": 18,
+                    "calibration": {"method": "sigmoid", "pmml_includes_calibration": False},
                     "capabilities": {
                         "pmml_supported": True,
                         "handoff_supported": True,
@@ -521,6 +529,9 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
                     "recipe": "mlp",
                     "artifact_id": "art-mlp",
                     "oot_ks": 0.33,
+                    "test_ks": 0.48,
+                    "psi_oot_vs_train": 0.28,
+                    "feature_count": 120,
                     "capabilities": {
                         "pmml_supported": False,
                         "handoff_supported": False,
@@ -541,11 +552,23 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
     assert delivery["source_tool"] == "select_experiment"
     assert delivery["selected_experiment_id"] == "exp-lgb"
     assert delivery["artifact_id"] == "art-lgb"
-    assert delivery["metrics"] == {"oot_ks": 0.31, "test_ks": 0.29}
+    assert delivery["metrics"] == {"oot_ks": 0.31, "test_ks": 0.29, "psi_oot_vs_train": 0.06, "feature_count": 18}
+    assert delivery["business_signals"] == {
+        "feature_count": 18.0,
+        "stability": "稳定",
+        "stability_value": 0.06,
+        "generalization_gap": pytest.approx(0.02),
+        "overfit_flag": False,
+        "calibration": "已校准(PMML不含)",
+        "delivery": "可移交",
+    }
     assert delivery["readiness"][0]["status"] == "ready"
     assert delivery["readiness"][1]["status"] == "ready"
     assert delivery["readiness"][2]["status"] == "ready"
     assert [row["selected"] for row in delivery["candidates"]] == [True, False]
+    assert delivery["candidates"][0]["business_signals"]["calibration"] == "已校准(PMML不含)"
+    assert delivery["candidates"][1]["business_signals"]["stability"] == "高风险"
+    assert delivery["candidates"][1]["business_signals"]["delivery"] == "仅原生"
     assert delivery["candidates"][1]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
 
 

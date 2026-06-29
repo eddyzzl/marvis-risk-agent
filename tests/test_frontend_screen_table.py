@@ -227,8 +227,11 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert "candidateTable(delivery.candidates)" in module_js
     assert "actionTable(delivery.actions)" in module_js
     assert "reportSummary(delivery.report)" in module_js
+    assert "businessSignalSummary(delivery.business_signals)" in module_js
+    assert "business_signals" in module_js
     assert ".model-delivery-panel" in css
     assert ".model-delivery-readiness-grid" in css
+    assert ".model-delivery-business-grid" in css
     assert ".model-delivery-table" in css
     assert ".model-delivery-status" in css
     assert ".model-delivery-report-summary" in css
@@ -252,6 +255,12 @@ def test_model_delivery_panel_renders_selection_and_actions():
               selection_metric: "oot_ks",
               selection_reason: "按 oot_ks 在 PMML/验证移交可用候选中自动选择。",
               metrics: {{ oot_ks: 0.3123, test_ks: 0.2876, oot_auc: 0.721 }},
+              business_signals: {{
+                stability: "稳定",
+                feature_count: 18,
+                calibration: "已校准(PMML不含)",
+                delivery: "可移交",
+              }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
                 {{ id: "model_report", label: "模型报告", status: "partial", artifact: "/tmp/model_report.xlsx", reason: "报告章节 1/2 可生成" }},
@@ -264,6 +273,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                   recipe: "lgb",
                   selected: true,
                   metrics: {{ oot_ks: 0.3123, test_ks: 0.2876 }},
+                  business_signals: {{ stability: "稳定", feature_count: 18, calibration: "已校准(PMML不含)", delivery: "可移交" }},
                   capabilities: {{ pmml_supported: true, handoff_supported: true, native_model_supported: true }},
                 }},
                 {{
@@ -271,6 +281,7 @@ def test_model_delivery_panel_renders_selection_and_actions():
                   recipe: "mlp",
                   selected: false,
                   metrics: {{ oot_ks: 0.3321 }},
+                  business_signals: {{ stability: "高风险", feature_count: 120, calibration: "未校准", delivery: "仅原生" }},
                   capabilities: {{ pmml_supported: false, handoff_supported: false, native_model_supported: true, reason: "仅原生模型" }},
                 }},
               ],
@@ -300,6 +311,14 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("exp-lgb"), true);
         assert.equal(html.includes("已选"), true);
         assert.equal(html.includes("0.3123"), true);
+        assert.equal(html.includes("稳定性"), true);
+        assert.equal(html.includes("特征数"), true);
+        assert.equal(html.includes("校准"), true);
+        assert.equal(html.includes("稳定"), true);
+        assert.equal(html.includes("高风险"), true);
+        assert.equal(html.includes("已校准(PMML不含)"), true);
+        assert.equal(html.includes("仅原生"), true);
+        assert.equal(html.includes("120.00"), true);
         assert.equal(html.includes("PMML"), true);
         assert.equal(html.includes("验证移交"), true);
         assert.equal(html.includes("model.pmml"), true);

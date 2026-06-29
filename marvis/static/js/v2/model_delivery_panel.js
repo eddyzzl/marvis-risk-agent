@@ -47,6 +47,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
     `<div class="model-delivery-chip"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
   )).join("");
   const readinessHtml = readinessCards(delivery.readiness);
+  const businessHtml = businessSignalSummary(delivery.business_signals);
   const metricsHtml = metricsGrid(delivery.metrics);
   const candidatesHtml = candidateTable(delivery.candidates);
   const actionsHtml = actionTable(delivery.actions);
@@ -60,6 +61,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
     ${chips ? `<div class="model-delivery-chip-grid">${chips}</div>` : ""}
     ${reason ? `<div class="model-delivery-reason">${escapeHtml(reason)}</div>` : ""}
     ${readinessHtml}
+    ${businessHtml}
     ${metricsHtml}
     ${candidatesHtml}
     ${actionsHtml}
@@ -102,7 +104,7 @@ function candidateTable(candidates) {
   const metricKeys = sortedMetricKeys([
     ...new Set(rows.flatMap((row) => Object.keys(row.metrics && typeof row.metrics === "object" ? row.metrics : {}))),
   ]).slice(0, 6);
-  const headers = ["算法", "实验", ...metricKeys, "PMML", "验证移交"];
+  const headers = ["算法", "实验", ...metricKeys, "稳定性", "特征数", "校准", "交付"];
   return `<div class="model-delivery-table-wrap">
     <div class="modeling-section-label">候选实验</div>
     <table class="model-delivery-table">
@@ -110,17 +112,36 @@ function candidateTable(candidates) {
       <tbody>${rows.map((row) => {
         const caps = row.capabilities && typeof row.capabilities === "object" ? row.capabilities : {};
         const metrics = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+        const signals = row.business_signals && typeof row.business_signals === "object" ? row.business_signals : {};
         const selected = row.selected === true;
         return `<tr${selected ? ' class="is-selected"' : ""}>
           <td>${escapeHtml(String(row.recipe || "-"))}${selected ? ' <span class="model-delivery-selected">已选</span>' : ""}</td>
           <td><code>${escapeHtml(String(row.id || "-"))}</code></td>
           ${metricKeys.map((key) => `<td class="model-delivery-num">${escapeHtml(formatMetric(metrics[key]))}</td>`).join("")}
-          <td>${caps.pmml_supported ? "是" : "否"}</td>
-          <td>${caps.handoff_supported ? "是" : "否"}</td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(signals.stability))}">${escapeHtml(String(signals.stability || "-"))}</span></td>
+          <td class="model-delivery-num">${escapeHtml(formatMetric(signals.feature_count))}</td>
+          <td>${escapeHtml(String(signals.calibration || "-"))}</td>
+          <td>${escapeHtml(String(signals.delivery || (caps.pmml_supported && caps.handoff_supported ? "可移交" : "仅原生")))}</td>
         </tr>`;
       }).join("")}</tbody>
     </table>
   </div>`;
+}
+
+function businessSignalSummary(signals) {
+  const data = signals && typeof signals === "object" ? signals : {};
+  const items = [
+    ["稳定性", data.stability || "待评估", signalKind(data.stability)],
+    ["特征数", data.feature_count === null || data.feature_count === undefined ? "-" : formatMetric(data.feature_count), "neutral"],
+    ["校准", data.calibration || "未校准", data.calibration === "需说明" ? "warning" : "neutral"],
+    ["交付", data.delivery || "待确认", data.delivery === "可移交" ? "ready" : "warning"],
+  ];
+  return `<div class="model-delivery-business-grid">${items.map(([label, value, kind]) => (
+    `<div class="model-delivery-business-card" data-signal-kind="${escapeHtml(kind)}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </div>`
+  )).join("")}</div>`;
 }
 
 function actionTable(actions) {
@@ -214,6 +235,14 @@ function statusKind(status) {
   if (["succeeded", "ready", "supported"].includes(normalized)) return "ready";
   if (["skipped", "unsupported", "missing", "partial"].includes(normalized)) return "warning";
   if (["failed", "error"].includes(normalized)) return "error";
+  return "neutral";
+}
+
+function signalKind(value) {
+  const text = String(value || "").toLowerCase();
+  if (["稳定", "可移交"].includes(String(value || ""))) return "ready";
+  if (["关注", "需复核", "高风险", "需说明", "仅原生", "不可交付"].includes(String(value || ""))) return "warning";
+  if (text.includes("risk") || text.includes("高")) return "warning";
   return "neutral";
 }
 

@@ -56,6 +56,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `59 passed` after merging model-report path and section readiness into the delivery panel for both final gates and done messages.
   - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after adding editable target type, algorithm, tuning-trial, and sample-weight controls to `ModelingSetupPanel` with required override reasons for structural changes.
   - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after allowing family-mismatch recipes to be selected when switching target type and blocking target/algorithm family mismatches before submission.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after adding delivery-panel business signals for stability, feature count, calibration state, and handoff readiness.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
@@ -83,7 +84,7 @@ It is not ready to call "complete" yet. The main remaining gap is not one isolat
 
 1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels; richer schema-to-form controls remain.
 2. Broaden AUTO coverage and safety tests around the new structured `confirm|adjust|replan|clarify|halt` path.
-3. Finish modeling productization with browser smoke for the setup/delivery panels, richer business comparison dimensions, and domain guidance for risky setup overrides.
+3. Finish modeling productization with browser smoke for the setup/delivery panels, deeper business constraints such as monotonicity/scorecard policy, and domain guidance for risky setup overrides.
 4. Add a deeper DB+file `UnitOfWork` over the staged artifact stores and recovered `StepRunLedger`.
 5. Continue deeper `api.py`, `db.py`, and `app.js` decomposition after the first stable splits.
 6. Keep CI and local `scripts/check` green while making the remaining large refactors.
@@ -117,14 +118,14 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
   - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
   - The modeling setup gate now renders a real setup panel rather than only a weight picker: it stays visible without weight candidates, shows target type, selected algorithms, primary tuning recipe, candidate feature count, tuning trials, metric policy, algorithm/PMML support, split/OOT counts and warnings, feeds the same context into AUTO prompts, and its renderer plus setup-adjust controller are extracted to `static/js/v2/modeling_setup_panel.js`. Target type, algorithms, tuning trials, and sample weight can now be adjusted through structured controls; structural changes require a human override reason and rerun the spec plus downstream screening. Family-mismatch recipes such as `lgb_regressor`/`lgb_multiclass` are selectable when changing target type, and invalid target/algorithm combinations are blocked before submission.
-  - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, model-report readiness/section coverage, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
+  - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, stability/feature-count/calibration/delivery business signals, model-report readiness/section coverage, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
 
 Items confirmed still not complete and therefore still part of the plan:
 
 - OS-level sandboxing is not complete. Plugin/draft tools and ordinary notebook execution have subprocess/resource-limit isolation, but the live keep-alive notebook path still needs either worker RPC redesign or removal from safety-critical flows.
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths, but there is still no single cross-resource `UnitOfWork` that makes SQLite state and file promotion atomic as one unit.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
-- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, but still lacks Playwright desktop/mobile visual smoke and deeper business-choice comparison dimensions. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
+- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls and core business signals, but still lacks Playwright desktop/mobile visual smoke and deeper policy dimensions such as monotonicity/scorecard constraints. Right-rail artifact preview is now wired into the real app shell, but still needs browser smoke coverage.
 - The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff risk flags and wide downstream resets. More domain fixtures are still useful for strategy, vintage, and future extracted modeling setup panels.
 
@@ -135,7 +136,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | # | Item | Status | Evidence / Gap | Next Action |
 |---|---|---|---|---|
 | 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. | Add more fixtures for destructive domain gates and frontend stale-control paths. |
-| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons and target/algorithm family guards for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage. | Add browser smoke coverage and deeper business comparison dimensions before calling the workflow complete. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons and target/algorithm family guards for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage and stability/calibration/feature-count/delivery signals. | Add browser smoke coverage and deeper policy dimensions before calling the workflow complete. |
 | 3 | PlanDriver decomposition | Partial | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`. `PlanDriver` still owns adjust/replan routing and step-specific gate validation. | Expand `GateResponseAdapter` and make adjust specs tool/step schema-driven. |
 | 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; `api.py` keeps the HTTP wrapper plus LLM/tier resolution. | Continue moving validation-agent stage orchestration and memory routes out of `api.py`. |
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
@@ -271,7 +272,8 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Problem: production credit/risk modeling usually needs richer business choice controls, not only metric max or automatic delivery-aware selection.
    - Fix:
      - Done: add `select_experiment` tool/gate and structured delivery panel.
-     - Remaining: rank candidates by stability, calibration, feature count, monotonicity/scorecard constraints, and require explicit override reasons for non-recommended picks.
+     - Done: surface stability, calibration, feature count, and delivery readiness in comparison/selection panels.
+     - Remaining: rank candidates by monotonicity/scorecard constraints and require explicit override reasons for non-recommended picks.
 
 4. G5 post-training closure is not a workflow.
    - Current behavior: report generation and `post_training_action` are workflow steps; PMML/handoff success, skip, and reason states are now visible in a dedicated delivery panel.
@@ -357,7 +359,8 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: `ModelingSetupPanel` with target/split counts, target type, algorithm choices, detected sample weights, split/OOT warnings.
      - Done: `ModelDeliveryPanel` with selected experiment, candidate metrics, PMML/native/handoff readiness, action state, artifact refs, and unsupported/skip reasons.
      - Screen table as a real modeling selector: threshold sliders plus numeric inputs, `top_k`, sort/filter chips, selected-count summary, leakage override reason, reset-to-proposal.
-     - Remaining: extend model comparison with stability/calibration/business-constraint dimensions and add browser visual smoke.
+     - Done: extend model comparison with stability, calibration, feature count, and delivery-readiness business signals.
+     - Remaining: add monotonicity/scorecard policy dimensions and browser visual smoke.
 
 3. Visual tokens are partial, not a system.
    - Current state: semantic task tones, surface/border/status tokens, and welcome/task icon palettes are centralized. KPI/ROC/modeling report areas still contain local palette constants.
@@ -591,7 +594,7 @@ The highest risks before a production-style merge are:
 
 - CI gate exists, but full CI/full pytest still must pass from the final committed tree.
 - AUTO can apply structured decisions, but broader safe-remediation policy fixtures are still needed.
-- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards, and delivery readiness has a dedicated UI; deeper comparison dimensions, richer domain guidance, and visual smoke still remain.
+- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards, and delivery readiness has a dedicated UI with core business signals; deeper policy dimensions, richer domain guidance, and visual smoke still remain.
 - Runtime crash windows are recoverable for staged artifacts and running step attempts, but the DB+filesystem boundary is not yet a true atomic unit of work.
 - `api.py`, `db.py`, and `app.js` are still large, but the first stable splits have landed (`turn_handlers`, `db_schema`, `theme.js`); remaining risk is deeper router/repository/workspace-controller extraction.
 - OS-level sandboxing for notebook/plugin execution is not complete.

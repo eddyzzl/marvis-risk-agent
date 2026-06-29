@@ -157,6 +157,7 @@ def build_model_delivery_payload(
     report = _report_summary(report_output, report_step)
     if selected_id:
         candidates = _mark_selected_candidate(candidates, selected_id)
+    selected_candidate = next((item for item in candidates if item.get("selected")), None)
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
@@ -168,6 +169,11 @@ def build_model_delivery_payload(
         "selection_metric": str(o.get("selection_metric") or ""),
         "selection_reason": str(o.get("selection_reason") or ""),
         "metrics": _metrics(o.get("metrics")),
+        "business_signals": (
+            dict(selected_candidate.get("business_signals"))
+            if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("business_signals"), dict)
+            else _business_signals(o)
+        ),
         "capabilities": capabilities,
         "candidates": candidates,
         "actions": actions,
@@ -236,6 +242,9 @@ def _is_delivery_metric_key(key: str) -> bool:
         "logloss",
         "feature_count",
         "n_features",
+        "psi_test_vs_train",
+        "psi_oot_vs_train",
+        "overfit_flag",
     }
 
 
@@ -260,9 +269,95 @@ def _experiment_candidates(value) -> list[dict]:
             "recipe": str(item.get("recipe") or ""),
             "metrics": _metrics(item),
             "capabilities": _capabilities(item.get("capabilities")),
+            "business_signals": _business_signals(item),
             "selected": False,
         })
     return rows
+
+
+def _business_signals(row: dict | None) -> dict:
+    item = row if isinstance(row, dict) else {}
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else item
+    caps = _capabilities(item.get("capabilities"))
+    feature_count = _first_number(metrics, ("feature_count", "n_features"))
+    if feature_count is None:
+        features = item.get("features") or item.get("feature_list")
+        feature_count = len(features) if isinstance(features, list) else None
+    psi_oot = _first_number(metrics, ("psi_oot_vs_train",))
+    psi_test = _first_number(metrics, ("psi_test_vs_train",))
+    stability_gap = _stability_gap(metrics)
+    overfit_flag = metrics.get("overfit_flag") if isinstance(metrics, dict) else None
+    return {
+        "feature_count": feature_count,
+        "stability": _stability_label(psi_oot, psi_test, stability_gap, overfit_flag),
+        "stability_value": psi_oot if psi_oot is not None else psi_test,
+        "generalization_gap": stability_gap,
+        "overfit_flag": bool(overfit_flag) if overfit_flag is not None else False,
+        "calibration": _calibration_label(item),
+        "delivery": _delivery_label(caps),
+    }
+
+
+def _first_number(metrics: dict, keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = metrics.get(key) if isinstance(metrics, dict) else None
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _stability_gap(metrics: dict) -> float | None:
+    if not isinstance(metrics, dict):
+        return None
+    pairs = (("test_ks", "oot_ks"), ("test_auc", "oot_auc"), ("test_rmse", "oot_rmse"))
+    for left, right in pairs:
+        a = metrics.get(left)
+        b = metrics.get(right)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return abs(float(a) - float(b))
+    return None
+
+
+def _stability_label(
+    psi_oot: float | None,
+    psi_test: float | None,
+    gap: float | None,
+    overfit_flag,
+) -> str:
+    if overfit_flag:
+        return "需复核"
+    psi = psi_oot if psi_oot is not None else psi_test
+    if psi is not None:
+        if psi >= 0.25:
+            return "高风险"
+        if psi >= 0.10:
+            return "关注"
+        return "稳定"
+    if gap is not None:
+        if gap >= 0.10:
+            return "关注"
+        return "稳定"
+    return "待评估"
+
+
+def _calibration_label(row: dict) -> str:
+    calibration = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
+    if calibration:
+        includes_pmml = calibration.get("pmml_includes_calibration")
+        return "已校准(PMML不含)" if includes_pmml is False else "已校准"
+    caps = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+    reason = str(caps.get("reason") or "")
+    if "calibration" in reason.lower() or "校准" in reason:
+        return "需说明"
+    return "未校准"
+
+
+def _delivery_label(caps: dict) -> str:
+    if caps.get("pmml_supported") and caps.get("handoff_supported"):
+        return "可移交"
+    if caps.get("native_model_supported"):
+        return "仅原生"
+    return "不可交付"
 
 
 def _mark_selected_candidate(candidates: list[dict], selected_id: str) -> list[dict]:
