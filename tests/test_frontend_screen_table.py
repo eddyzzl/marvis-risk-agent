@@ -240,8 +240,10 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert "reportSummary(delivery.report)" in module_js
     assert "businessSignalSummary(delivery.business_signals)" in module_js
     assert "policySignalSummary(delivery.policy_signals)" in module_js
+    assert "policyDecisionSummary(delivery.policy_decision)" in module_js
     assert "business_signals" in module_js
     assert "policy_signals" in module_js
+    assert "policy_decision" in module_js
     assert ".model-delivery-panel" in css
     assert ".model-delivery-readiness-grid" in css
     assert ".model-delivery-business-grid" in css
@@ -284,6 +286,15 @@ def test_model_delivery_panel_renders_selection_and_actions():
                 approval: "建议可审批",
                 approval_status: "ready",
                 reasons: ["评分卡表 12 行"],
+              }},
+              policy_decision: {{
+                status: "overridden",
+                policy: {{ require_pmml: true, require_handoff: true }},
+                profile: {{ pmml_supported: false, handoff_supported: false, monotonicity_declared: true }},
+                violations: [
+                  {{ code: "require_pmml", message: "要求最终模型支持 PMML 导出,但该候选不支持。" }},
+                ],
+                override_reason: "本轮只验收原生模型。",
               }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
@@ -342,6 +353,11 @@ def test_model_delivery_panel_renders_selection_and_actions():
         assert.equal(html.includes("特征数"), true);
         assert.equal(html.includes("校准"), true);
         assert.equal(html.includes("模型策略"), true);
+        assert.equal(html.includes("策略执行"), true);
+        assert.equal(html.includes("已人工放行"), true);
+        assert.equal(html.includes("require_pmml: true"), true);
+        assert.equal(html.includes("要求最终模型支持 PMML 导出"), true);
+        assert.equal(html.includes("放行原因: 本轮只验收原生模型。"), true);
         assert.equal(html.includes("评分卡"), true);
         assert.equal(html.includes("单调性"), true);
         assert.equal(html.includes("审批建议"), true);
@@ -416,6 +432,12 @@ def test_modeling_panels_combined_dom_smoke_contract():
               selection_metric: "oot_ks",
               business_signals: {{ stability: "关注", feature_count: 128, calibration: "需说明", delivery: "可移交" }},
               policy_signals: {{ scorecard: "非评分卡", monotonicity: "未声明", approval: "仅实验候选" }},
+              policy_decision: {{
+                status: "accepted",
+                policy: {{ require_pmml: true, require_handoff: true }},
+                profile: {{ pmml_supported: true, handoff_supported: true, monotonicity_declared: false }},
+                violations: [],
+              }},
               readiness: [
                 {{ id: "native_model", label: "原生模型", status: "ready", artifact: "/tmp/model.pkl" }},
                 {{ id: "pmml", label: "PMML", status: "succeeded", artifact: longPath }},
@@ -446,6 +468,7 @@ def test_modeling_panels_combined_dom_smoke_contract():
           "model-delivery-panel",
           "model-delivery-business-grid",
           "model-delivery-policy-grid",
+          "data-policy-decision-status",
           "model-delivery-table-wrap",
           "model-delivery-artifacts",
         ]) {{

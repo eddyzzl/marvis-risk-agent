@@ -49,6 +49,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
   const readinessHtml = readinessCards(delivery.readiness);
   const businessHtml = businessSignalSummary(delivery.business_signals);
   const policyHtml = policySignalSummary(delivery.policy_signals);
+  const policyDecisionHtml = policyDecisionSummary(delivery.policy_decision);
   const metricsHtml = metricsGrid(delivery.metrics);
   const candidatesHtml = candidateTable(delivery.candidates);
   const actionsHtml = actionTable(delivery.actions);
@@ -64,6 +65,7 @@ export function renderModelDeliveryPanel(message, options = {}) {
     ${readinessHtml}
     ${businessHtml}
     ${policyHtml}
+    ${policyDecisionHtml}
     ${metricsHtml}
     ${candidatesHtml}
     ${actionsHtml}
@@ -172,6 +174,43 @@ function policySignalSummary(signals) {
   </div>`;
 }
 
+function policyDecisionSummary(decision) {
+  const data = decision && typeof decision === "object" ? decision : {};
+  if (!Object.keys(data).length) return "";
+  const status = String(data.status || "not_requested");
+  const policy = data.policy && typeof data.policy === "object" ? data.policy : {};
+  const profile = data.profile && typeof data.profile === "object" ? data.profile : {};
+  const violations = Array.isArray(data.violations)
+    ? data.violations.filter((item) => item && typeof item === "object")
+    : [];
+  const enabledRules = Object.entries(policy)
+    .filter(([, value]) => value === true || typeof value === "number" || (typeof value === "string" && value.trim()))
+    .map(([key, value]) => `${key}: ${value}`)
+    .slice(0, 4);
+  const items = [
+    ["执行结果", policyDecisionLabel(status), policyDecisionKind(status)],
+    ["PMML", profile.pmml_supported ? "满足" : "未满足", profile.pmml_supported ? "ready" : "warning"],
+    ["移交", profile.handoff_supported ? "满足" : "未满足", profile.handoff_supported ? "ready" : "warning"],
+    ["单调性", profile.monotonicity_declared ? "已声明" : "未声明", profile.monotonicity_declared ? "ready" : "warning"],
+  ];
+  const violationText = violations
+    .map((item) => String(item.message || item.code || ""))
+    .filter(Boolean)
+    .slice(0, 3);
+  return `<div class="model-delivery-policy" data-policy-decision-status="${escapeHtml(status)}">
+    <div class="modeling-section-label">策略执行</div>
+    <div class="model-delivery-policy-grid">${items.map(([label, value, kind]) => (
+      `<div class="model-delivery-policy-card" data-signal-kind="${escapeHtml(kind)}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(String(value))}</strong>
+      </div>`
+    )).join("")}</div>
+    ${enabledRules.length ? `<div class="model-delivery-policy-reasons">${enabledRules.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${violationText.length ? `<div class="model-delivery-policy-reasons">${violationText.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+    ${data.override_reason ? `<div class="model-delivery-policy-reasons"><span>放行原因: ${escapeHtml(String(data.override_reason))}</span></div>` : ""}
+  </div>`;
+}
+
 function actionTable(actions) {
   const rows = Array.isArray(actions) ? actions.filter((item) => item && typeof item === "object") : [];
   if (!rows.length) return "";
@@ -275,6 +314,24 @@ function signalKind(value) {
   if (["关注", "需复核", "高风险", "需说明", "仅原生", "不可交付", "需确认", "仅实验候选"].includes(String(value || ""))) return "warning";
   if (text.includes("risk") || text.includes("高")) return "warning";
   return "neutral";
+}
+
+function policyDecisionKind(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "accepted") return "ready";
+  if (normalized === "overridden") return "warning";
+  if (normalized === "blocked") return "error";
+  return "neutral";
+}
+
+function policyDecisionLabel(status) {
+  const labels = {
+    accepted: "已通过",
+    overridden: "已人工放行",
+    blocked: "未通过",
+    not_requested: "未启用",
+  };
+  return labels[String(status || "").toLowerCase()] || String(status || "待评估");
 }
 
 function statusLabel(status) {

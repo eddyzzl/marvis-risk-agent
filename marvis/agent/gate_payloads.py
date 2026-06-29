@@ -170,6 +170,7 @@ def build_model_delivery_payload(
         if isinstance(selected_candidate, dict) and isinstance(selected_candidate.get("policy_signals"), dict)
         else _policy_signals(o)
     )
+    policy_decision = _policy_decision(o.get("policy_decision"))
     return {
         "step_id": getattr(dep, "id", None),
         "step_title": getattr(dep, "title", None),
@@ -187,6 +188,7 @@ def build_model_delivery_payload(
             else _business_signals(o)
         ),
         "policy_signals": policy_signals,
+        "policy_decision": policy_decision,
         "capabilities": capabilities,
         "candidates": candidates,
         "actions": actions,
@@ -200,6 +202,7 @@ def build_model_delivery_payload(
             actions,
             report=report,
             policy_signals=policy_signals,
+            policy_decision=policy_decision,
         ),
     }
 
@@ -588,6 +591,60 @@ def _has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
     return False
 
 
+def _policy_decision(value) -> dict:
+    decision = value if isinstance(value, dict) else {}
+    if not decision:
+        return {}
+    violations = []
+    for item in decision.get("violations") or []:
+        if not isinstance(item, dict):
+            continue
+        violations.append({
+            "code": str(item.get("code") or ""),
+            "message": str(item.get("message") or ""),
+        })
+    profile = decision.get("profile") if isinstance(decision.get("profile"), dict) else {}
+    policy = decision.get("policy") if isinstance(decision.get("policy"), dict) else {}
+    return {
+        "status": str(decision.get("status") or ""),
+        "explicit_selection": bool(decision.get("explicit_selection")),
+        "selected_experiment_id": str(decision.get("selected_experiment_id") or ""),
+        "policy": {
+            str(key): value
+            for key, value in policy.items()
+            if isinstance(value, (str, int, float, bool))
+        },
+        "profile": {
+            str(key): value
+            for key, value in profile.items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        },
+        "violations": violations,
+        "override_reason": str(decision.get("override_reason") or ""),
+    }
+
+
+def _policy_decision_readiness(policy_decision: dict) -> tuple[str, str] | None:
+    if not isinstance(policy_decision, dict) or not policy_decision:
+        return None
+    status = str(policy_decision.get("status") or "")
+    if status == "accepted":
+        return "ready", "策略门控已通过"
+    if status == "overridden":
+        reason = str(policy_decision.get("override_reason") or "已人工 override")
+        return "warning", reason
+    if status == "blocked":
+        messages = [
+            str(item.get("message") or item.get("code") or "")
+            for item in (policy_decision.get("violations") or [])
+            if isinstance(item, dict)
+        ]
+        return "error", "; ".join(item for item in messages if item) or "策略门控未通过"
+    if status == "not_requested":
+        return "neutral", "未启用执行策略"
+    return "neutral", status or "待评估"
+
+
 def _mark_selected_candidate(candidates: list[dict], selected_id: str) -> list[dict]:
     marked = []
     for item in candidates:
@@ -664,6 +721,7 @@ def _delivery_readiness(
     *,
     report: dict | None = None,
     policy_signals: dict | None = None,
+    policy_decision: dict | None = None,
 ) -> list[dict]:
     native_path = str(output.get("native_model_path") or "")
     pmml_path = str(output.get("pmml_path") or "")
@@ -706,12 +764,15 @@ def _delivery_readiness(
             "reason": f"报告章节 {available}/{total} 可生成" if total else "",
         })
     if isinstance(policy_signals, dict) and policy_signals:
+        decision_readiness = _policy_decision_readiness(policy_decision or {})
+        status = decision_readiness[0] if decision_readiness else str(policy_signals.get("approval_status") or "neutral")
+        reason = decision_readiness[1] if decision_readiness else str(policy_signals.get("approval") or "待评估")
         readiness.append({
             "id": "approval_policy",
             "label": "审批策略",
-            "status": str(policy_signals.get("approval_status") or "neutral"),
+            "status": status,
             "artifact": "",
-            "reason": str(policy_signals.get("approval") or "待评估"),
+            "reason": reason,
         })
     return readiness
 

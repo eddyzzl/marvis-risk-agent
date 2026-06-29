@@ -526,6 +526,19 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
                 "native_model_supported": True,
                 "reason": "",
             },
+            "policy_decision": {
+                "status": "accepted",
+                "explicit_selection": False,
+                "selected_experiment_id": "exp-lgb",
+                "policy": {"require_pmml": True, "require_handoff": True},
+                "profile": {
+                    "pmml_supported": True,
+                    "handoff_supported": True,
+                    "monotonicity_declared": True,
+                },
+                "violations": [],
+                "override_reason": "",
+            },
             "experiments": [
                 {
                     "id": "exp-lgb",
@@ -607,6 +620,19 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
         "approval_status": "ready",
         "reasons": [],
     }
+    assert delivery["policy_decision"] == {
+        "status": "accepted",
+        "explicit_selection": False,
+        "selected_experiment_id": "exp-lgb",
+        "policy": {"require_pmml": True, "require_handoff": True},
+        "profile": {
+            "pmml_supported": True,
+            "handoff_supported": True,
+            "monotonicity_declared": True,
+        },
+        "violations": [],
+        "override_reason": "",
+    }
     assert delivery["readiness"][0]["status"] == "ready"
     assert delivery["readiness"][1]["status"] == "ready"
     assert delivery["readiness"][2]["status"] == "ready"
@@ -615,7 +641,7 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
         "label": "审批策略",
         "status": "ready",
         "artifact": "",
-        "reason": "建议可审批",
+        "reason": "策略门控已通过",
     }
     assert [row["selected"] for row in delivery["candidates"]] == [True, False, False]
     assert delivery["candidates"][0]["business_signals"]["calibration"] == "已校准(PMML不含)"
