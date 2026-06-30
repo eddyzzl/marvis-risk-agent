@@ -6,6 +6,7 @@ import lightgbm as lgb
 import nbformat
 import pandas as pd
 import pytest
+import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 
 from marvis.data.backend import DataBackend
@@ -323,21 +324,29 @@ def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monke
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
-def test_post_training_action_skips_native_lgb_booster_without_failing(tmp_path):
+@pytest.mark.parametrize("algorithm", ["lgb", "xgb"])
+def test_post_training_action_skips_native_tree_booster_without_failing(tmp_path, algorithm):
     settings, store, source_task, dataset, _lr_artifact = _seed_experiment(tmp_path)
     frame = pd.DataFrame({
         "x1": [0.1, 0.2, 0.8, 0.9, 0.15, 0.85],
         "x2": [0.3, 0.4, 0.7, 0.6, 0.35, 0.75],
         "y": [0, 0, 1, 1, 0, 1],
     })
-    booster = lgb.train(
-        {"objective": "binary", "verbosity": -1, "num_threads": 1},
-        lgb.Dataset(frame[["x1", "x2"]], label=frame["y"]),
-        num_boost_round=2,
-    )
+    if algorithm == "lgb":
+        booster = lgb.train(
+            {"objective": "binary", "verbosity": -1, "num_threads": 1},
+            lgb.Dataset(frame[["x1", "x2"]], label=frame["y"]),
+            num_boost_round=2,
+        )
+    else:
+        booster = xgb.train(
+            {"objective": "binary:logistic", "eval_metric": "auc", "nthread": 1},
+            xgb.DMatrix(frame[["x1", "x2"]], label=frame["y"], feature_names=["x1", "x2"]),
+            num_boost_round=2,
+        )
     artifact = save_model(
         booster,
-        "lgb",
+        algorithm,
         settings.tasks_dir / source_task.id / "modeling_artifacts",
         feature_list=("x1", "x2"),
         params={},
