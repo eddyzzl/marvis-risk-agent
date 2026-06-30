@@ -86,6 +86,7 @@ from marvis.api_schemas import (
 from marvis.api_settings import router as settings_router
 from marvis.api_task_payloads import (
     normalized_status_reason as _normalized_status_reason,
+    task_payload as _task_payload,  # noqa: F401 - compatibility alias for structure tests/imports.
     task_report_download_filename as _task_report_download_filename,
 )
 from marvis.notebook_contract import (

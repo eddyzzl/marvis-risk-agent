@@ -233,6 +233,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `68 passed` after preserving the API v2 fixture contract with the material upload router split.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_app_security.py::test_remote_read_does_not_expose_settings_or_branding -q`: `1 passed` after confirming the material router remains behind the same local-only middleware.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the material upload router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1893 passed, 4 skipped, 2 warnings` after the current router-extraction series and compatibility alias fix.
 
 ## Executive Summary
 
