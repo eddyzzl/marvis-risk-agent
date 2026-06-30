@@ -280,6 +280,71 @@ def test_metrics_cell_reuses_notebook_scorer_and_saved_reproducibility(tmp_path:
     assert f"_rmc_package_root = {tmp_path.as_posix()!r}" in source
 
 
+def test_v1_validation_appended_policy_matches_generated_cell_kinds(tmp_path: Path):
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    init_db(repo.db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(tmp_path),
+        )
+    )
+    settings = PipelineSettings(
+        workspace=tmp_path,
+        db_path=repo.db_path,
+        report_template_path=tmp_path / "template.docx",
+    )
+    contract = RuntimeContract(
+        target_col="y",
+        split_col="split",
+        time_col="apply_month",
+        pmml_output_field="probability_1",
+        score_decimal_places=6,
+        code_model_scores_path=tmp_path / "code_model_scores.csv",
+        feature_importance_path=None,
+        model_params_path=None,
+        algorithm="lgb",
+    )
+
+    reproducibility_kinds = {
+        kind
+        for kind, _source in pipeline_module._build_reproducibility_cell_sources(
+            package_root=tmp_path,
+            task=task,
+            settings=settings,
+            input_pmml_path=tmp_path / "model.pmml",
+            contract_meta_path=tmp_path / "runtime_contract.json",
+            output_path=tmp_path / "reproducibility_result.json",
+        )
+    }
+    metrics_kinds = {
+        kind
+        for kind, _source in pipeline_module._build_metrics_cell_sources(
+            package_root=tmp_path,
+            task=task,
+            settings=settings,
+            dictionary_path=tmp_path / "dictionary.csv",
+            input_pmml_path=tmp_path / "model.pmml",
+            contract=contract,
+            model_meta_path=tmp_path / "model_meta.json",
+            reproducibility_json_path=tmp_path / "reproducibility_result.json",
+            results_json_path=tmp_path / "validation_results.json",
+            excel_path=tmp_path / "validation.xlsx",
+        )
+    }
+    generated_kinds = reproducibility_kinds | metrics_kinds
+
+    assert generated_kinds == set(pipeline_module.V1_VALIDATION_APPENDED_CELL_KINDS)
+    assert (
+        set(
+            pipeline_module.V1_VALIDATION_APPENDED_EXECUTION_POLICY.allowed_marvis_kinds
+        )
+        == generated_kinds
+    )
+
+
 def test_metrics_cell_handles_null_split_and_time_columns_in_history(tmp_path: Path):
     repo = TaskRepository(tmp_path / "marvis.sqlite")
     init_db(repo.db_path)

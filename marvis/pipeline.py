@@ -37,6 +37,7 @@ from marvis.notebook_cancellation import (
 )
 from marvis.notebook_contract import RuntimeContract, load_runtime_contract
 from marvis.notebooks import (
+    AppendedCellExecutionPolicy,
     NotebookExecutionSession,
     close_live_notebook_session,
     get_live_notebook_session,
@@ -86,6 +87,23 @@ SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 NOTEBOOK_STAGE_FAILURE_PREFIX = "模型可复现性验证失败："
 METRICS_STAGE_FAILURE_PREFIX = "模型效果&稳定性验证失败："
 REPORT_STAGE_FAILURE_PREFIX = "报告输出失败："
+V1_VALIDATION_APPENDED_CELL_KINDS = (
+    "repro-pmml",
+    "repro-compare",
+    "metrics-prepare",
+    "metrics-score",
+    "metrics-basic",
+    "metrics-ks",
+    "metrics-psi",
+    "metrics-binning",
+    "metrics-stress",
+    "metrics-output",
+)
+V1_VALIDATION_APPENDED_EXECUTION_POLICY = AppendedCellExecutionPolicy(
+    scope="v1-validation-post-notebook",
+    reason="run MARVIS-generated reproducibility and validation metric cells in the validated notebook kernel",
+    allowed_marvis_kinds=V1_VALIDATION_APPENDED_CELL_KINDS,
+)
 
 
 def _metrics_cancel_marker_path(task_dir: Path) -> Path:
@@ -1701,6 +1719,7 @@ def _notebook_step_v3(
             cancellation_token=cancellation_token,
             memory_limit_mb=notebook_memory_limit_mb,
             allow_appended_execution=True,
+            appended_execution_policy=V1_VALIDATION_APPENDED_EXECUTION_POLICY,
         )
         result = live_session.execute_notebook(keep_alive=True)
     else:

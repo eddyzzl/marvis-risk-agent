@@ -44,6 +44,42 @@ class NotebookRunResult:
     resource_usage: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class AppendedCellExecutionPolicy:
+    scope: str
+    reason: str
+    allowed_marvis_kinds: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        scope = self.scope.strip()
+        reason = self.reason.strip()
+        allowed_marvis_kinds = tuple(
+            kind.strip() for kind in self.allowed_marvis_kinds if kind.strip()
+        )
+        if not scope:
+            raise ValueError("appended-cell execution policy scope is required")
+        if not reason:
+            raise ValueError("appended-cell execution policy reason is required")
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "reason", reason)
+        object.__setattr__(self, "allowed_marvis_kinds", allowed_marvis_kinds)
+
+    def validate_cell_metadata(self, metadata: dict[str, Any] | None) -> None:
+        if not self.allowed_marvis_kinds:
+            return
+        marvis_kind = None
+        if metadata is not None:
+            raw_kind = metadata.get("marvis")
+            if isinstance(raw_kind, str):
+                marvis_kind = raw_kind.strip()
+        if marvis_kind not in self.allowed_marvis_kinds:
+            allowed = ", ".join(self.allowed_marvis_kinds)
+            raise RuntimeError(
+                "live notebook appended-cell execution policy "
+                f"{self.scope!r} only allows marvis cell kinds: {allowed}"
+            )
+
+
 class NotebookResourceLimitExceeded(RuntimeError):
     """Raised when the notebook kernel exceeds the configured RSS budget."""
 
@@ -71,7 +107,12 @@ class NotebookExecutionSession:
         memory_limit_mb: int | None = None,
         resource_poll_interval_seconds: float = 0.5,
         allow_appended_execution: bool = False,
+        appended_execution_policy: AppendedCellExecutionPolicy | None = None,
     ) -> None:
+        if allow_appended_execution and appended_execution_policy is None:
+            raise ValueError(
+                "live notebook appended-cell execution requires an explicit policy"
+            )
         self.notebook_path = notebook_path
         self.executed_path = executed_path
         self.log_path = log_path
@@ -84,7 +125,10 @@ class NotebookExecutionSession:
         self.resource_poll_interval_seconds = max(0.05, float(resource_poll_interval_seconds))
         self.notebook = nbformat.read(notebook_path, as_version=4)
         self.original_cell_count = len(self.notebook.cells)
-        self.allow_appended_execution = bool(allow_appended_execution)
+        self.allow_appended_execution = bool(
+            allow_appended_execution or appended_execution_policy is not None
+        )
+        self.appended_execution_policy = appended_execution_policy
         self.plan = notebook_step_plan(self.notebook)
         self.cell_events: dict[int, dict[str, Any]] = {}
         self.closed = False
@@ -126,7 +170,7 @@ class NotebookExecutionSession:
         metadata: dict[str, Any] | None = None,
         record_progress: bool = False,
     ) -> NotebookRunResult:
-        self._ensure_appended_execution_allowed()
+        self._ensure_appended_execution_allowed(metadata=metadata)
         cell_index = self.append_code_cell(
             source,
             metadata=metadata,
@@ -146,7 +190,7 @@ class NotebookExecutionSession:
         record_progress: bool = False,
     ) -> int:
         self._ensure_open()
-        self._ensure_appended_execution_allowed()
+        self._ensure_appended_execution_allowed(metadata=metadata)
         cell = nbformat.v4.new_code_cell(source)
         if metadata:
             cell.metadata.update(metadata)
@@ -172,7 +216,7 @@ class NotebookExecutionSession:
         if cell.cell_type != "code":
             raise ValueError(f"notebook cell is not code: {cell_index}")
         if cell_index >= self.original_cell_count:
-            self._ensure_appended_execution_allowed()
+            self._ensure_appended_execution_allowed(metadata=dict(cell.metadata or {}))
         target_log_path = log_path or self.log_path
         target_log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -455,12 +499,17 @@ class NotebookExecutionSession:
         if self.closed:
             raise RuntimeError("notebook execution session is closed")
 
-    def _ensure_appended_execution_allowed(self) -> None:
-        if not self.allow_appended_execution:
+    def _ensure_appended_execution_allowed(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.allow_appended_execution or self.appended_execution_policy is None:
             raise RuntimeError(
                 "live notebook appended-cell execution is disabled for this session; "
                 "use isolated notebook execution or create the session with explicit appended-cell permission"
             )
+        self.appended_execution_policy.validate_cell_metadata(metadata)
 
 
 class _NotebookResourceMonitor:
