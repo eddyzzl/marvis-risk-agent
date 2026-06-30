@@ -26,8 +26,10 @@ def test_static_es_module_files_exist_for_declared_imports():
 
     for module_name in (
         "api.js",
+        "agent-memory-panel.js",
         "branding.js",
         "dialogs.js",
+        "draft-tools-panel.js",
         "polling.js",
         "render-agent.js",
         "render-metrics.js",

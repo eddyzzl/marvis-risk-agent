@@ -79,8 +79,10 @@ def test_app_entry_is_split_into_frontend_modules():
     assert '<script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>' in index_html
     for module_name in [
         "api.js",
+        "agent-memory-panel.js",
         "branding.js",
         "dialogs.js",
+        "draft-tools-panel.js",
         "polling.js",
         "render-agent.js",
         "render-metrics.js",
@@ -91,8 +93,10 @@ def test_app_entry_is_split_into_frontend_modules():
         assert (STATIC_DIR / "js" / module_name).exists()
 
     assert 'from "./js/api.js"' in app_js
+    assert 'from "./js/agent-memory-panel.js"' in app_js
     assert 'from "./js/branding.js"' in app_js
     assert 'from "./js/dialogs.js"' in app_js
+    assert 'from "./js/draft-tools-panel.js"' in app_js
     assert 'from "./js/polling.js"' in app_js
     assert 'from "./js/render-agent.js"' in app_js
     assert 'from "./js/render-metrics.js"' in app_js

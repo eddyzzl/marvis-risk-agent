@@ -5420,6 +5420,7 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
 def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    draft_tools_panel_js = _read_static("js/draft-tools-panel.js")
     styles_css = _read_static("styles.css")
     v2_css = _read_static("css/v2-workbench.css")
 
@@ -5563,10 +5564,14 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
     assert 'openGovernanceSettingsCenter("llm")' in app_js
     assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
-    assert "let draftTools = [];" in app_js
+    assert 'import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";' in app_js
+    assert "const draftToolsPanel = createDraftToolsPanelController" in app_js
+    assert "let draftTools = [];" not in app_js
+    assert "let draftTools = [];" in draft_tools_panel_js
     # Drafts open via the plugins extension <details> toggle (lazy load) and the
     # status filter, not a dedicated dialog or nav key.
     assert '$("draftManageDetails").addEventListener("toggle"' in app_js
+    assert "!draftToolsPanel.hasLoaded()" in app_js
     assert 'runAction(loadDraftTools, { actionId: "draftTools"' in app_js
     assert "function openDraftToolsDialog" not in app_js
     assert 'openGovernanceSettingsCenter("drafts")' not in app_js
@@ -5575,11 +5580,15 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "async function runDraftTool" in app_js
     assert "async function promoteDraftTool" in app_js
     assert "async function rejectDraftTool" in app_js
-    assert 'api("/api/drafts' in app_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in app_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in app_js
-    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in app_js
-    assert '"X-MARVIS-Plugin-Admin": "local-dev"' in app_js
+    assert "return draftToolsPanel.load({ preserveSelection });" in app_js
+    assert "return draftToolsPanel.run();" in app_js
+    assert "return draftToolsPanel.promote();" in app_js
+    assert "return draftToolsPanel.reject();" in app_js
+    assert 'api("/api/drafts' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in draft_tools_panel_js
+    assert '"X-MARVIS-Plugin-Admin": "local-dev"' in draft_tools_panel_js
     assert "function governanceExtensionActions" in app_js
     assert "pluginActions:" in app_js
     assert "skillActions:" in app_js
@@ -5595,8 +5604,8 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert "await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions)" in app_js
     assert "await renderSkillManager(mounted.panels.skillPanel, actions.skillActions)" in app_js
     assert "await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions)" in app_js
-    assert "请填写转正测试用例。" in app_js
-    assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in app_js
+    assert "请填写转正测试用例。" in draft_tools_panel_js
+    assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in draft_tools_panel_js
 
     assert "dialog.governance-settings-dialog" in styles_css
     assert ".governance-settings-dialog" in styles_css
