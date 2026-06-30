@@ -46,21 +46,22 @@ from marvis.agent.turn_handlers import (
     dispatch_driver_turn as dispatch_plan_driver_turn,
 )
 from marvis.api_task_helpers import (
-    ACTIVE_JOB_DETAIL,
-    dispatch_platform_hook as _dispatch_platform_hook,
     get_task_or_404 as _get_task_or_404,
     reject_if_task_has_active_job as _reject_if_task_has_active_job,
-)
-from marvis.api_report_helpers import (
-    require_confirmed_agent_conclusions as _require_confirmed_agent_conclusions,
 )
 from marvis.api_report_field_helpers import (
     build_report_field_payload as _build_report_field_payload,
 )
 from marvis.api_scan_helpers import (
     SCAN_FAILURE_PREFIX,
-    is_scan_failure as _is_scan_failure,
     perform_scan_task as _perform_scan_task,
+)
+from marvis.api_stage_helpers import (
+    add_agent_report_ready_message as _add_agent_report_ready_message,
+    agent_pipeline_settings as _agent_pipeline_settings,
+    fail_queued_job as _fail_queued_job,
+    run_stage_job as _run_stage_job,
+    start_task_job as _start_task_job,
 )
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
@@ -73,9 +74,6 @@ from marvis.domain import (
     TaskRecord,
     TaskStatus,
 )
-from marvis.execution_environment import (
-    load_execution_environment,
-)
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import (
     LLMSettingsError,
@@ -85,28 +83,24 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
-    ValidateRequest,
 )
 from marvis.api_settings import router as settings_router
 from marvis.api_task_payloads import (
-    normalized_status_reason as _normalized_status_reason,
     task_payload as _task_payload,  # noqa: F401 - compatibility alias for structure tests/imports.
 )
 from marvis.notebook_cancellation import (
     clear_pending_notebook_cancellation,
     request_notebook_cancellation,
 )
-from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
+from marvis.notebooks import close_live_notebook_session
 from marvis.pipeline import (
     NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
-    PipelineSettings,
     run_metrics_stage,
     run_notebook_stage,
     run_report_stage,
-    run_staged_pipeline,
 )
-from marvis.state_machine import ConflictError, IllegalTransition
+from marvis.state_machine import ConflictError
 from marvis.validation.overfitting import overfitting_check_from_validation_results
 
 
@@ -128,133 +122,6 @@ def _is_metrics_failure(task: TaskRecord) -> bool:
 
 def _repo(request: Request) -> TaskRepository:
     return TaskRepository(request.app.state.settings.db_path)
-
-
-def _start_task_job(repo: TaskRepository, task_id: str, kind: str) -> str:
-    try:
-        return repo.start_job(task_id, kind)
-    except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL) from exc
-
-
-def _fail_queued_job(repo: TaskRepository, job_id: str, exc: Exception) -> None:
-    repo.finish_job(
-        job_id,
-        status="failed",
-        error_name=exc.__class__.__name__,
-        error_value=str(exc),
-        traceback="",
-    )
-
-
-def _run_stage_job(
-    job_id: str,
-    db_path: Path,
-    stage_func,
-    kwargs: dict,
-    *,
-    success_agent_notice: str | None = None,
-    hook_dispatcher=None,
-    before_hook_event: str | None = None,
-    after_hook_event: str | None = None,
-) -> None:
-    repo = TaskRepository(db_path)
-    repo.mark_job_running(job_id)
-    task_id = kwargs.get("task_id")
-    task_id_text = str(task_id) if task_id else None
-    _dispatch_platform_hook(
-        hook_dispatcher,
-        before_hook_event,
-        _stage_hook_payload(job_id, task_id_text),
-        task_id=task_id_text,
-    )
-    try:
-        stage_func(**kwargs)
-    except Exception as exc:
-        repo.finish_job(
-            job_id,
-            status="failed",
-            error_name=exc.__class__.__name__,
-            error_value=str(exc),
-            traceback=traceback.format_exc(),
-        )
-        raise
-    else:
-        job_status = (
-            "cancelled"
-            if _stage_returned_cancelled_task(repo, task_id)
-            else "succeeded"
-        )
-        repo.finish_job(job_id, status=job_status)
-        if job_status == "succeeded":
-            _dispatch_platform_hook(
-                hook_dispatcher,
-                after_hook_event,
-                _stage_hook_payload(job_id, task_id_text, status=job_status),
-                task_id=task_id_text,
-            )
-        if job_status == "succeeded" and success_agent_notice == "word_report_ready":
-            _add_agent_report_ready_message(repo, task_id)
-
-
-def _stage_hook_payload(
-    job_id: str,
-    task_id: str | None,
-    *,
-    status: str | None = None,
-) -> dict:
-    payload = {"job_id": job_id}
-    if task_id:
-        payload["task_id"] = task_id
-    if status:
-        payload["status"] = status
-    return payload
-
-
-def _add_agent_report_ready_message(repo: TaskRepository, task_id: str | None) -> None:
-    if not task_id:
-        return
-    task = repo.get_task(task_id)
-    if task.run_mode != "agent":
-        return
-    messages = repo.list_agent_messages(task_id)
-    latest_confirmed_index = max(
-        (
-            index
-            for index, message in enumerate(messages)
-            if message.get("stage") == "word_conclusion_confirmed"
-        ),
-        default=-1,
-    )
-    if latest_confirmed_index < 0:
-        return
-    if any(
-        message.get("stage") == "word_report_ready"
-        for message in messages[latest_confirmed_index + 1 :]
-    ):
-        return
-    repo.add_agent_message(
-        task_id,
-        role="assistant",
-        stage="word_report_ready",
-        content=(
-            "报告已生成。右侧步骤里的“预览”可以在线查看 Word，"
-            "“下载Word”用于下载验证报告，“下载Excel”用于下载指标分析明细。"
-        ),
-        metadata={"report_ready": True},
-    )
-
-
-def _stage_returned_cancelled_task(repo: TaskRepository, task_id: str | None) -> bool:
-    if not task_id:
-        return False
-    try:
-        task = repo.get_task(task_id)
-    except Exception:
-        return False
-    return _normalized_status_reason(task.status_reason_code) == (
-        TASK_STATUS_REASON_USER_CANCELLED
-    )
 
 
 def _task_tier(request, task) -> str:
@@ -659,15 +526,7 @@ def _confirm_agent_report_conclusions(
         run_report_stage,
         {
             "task_id": task_id,
-            "settings": _agent_pipeline_settings(settings, latest_task)
-            if latest_task.run_mode == "agent"
-            else PipelineSettings(
-                workspace=settings.workspace,
-                db_path=settings.db_path,
-                report_template_path=settings.report_template_path,
-                feature_columns=latest_task.feature_columns,
-                notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
-            ),
+            "settings": _agent_pipeline_settings(settings, latest_task),
         },
         success_agent_notice="word_report_ready",
         hook_dispatcher=hook_dispatcher,
@@ -680,238 +539,6 @@ def _confirm_agent_report_conclusions(
         "revision": revision,
         "message": "agent conclusions confirmed; word report stage dispatched",
         "messages": repo.list_agent_messages(task_id),
-    }
-
-
-@router.post("/tasks/{task_id}/notebook", status_code=202)
-def run_task_notebook(
-    task_id: str,
-    payload: ValidateRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    job_id = _start_task_job(repo, task_id, "notebook")
-    if task.status in {
-        TaskStatus.RUNNING,
-        TaskStatus.COMPUTING_METRICS,
-    }:
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot run notebook in status {task.status.value}",
-        )
-    if _is_scan_failure(task):
-        detail = task.status_message.removeprefix(SCAN_FAILURE_PREFIX)
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"材料扫描未完整通过：{detail}",
-        )
-    try:
-        repo.update_status(
-            task_id,
-            TaskStatus.RUNNING,
-            "notebook queued",
-            expected={
-                TaskStatus.SCANNED,
-                TaskStatus.FAILED,
-                TaskStatus.EXECUTED,
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-            },
-        )
-    except IllegalTransition as exc:
-        _fail_queued_job(repo, job_id, exc)
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot run notebook in status {exc.current.value}",
-        ) from exc
-    background_tasks.add_task(
-        _run_stage_job,
-        job_id,
-        request.app.state.settings.db_path,
-        run_notebook_stage,
-        {
-            "task_id": task_id,
-            "settings": _pipeline_settings(request, task, payload.feature_columns),
-            "stage_claimed": True,
-        },
-        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
-        after_hook_event="notebook.completed",
-    )
-    return {
-        "task_id": task_id,
-        "status": "accepted",
-        "message": "notebook stage dispatched; poll GET /api/tasks/{task_id}",
-    }
-
-
-@router.post("/tasks/{task_id}/metrics", status_code=202)
-def run_task_metrics(
-    task_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    job_id = _start_task_job(repo, task_id, "metrics")
-    metrics_retry = _is_metrics_failure(task)
-    if (
-        task.status
-        in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
-        and get_live_notebook_session(task_id) is None
-    ):
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail="live notebook kernel is not available; rerun notebook stage before metrics",
-        )
-    if task.status in {
-        TaskStatus.CREATED,
-        TaskStatus.SCANNED,
-        TaskStatus.RUNNING,
-        TaskStatus.COMPUTING_METRICS,
-    }:
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {task.status.value}",
-        )
-    if task.status == TaskStatus.FAILED and not metrics_retry:
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {task.status.value}",
-        )
-    try:
-        repo.update_status(
-            task_id,
-            TaskStatus.COMPUTING_METRICS,
-            "metrics queued",
-            expected={
-                TaskStatus.EXECUTED,
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-                TaskStatus.FAILED,
-            }
-            if metrics_retry
-            else {
-                TaskStatus.EXECUTED,
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-            },
-        )
-    except IllegalTransition as exc:
-        _fail_queued_job(repo, job_id, exc)
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {exc.current.value}",
-        ) from exc
-    background_tasks.add_task(
-        _run_stage_job,
-        job_id,
-        request.app.state.settings.db_path,
-        run_metrics_stage,
-        {
-            "task_id": task_id,
-            "settings": _pipeline_settings(request, task, None),
-            "stage_claimed": True,
-        },
-        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
-        after_hook_event="validation.completed",
-    )
-    return {
-        "task_id": task_id,
-        "status": "accepted",
-        "message": "metrics stage dispatched; poll GET /api/tasks/{task_id}",
-    }
-
-
-@router.post("/tasks/{task_id}/report", status_code=202)
-def run_task_report(
-    task_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    _require_confirmed_agent_conclusions(repo, task)
-    job_id = _start_task_job(repo, task_id, "report")
-    if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate report in status {task.status.value}",
-        )
-    background_tasks.add_task(
-        _run_stage_job,
-        job_id,
-        request.app.state.settings.db_path,
-        run_report_stage,
-        {
-            "task_id": task_id,
-            "settings": _pipeline_settings(request, task, None),
-        },
-        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
-        before_hook_event="report.before_generate",
-        after_hook_event="report.after_generate",
-    )
-    return {
-        "task_id": task_id,
-        "status": "accepted",
-        "message": "word report stage dispatched; poll GET /api/tasks/{task_id}",
-    }
-
-
-@router.post("/tasks/{task_id}/validate", status_code=202)
-def validate_task(
-    task_id: str,
-    payload: ValidateRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    job_id = _start_task_job(repo, task_id, "pipeline")
-    if task.status in {
-        TaskStatus.RUNNING,
-        TaskStatus.EXECUTED,
-        TaskStatus.COMPUTING_METRICS,
-        TaskStatus.WRITING_ARTIFACTS,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.REVIEW_REQUIRED,
-    }:
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot validate task in status {task.status.value}",
-        )
-    settings = request.app.state.settings
-    background_tasks.add_task(
-        _run_stage_job,
-        job_id,
-        settings.db_path,
-        run_staged_pipeline,
-        {
-            "task_id": task_id,
-            "settings": PipelineSettings(
-                workspace=settings.workspace,
-                db_path=settings.db_path,
-                report_template_path=settings.report_template_path,
-                feature_columns=payload.feature_columns or task.feature_columns,
-                notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
-            ),
-        },
-    )
-    return {
-        "task_id": task_id,
-        "status": "accepted",
-        "message": "pipeline dispatched; poll GET /api/tasks/{task_id} for terminal status",
     }
 
 
@@ -1072,16 +699,6 @@ def _reset_agent_task_for_rerun(
     if stage in {"scan", "reproducibility"}:
         close_live_notebook_session(task_id)
     return repo.get_task(task_id)
-
-
-def _agent_pipeline_settings(settings, task: TaskRecord) -> PipelineSettings:
-    return PipelineSettings(
-        workspace=settings.workspace,
-        db_path=settings.db_path,
-        report_template_path=settings.report_template_path,
-        feature_columns=task.feature_columns,
-        notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
-    )
 
 
 def _open_agent_stage(
@@ -2220,21 +1837,6 @@ def _format_conclusion_values(values: dict[str, str]) -> str:
         f"{labels.get(key, key)}\n{value}"
         for key in ordered_keys
         if (value := values.get(key))
-    )
-
-
-def _pipeline_settings(
-    request: Request,
-    task: TaskRecord,
-    feature_columns: list[str] | None,
-) -> PipelineSettings:
-    settings = request.app.state.settings
-    return PipelineSettings(
-        workspace=settings.workspace,
-        db_path=settings.db_path,
-        report_template_path=settings.report_template_path,
-        feature_columns=feature_columns or task.feature_columns,
-        notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
     )
 
 

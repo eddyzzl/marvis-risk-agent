@@ -26,6 +26,7 @@ from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
+from marvis.routers.validation_stages import router as validation_stages_router
 
 
 class FakeTaskRepository:
@@ -220,12 +221,17 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.reports.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.scans.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.stage_controls.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.TaskRepository",
+        FakeTaskRepository,
+    )
 
     app = FastAPI()
     app.state.settings = SimpleNamespace(
@@ -243,6 +249,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.include_router(scans_router)
     app.include_router(stage_controls_router)
     app.include_router(tasks_router)
+    app.include_router(validation_stages_router)
     return TestClient(app)
 
 
@@ -421,6 +428,26 @@ def test_stage_cancel_routes_are_served_from_dedicated_router():
     )
     assert routes[("/api/tasks/{task_id}/report/cancel", ("POST",))] == (
         "marvis.routers.stage_controls"
+    )
+
+
+def test_validation_stage_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in validation_stages_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/notebook", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/metrics", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/report", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/validate", ("POST",))] == (
+        "marvis.routers.validation_stages"
     )
 
 
@@ -1368,9 +1395,9 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     def fake_report_stage(*, task_id, settings, **_kwargs):
         calls.append(("report", task_id, settings))
 
-    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
-    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_report_stage", fake_report_stage)
 
     create = client.post(
         "/api/tasks",
@@ -1419,7 +1446,7 @@ def test_stage_endpoint_blocks_active_same_task_but_allows_other_tasks(
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.routers.validation_stages.run_report_stage",
         lambda **kwargs: calls.append(kwargs["task_id"]),
     )
     task_id = client.post(
@@ -1457,15 +1484,15 @@ def test_completed_task_can_rerun_prior_workflow_stages(tmp_path: Path, monkeypa
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.routers.validation_stages.run_notebook_stage",
         lambda **_kwargs: calls.append("notebook"),
     )
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **_kwargs: calls.append("metrics"),
     )
     monkeypatch.setattr(
-        "marvis.api.get_live_notebook_session",
+        "marvis.routers.validation_stages.get_live_notebook_session",
         lambda _task_id: object(),
     )
     source = tmp_path / "source"
@@ -1522,7 +1549,7 @@ def test_notebook_endpoint_claims_running_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.routers.validation_stages.run_notebook_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1794,7 +1821,7 @@ def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1821,11 +1848,11 @@ def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(
-        "marvis.api.get_live_notebook_session",
+        "marvis.routers.validation_stages.get_live_notebook_session",
         lambda _task_id: None,
     )
     task_id = client.post(
@@ -1851,7 +1878,7 @@ def test_metrics_endpoint_allows_retry_after_metrics_stage_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1880,7 +1907,7 @@ def test_metrics_endpoint_allows_retry_after_legacy_sample_column_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1907,7 +1934,7 @@ def test_metrics_endpoint_rejects_non_metrics_failure(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    monkeypatch.setattr("marvis.api.run_metrics_stage", lambda **_kwargs: None)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_metrics_stage", lambda **_kwargs: None)
     task_id = client.post(
         "/api/tasks",
         json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
@@ -1936,7 +1963,7 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
     def fake_run_staged_pipeline(*, task_id, settings):
         calls.append((task_id, settings))
 
-    monkeypatch.setattr("marvis.api.run_staged_pipeline", fake_run_staged_pipeline)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_staged_pipeline", fake_run_staged_pipeline)
     create = client.post(
         "/api/tasks",
         json={
@@ -1962,7 +1989,7 @@ def test_validate_rejects_terminal_task_without_dispatching_pipeline(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_staged_pipeline",
+        "marvis.routers.validation_stages.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1993,7 +2020,7 @@ def test_validate_accepts_tasks_without_feature_columns(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_staged_pipeline",
+        "marvis.routers.validation_stages.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     create = client.post(

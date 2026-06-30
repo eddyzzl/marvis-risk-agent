@@ -106,7 +106,10 @@ def test_metrics_endpoint_does_not_pass_agent_memory_context_to_validation_stage
     def fake_run_metrics_stage(**kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_run_metrics_stage)
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        fake_run_metrics_stage,
+    )
 
     response = client.post(f"/api/tasks/{task.id}/metrics")
 

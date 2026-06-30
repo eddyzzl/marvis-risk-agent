@@ -58,6 +58,7 @@ from marvis.routers.scans import router as scans_router
 from marvis.routers.skills import router as skills_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
+from marvis.routers.validation_stages import router as validation_stages_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
@@ -206,6 +207,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(stage_controls_router)
     app.include_router(reports_router)
     app.include_router(tasks_router)
+    app.include_router(validation_stages_router)
 
     @app.exception_handler(IllegalTransition)
     def _illegal_transition(_request, exc: IllegalTransition):
