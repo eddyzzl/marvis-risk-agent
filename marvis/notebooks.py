@@ -660,6 +660,7 @@ def prepare_execution_notebook_v3(
     code_scores_path: Path,
     feature_importance_path: Path,
     model_params_path: Path,
+    extra_code_cells: list[tuple[str, str]] | None = None,
 ) -> Path:
     if source_notebook.resolve() == output_notebook.resolve():
         raise ValueError("source and output notebook paths must differ")
@@ -688,6 +689,10 @@ def prepare_execution_notebook_v3(
     tail.metadata["marvis"] = "tail"
     notebook.cells.insert(0, head)
     notebook.cells.append(tail)
+    for kind, source in extra_code_cells or []:
+        cell = nbformat.v4.new_code_cell(source)
+        cell.metadata["marvis"] = kind
+        notebook.cells.append(cell)
     nbformat.write(notebook, output_notebook)
     return output_notebook
 

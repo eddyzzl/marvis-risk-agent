@@ -13,6 +13,7 @@ from marvis.notebooks import (
     _record_cell_start,
     AppendedCellExecutionPolicy,
     NotebookExecutionSession,
+    prepare_execution_notebook_v3,
     run_notebook,
 )
 from marvis.notebook_steps import notebook_step_plan
@@ -691,6 +692,57 @@ def test_run_notebook_isolated_parent_timeout_kills_worker_and_preserves_artifac
     assert killed["value"] is True
     assert executed_path.exists()
     assert "NotebookSubprocessTimeout" in log_path.read_text(encoding="utf-8")
+
+
+def test_prepare_execution_notebook_appends_generated_system_cells(tmp_path: Path):
+    source_notebook = tmp_path / "source.ipynb"
+    output_notebook = tmp_path / "prepared.ipynb"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[
+                nbformat.v4.new_code_cell(
+                    "\n".join(
+                        [
+                            "import pandas as pd",
+                            "RMC_SAMPLE_DF = pd.DataFrame({'x': [1.0, 2.0], 'y': [0, 1]})",
+                            "RMC_TARGET_COL = 'y'",
+                            "RMC_ALGORITHM = 'lgb'",
+                            "def RMC_SCORE_FN(df):",
+                            "    return [0.1 for _ in range(len(df))]",
+                        ]
+                    )
+                )
+            ],
+            metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+        ),
+        source_notebook,
+    )
+
+    prepare_execution_notebook_v3(
+        source_notebook=source_notebook,
+        output_notebook=output_notebook,
+        sample_path=tmp_path / "sample.csv",
+        contract_meta_path=tmp_path / "runtime_contract.json",
+        code_scores_path=tmp_path / "code_model_scores.csv",
+        feature_importance_path=tmp_path / "feature_importance.csv",
+        model_params_path=tmp_path / "model_params.json",
+        extra_code_cells=[
+            ("repro-pmml", "score_pmml()"),
+            ("metrics-output", "write_metrics()"),
+        ],
+    )
+
+    prepared = nbformat.read(output_notebook, as_version=4)
+
+    assert [cell.metadata.get("marvis") for cell in prepared.cells] == [
+        "head",
+        None,
+        "tail",
+        "repro-pmml",
+        "metrics-output",
+    ]
+    assert prepared.cells[-2].source == "score_pmml()"
+    assert prepared.cells[-1].source == "write_metrics()"
 
 
 def test_run_notebook_isolated_worker_error_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
