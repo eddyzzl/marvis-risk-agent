@@ -99,15 +99,18 @@ def test_agent_message_polling_uses_incremental_cursor_when_safe():
 
 def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
     app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
 
-    assert "const v2PlanFetchErrors = new Map()" in app_js
-    assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in app_js
-    assert "计划读取失败" in app_js
-    assert "当前显示的是上次缓存的计划" in app_js
-    assert "const fetchErrorBanner = fetchError" in app_js
-    assert "return fetchErrorBanner + phasesHtml + startControl;" in app_js
-    assert "data-plan-rail-retry" in app_js
-    assert "function retryV2PlanFetch" in app_js
+    assert "createPlanRailController" in app_js
+    assert "planRailController.render({ force, renderSignatures })" in app_js
+    assert "const v2PlanFetchErrors = new Map()" in plan_js
+    assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in plan_js
+    assert "计划读取失败" in plan_js
+    assert "当前显示的是上次缓存的计划" in plan_js
+    assert "const fetchErrorBanner = fetchError" in plan_js
+    assert "return fetchErrorBanner + phasesHtml + startControl;" in plan_js
+    assert "data-plan-rail-retry" in plan_js
+    assert "function retryFetch" in plan_js
 
 
 def _agent_timeline_items_for(
@@ -432,20 +435,20 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
 
 
 def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
-    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_static("css/v2-workbench.css")
 
-    plan_start = app_js.index("function planRailHtml")
-    plan_end = app_js.index("function renderWorkflowStepper", plan_start)
-    plan_renderer = app_js[plan_start:plan_end]
-    substeps_start = app_js.index("function planSubstepGroupHtml")
-    substeps_end = app_js.index("function taskUsesPlanRail", substeps_start)
-    substeps_renderer = app_js[substeps_start:substeps_end]
+    plan_start = plan_js.index("function planRailHtml")
+    plan_end = plan_js.index("function render({", plan_start)
+    plan_renderer = plan_js[plan_start:plan_end]
+    substeps_start = plan_js.index("function planSubstepGroupHtml")
+    substeps_end = plan_js.index("function driverHasBlockingError", substeps_start)
+    substeps_renderer = plan_js[substeps_start:substeps_end]
 
-    assert "function planPhaseStatus" in app_js
-    assert "function planPhaseHint" in app_js
-    assert "function planRetryControlHtml" in app_js
-    assert "function planSubstepGroupHtml" in app_js
+    assert "function planPhaseStatus" in plan_js
+    assert "function planPhaseHint" in plan_js
+    assert "function planRetryControlHtml" in plan_js
+    assert "function planSubstepGroupHtml" in plan_js
     assert "const phaseNumber = phaseIndex + 1;" in plan_renderer
     assert 'class="step plan-rail-step' in plan_renderer
     assert '<span class="step-number">${phaseNumber}</span>' in plan_renderer
@@ -462,8 +465,8 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
     assert "descriptionHtml" in substeps_renderer
     assert "retry" in substeps_renderer
-    assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in app_js
-    assert 'class="plan-retry-inputs"' in app_js
+    assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in plan_js
+    assert 'class="plan-retry-inputs"' in plan_js
     assert ': "";' in substeps_renderer
     assert '<section class="plan-rail-phase"' not in plan_renderer
     assert "plan-rail-major-number" not in plan_renderer
@@ -487,22 +490,22 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
 
 
 def test_plan_rail_retry_step_posts_edited_inputs():
-    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
     v2_css = _read_static("css/v2-workbench.css")
 
-    retry_text_body = _slice_function(app_js, "function planRetryInputsText")
-    retry_fields_body = _slice_function(app_js, "function planRetrySchemaFieldsHtml")
-    retry_parse_structured_body = _slice_function(app_js, "function collectPlanRetryStructuredInputs")
-    retry_scope_body = _slice_function(app_js, "function planRetryScopeHtml")
-    retry_body = _slice_function(app_js, "async function retryV2PlanStep")
-    click_body = _slice_function(app_js, "function handleWorkflowStepperClick")
+    retry_text_body = _slice_function(plan_js, "function planRetryInputsText")
+    retry_fields_body = _slice_function(plan_js, "function planRetrySchemaFieldsHtml")
+    retry_parse_structured_body = _slice_function(plan_js, "function collectPlanRetryStructuredInputs")
+    retry_scope_body = _slice_function(plan_js, "function planRetryScopeHtml")
+    retry_body = _slice_function(plan_js, "async function retryPlanStep")
+    click_body = _slice_function(plan_js, "function handleClick")
 
     assert "step?.failure_envelope?.editable_input_schema" in retry_text_body
     assert 'Object.prototype.hasOwnProperty.call(spec, "default")' in retry_text_body
     assert 'data-plan-retry-input-key="${encodedKey}"' in retry_fields_body
     assert 'data-plan-retry-input-type="${typeLabel}"' in retry_fields_body
     assert "plan-retry-schema-fields" in retry_fields_body
-    assert "collectPlanRetryStructuredInputs(form)" in _slice_function(app_js, "function parsePlanRetryInputs")
+    assert "collectPlanRetryStructuredInputs(form)" in _slice_function(plan_js, "function parsePlanRetryInputs")
     assert "[data-plan-retry-input-key]" in retry_parse_structured_body
     assert "step?.failure_envelope" in retry_scope_body
     assert "downstream_reset_steps" in retry_scope_body
@@ -513,9 +516,9 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
     assert "JSON.stringify({ inputs })" in retry_body
     assert "v2PlanCache.delete(taskId)" in retry_body
-    assert "window.setTimeout(() => retryV2PlanFetch(taskId), 1000)" in retry_body
+    assert "window.setTimeout(() => retryFetch(taskId), 1000)" in retry_body
     assert "[data-plan-retry-step]" in click_body
-    assert "void retryV2PlanStep(planRetryButton);" in click_body
+    assert "void retryPlanStep(planRetryButton);" in click_body
     assert "[data-plan-rail-retry]" in click_body
 
 
@@ -1283,10 +1286,11 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
 
     assert 'id="progressRail"' in index_html
     assert 'aria-label="验证步骤"' in index_html
-    assert 'progressRail?.setAttribute("aria-label", "计划步骤");' in app_js
+    assert 'progressRail?.setAttribute("aria-label", "计划步骤");' in plan_js
     assert 'progressRail?.setAttribute("aria-label", "验证步骤");' in app_js
     assert 'id="taskSnapshot"' in index_html
     assert index_html.index('id="scanSection"') < index_html.index('id="notebookSection"')
@@ -1314,15 +1318,17 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
 def test_plan_rail_artifact_preview_is_wired_to_real_app_shell():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
     styles_css = _read_static("styles.css")
 
     assert 'id="artifactPanel"' in index_html
     assert 'id="artifactPanelBody"' in index_html
-    assert 'import { attachArtifactHandlers, renderArtifact } from "./js/v2/artifact_view.js";' in app_js
-    assert 'function planOutputButtonHtml(step)' in app_js
-    assert 'data-artifact="${escapeHtml(outputRef)}"' in app_js
-    assert "attachArtifactHandlers(document, artifactPreviewContainer" in app_js
-    assert "renderArtifact(target, artifactRef)" in app_js
+    assert 'import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";' in plan_js
+    assert 'function planOutputButtonHtml(step)' in plan_js
+    assert 'data-artifact="${escapeHtml(outputRef)}"' in plan_js
+    assert "attachArtifactHandlers(root, artifactPreviewContainer" in plan_js
+    assert "artifactRenderer(target, artifactRef)" in plan_js
+    assert "planRailController.installArtifactHandlers(document);" in app_js
     assert ".artifact-panel {" in styles_css
     assert ".artifact-panel-body" in styles_css
 
@@ -2975,7 +2981,8 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     ]
     assert 'available: false' not in definitions
     assert 'manualEnabled: false' not in definitions
-    assert 'const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in app_js
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    assert 'export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in plan_js
     # The toast path remains available for future explicitly unavailable task definitions.
     assert "card.dataset.comingSoon" not in app_js
     assert "definition.available === false" in create_dialog_js
@@ -5972,12 +5979,14 @@ def test_agent_conversation_panel_layout_and_message_shapes():
 
 def test_agent_message_meta_label_includes_plan_step_context():
     app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
     meta_start = app_js.index("function agentMessageMetaLabel")
     meta_end = app_js.index("function formatAgentMessageContent", meta_start)
     meta_body = app_js[meta_start:meta_end]
 
     assert "function agentMessagePlanStep" in meta_body
-    assert "metadata.step_id" in meta_body
+    assert "planRailController.planStep(metadata, selectedTaskId)" in meta_body
+    assert "metadata.step_id" in plan_js
     assert "metadata.step_title || step?.title" in meta_body
     assert "metadata.phase || step?.phase" in meta_body
     assert "metadata.run_seq" in meta_body
