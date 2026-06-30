@@ -52,11 +52,13 @@ class ModelingProposal:
     sample_weight_col: str = ""
     sample_weight_candidates: list[str] = field(default_factory=list)
     sample_weight_diagnostics: list[dict] = field(default_factory=list)
+    business_columns: dict[str, object] = field(default_factory=dict)
+    feature_dictionary_id: str = ""
 
     def template_slots(self) -> dict:
         selection_policy = _default_selection_policy(self.target_type)
         if self.template_id == "modeling_with_join":
-            return {
+            slots = {
                 "anchor_id": self.anchor_id or self.dataset_id,
                 "feature_ids": list(self.join_feature_ids),
                 "target_col": self.target_col,
@@ -73,10 +75,15 @@ class ModelingProposal:
                 "sample_weight_col": self.sample_weight_col,
                 "sample_weight_candidates": list(self.sample_weight_candidates),
                 "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
-                "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
+                "passthrough_cols": _unique([
+                    self.sample_weight_col,
+                    *self.sample_weight_candidates,
+                    *_business_passthrough_cols(self.business_columns),
+                ]),
                 "selection_policy": selection_policy,
             }
-        return {
+            return _with_optional_business_slots(slots, self)
+        slots = {
             "dataset_id": self.dataset_id,
             "target_col": self.target_col,
             "feature_cols": self.feature_cols,
@@ -93,9 +100,14 @@ class ModelingProposal:
             "sample_weight_col": self.sample_weight_col,
             "sample_weight_candidates": list(self.sample_weight_candidates),
             "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
-            "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
+            "passthrough_cols": _unique([
+                self.sample_weight_col,
+                *self.sample_weight_candidates,
+                *_business_passthrough_cols(self.business_columns),
+            ]),
             "selection_policy": selection_policy,
         }
+        return _with_optional_business_slots(slots, self)
 
 
 # Recipes selectable for the binary credit-risk default; lgb is the recommended
@@ -104,6 +116,15 @@ class ModelingProposal:
 _SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass")
 _BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
 _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
+_BUSINESS_COLUMN_ALIASES = {
+    "loan_month_col": ("loan_month", "apply_month", "book_month", "放款月", "贷款月份", "申请月份"),
+    "interest_rate_col": ("interest_rate", "rate", "apr", "pricing_rate", "利率", "年利率", "定价利率"),
+    "loan_amount_col": ("loan_amount", "amount", "loan_amt", "放款金额", "贷款金额", "合同金额"),
+    "term_col": ("term", "loan_term", "periods", "期数", "期限", "贷款期数"),
+    "drawdown_amount_col": ("drawdown_amount", "drawdown", "支用金额", "提款金额", "放款支用金额"),
+    "credit_limit_col": ("credit_limit", "limit", "授信额度", "额度", "信用额度"),
+}
+_FEATURE_DICTIONARY_ROLES = frozenset({"feature_dictionary", FileRole.DATA_DICTIONARY.value})
 
 
 def build_modeling_proposal(
@@ -225,6 +246,12 @@ def build_modeling_proposal(
         notes.append(f"算法:{'/'.join(recipe_list)}(多算法训练后按 {_selection_metric_label(target_type)} 取最优)。")
     else:
         notes.append(f"算法:`{recipe_list[0]}`(可选 {'/'.join(_SUPPORTED_RECIPES)})。")
+    business_columns = _infer_business_columns(backend.column_names(path))
+    feature_dictionary_id = _resolve_feature_dictionary_id(registry, task_id, source_dir)
+    if business_columns:
+        notes.append("已识别建模报告业务列,将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
+    if feature_dictionary_id:
+        notes.append("已识别特征字典,将用于报告产品/厂商/类别解释。")
     oot = split_values.get("oot")
     return ModelingProposal(
         dataset_id=dataset_id,
@@ -247,7 +274,82 @@ def build_modeling_proposal(
         sample_weight_col=selected_weight_col,
         sample_weight_candidates=weight_candidates,
         sample_weight_diagnostics=weight_diagnostics,
+        business_columns=business_columns,
+        feature_dictionary_id=feature_dictionary_id,
     )
+
+
+def _with_optional_business_slots(slots: dict, proposal: ModelingProposal) -> dict:
+    if proposal.business_columns:
+        slots["business_columns"] = dict(proposal.business_columns)
+    if proposal.feature_dictionary_id:
+        slots["feature_dictionary_id"] = proposal.feature_dictionary_id
+    return slots
+
+
+def _business_passthrough_cols(business_columns: dict[str, object]) -> list[str]:
+    cols: list[str] = []
+    for key, value in business_columns.items():
+        if key == "mob_observe_cols" and isinstance(value, list):
+            cols.extend(str(item) for item in value)
+        elif isinstance(value, str):
+            cols.append(value)
+    return cols
+
+
+def _infer_business_columns(columns: list[str]) -> dict[str, object]:
+    by_lower = {str(column).strip().lower(): str(column) for column in columns}
+    business: dict[str, object] = {}
+    for key, aliases in _BUSINESS_COLUMN_ALIASES.items():
+        matched = _first_matching_column(by_lower, aliases)
+        if matched:
+            business[key] = matched
+    mob_cols = [
+        str(column)
+        for column in columns
+        if _is_mob_observe_column(str(column))
+    ]
+    if mob_cols:
+        business["mob_observe_cols"] = mob_cols
+    return business
+
+
+def _first_matching_column(by_lower: dict[str, str], aliases: tuple[str, ...]) -> str:
+    for alias in aliases:
+        matched = by_lower.get(str(alias).strip().lower())
+        if matched:
+            return matched
+    return ""
+
+
+def _is_mob_observe_column(column: str) -> bool:
+    normalized = column.strip().lower().replace("_", "").replace("-", "")
+    suffix = normalized[3:] if normalized.startswith("mob") else ""
+    return bool(suffix) and suffix[0].isdigit()
+
+
+def _resolve_feature_dictionary_id(registry, task_id: str, source_dir) -> str:
+    existing = _first_feature_dictionary(registry.list_for_task(task_id))
+    if existing:
+        return existing
+    if source_dir is None:
+        return ""
+    for artifact in scan_source_dir(Path(source_dir)):
+        if artifact.role == FileRole.DATA_DICTIONARY:
+            dataset = registry.register_from_upload(
+                task_id,
+                Path(artifact.path),
+                role="feature_dictionary",
+            )
+            return dataset.id
+    return ""
+
+
+def _first_feature_dictionary(datasets) -> str:
+    for dataset in datasets:
+        if str(getattr(dataset, "role", "")) in _FEATURE_DICTIONARY_ROLES:
+            return str(dataset.id)
+    return ""
 
 
 def _derive_target_type(recipe_list: list[str]) -> str:

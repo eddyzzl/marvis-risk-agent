@@ -15,8 +15,10 @@ import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from marvis.app import create_app
+from marvis.plugins.manifest import ToolRef
 
 
 def _sample_dir(root: Path, n: int = 4000) -> Path:
@@ -67,6 +69,46 @@ def _continuous_dir(root: Path, n: int = 240) -> Path:
         "income": 3000 + rng.normal(size=n) * 300,
         "model_flag": split,
     }).to_parquet(src / "sample.parquet")
+    return src
+
+
+def _business_material_dir(root: Path, n: int = 900) -> Path:
+    src = root / "business_modeling_material"
+    src.mkdir(parents=True, exist_ok=True)
+    rng = np.random.RandomState(29)
+    sig1 = rng.normal(size=n)
+    sig2 = rng.normal(size=n)
+    sig3 = rng.normal(size=n)
+    score = 0.8 * sig1 - 0.5 * sig2 + 0.4 * sig3
+    p = 1 / (1 + np.exp(-(score - 0.8)))
+    y = (rng.uniform(size=n) < p).astype(float)
+    split = np.array(["train"] * n, dtype=object)
+    split[int(n * 0.55):int(n * 0.75)] = "test"
+    split[int(n * 0.75):] = "oot"
+    months = np.array(["2025-10", "2025-11", "2025-12", "2026-01"], dtype=object)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "sig1": sig1,
+        "sig2": sig2,
+        "sig3": sig3,
+        "long_y": y,
+        "model_flag": split,
+        "loan_month": months[np.arange(n) % len(months)],
+        "rate": 0.08 + rng.uniform(size=n) * 0.12,
+        "amount": 5000 + rng.randint(0, 20000, size=n),
+        "term": rng.choice([6, 12, 18, 24], size=n),
+        "drawdown": 3000 + rng.randint(0, 15000, size=n),
+        "limit": 8000 + rng.randint(0, 40000, size=n),
+        "mob1": y,
+        "mob2": np.where(rng.uniform(size=n) < p * 0.85, 1.0, 0.0),
+        "mob3": np.where(rng.uniform(size=n) < p * 0.75, 1.0, 0.0),
+    }).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "特征名": ["sig1", "sig2", "sig3"],
+        "含义": ["收入稳定性", "负债压力", "交易活跃度"],
+        "产品名称": ["征信评分", "借贷画像", "交易评分"],
+        "厂商名称": ["数据厂商A", "数据厂商B", "数据厂商C"],
+    }).to_csv(src / "feature_dictionary.csv", index=False, encoding="utf-8-sig")
     return src
 
 
@@ -166,6 +208,80 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "计划已全部完成" in done["content"]
+
+
+def test_modeling_business_materials_flow_into_report_and_delivery(client: TestClient, tmp_path: Path):
+    src = _business_material_dir(tmp_path)
+    resp = client.post("/api/tasks", json={
+        "model_name": "业务材料建模",
+        "model_version": "business-smoke",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+    })
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    opening = next(m for m in messages if m["role"] == "assistant")
+    assert "已识别建模报告业务列" in opening["content"]
+    assert "已识别特征字典" in opening["content"]
+
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_report"))
+    delivery_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "post_training_action"))
+    assert report_step.inputs["business_columns"] == {
+        "loan_month_col": "loan_month",
+        "interest_rate_col": "rate",
+        "loan_amount_col": "amount",
+        "term_col": "term",
+        "drawdown_amount_col": "drawdown",
+        "credit_limit_col": "limit",
+        "mob_observe_cols": ["mob1", "mob2", "mob3"],
+    }
+    assert report_step.inputs["feature_dictionary_id"]
+    assert report_step.inputs["project_meta"] == {
+        "模型名称": "业务材料建模",
+        "模型版本": "business-smoke",
+        "验证人": "qa",
+    }
+    for column in ["loan_month", "rate", "amount", "term", "drawdown", "limit", "mob1", "mob2", "mob3"]:
+        assert column in split_step.inputs["passthrough_cols"]
+
+    for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认"]:
+        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        assert resp.status_code == 202, resp.text
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "计划已全部完成" in done["content"]
+    assert not done["metadata"].get("error")
+
+    report_output = client.app.state.plan_repo.load_step_output(report_step.id)
+    statuses = {item["section"]: item for item in report_output["section_status"]}
+    assert set(statuses) == {"sample_analysis", "vintage", "amount_bin", "low_pricing", "product_list"}
+    assert all(item["available"] for item in statuses.values())
+    workbook = load_workbook(report_output["report_path"])
+    for sheet_name in ["汇总", "样本分析", "Vintage", "评分分段", "特征重要性", "压力测试"]:
+        assert sheet_name in workbook.sheetnames
+        assert workbook[sheet_name].max_row > 1
+    summary_rows = {
+        workbook["汇总"].cell(row=row, column=1).value: workbook["汇总"].cell(row=row, column=2).value
+        for row in range(1, workbook["汇总"].max_row + 1)
+    }
+    assert set(str(summary_rows["五、使用产品清单"]).split("；")) == {
+        "征信评分（数据厂商A）",
+        "借贷画像（数据厂商B）",
+        "交易评分（数据厂商C）",
+    }
+
+    delivery_output = client.app.state.plan_repo.load_step_output(delivery_step.id)
+    assert Path(delivery_output["approval_package_markdown_path"]).exists()
+    assert Path(delivery_output["model_card_markdown_path"]).exists()
+    assert delivery_output["model_card"]["delivery"]["validation_handoff_status"] == "succeeded"
 
 
 def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: Path):

@@ -393,10 +393,12 @@ def run_modeling_driver_turn(
             ),
             metadata={"intent": "modeling"},
         )
+        slots = proposal.template_slots()
+        slots.setdefault("project_meta", _modeling_project_meta(task))
         turn = driver.start(
             task_id=task.id,
             template_id=proposal.template_id,
-            slots=proposal.template_slots(),
+            slots=slots,
             tier=runtime.tier,
         )
         append_driver_messages(repo, task.id, turn)
@@ -684,6 +686,19 @@ def _modeling_recipes(task: TaskRecord) -> list[str] | None:
 def _modeling_target_type(task: TaskRecord) -> str | None:
     target_type = str(getattr(task, "target_type", "") or "").strip()
     return target_type or None
+
+
+def _modeling_project_meta(task: TaskRecord) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    for key, value in (
+        ("模型名称", getattr(task, "model_name", "")),
+        ("模型版本", getattr(task, "model_version", "")),
+        ("验证人", getattr(task, "validator", "")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            meta[key] = text
+    return meta
 
 
 def _auto_decision_content(decision: dict) -> str:
