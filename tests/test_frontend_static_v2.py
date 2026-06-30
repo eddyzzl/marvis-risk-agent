@@ -120,15 +120,12 @@ def _agent_timeline_items_for(
     frozen_snapshots: list[dict] | None = None,
     selected_task_id: str | None = None,
 ) -> list[dict]:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentTimelineStageDefinitions")
-    end = app_js.index("function renderAgentTimeline", start)
-    timeline_source = app_js[start:end]
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     snapshots = frozen_snapshots or []
     snapshot_task = selected_task_id or ("test-task" if snapshots else "")
     script = "\n".join(
         [
-            timeline_source,
+            f"import * as conversation from {json.dumps(module_url)};",
             (
                 f"const selectedTaskId = {json.dumps(snapshot_task)};"
                 if snapshot_task
@@ -142,7 +139,12 @@ def _agent_timeline_items_for(
             "if (__seedSnapshots.length && selectedTaskId) {",
             "  taskFrozenSectionSnapshots.set(selectedTaskId, __seedSnapshots);",
             "}",
-            "const items = agentTimelineItems(messages, visibleStages).map((item) => {",
+            "const snapshotsByTrigger = conversation.agentFrozenSnapshotsByTriggerId({",
+            "  selectedTaskId,",
+            "  taskFrozenSectionSnapshots,",
+            "  agentMessages: messages,",
+            "});",
+            "const items = conversation.agentTimelineItems(messages, visibleStages, { snapshotsByTrigger }).map((item) => {",
             "  if (item.type === 'stage') return { type: item.type, stage: item.stage };",
             "  if (item.type === 'frozen') return {",
             "    type: item.type,",
@@ -155,7 +157,7 @@ def _agent_timeline_items_for(
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -164,23 +166,24 @@ def _agent_timeline_items_for(
 
 
 def _agent_messages_html_for(messages: list[dict], label_stage: str | None = None) -> str:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentMessagesHtml")
-    end = app_js.index("function clearAgentStageMessages", start)
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     script = "\n".join(
         [
+            f"import * as conversation from {json.dumps(module_url)};",
             "function agentStageLabel(stage) { return 'Agent'; }",
             "function agentMessageHtml(message, labelStage = message?.stage, options = {}) {",
             "  const label = message.role === 'user' ? '' : agentStageLabel(labelStage);",
             "  return `${options.hideMeta || !label ? '' : `<meta>${label}</meta>`}<body>${message.content}</body>`;",
             "}",
-            app_js[start:end],
             f"const messages = {json.dumps(messages, ensure_ascii=False)};",
-            f"process.stdout.write(agentMessagesHtml(messages, {json.dumps(label_stage, ensure_ascii=False)}));",
+            "process.stdout.write(conversation.agentMessagesHtml(",
+            f"  messages, {json.dumps(label_stage, ensure_ascii=False)},",
+            "  { agentStageLabel, agentMessageHtml },",
+            "));",
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -189,18 +192,16 @@ def _agent_messages_html_for(messages: list[dict], label_stage: str | None = Non
 
 
 def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentReportMessagesForDisplay")
-    end = app_js.index("function clearAgentStageMessages", start)
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     script = "\n".join(
         [
-            app_js[start:end],
+            f"import * as conversation from {json.dumps(module_url)};",
             f"const messages = {json.dumps(messages, ensure_ascii=False)};",
-            "process.stdout.write(JSON.stringify(agentReportMessagesForDisplay(messages)));",
+            "process.stdout.write(JSON.stringify(conversation.agentReportMessagesForDisplay(messages)));",
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -5313,7 +5314,8 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     timeline_end = app_js.index("function resetAgentTypingState", timeline_start)
     timeline_body = app_js[timeline_start:timeline_end]
     assert "agentTimelineVisibleStages()" in timeline_body
-    assert "agentTimelineItems(messages, visibleStages)" in timeline_body
+    assert "agentTimelineItems(messages, visibleStages, {" in timeline_body
+    assert "snapshotsByTrigger: agentFrozenSnapshotsByTriggerId({" in timeline_body
 
     report_visibility_start = app_js.index("function updateAgentReportSectionVisibility")
     report_visibility_end = app_js.index(
@@ -5721,6 +5723,7 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    conversation_js = _read_static("js/agent-conversation-view.js")
 
     assert 'id="agentConversationPanel"' in index_html
     assert 'id="agentScanLeadMessages"' in index_html
@@ -5939,19 +5942,19 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "agent-message assistant" in app_js
     assert "renderAgentTimeline" in app_js
     render_start = app_js.index("function renderAgentConversation")
-    render_end = app_js.index("function agentTimelineStageDefinitions", render_start)
+    render_end = app_js.index("function agentStructuralSignature", render_start)
     render_body = app_js[render_start:render_end]
     # v2 wiring: renderAgentTimeline must be fed via agentReportMessagesForDisplay.
     assert "agentReportMessagesForDisplay(agentMessages)" in render_body
     assert "renderAgentTimeline(" in render_body
     assert "agentMessages.filter((message, index) => !agentMessageTargetId(message, index, agentMessages))" not in render_body
     assert "requestAgentConversationScrollToLatest();" in render_body
-    assert "function agentTimelineItems" in app_js
-    assert "function agentTimelineInsertionIndex" in app_js
-    assert "function agentReportMessagesForDisplay" in app_js
-    assert "function agentMessagesHtml" in app_js
+    assert "function agentTimelineItems" in conversation_js
+    assert "function agentTimelineInsertionIndex" in conversation_js
+    assert "function agentReportMessagesForDisplay" in conversation_js
+    assert "function agentMessagesHtml" in conversation_js
     assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
-    assert "agentMessagesHtml(item.messages)" in app_js
+    assert "agentMessagesHtml(item.messages, undefined, {" in app_js
     assert "agentMessageMetaLabel(message, labelStage)" in app_js
     alias_start = app_js.index("function agentValidatorAlias")
     stage_label_start = app_js.index("function agentStageLabel", alias_start)
@@ -5968,9 +5971,9 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "材料完备性" not in stage_label_body
     assert "分数一致性" not in stage_label_body
     assert "效果与稳定性" not in stage_label_body
-    assert 'metadata.tool_call?.name === "scan_materials"' in app_js
-    assert "function agentMessageIsAdvanceIntent" in app_js
-    assert 'metadata.intent === "advance"' in app_js
+    assert 'metadata.tool_call?.name === "scan_materials"' in conversation_js
+    assert "function agentMessageIsAdvanceIntent" in conversation_js
+    assert 'metadata.intent === "advance"' in conversation_js
     assert "agentTimelineVisibleStages" in app_js
     assert "restoreResultScrollDefaultOrder" in app_js
     assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
@@ -6730,12 +6733,14 @@ def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status
 
 def test_agent_send_shows_thinking_message_before_network_wait():
     app_js = _read_static("app.js")
-    helpers_start = app_js.index("function agentMessageContent")
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
+    helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
     helpers_end = app_js.index("function renderAgentTimeline", helpers_start)
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     script = "\n".join(
         [
+            f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
@@ -6788,14 +6793,16 @@ def test_agent_send_shows_thinking_message_before_network_wait():
 
 def test_agent_send_polls_streaming_messages_before_network_response_finishes():
     app_js = _read_static("app.js")
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     helpers_start = app_js.index("async function pollAgentMessagesUntilSettled")
     helpers_end = app_js.index("async function startAgentValidation", helpers_start)
-    message_helpers_start = app_js.index("function agentMessageContent")
+    message_helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
     message_helpers_end = app_js.index("function renderAgentTimeline", message_helpers_start)
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     script = "\n".join(
         [
+            f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
             "const AGENT_STREAM_POLL_INTERVAL_MS = 1;",
             "let selectedTaskId = 'task-1';",
             "let selectedTask = { task_type: 'validation' };",
@@ -6867,7 +6874,7 @@ def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_
     assert "renderAgentEffortPreference()" in app_js
 
     conversation_start = app_js.index("function renderAgentConversation")
-    conversation_end = app_js.index("function agentTimelineStageDefinitions", conversation_start)
+    conversation_end = app_js.index("function agentStructuralSignature", conversation_start)
     conversation = app_js[conversation_start:conversation_end]
     assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!showConversation)")
     assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!showConversation)")

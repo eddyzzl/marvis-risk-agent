@@ -828,11 +828,13 @@ def test_capability_tier_picker_is_wired():
     selector (the previously-missing entry point), collected into payload."""
     index_html = _read("index.html")
     app_js = _read("app.js")
+    create_dialog_js = _read("js/create-task-dialog.js")
+    task_types_js = _read("js/task-types.js")
     assert 'id="createTaskTier"' in index_html
     for tier in ("conservative", "balanced", "autonomous"):
         assert f'value="{tier}"' in index_html
-    assert "createTaskTierField" in app_js
-    assert "tierField" in app_js  # gated to driver task types
+    assert "createTaskTierField" in create_dialog_js
+    assert "tierField" in task_types_js  # gated to driver task types
     assert "syncCreateTaskTierDefault" in app_js
-    assert "getSelectedTier()" in app_js
-    assert "payload.capability_tier" in app_js
+    assert "getSelectedTier" in create_dialog_js
+    assert "payload.capability_tier" in create_dialog_js
