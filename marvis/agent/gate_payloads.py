@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
+
 
 def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict | None:
     """Per-feature dedup picker payload for a join gate (§4). Returns None unless
@@ -568,7 +570,8 @@ def _policy_signals(row: dict | None) -> dict:
     recipe = str(item.get("recipe") or "")
     scorecard_rows = item.get("scorecard_table") if isinstance(item.get("scorecard_table"), list) else []
     scorecard_like = recipe == "scorecard" or bool(scorecard_rows)
-    monotonic_declared = _has_monotonic_policy(item, scorecard_rows)
+    monotonic_profile = monotonic_policy_profile(item, scorecard_rows)
+    monotonic_declared = bool(monotonic_profile.get("monotonicity_declared"))
     stability = str(business.get("stability") or "")
     delivery = str(business.get("delivery") or "")
     reasons: list[str] = []
@@ -588,7 +591,11 @@ def _policy_signals(row: dict | None) -> dict:
     elif scorecard_like:
         monotonicity = "需确认"
         monotonicity_status = "warning"
-        reasons.append("评分卡缺少单调性方向证据")
+        missing = monotonic_profile.get("monotonicity_missing_features")
+        if isinstance(missing, list) and missing:
+            reasons.append(f"评分卡部分特征缺少单调性方向证据: {', '.join(str(item) for item in missing[:8])}")
+        else:
+            reasons.append("评分卡缺少单调性方向证据")
     else:
         monotonicity = "未声明"
         monotonicity_status = "neutral"
@@ -624,20 +631,7 @@ def _policy_signals(row: dict | None) -> dict:
 
 
 def _has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
-    for key in ("monotonic_constraints", "monotone_constraints", "monotonic_directions"):
-        value = item.get(key)
-        if isinstance(value, (dict, list, tuple)) and len(value) > 0:
-            return True
-        if isinstance(value, str) and value.strip():
-            return True
-    for container_key in ("params", "model_params", "fixed_params"):
-        value = item.get(container_key)
-        if isinstance(value, dict) and _has_monotonic_policy(value, []):
-            return True
-    for row in scorecard_rows:
-        if isinstance(row, dict) and str(row.get("monotonic_direction") or "").strip():
-            return True
-    return False
+    return has_monotonic_policy(item, scorecard_rows)
 
 
 def _policy_decision(value) -> dict:

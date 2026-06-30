@@ -1161,6 +1161,18 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
             "scorecard_table": [{"feature": "x1", "monotonic_direction": "increasing"}],
         },
         {
+            "id": "scorecard-partial-monotonic",
+            "recipe": "scorecard",
+            "oot_ks": 0.53,
+            "psi_oot_vs_train": 0.03,
+            "feature_count": 12,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "scorecard_table": [
+                {"feature": "x1", "monotonic_direction": "increasing"},
+                {"feature": "x2"},
+            ],
+        },
+        {
             "id": "scorecard-no-monotonic",
             "recipe": "scorecard",
             "oot_ks": 0.51,
@@ -1189,6 +1201,50 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
     assert decision["status"] == "accepted"
     assert decision["policy_candidate_count"] == 2
     assert decision["selected_by_preference"] is True
+
+
+def test_selection_policy_rejects_partial_scorecard_monotonicity():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "scorecard-partial-monotonic",
+            "recipe": "scorecard",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "scorecard_table": [
+                {"feature": "x1", "monotonic_direction": "increasing"},
+                {"feature": "x2"},
+            ],
+        },
+        {"require_monotonicity": True},
+        explicit=False,
+    )
+
+    assert decision["status"] == "blocked"
+    assert decision["profile"]["monotonicity_declared"] is False
+    assert decision["profile"]["monotonicity_coverage"] == "partial"
+    assert decision["profile"]["monotonicity_missing_features"] == ["x2"]
+    assert decision["violations"][0]["code"] == "require_monotonicity"
+    assert "x2" in decision["violations"][0]["message"]
+
+
+def test_selection_policy_rejects_zero_monotone_constraints():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "lgb-zero-constraints",
+            "recipe": "lgb",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "model_params": {"monotone_constraints": [0, 0, 0]},
+        },
+        {"require_monotonicity": True},
+        explicit=False,
+    )
+
+    assert decision["status"] == "blocked"
+    assert decision["profile"]["monotonicity_declared"] is False
+    assert decision["violations"][0]["code"] == "require_monotonicity"
 
 
 def test_selection_policy_string_false_is_not_enabled():

@@ -655,6 +655,25 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
     assert delivery["candidates"][2]["capabilities"]["reason"] == "DNN 仅支持原生模型。"
 
 
+def test_model_delivery_policy_signals_warn_on_partial_scorecard_monotonicity():
+    from marvis.agent.gate_payloads import _policy_signals
+
+    signals = _policy_signals({
+        "id": "exp-scorecard",
+        "recipe": "scorecard",
+        "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        "scorecard_table": [
+            {"feature": "x1", "monotonic_direction": "increasing"},
+            {"feature": "x2"},
+        ],
+    })
+
+    assert signals["scorecard"] == "评分卡"
+    assert signals["monotonicity"] == "需确认"
+    assert signals["monotonicity_status"] == "warning"
+    assert any("x2" in reason for reason in signals["reasons"])
+
+
 def test_post_training_gate_merges_report_readiness(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

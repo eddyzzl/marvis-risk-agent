@@ -27,6 +27,7 @@ from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainRes
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.handoff import create_challenger_backtest_task, handoff_to_validation
+from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
 from marvis.packs.modeling.report_compute import (
     BusinessColumns,
     build_feature_dictionary,
@@ -1049,9 +1050,17 @@ def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
             "message": "要求最终模型为评分卡,但该候选不是评分卡。",
         })
     if policy.get("require_monotonicity") and not profile.get("monotonicity_declared"):
+        missing = profile.get("monotonicity_missing_features")
+        if isinstance(missing, list) and missing:
+            missing_text = ", ".join(str(item) for item in missing[:8])
+            if len(missing) > 8:
+                missing_text += ", ..."
+            message = f"要求完整单调性证据,但以下特征缺少方向: {missing_text}。"
+        else:
+            message = "要求声明单调约束,但该候选缺少单调性证据。"
         violations.append({
             "code": "require_monotonicity",
-            "message": "要求声明单调约束,但该候选缺少单调性证据。",
+            "message": message,
         })
     max_feature_count = policy.get("max_feature_count")
     feature_count = profile.get("feature_count")
@@ -1113,11 +1122,15 @@ def _row_policy_profile(row: dict) -> dict:
     feature_count = item.get("feature_count")
     if not isinstance(feature_count, int) and isinstance(features, list):
         feature_count = len(features)
+    monotonic = monotonic_policy_profile(item, scorecard_rows)
     profile = {
         "recipe": recipe,
         "scorecard": recipe == "scorecard" or bool(scorecard_rows),
         "scorecard_table_rows": len(scorecard_rows),
-        "monotonicity_declared": _row_has_monotonic_policy(item, scorecard_rows),
+        "monotonicity_declared": bool(monotonic.get("monotonicity_declared")),
+        "monotonicity_coverage": monotonic.get("monotonicity_coverage"),
+        "monotonicity_missing_features": monotonic.get("monotonicity_missing_features") or [],
+        "monotonicity_constrained_features": monotonic.get("monotonicity_constrained_features") or [],
         "pmml_supported": bool(caps.get("pmml_supported")),
         "handoff_supported": bool(caps.get("handoff_supported")),
         "native_model_supported": bool(caps.get("native_model_supported")),
@@ -1130,20 +1143,7 @@ def _row_policy_profile(row: dict) -> dict:
 
 
 def _row_has_monotonic_policy(item: dict, scorecard_rows: list) -> bool:
-    for key in ("monotonic_constraints", "monotone_constraints", "monotonic_directions"):
-        value = item.get(key)
-        if isinstance(value, (dict, list, tuple)) and len(value) > 0:
-            return True
-        if isinstance(value, str) and value.strip():
-            return True
-    for container_key in ("params", "model_params", "fixed_params"):
-        value = item.get(container_key)
-        if isinstance(value, dict) and _row_has_monotonic_policy(value, []):
-            return True
-    for row in scorecard_rows:
-        if isinstance(row, dict) and str(row.get("monotonic_direction") or "").strip():
-            return True
-    return False
+    return has_monotonic_policy(item, scorecard_rows)
 
 
 def _positive_int_or_none(value) -> int | None:
