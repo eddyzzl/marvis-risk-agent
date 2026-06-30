@@ -5,7 +5,6 @@ import logging
 from pathlib import Path, PurePosixPath
 import shutil
 import traceback
-from urllib.parse import unquote
 from uuid import uuid4
 
 from fastapi import (
@@ -1347,25 +1346,6 @@ def _latest_driver_report_path(state, task_id: str):
                 continue  # reject anything outside the task outputs dir
             return path
     return None
-
-
-@router.get("/artifacts/{artifact_path:path}/preview")
-def preview_artifact(artifact_path: str, request: Request):
-    path = _resolve_task_artifact_path(request, artifact_path)
-    suffix = path.suffix.lower()
-    if suffix == ".docx":
-        return HTMLResponse(docx_to_html_preview(path))
-    if suffix in {".html", ".htm"}:
-        return FileResponse(path, media_type="text/html", filename=path.name)
-    if suffix == ".pdf":
-        return FileResponse(path, media_type="application/pdf", filename=path.name)
-    raise HTTPException(status_code=404, detail="artifact preview not available")
-
-
-@router.get("/artifacts/{artifact_path:path}")
-def download_artifact(artifact_path: str, request: Request) -> FileResponse:
-    path = _resolve_task_artifact_path(request, artifact_path)
-    return FileResponse(path, filename=path.name)
 
 
 @router.post("/tasks/{task_id}/validate", status_code=202)
@@ -2986,21 +2966,6 @@ def _validation_results_payload_for_task(request: Request, task: TaskRecord) -> 
         return json.loads(result_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _resolve_task_artifact_path(request: Request, artifact_path: str) -> Path:
-    raw = unquote(str(artifact_path or ""))
-    if not raw or raw.startswith(("/", "\\")):
-        raise HTTPException(status_code=404, detail="artifact not found")
-    root = request.app.state.settings.tasks_dir.resolve()
-    candidate = (request.app.state.settings.workspace / raw).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="artifact not found") from exc
-    if not candidate.is_file():
-        raise HTTPException(status_code=404, detail="artifact not found")
-    return candidate
 
 
 def _read_json(path: Path) -> dict:

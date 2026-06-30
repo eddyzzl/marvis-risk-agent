@@ -2,6 +2,21 @@ from fastapi.testclient import TestClient
 from docx import Document
 
 from marvis.app import create_app
+from marvis.routers.artifacts import router as artifacts_router
+
+
+def test_artifact_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in artifacts_router.routes
+    }
+
+    assert routes[("/api/artifacts/{artifact_path:path}/preview", ("GET",))] == (
+        "marvis.routers.artifacts"
+    )
+    assert routes[("/api/artifacts/{artifact_path:path}", ("GET",))] == (
+        "marvis.routers.artifacts"
+    )
 
 
 def test_artifact_api_serves_workspace_task_artifact_by_relative_path(tmp_path):
