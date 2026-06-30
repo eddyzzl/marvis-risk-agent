@@ -992,6 +992,7 @@ def test_create_dialog_uses_visual_run_mode_cards():
 def test_create_dialog_updates_run_mode_copy_by_task_type():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
 
     assert 'data-run-mode-description="manual"' in index_html
     assert 'data-run-mode-description="agent"' in index_html
@@ -1001,9 +1002,9 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
     assert "由验证人员逐步执行材料扫描、Notebook 验证与报告生成" not in index_html
     assert "智能解析材料、规划验证步骤并辅助生成验证报告" not in index_html
 
-    definitions_start = app_js.index("const taskTypeDefinitions = {")
-    definitions_end = app_js.index("let activeTaskType", definitions_start)
-    definitions = app_js[definitions_start:definitions_end]
+    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
+    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
+    definitions = task_types_js[definitions_start:definitions_end]
     expected_copy = {
         "data_join": [
             "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
@@ -1043,6 +1044,7 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
 def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     app_js = _read_static("app.js")
     index_html = _read_static("index.html")
+    task_types_js = _read_static("js/task-types.js")
 
     assert 'name="runMode" type="radio" value="manual" checked' not in index_html
     assert 'name="runMode" type="radio" value="agent" checked' not in index_html
@@ -1051,9 +1053,9 @@ def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     assert 'name="modelAlgorithm" value="lr" checked' not in index_html
     assert 'name="modelAlgorithm" value="scorecard" checked' not in index_html
 
-    definitions_start = app_js.index("const taskTypeDefinitions = {")
-    definitions_end = app_js.index("let activeTaskType", definitions_start)
-    definitions = app_js[definitions_start:definitions_end]
+    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
+    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
+    definitions = task_types_js[definitions_start:definitions_end]
     assert 'defaultRunMode: "manual"' not in definitions
     assert 'defaultRunMode: "agent"' not in definitions
     assert definitions.count('defaultRunMode: ""') == 6
@@ -2914,6 +2916,7 @@ def test_modeling_create_dialog_has_algorithm_selector():
     posted as `payload.recipes` + `payload.target_type`."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskAlgorithmField"' in index_html
     assert 'id="modelAlgorithmChoices"' in index_html
@@ -2932,7 +2935,7 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'value="none">不使用样本权重' in index_html
     assert 'value="explicit">指定权重列' in index_html
     assert "updateSampleWeightCreateState" in app_js
-    assert "algorithmField: true" in app_js
+    assert "algorithmField: true" in task_types_js
     assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
     assert 'payload.target_type = [...families][0] || "binary";' in app_js
     assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in app_js
@@ -2948,6 +2951,7 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     """风险分析(vintage) + 策略开发(strategy) are wired PlanDriver entries."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
     for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
         start = index_html.index(f'id="{card_id}"')
         tag_end = index_html.index(">", start)
@@ -2955,8 +2959,12 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
         assert "data-coming-soon" not in tag, card_id
         assert 'class="welcome-task-card available"' in tag, card_id
         assert 'aria-describedby="welcomeComingSoonHint"' not in tag, card_id
-    assert 'available: false' not in app_js[app_js.index("const taskTypeDefinitions = {"):app_js.index("let activeTaskType")]
-    assert 'manualEnabled: false' not in app_js[app_js.index("const taskTypeDefinitions = {"):app_js.index("let activeTaskType")]
+    definitions = task_types_js[
+        task_types_js.index("export const taskTypeDefinitions = {"):
+        task_types_js.index("export const taskTypeDisplayOrder")
+    ]
+    assert 'available: false' not in definitions
+    assert 'manualEnabled: false' not in definitions
     assert 'const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in app_js
     # The toast path remains available for future explicitly unavailable task definitions.
     assert "card.dataset.comingSoon" not in app_js
@@ -2983,6 +2991,7 @@ def test_feature_create_dialog_has_optional_metric_selector():
     `payload.metrics`. VIF is the first wired optional metric; empty is valid."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskMetricField"' in index_html
     assert 'id="featureMetricChoices"' in index_html
@@ -2993,7 +3002,7 @@ def test_feature_create_dialog_has_optional_metric_selector():
     assert 'name="featureMetric" value="vif" checked' not in index_html
     assert 'name="featureMetric" value="head_tail_lift" checked' not in index_html
     assert 'name="featureMetric" value="importance" checked' not in index_html
-    assert "metricField: true" in app_js
+    assert "metricField: true" in task_types_js
     assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in app_js
 
 
@@ -3450,6 +3459,7 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
 def test_task_group_setting_supports_created_month_and_task_type():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
@@ -3458,7 +3468,7 @@ def test_task_group_setting_supports_created_month_and_task_type():
     assert '<option value="created_month">按创建月份</option>' in settings_markup
     assert 'taskGroupMode === "task_type"' in app_js
     assert 'taskGroupMode === "created_month"' in app_js
-    assert 'const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in app_js
+    assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in task_types_js
     assert "sortTaskTypeGroups" in app_js
     assert "appendTaskGroup(list, taskTypeLabel(taskType), groupTasks)" in app_js
     assert "function taskCreatedMonth" in app_js
@@ -5088,6 +5098,7 @@ def test_welcome_task_cards_share_the_same_visual_treatment():
 
 def test_agent_task_creation_prefills_conversation_composer_with_goal():
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
 
     # The V2 plan-composer dialog is retired; agent tasks now prefill the inline
     # conversation composer with the task type's suggested goal.
@@ -5103,9 +5114,9 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert "input.value = definition.initialGoal;" in helper_body
     assert "autoGrowComposerInput();" in helper_body
     assert "updateAgentSendDisabled();" in helper_body
-    assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in app_js
-    assert "先识别 cohort、MOB 和坏账标签字段" in app_js
-    assert "计算资产 Vintage 曲线并给出风险观察" in app_js
+    assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in task_types_js
+    assert "先识别 cohort、MOB 和坏账标签字段" in task_types_js
+    assert "计算资产 Vintage 曲线并给出风险观察" in task_types_js
     assert "营利性测算" not in app_js
 
     # createTask() invokes the prefill once the task is created.

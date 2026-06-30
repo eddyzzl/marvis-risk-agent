@@ -3,6 +3,7 @@ import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import { defaultTaskType, taskTypeDefinitions, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { attachArtifactHandlers, renderArtifact } from "./js/v2/artifact_view.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
@@ -132,116 +133,6 @@ const materialSourceController = createMaterialSourceController({
   onFilesChanged: renderMaterialUploadSelection,
 });
 
-const defaultTaskType = "validation";
-const taskTypeDefinitions = {
-  feature_analysis: {
-    label: "特征分析",
-    dialogTitle: "创建特征分析任务",
-    dialogSubtitle: "上传样本或特征表，Agent 会检查字段质量、分箱和可用性。",
-    nameLabel: "任务名称",
-    namePlaceholder: "例如：现金贷申请特征画像",
-    validatorLabel: "负责人",
-    validatorPlaceholder: "填写负责人姓名",
-    sourceLabel: "数据材料目录",
-    sourcePlaceholder: "/path/to/feature-data",
-    reportFields: false,
-    metricField: true,
-    tierField: true,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
-    agentModeDescription: "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
-    initialGoal: "请基于当前任务材料做特征分析。先识别可用数据集、目标列、时间切分和候选特征；如果缺少字段请先提问。随后生成 V2 Workflow，执行字段画像、IV/KS/PSI、分箱或衍生变量检查，并把关键风险点整理给我确认。",
-  },
-  data_join: {
-    label: "数据处理",
-    dialogTitle: "创建数据处理任务",
-    dialogSubtitle: "上传主表和特征表，Agent 会先诊断数据处理风险，再等待确认。",
-    nameLabel: "任务名称",
-    namePlaceholder: "例如：申请主表与征信特征处理",
-    validatorLabel: "负责人",
-    validatorPlaceholder: "填写负责人姓名",
-    sourceLabel: "数据材料目录",
-    sourcePlaceholder: "/path/to/join-data",
-    reportFields: false,
-    tierField: true,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
-    agentModeDescription: "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
-    initialGoal: "请基于当前任务材料做数据处理。先识别主表、特征表和候选 join key；对命中率、行数膨胀、键不唯一和去重策略做诊断。任何 join 执行前都要把风险和方案列出来让我确认。",
-  },
-  modeling: {
-    label: "模型开发",
-    dialogTitle: "创建模型开发任务",
-    dialogSubtitle: "上传建模样本，Agent 会组织建模准备、训练、实验比较和报告。",
-    nameLabel: "模型或任务名称",
-    namePlaceholder: "例如：贷前评分卡 MOB3 建模",
-    validatorLabel: "建模负责人",
-    validatorPlaceholder: "填写负责人姓名",
-    sourceLabel: "建模材料目录",
-    sourcePlaceholder: "/path/to/modeling-data",
-    reportFields: false,
-    algorithmField: true,
-    tierField: true,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
-    agentModeDescription: "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
-    initialGoal: "开始建模吧。请读取建模样本，先和我确认目标列与 train/test/oot 切分，再做泄漏感知的特征筛选交我过目，然后调参、训练，开发出尽量高 KS 的 LightGBM 模型。",
-  },
-  validation: {
-    label: "模型验证",
-    dialogTitle: "创建验证任务",
-    dialogSubtitle: "支持手动模式，也可以让 Agent 辅助完成验证和报告。",
-    nameLabel: "模型名称",
-    namePlaceholder: "例如：贷前评分卡 MOB3 v202604",
-    validatorLabel: "验证人员",
-    validatorPlaceholder: "填写验证人员姓名",
-    sourceLabel: "材料目录",
-    sourcePlaceholder: "/path/to/project",
-    reportFields: true,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
-    agentModeDescription: "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
-    initialGoal: "请基于当前任务材料开始模型验证。先扫描材料并确认 Notebook、样本、PMML 和数据字典是否齐全；如果材料完备，再按平台证据逐步完成一致性、效果、稳定性、压力测试和报告草稿。",
-  },
-  strategy: {
-    label: "策略开发",
-    dialogTitle: "创建策略开发任务",
-    dialogSubtitle: "上传评分或申请数据，Agent 会构造规则、回测并比较策略收益。",
-    nameLabel: "策略任务名称",
-    namePlaceholder: "例如：额度准入策略回测",
-    validatorLabel: "策略负责人",
-    validatorPlaceholder: "填写负责人姓名",
-    sourceLabel: "策略数据目录",
-    sourcePlaceholder: "/path/to/strategy-data",
-    reportFields: false,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
-    agentModeDescription: "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
-    initialGoal: "请基于当前任务材料做策略开发。先识别评分列、目标列、客群字段和候选规则；如果缺少规则口径请先提问。随后生成 V2 Workflow，构造策略、执行回测、计算收益和 swap 分析，并给出阈值权衡建议。",
-  },
-  vintage: {
-    label: "风险分析",
-    dialogTitle: "创建风险分析任务",
-    dialogSubtitle: "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据，Agent 会生成风险观察和结论。",
-    nameLabel: "分析任务名称",
-    namePlaceholder: "例如：2024H2 新客风险分析",
-    validatorLabel: "分析负责人",
-    validatorPlaceholder: "填写负责人姓名",
-    sourceLabel: "风险分析数据目录",
-    sourcePlaceholder: "/path/to/risk-analysis-data",
-    reportFields: false,
-    defaultRunMode: "",
-    manualEnabled: true,
-    manualModeDescription: "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
-    agentModeDescription: "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
-    initialGoal: "请基于当前任务材料做风险分析。先识别 cohort、MOB 和坏账标签字段；如果缺少字段请先提问。随后生成 V2 Workflow，计算资产 Vintage 曲线并给出风险观察。",
-  },
-};
 let activeTaskType = defaultTaskType;
 
 const PET_REACTION_DURATION_MS = 6500;
@@ -270,7 +161,6 @@ const PROGRESS_WIDTH_MIN = 314;
 const PROGRESS_WIDTH_MAX = 560;
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
 const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
-const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
 
 const petDefinitions = {
