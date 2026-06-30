@@ -491,15 +491,23 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     v2_css = _read_static("css/v2-workbench.css")
 
     retry_text_body = _slice_function(app_js, "function planRetryInputsText")
+    retry_fields_body = _slice_function(app_js, "function planRetrySchemaFieldsHtml")
+    retry_parse_structured_body = _slice_function(app_js, "function collectPlanRetryStructuredInputs")
     retry_scope_body = _slice_function(app_js, "function planRetryScopeHtml")
     retry_body = _slice_function(app_js, "async function retryV2PlanStep")
     click_body = _slice_function(app_js, "function handleWorkflowStepperClick")
 
     assert "step?.failure_envelope?.editable_input_schema" in retry_text_body
     assert 'Object.prototype.hasOwnProperty.call(spec, "default")' in retry_text_body
+    assert 'data-plan-retry-input-key="${encodedKey}"' in retry_fields_body
+    assert 'data-plan-retry-input-type="${typeLabel}"' in retry_fields_body
+    assert "plan-retry-schema-fields" in retry_fields_body
+    assert "collectPlanRetryStructuredInputs(form)" in _slice_function(app_js, "function parsePlanRetryInputs")
+    assert "[data-plan-retry-input-key]" in retry_parse_structured_body
     assert "step?.failure_envelope" in retry_scope_body
     assert "downstream_reset_steps" in retry_scope_body
     assert "plan-retry-scope" in retry_scope_body
+    assert "grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))" in _css_rule(v2_css, ".plan-retry-schema-fields")
     assert "color: var(--text-muted)" in _css_rule(v2_css, ".plan-retry-scope")
     assert 'button?.dataset?.planRetryStep || ""' in retry_body
     assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body

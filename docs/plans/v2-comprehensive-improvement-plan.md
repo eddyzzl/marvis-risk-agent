@@ -120,6 +120,8 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py -q`: `30 passed` after extending AUTO risk flags to halt on strategy/vintage `manual_review` and `approval` domain markers.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py tests/test_agent_gate_contracts.py tests/test_plan_driver.py::test_screen_gate_carries_structured_screen_payload tests/test_plan_driver.py::test_plan_overview_message_carries_gate_envelope tests/test_plan_driver.py::test_resume_structured_screen_control_rejects_stale_or_missing_gate_token -q`: `37 passed` after the AUTO domain-risk fixture update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO domain-risk fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_plan.py tests/test_frontend_v2_plan_confirm.py tests/test_frontend_static_v2.py::test_plan_rail_retry_step_posts_edited_inputs tests/test_frontend_v2_api_state.py -q`: `31 passed` after adding schema-driven retry fields to both the modular V2 plan view and main plan rail while preserving JSON textarea fallback.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the schema-driven retry fields update.
 
 ## Executive Summary
 
@@ -127,7 +129,7 @@ V2 is materially stronger than the original runtime: PlanDriver is the common ex
 
 It is not ready to call "complete" yet. The main remaining gap is not one isolated bug; it is that several capabilities are working as primitives but are not yet productized as reliable, typed, user-facing workflows. The highest-value next work is:
 
-1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels; richer schema-to-form controls remain.
+1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels, and retry panels now render schema-driven fields with a JSON fallback; deeper per-tool schema/adapter registries remain.
 2. Broaden AUTO coverage and safety tests around the new structured `confirm|adjust|replan|clarify|halt` path.
 3. Finish the remaining modeling productization with manual business smoke plus remaining native/export edge-case fixtures. JSON and Markdown model cards, approval packages, monitoring policies, prior Champion comparison, PMML/native delivery metadata, PMML-backed challenger/backtest packages, stricter scorecard/monotonicity policy fixtures, and native LightGBM Booster skip coverage now exist and have browser or unit-level coverage.
 4. Add a deeper DB+file `UnitOfWork` over the staged artifact stores and recovered `StepRunLedger`.
@@ -158,7 +160,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - Failure messages now carry a richer `FailureEnvelope`: retryability, editable input JSON schema with current defaults, stale token, and the exact failed/downstream steps that a retry will reset.
   - Step evidence now records tool version, manifest hash, source dataset refs, artifact refs, input hash/summary, parent output refs, seed, and renderer hint in one persisted envelope.
   - AUTO adjust now has a deterministic low-risk control allowlist: undeclared controls still halt, and declared high-risk controls such as expensive tuning budgets or post-training handoff/export actions also halt for human review.
-  - Failed plan steps returned by the plan API now include `failure_envelope`; the main right rail and modular V2 plan view both use its editable input defaults and reset-scope metadata in retry panels.
+  - Failed plan steps returned by the plan API now include `failure_envelope`; the main right rail and modular V2 plan view both use its editable input defaults and reset-scope metadata in retry panels, and now render schema-derived retry fields for string/number/integer/boolean/enum/object/array inputs while preserving the JSON textarea fallback.
   - Modeling setup now diagnoses sample-weight candidates for numeric validity, missingness, range, mean, feature exclusion, and exposes those diagnostics in gate metadata, front-end controls, renderer tables, and AUTO prompts.
   - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
   - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
@@ -245,9 +247,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 
 4. Failure and retry UX is not a first-class contract.
    - Current behavior: failure transcript is mostly plain text with limited metadata; plan rail has retry UI.
-   - Problem: user and AUTO cannot reliably understand what is retryable, what inputs can be edited, and what downstream steps reset.
+   - Problem: user and AUTO need one consistent contract for what is retryable, what inputs can be edited, how typed controls map back to JSON, and what downstream steps reset.
    - Fix: add `FailureEnvelope` with `failed_step_id`, `error_kind`, `retryable`, `editable_input_schema`, `suggested_actions`, `stale_token`, `downstream_reset`.
    - Tests: force tool failure, edit retry inputs, verify downstream reset and recovered completion.
+   - Current update: modular V2 plan view and main plan rail render schema-derived retry fields and submit typed values before falling back to raw JSON.
 
 ### P1: Evidence, Transactions, And Runtime Safety
 
@@ -503,7 +506,7 @@ Tasks:
 - Partial: add output renderers, gate payload helpers, dependency gate adapters, and basic adjust specs; per-tool gate adapters and schema-driven adjust specs remain.
 - Done: extend AUTO to structured bounded decisions.
 - Partial: add stale-token style `expected_step_id` enforcement for structured screen controls; expand to all gate actions.
-- Partial: add retry/failure contract metadata and downstream reset behavior; richer editable-input retry UX remains.
+- Mostly done: add retry/failure contract metadata, downstream reset behavior, and first schema-driven retry fields; deeper per-tool form adapters remain.
 
 Acceptance:
 - Existing manual driver flows still work.

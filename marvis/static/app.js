@@ -4118,6 +4118,58 @@ function planRetryInputsText(step) {
   }
 }
 
+function planRetrySchemaProperties(step) {
+  const schema = step?.failure_envelope?.editable_input_schema;
+  const properties = schema && typeof schema === "object" ? schema.properties : null;
+  return properties && typeof properties === "object" ? properties : {};
+}
+
+function planRetryFieldValue(value) {
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return "";
+    }
+  }
+  return value == null ? "" : String(value);
+}
+
+function planRetryFieldType(spec) {
+  const type = Array.isArray(spec?.type) ? spec.type[0] : spec?.type;
+  return String(type || "string");
+}
+
+function planRetrySchemaFieldsHtml(step) {
+  const properties = planRetrySchemaProperties(step);
+  const fields = Object.entries(properties).map(([key, spec]) => {
+    const fieldSpec = spec && typeof spec === "object" ? spec : {};
+    const type = planRetryFieldType(fieldSpec);
+    const defaultValue = Object.prototype.hasOwnProperty.call(fieldSpec, "default") ? fieldSpec.default : "";
+    const encodedKey = escapeHtml(key);
+    const label = escapeHtml(fieldSpec.title || key);
+    const typeLabel = escapeHtml(type);
+    const baseAttrs = `data-plan-retry-input-key="${encodedKey}" data-plan-retry-input-type="${typeLabel}"`;
+    if (Array.isArray(fieldSpec.enum) && fieldSpec.enum.length) {
+      const current = planRetryFieldValue(defaultValue);
+      const options = fieldSpec.enum.map((item) => {
+        const value = planRetryFieldValue(item);
+        const selected = value === current ? " selected" : "";
+        return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+      }).join("");
+      return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}>${options}</select></label>`;
+    }
+    if (type === "boolean") {
+      const selected = Boolean(defaultValue);
+      return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}><option value="true"${selected ? " selected" : ""}>true</option><option value="false"${selected ? "" : " selected"}>false</option></select></label>`;
+    }
+    const inputType = type === "number" || type === "integer" ? "number" : "text";
+    return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><input ${baseAttrs} type="${inputType}" value="${escapeHtml(planRetryFieldValue(defaultValue))}"></label>`;
+  });
+  if (!fields.length) return "";
+  return `<div class="plan-retry-schema-fields">${fields.join("")}</div>`;
+}
+
 function planRetryScopeHtml(step) {
   const envelope = step?.failure_envelope;
   const resetSteps = Array.isArray(envelope?.downstream_reset_steps)
@@ -4132,6 +4184,7 @@ function planRetryControlHtml(step) {
   return `<details class="plan-step-retry" data-plan-step-retry="${escapeHtml(stepId)}">
     <summary>编辑参数后重试</summary>
     ${planRetryScopeHtml(step)}
+    ${planRetrySchemaFieldsHtml(step)}
     <label>
       参数 JSON
       <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>
@@ -4283,7 +4336,65 @@ function retryV2PlanFetch(taskId = selectedTaskId) {
   renderWorkflowStepper({ force: true });
 }
 
+function parsePlanRetryStructuredValue(field) {
+  const type = String(field?.dataset?.planRetryInputType || "string");
+  const raw = String(field?.value ?? "");
+  if (type === "boolean") {
+    return raw === "true";
+  }
+  if (type === "integer") {
+    const value = Number.parseInt(raw, 10);
+    if (!Number.isFinite(value)) throw new Error("整数重试参数无效。");
+    return value;
+  }
+  if (type === "number") {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error("数值重试参数无效。");
+    return value;
+  }
+  if (type === "array") {
+    let value;
+    try {
+      value = JSON.parse(raw || "[]");
+    } catch (_) {
+      throw new Error("数组重试参数无效。");
+    }
+    if (!Array.isArray(value)) throw new Error("数组重试参数无效。");
+    return value;
+  }
+  if (type === "object") {
+    let value;
+    try {
+      value = JSON.parse(raw || "{}");
+    } catch (_) {
+      throw new Error("对象重试参数无效。");
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("对象重试参数无效。");
+    }
+    return value;
+  }
+  if (type === "null") {
+    return null;
+  }
+  return raw;
+}
+
+function collectPlanRetryStructuredInputs(form) {
+  const fields = Array.from(form?.querySelectorAll?.("[data-plan-retry-input-key]") || []);
+  if (!fields.length) return null;
+  const inputs = {};
+  fields.forEach((field) => {
+    const key = String(field?.dataset?.planRetryInputKey || "");
+    if (!key) return;
+    inputs[key] = parsePlanRetryStructuredValue(field);
+  });
+  return inputs;
+}
+
 function parsePlanRetryInputs(form) {
+  const structured = collectPlanRetryStructuredInputs(form);
+  if (structured) return structured;
   const field = form?.querySelector?.(".plan-retry-inputs");
   let value;
   try {

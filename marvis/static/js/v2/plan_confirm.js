@@ -43,8 +43,73 @@ function parseJsonObject(text) {
   return value;
 }
 
+function parseRetryFieldValue(field) {
+  const type = String(field?.dataset?.retryInputType || "string");
+  const raw = String(field?.value ?? "");
+  if (type === "boolean") {
+    return raw === "true";
+  }
+  if (type === "integer") {
+    const value = Number.parseInt(raw, 10);
+    if (!Number.isFinite(value)) {
+      throw new Error("整数重试参数无效");
+    }
+    return value;
+  }
+  if (type === "number") {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      throw new Error("数值重试参数无效");
+    }
+    return value;
+  }
+  if (type === "array") {
+    let value;
+    try {
+      value = JSON.parse(raw || "[]");
+    } catch (_error) {
+      throw new Error("数组重试参数无效");
+    }
+    if (!Array.isArray(value)) {
+      throw new Error("数组重试参数无效");
+    }
+    return value;
+  }
+  if (type === "object") {
+    try {
+      return parseJsonObject(raw || "{}");
+    } catch (_error) {
+      throw new Error("对象重试参数无效");
+    }
+  }
+  if (type === "null") {
+    return null;
+  }
+  return raw;
+}
+
+function readStructuredRetryInputs(panel) {
+  const fields = Array.from(panel?.querySelectorAll?.("[data-retry-input-key]") || []);
+  if (!fields.length) {
+    return null;
+  }
+  const inputs = {};
+  fields.forEach((field) => {
+    const key = String(field?.dataset?.retryInputKey || "");
+    if (!key) {
+      return;
+    }
+    inputs[key] = parseRetryFieldValue(field);
+  });
+  return inputs;
+}
+
 function defaultReadRetryInputs(root, retryButton, stepId) {
   const panel = closest(retryButton, "[data-retry-panel]");
+  const structured = readStructuredRetryInputs(panel);
+  if (structured) {
+    return structured;
+  }
   const panelField = panel?.querySelector?.("[data-retry-inputs-for]");
   const field = panelField || Array.from(root?.querySelectorAll?.("[data-retry-inputs-for]") || [])
     .find((candidate) => candidate?.dataset?.retryInputsFor === stepId);

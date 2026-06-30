@@ -140,6 +140,59 @@ function retryInputText(step) {
   return JSON.stringify(step?.inputs || {}, null, 2);
 }
 
+function retrySchemaProperties(step) {
+  const schema = step?.failure_envelope?.editable_input_schema;
+  const properties = schema && typeof schema === "object" ? schema.properties : null;
+  return properties && typeof properties === "object" ? properties : {};
+}
+
+function retryFieldValue(value) {
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch (_error) {
+      return "";
+    }
+  }
+  return value == null ? "" : String(value);
+}
+
+function retryFieldType(spec) {
+  const type = Array.isArray(spec?.type) ? spec.type[0] : spec?.type;
+  return String(type || "string");
+}
+
+function retrySchemaFieldsHtml(step) {
+  const properties = retrySchemaProperties(step);
+  const rows = Object.entries(properties).map(([key, spec]) => {
+    const fieldSpec = spec && typeof spec === "object" ? spec : {};
+    const type = retryFieldType(fieldSpec);
+    const defaultValue = Object.prototype.hasOwnProperty.call(fieldSpec, "default") ? fieldSpec.default : "";
+    const encodedKey = escapeHtml(key);
+    const label = escapeHtml(fieldSpec.title || key);
+    const typeLabel = escapeHtml(type);
+    const baseAttrs = `data-retry-input-key="${encodedKey}" data-retry-input-type="${typeLabel}"`;
+    if (Array.isArray(fieldSpec.enum) && fieldSpec.enum.length) {
+      const options = fieldSpec.enum.map((item) => {
+        const value = retryFieldValue(item);
+        const selected = value === retryFieldValue(defaultValue) ? " selected" : "";
+        return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
+      }).join("");
+      return `<label class="retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}>${options}</select></label>`;
+    }
+    if (type === "boolean") {
+      const selected = Boolean(defaultValue);
+      return `<label class="retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}><option value="true"${selected ? " selected" : ""}>true</option><option value="false"${selected ? "" : " selected"}>false</option></select></label>`;
+    }
+    const inputType = type === "number" || type === "integer" ? "number" : "text";
+    return `<label class="retry-schema-field"><span>${label}<em>${typeLabel}</em></span><input ${baseAttrs} type="${inputType}" value="${escapeHtml(retryFieldValue(defaultValue))}"></label>`;
+  });
+  if (!rows.length) {
+    return "";
+  }
+  return `<div class="retry-schema-fields">${rows.join("")}</div>`;
+}
+
 function retryScopeHtml(step) {
   const resetSteps = Array.isArray(step?.failure_envelope?.downstream_reset_steps)
     ? step.failure_envelope.downstream_reset_steps.filter(Boolean)
@@ -156,6 +209,7 @@ function retryPanelHtml(step) {
   return `<details class="retry-step-panel" data-retry-panel="${escapeHtml(stepId)}">
     <summary>重试步骤</summary>
     ${retryScopeHtml(step)}
+    ${retrySchemaFieldsHtml(step)}
     <label>
       参数 JSON
       <textarea data-retry-inputs-for="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(inputText)}</textarea>

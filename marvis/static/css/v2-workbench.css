@@ -221,6 +221,32 @@
   color: var(--text-muted);
   font-size: 12px;
 }
+.retry-schema-fields {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.retry-schema-field {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.retry-schema-field span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.retry-schema-field em {
+  color: var(--text-subtle);
+  font-style: normal;
+}
+.retry-schema-field input,
+.retry-schema-field select {
+  width: 100%;
+  min-height: 32px;
+}
 
 .retry-step-panel label {
   display: grid;
@@ -957,6 +983,32 @@
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
+}
+.plan-retry-schema-fields {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.plan-retry-schema-field {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.plan-retry-schema-field span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.plan-retry-schema-field em {
+  color: var(--text-subtle);
+  font-style: normal;
+}
+.plan-retry-schema-field input,
+.plan-retry-schema-field select {
+  width: 100%;
+  min-height: 32px;
 }
 .plan-step-retry label {
   display: grid;

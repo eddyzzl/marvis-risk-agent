@@ -208,6 +208,69 @@ def test_plan_confirm_handlers_retry_failed_step_with_edited_inputs():
     )
 
 
+def test_plan_confirm_handlers_retry_failed_step_reads_structured_inputs():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachPlanConfirmHandlers } from "./marvis/static/js/v2/plan_confirm.js";
+        import { resetV2State, setPlan } from "./marvis/static/js/v2/state_v2.js";
+
+        resetV2State();
+        setPlan({ id: "plan-1", status: "failed", steps: [] });
+        const calls = [];
+        const listeners = {};
+        const fields = [
+          { dataset: { retryInputKey: "threshold", retryInputType: "number" }, value: "0.42" },
+          { dataset: { retryInputKey: "max_iter", retryInputType: "integer" }, value: "7" },
+          { dataset: { retryInputKey: "enabled", retryInputType: "boolean" }, value: "false" },
+          { dataset: { retryInputKey: "tags", retryInputType: "array" }, value: "[\\"a\\",\\"b\\"]" },
+        ];
+        const panel = {
+          querySelectorAll(selector) {
+            return selector === "[data-retry-input-key]" ? fields : [];
+          },
+          querySelector() {
+            throw new Error("JSON textarea should not be read when structured fields exist");
+          },
+        };
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+          querySelectorAll() { return []; },
+        };
+        attachPlanConfirmHandlers(root, {
+          retryStep: async (planId, stepId, inputs) => calls.push(["retryStep", planId, stepId, inputs]),
+          startPlanPolling: (planId) => calls.push(["startPlanPolling", planId]),
+        });
+        const retryButton = {
+          dataset: { retryStep: "step-1" },
+          closest(selector) {
+            return selector === "[data-retry-panel]" ? panel : null;
+          },
+        };
+        const retryTarget = {
+          closest(selector) {
+            if (selector === "[data-retry-step]") return retryButton;
+            if (selector === "[data-retry-panel]") return panel;
+            return null;
+          },
+        };
+
+        await listeners.click({ target: retryTarget, preventDefault() {} });
+
+        assert.deepEqual(calls, [
+          ["retryStep", "plan-1", "step-1", {
+            threshold: 0.42,
+            max_iter: 7,
+            enabled: false,
+            tags: ["a", "b"],
+          }],
+          ["startPlanPolling", "plan-1"],
+        ]);
+        """
+    )
+
+
 def test_plan_confirm_handlers_reject_invalid_retry_inputs_without_polling():
     run_node(
         """

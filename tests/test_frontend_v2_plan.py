@@ -225,6 +225,9 @@ def test_plan_html_renders_failed_step_retry_action():
                   type: "object",
                   properties: {
                     message: { type: "string", default: "retry from envelope <safe>" },
+                    threshold: { type: "number", default: 0.42 },
+                    enabled: { type: "boolean", default: true },
+                    mode: { type: "string", enum: ["fast", "safe"], default: "safe" },
                   },
                 },
                 downstream_reset_steps: ["step-1", "step-2"],
@@ -237,6 +240,11 @@ def test_plan_html_renders_failed_step_retry_action():
 
         assert.ok(html.includes('data-retry-step="step-1"'));
         assert.ok(html.includes('data-retry-inputs-for="step-1"'));
+        assert.ok(html.includes('data-retry-input-key="message"'));
+        assert.ok(html.includes('data-retry-input-type="number"'));
+        assert.ok(html.includes('value="0.42"'));
+        assert.ok(html.includes('<option value="true" selected>true</option>'));
+        assert.ok(html.includes('<option value="safe" selected>safe</option>'));
         assert.equal(html.includes("try again &lt;safe&gt;"), false);
         assert.ok(html.includes('&quot;message&quot;: &quot;retry from envelope &lt;safe&gt;&quot;'));
         assert.ok(html.includes("将重置"));
