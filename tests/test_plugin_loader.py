@@ -20,6 +20,8 @@ def _manifest(
     *,
     version: str = "0.1.0",
     schema: dict | None = None,
+    permissions: tuple[str, ...] = (),
+    side_effects: tuple[str, ...] = (),
 ):
     object_schema = schema or {"type": "object", "properties": {}, "required": []}
     return {
@@ -37,11 +39,12 @@ def _manifest(
                 "determinism": "deterministic",
                 "timeout_seconds": 10,
                 "failure_policy": "fail",
+                "side_effects": list(side_effects),
                 "entrypoint": "tool_echo",
             }
         ],
         "hooks": [],
-        "permissions": [],
+        "permissions": list(permissions),
         "checksum": "uploaded-value-is-ignored",
     }
 
@@ -52,12 +55,22 @@ def _write_pack(
     *,
     version: str = "0.1.0",
     schema: dict | None = None,
+    permissions: tuple[str, ...] = (),
+    side_effects: tuple[str, ...] = (),
     tool_body: str = "def tool_echo(inputs, ctx):\n    return {}\n",
 ) -> Path:
     pack_dir = root / name
     pack_dir.mkdir(parents=True)
     (pack_dir / "manifest.json").write_text(
-        json.dumps(_manifest(name, version=version, schema=schema)),
+        json.dumps(
+            _manifest(
+                name,
+                version=version,
+                schema=schema,
+                permissions=permissions,
+                side_effects=side_effects,
+            )
+        ),
         encoding="utf-8",
     )
     (pack_dir / "tools.py").write_text(tool_body, encoding="utf-8")
@@ -78,6 +91,19 @@ def test_load_manifest_reads_and_validates_manifest_file(tmp_path):
     assert manifest.name == "sample_pack"
     assert manifest.builtin is True
     assert manifest.checksum == ""
+
+
+def test_load_manifest_accepts_explicit_process_spawn_permission(tmp_path):
+    pack_dir = _write_pack(
+        tmp_path,
+        permissions=("process:spawn",),
+        side_effects=("process:spawn",),
+    )
+
+    manifest = load_manifest(pack_dir, builtin=False)
+
+    assert manifest.permissions == ("process:spawn",)
+    assert manifest.tools[0].side_effects == ("process:spawn",)
 
 
 def test_load_builtin_packs_registers_packs_idempotently(tmp_path):

@@ -613,6 +613,104 @@ def test_tool_runner_allows_loopback_for_local_kernels_without_network_side_effe
     assert result.ok is True, result.error
 
 
+def test_tool_runner_denies_adhoc_process_spawn_without_side_effect(tmp_path):
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "process_tool.py"
+    module_path.write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "def run(inputs, ctx):\n"
+        "    subprocess.run([sys.executable, '-c', 'print(1)'], check=True)\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={},
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "process spawn access requires process:spawn" in result.error
+
+
+def test_tool_runner_allows_external_plugin_process_spawn_with_side_effect(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    plugin_root = tmp_path / "plugins"
+    package = plugin_root / "processpack"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "def run(inputs, ctx):\n"
+        "    out = subprocess.check_output([sys.executable, '-c', 'print(\"child-ok\")'], text=True)\n"
+        "    return {'child_output': out.strip()}\n",
+        encoding="utf-8",
+    )
+    manifest = PluginManifest(
+        name="processpack",
+        version="0.1.0",
+        display_name="Process Pack",
+        description="Spawns a child process",
+        module="processpack.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="spawn",
+                summary="Spawn a child process",
+                input_schema={"type": "object", "additionalProperties": False},
+                output_schema={
+                    "type": "object",
+                    "properties": {"child_output": {"type": "string"}},
+                    "required": ["child_output"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=("process:spawn",),
+                entrypoint="run",
+            ),
+        ),
+        permissions=("process:spawn",),
+        builtin=False,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("processpack", "spawn")
+            return manifest, manifest.tools[0]
+
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        plugin_paths=[plugin_root],
+    )
+
+    result = runner.invoke(ToolRef("processpack", "spawn"), {}, task_id="task-1")
+
+    assert result.ok is True, result.error
+    assert result.output == {"child_output": "child-ok"}
+
+
 def test_tool_runner_denies_external_plugin_file_write_without_write_side_effect(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

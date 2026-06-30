@@ -100,6 +100,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight diagnostics update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step confirmation state guard update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO gate-risk policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the plugin/draft `process:spawn` sandbox guard update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the modeling setup panel expansion.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` renderer extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` controller extraction.
@@ -159,6 +160,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after moving screen selection and join dedup gate controls into `GateExecutionAdapter`.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_data_repository_registry.py::test_dataset_registry_register_existing_on_connection tests/test_data_ops_pack.py::test_data_ops_derived_frame_registration_failure_rolls_back_staged_file tests/test_data_ops_pack.py::test_data_ops_derived_frame_connection_failure_rolls_back_promoted_file tests/test_data_ops_pack.py::test_data_ops_clean_format_and_dedup_rows_via_runner -q`: `4 passed` after moving data_ops derived dataset registration onto the connection-scoped artifact unit-of-work path.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_prepare.py tests/test_modeling_pack.py::test_reject_inference_tool_registers_augmented_dataset tests/test_modeling_pack.py::test_reject_inference_audit_failure_rolls_back_dataset_and_file -q`: `14 passed` after moving modeling prepare/reject-inference derived parquet registration onto connection-scoped artifact unit-of-work paths.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plugin_loader.py tests/test_plugin_runner.py -q`: `42 passed` after requiring untrusted plugin/draft code to declare `process:spawn` before starting child processes.
 
 ## Executive Summary
 
@@ -327,9 +329,9 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Tests: v1 raw output can still load; v2 evidence can drive renderer and audit.
 
 4. Notebook/plugin sandboxing is not OS-level.
-   - Current state: plugin and draft tools run in one-shot subprocess workers with resource limits, timeout kill, network guard, and audited stdout/stderr tails. Ordinary full-notebook execution now has an optional isolated worker with parent timeout kill and artifact preservation. The live keep-alive notebook kernel path still exists for PMML/reproducibility appended cells; appended-cell execution is opt-in per session, requires an explicit policy plus generated V1 validation cell-kind allowlist, and is protected by RSS monitoring/interrupt/shutdown rather than full subprocess session RPC.
+   - Current state: plugin and draft tools run in one-shot subprocess workers with resource limits, timeout kill, network guard, process-spawn guard for non-builtin code, and audited stdout/stderr tails. Ordinary full-notebook execution now has an optional isolated worker with parent timeout kill and artifact preservation. The live keep-alive notebook kernel path still exists for PMML/reproducibility appended cells; appended-cell execution is opt-in per session, requires an explicit policy plus generated V1 validation cell-kind allowlist, and is protected by RSS monitoring/interrupt/shutdown rather than full subprocess session RPC.
    - Fix:
-     - Done for plugin/draft tools: run in subprocess with memory/CPU/file-size limits and restricted worker environment.
+     - Done for plugin/draft tools: run in subprocess with memory/CPU/file-size limits, restricted worker environment, local-only network by default, and `process:spawn` required before untrusted non-builtin code can start child processes.
      - Done for ordinary notebook execution: add `marvis.notebook_worker`, `run_notebook(..., isolated=True)`, worker error propagation, and parent timeout artifact preservation.
      - Remaining for live notebook sessions: either replace keep-alive kernel mutation with a worker RPC protocol, or split PMML/reproducibility appended-cell work into explicit non-live notebook/tool steps so the whole validation flow can use isolated execution.
      - Add slow/OOM integration tests at the pipeline/job layer once the live-session boundary is removed or explicitly downgraded.
@@ -591,7 +593,7 @@ Tasks:
 - Done for plugin install/promote paths: migrate zip install and draft promotion directory swaps to `TransactionalDirectoryStore`.
 - Done: add orphan reconciliation on startup with `app.state.artifact_recovery_report`.
 - Done: recover in-flight `plan_step_runs` by finalizing current persisted-output attempts as succeeded and no-output attempts as interrupted without unsafe reruns.
-- Partial: add OS-level subprocess sandbox for plugin/draft tools and ordinary full-notebook execution; live keep-alive notebook execution is now policy-gated to V1 validation injected cells but still needs a worker RPC redesign or step split.
+- Partial: add OS-level subprocess sandbox for plugin/draft tools and ordinary full-notebook execution; untrusted plugin/draft child process spawning now requires explicit `process:spawn`; live keep-alive notebook execution is policy-gated to V1 validation injected cells but still needs a worker RPC redesign or step split.
 
 Acceptance:
 - Crash-window tests pass.

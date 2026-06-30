@@ -13,6 +13,7 @@ FAILURE_POLICY_CHOICES = frozenset({"fail", "retry", "skip"})
 PERMISSION_CHOICES = frozenset({
     "llm",
     "network:optional",
+    "process:spawn",
     "read:artifacts",
     "read:dataset",
     "read:draft",

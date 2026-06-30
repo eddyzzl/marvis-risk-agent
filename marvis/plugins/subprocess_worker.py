@@ -14,6 +14,7 @@ from pathlib import Path
 import random
 import shutil
 import socket
+import subprocess
 import sys
 import traceback
 
@@ -80,6 +81,8 @@ def _run_tool(job: dict) -> dict:
     side_effects = [str(item) for item in (job.get("side_effects") or [])]
     plugin_paths = [Path(str(path)) for path in (job.get("plugin_paths") or []) if str(path)]
     _install_network_guard(side_effects)
+    if not bool(job.get("builtin")):
+        _install_process_guard(side_effects)
     if _should_install_file_guard(job):
         _install_file_guard(
             workspace=Path(job["workspace"]),
@@ -442,6 +445,51 @@ def _assert_local_address(address) -> None:
         raise PermissionError("network access requires network:optional or llm side_effect") from exc
     if not ip.is_loopback:
         raise PermissionError("network access requires network:optional or llm side_effect")
+
+
+def _install_process_guard(side_effects: list[str]) -> None:
+    if "process:spawn" in set(str(item) for item in side_effects):
+        return
+
+    def _blocked_process_spawn(*_args, **_kwargs):
+        raise PermissionError("process spawn access requires process:spawn side_effect")
+
+    subprocess.Popen = _blocked_process_spawn
+    for name in ("call", "check_call", "check_output", "getoutput", "getstatusoutput", "run"):
+        if hasattr(subprocess, name):
+            setattr(subprocess, name, _blocked_process_spawn)
+    for name in (
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "fork",
+        "forkpty",
+        "popen",
+        "posix_spawn",
+        "posix_spawnp",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "startfile",
+        "system",
+    ):
+        if hasattr(os, name):
+            setattr(os, name, _blocked_process_spawn)
+    try:
+        import pty
+    except ImportError:
+        return
+    pty.spawn = _blocked_process_spawn
 
 
 def _load_module(job: dict):
