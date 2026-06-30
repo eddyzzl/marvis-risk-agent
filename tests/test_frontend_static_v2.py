@@ -5049,6 +5049,7 @@ def test_validation_failure_writes_error_detail_to_global_action_status():
 def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
+    driver_confirm_js = _read_static("js/v2/driver_gate_confirm.js")
 
     create_start = app_js.index("async function createTask")
     create_end = app_js.index("async function refreshTasks", create_start)
@@ -5058,7 +5059,8 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     assert "run_mode: selectedRunMode" in create_dialog_js
 
     assert "function selectedTaskIsAgentMode" in app_js
-    assert "if (selectedTaskIsAgentMode()) return \"\";" in app_js
+    assert "renderDriverGateButton(message, { isAgentMode: selectedTaskIsAgentMode })" in app_js
+    assert 'message?.metadata?.kind !== "gate" || isAgentMode' in driver_confirm_js
     assert "startAgentValidation" in app_js
 
 

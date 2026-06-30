@@ -30,6 +30,11 @@ import {
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
 } from "./js/v2/driver_manual_analysis.js";
+import {
+  handleDriverConfirmClick as handleDriverConfirmClickController,
+  renderDriverGateButton,
+  submitDriverConfirm as submitDriverConfirmController,
+} from "./js/v2/driver_gate_confirm.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
@@ -6096,37 +6101,28 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleDedupConfirmClick);
 }
 
-// In manual mode there is no free-text composer, so a needs-confirmation gate
-// message carries a 确认 control button. Agent mode confirms via the composer / LLM.
 function agentMessageGateButtonHtml(message) {
-  if (message?.metadata?.kind !== "gate" || selectedTaskIsAgentMode()) return "";
-  return '<div class="driver-gate-actions">'
-    + '<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1">确认</button>'
-    + "</div>";
+  return renderDriverGateButton(message, { isAgentMode: selectedTaskIsAgentMode });
 }
 
 async function submitDriverConfirm(button) {
-  const taskId = selectedTaskId;
-  if (!taskId) return;
-  button.disabled = true;
-  try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content: "确认" }),
-    });
-    agentMessages = result.messages || agentMessages;
-    renderAgentConversation();
-  } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "确认失败", "error");
-  }
+  return submitDriverConfirmController(button, driverConfirmControllerContext());
 }
 
 function handleDriverConfirmClick(event) {
-  const button = event.target?.closest?.("[data-driver-confirm]");
-  if (!button) return;
-  event.preventDefault();
-  void submitDriverConfirm(button);
+  return handleDriverConfirmClickController(event, driverConfirmControllerContext());
+}
+
+function driverConfirmControllerContext() {
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+  };
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDriverConfirmClick);

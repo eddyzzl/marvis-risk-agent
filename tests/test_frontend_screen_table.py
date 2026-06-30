@@ -976,6 +976,57 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
     assert output == "ok"
 
 
+def test_driver_gate_confirm_controller_renders_and_posts_confirm():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{
+          handleDriverConfirmClick,
+          renderDriverGateButton,
+          submitDriverConfirm,
+        }} from "./marvis/static/js/v2/driver_gate_confirm.js";
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}).includes("data-driver-confirm"), true);
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}, {{ isAgentMode: true }}), "");
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "done" }} }}), "");
+
+        let agentMessages = [];
+        let rendered = 0;
+        const statuses = [];
+        const calls = [];
+        const context = {{
+          selectedTaskId: "task-1",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: (messages) => {{ agentMessages = messages || agentMessages; }},
+          renderAgentConversation: () => {{ rendered += 1; }},
+          api: async (url, options) => {{
+            calls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [{{ id: "m2" }}] }};
+          }},
+        }};
+        const button = {{ disabled: false }};
+        await submitDriverConfirm(button, context);
+        assert.equal(button.disabled, true);
+        assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
+        assert.deepEqual(calls[0][1], {{ content: "确认" }});
+        assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
+        assert.equal(rendered, 1);
+
+        const eventButton = {{ disabled: false }};
+        const event = {{
+          target: {{ closest: (selector) => selector === "[data-driver-confirm]" ? eventButton : null }},
+          preventDefault: () => statuses.push(["prevented", "event"]),
+        }};
+        assert.equal(handleDriverConfirmClick(event, context), true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(statuses.at(-1), ["prevented", "event"]);
+        assert.equal(calls.length, 2);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
 def test_capability_tier_picker_is_wired():
     """TIER-IA (spec §5.1): the create dialog exposes a per-task capability-tier
     selector (the previously-missing entry point), collected into payload."""
