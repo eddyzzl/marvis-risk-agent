@@ -18,14 +18,16 @@ testable offline.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 
-from marvis.agent.adjust_specs import adjust_param_error
+from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gate_adapters import render_gate_dependencies
+from marvis.agent.gate_execution_adapter import GateExecutionAdapter
 from marvis.agent.gate_payloads import build_model_delivery_payload, screen_known_features
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
+from marvis.agent.plan_utils import downstream_step_ids as _downstream_step_ids
+from marvis.agent.plan_utils import find_step as _find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
@@ -68,23 +70,6 @@ def _parse_dedup_instruction(text: str) -> str | None:
     return None
 
 
-@dataclass
-class DriverMessage:
-    """One append-only assistant message. ``metadata`` carries the locator
-    ``{plan_id, step_id, run_seq}`` plus any inline ``tables``."""
-
-    stage: str
-    content: str
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class DriverTurn:
-    plan_id: str
-    status: str  # PlanStatus value
-    messages: list[DriverMessage] = field(default_factory=list)
-
-
 class DriverError(Exception):
     pass
 
@@ -98,6 +83,13 @@ class PlanDriver:
         # Optional LLM for agent-mode free-text gate instructions (adjust / replan).
         # None in manual mode — non-confirm replies then show the canned hint.
         self._llm = llm_client
+        self._gate_execution = GateExecutionAdapter(
+            self._repo,
+            self._executor,
+            safe_output=self._safe_output,
+            run_and_handle=self._run_and_handle,
+            plan_overview_message=self._plan_overview_message,
+        )
 
     # -- entry points ---------------------------------------------------------
     def start(self, *, task_id, template_id, slots, autonomy=None, tier=None, run_seq=0) -> DriverTurn:
@@ -166,7 +158,7 @@ class PlanDriver:
             self._apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
-            return self._apply_adjust(plan, gate, adjust_params, run_seq)
+            return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
             if gate is not None:
                 if selection is not None:
@@ -266,125 +258,13 @@ class PlanDriver:
                 self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan.id, run_seq=run_seq)
         if action == "adjust" and gate is not None and gate.depends_on:
-            return self._apply_adjust(plan, gate, route["params"], run_seq)
+            return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
         if action == "replan":
-            return self._apply_replan(plan, gate, user_text, run_seq)
+            return self._gate_execution.apply_replan(plan, gate, user_text, run_seq)
         return self._instruction_message(
             plan, gate, run_seq,
             route.get("reason") or "请明确指令:回复「确认」继续,或说明要调整的参数。",
         )
-
-    def _apply_replan(self, plan, gate, instruction, run_seq) -> DriverTurn:
-        """Structural replan (spec §3 提指令→重规划): regenerate the remaining steps to
-        satisfy the instruction. Before the plan starts, show the revised overview and
-        await 开始 again; mid-execution, run the revised remaining steps to the next gate."""
-        replan = getattr(self._executor, "replan_from_instruction", None)
-        if replan is None or not replan(plan.id, instruction):
-            return self._instruction_message(
-                plan, gate, run_seq,
-                "重规划未成功(重规划预算用尽或指令无法执行);可改为在节点处「调参重算」,"
-                "或重新创建任务调整配置。",
-            )
-        revised = self._repo.load_plan(plan.id)
-        if revised.status == PlanStatus.VALIDATED:
-            # Not started yet → present the new plan and pause at the 开始 gate again.
-            return DriverTurn(revised.id, revised.status.value, [
-                DriverMessage("chat", "已按指令重规划,请查看新计划。",
-                              {"plan_id": revised.id, "run_seq": run_seq}),
-                self._plan_overview_message(revised),
-            ])
-        turn = self._run_and_handle(plan.id, run_seq=run_seq)
-        turn.messages.insert(
-            0,
-            DriverMessage("chat", "已按指令重规划并继续执行。",
-                          {"plan_id": plan.id, "run_seq": run_seq}),
-        )
-        return turn
-
-    def _apply_adjust(self, plan, gate, params, run_seq) -> DriverTurn:
-        """Re-run ALL of the gate's analysis dependencies with overridden parameters, then
-        re-pause at the gate showing the recomputed result. Each override is applied only
-        to a dependency whose inputs declare that key (so a param meant for one step isn't
-        forced onto another); any downstream completed outputs are reset so the recompute
-        cannot mix new upstream parameters with stale models/reports."""
-        deps = [step for step in (_find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
-        if not deps:
-            return self._instruction_message(plan, gate, run_seq, "没找到可调整的上一步,请重新确认。")
-        params = params or {}
-        validation_error = adjust_param_error(params)
-        if validation_error:
-            return self._instruction_message(plan, gate, run_seq, validation_error)
-        # Apply each override only to a dep that ALREADY declares that input key, and to
-        # EVERY such dep (per-key fan-out). This never injects a schema-forbidden key (the
-        # tools use additionalProperties:false, so an undeclared key would fail validation
-        # and FAIL the plan), and keeps sibling deps that share a param consistent.
-        primary = None
-        adjusted_ids: list[str] = []
-        for dep in deps:
-            overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
-            if "sample_weight_col" in overrides:
-                if dep.tool_ref.tool != "choose_modeling_spec":
-                    overrides.pop("sample_weight_col", None)
-                else:
-                    sample_weight_error = self._sample_weight_adjust_error(dep.id, overrides["sample_weight_col"])
-                    if sample_weight_error:
-                        return self._instruction_message(plan, gate, run_seq, sample_weight_error)
-            if not overrides:
-                continue
-            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), **overrides})
-            adjusted_ids.append(dep.id)
-            if overrides and primary is None:
-                primary = dep
-        if primary is None:
-            available = sorted({str(key) for dep in deps for key in (dep.inputs or {}).keys()})
-            hint = f"可调整参数: {', '.join(available)}。" if available else "当前节点没有声明可调整参数。"
-            return self._instruction_message(
-                plan,
-                gate,
-                run_seq,
-                f"没有识别到可调整的参数,未重算。{hint}",
-            )
-        reset_ids = self._reset_downstream_steps(plan, adjusted_ids)
-        if gate.id not in reset_ids:
-            self._repo.reset_step(gate.id)
-        turn = self._run_and_handle(plan.id, run_seq=run_seq)
-        turn.messages.insert(
-            0,
-            DriverMessage(
-                "chat",
-                f"已按指令调整参数 {dict(params)} 并重算「{primary.title}」。",
-                {"plan_id": plan.id, "step_id": primary.id, "run_seq": run_seq},
-            ),
-        )
-        return turn
-
-    def _reset_downstream_steps(self, plan: Plan, root_ids: list[str]) -> set[str]:
-        downstream_ids = _downstream_step_ids(plan, root_ids)
-        reset_ids: set[str] = set()
-        for step in sorted(
-            (step for step in plan.steps if step.id in downstream_ids),
-            key=lambda item: (item.index, item.id),
-        ):
-            self._repo.reset_step(step.id)
-            reset_ids.add(step.id)
-        return reset_ids
-
-    def _sample_weight_adjust_error(self, step_id: str, value) -> str | None:
-        selected = str(value or "").strip()
-        if not selected:
-            return None
-        output = self._safe_output(step_id)
-        if not isinstance(output, dict):
-            return "缺少建模规格输出,无法调整样本权重列。"
-        candidates = [str(col) for col in (output.get("sample_weight_candidates") or []) if str(col).strip()]
-        current = str(output.get("sample_weight_col") or "").strip()
-        allowed = set(candidates)
-        if current:
-            allowed.add(current)
-        if selected not in allowed:
-            display = "、".join(candidates) if candidates else "无"
-            return f"样本权重列 `{selected}` 不在已检测候选列中,未重算。候选列:{display}。"
-        return None
 
     def _instruction_message(self, plan, gate, run_seq, text) -> DriverTurn:
         return DriverTurn(
@@ -568,31 +448,6 @@ class PlanDriver:
             return self._repo.load_step_output(step_id)
         except KeyError:
             return None
-
-
-def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
-    for step in plan.steps:
-        if step.id == step_id:
-            return step
-    return None
-
-
-def _downstream_step_ids(plan: Plan, root_ids: list[str]) -> set[str]:
-    roots = set(root_ids or [])
-    downstream: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        known_upstream = roots | downstream
-        for step in plan.steps:
-            if step.id in known_upstream:
-                continue
-            if any(dep_id in known_upstream for dep_id in step.depends_on):
-                downstream.add(step.id)
-                changed = True
-    return downstream
-
-
 __all__ = [
     "PlanDriver",
     "DriverMessage",

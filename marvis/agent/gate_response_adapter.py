@@ -12,6 +12,7 @@ from marvis.agent.adjust_specs import (
     has_screen_adjust,
     has_tuning_adjust,
 )
+from marvis.agent.plan_utils import gate_depends_on_tool
 from marvis.orchestrator.contracts import Plan, PlanStep
 
 
@@ -41,32 +42,17 @@ def validate_gate_control(
         raise GateControlValidationError("当前没有待确认步骤,无法应用该控件。")
     if not expected_step_id:
         raise GateControlValidationError("该控件缺少待确认步骤校验信息,请刷新后重试。")
-    if (selection is not None or screen_adjust) and not _gate_depends_on_tool(plan, gate, "screen_features"):
+    if (selection is not None or screen_adjust) and not gate_depends_on_tool(plan, gate, "screen_features"):
         raise GateControlValidationError("该控件只适用于特征筛选确认步骤。")
-    if dedup_adjust and not _gate_depends_on_tool(plan, gate, "confirm_join"):
+    if dedup_adjust and not gate_depends_on_tool(plan, gate, "confirm_join"):
         raise GateControlValidationError("该控件只适用于拼接去重确认步骤。")
-    if modeling_setup_adjust and not _gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
+    if modeling_setup_adjust and not gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
         raise GateControlValidationError("该控件只适用于建模规格确认步骤。")
     if tuning_adjust and not (
-        _gate_depends_on_tool(plan, gate, "choose_modeling_spec")
-        or _gate_depends_on_tool(plan, gate, "tune_hyperparameters")
+        gate_depends_on_tool(plan, gate, "choose_modeling_spec")
+        or gate_depends_on_tool(plan, gate, "tune_hyperparameters")
     ):
         raise GateControlValidationError("该控件只适用于建模规格或调参确认步骤。")
-
-
-def _gate_depends_on_tool(plan: Plan, gate: PlanStep, tool: str) -> bool:
-    for dep_id in gate.depends_on or []:
-        dep = _find_step(plan, dep_id)
-        if dep is not None and dep.tool_ref.tool == tool:
-            return True
-    return False
-
-
-def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
-    for step in plan.steps:
-        if step.id == step_id:
-            return step
-    return None
 
 
 __all__ = ["GateControlValidationError", "validate_gate_control"]
