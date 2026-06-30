@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from marvis.agent.adjust_specs import adjust_param_error
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
+from marvis.agent.gate_payloads import screen_known_features
 from marvis.agent.plan_utils import downstream_step_ids, find_step
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
 
@@ -27,6 +28,59 @@ class GateExecutionAdapter:
         self._safe_output = safe_output
         self._run_and_handle = run_and_handle
         self._plan_overview_message = plan_overview_message
+
+    def needs_dedup_features(self, plan: Plan, gate: PlanStep | None) -> list[str]:
+        """Feature ids a join confirmation dependency still needs dedup strategies for."""
+        if gate is None:
+            return []
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "confirm_join":
+                continue
+            output = self._safe_output(dep.id)
+            if not isinstance(output, dict):
+                return []
+            pending = output.get("needs_dedup") or []
+            return [str(feature) for feature in pending]
+        return []
+
+    def apply_dedup_strategies(self, plan: Plan, gate: PlanStep | None, dedup_strategies) -> None:
+        """Apply per-feature join dedup strategies and reset only the affected join gate."""
+        if gate is None or not isinstance(dedup_strategies, dict) or not dedup_strategies:
+            return
+        clean = {str(key): str(value) for key, value in dedup_strategies.items() if str(value).strip()}
+        if not clean:
+            return
+        reset_any = False
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "confirm_join":
+                continue
+            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), "dedup_strategies": clean})
+            reset_any = True
+        if reset_any:
+            self._repo.reset_step(gate.id)
+
+    def apply_screen_selection(self, plan: Plan, gate: PlanStep | None, selection) -> None:
+        """Persist a user's edited screen-feature selection before confirming a gate."""
+        if gate is None:
+            return
+        selected = [str(feature) for feature in (selection or []) if str(feature).strip()]
+        if not selected:
+            return
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "screen_features":
+                continue
+            output = self._safe_output(dep_id)
+            if not isinstance(output, dict):
+                continue
+            known = screen_known_features(output)
+            chosen = [feature for feature in dict.fromkeys(selected) if not known or feature in known]
+            if not chosen:
+                continue
+            dep.output_ref = self._repo.store_step_output(dep_id, {**output, "selected": chosen})
+            self._repo.update_step(dep)
 
     def apply_replan(self, plan: Plan, gate: PlanStep | None, instruction, run_seq) -> DriverTurn:
         """Regenerate remaining steps from a structural instruction and continue."""

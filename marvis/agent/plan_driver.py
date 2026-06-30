@@ -23,7 +23,7 @@ from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
-from marvis.agent.gate_payloads import build_model_delivery_payload, screen_known_features
+from marvis.agent.gate_payloads import build_model_delivery_payload
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_utils import downstream_step_ids as _downstream_step_ids
@@ -155,14 +155,14 @@ class PlanDriver:
         # Join dedup picker: re-confirm with the chosen strategies, then re-pause at the
         # (now conflict-free) gate — do NOT confirm-execute yet; the user confirms after.
         if dedup_strategies and gate is not None:
-            self._apply_dedup_strategies(plan, gate, dedup_strategies)
+            self._gate_execution.apply_dedup_strategies(plan, gate, dedup_strategies)
             return self._run_and_handle(plan_id, run_seq=run_seq)
         if adjust_params and gate is not None:
             return self._gate_execution.apply_adjust(plan, gate, adjust_params, run_seq)
         if is_confirm(user_text):
             if gate is not None:
                 if selection is not None:
-                    self._apply_screen_selection(plan, gate, selection)
+                    self._gate_execution.apply_screen_selection(plan, gate, selection)
                 self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan_id, run_seq=run_seq)
         # Manual-mode TEXT resolution of a same-key dedup conflict (no §4 picker available):
@@ -171,76 +171,11 @@ class PlanDriver:
         if gate is not None:
             strategy = _parse_dedup_instruction(user_text)
             if strategy:
-                pending = self._needs_dedup_features(plan, gate)
+                pending = self._gate_execution.needs_dedup_features(plan, gate)
                 if pending:
-                    self._apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
+                    self._gate_execution.apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
                     return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
-
-    def _needs_dedup_features(self, plan, gate) -> list[str]:
-        """Feature ids the gate's confirm_join dependency flagged as needing a dedup
-        strategy (same-key conflict). Empty when there is nothing to resolve."""
-        if gate is None:
-            return []
-        for dep_id in gate.depends_on or []:
-            dep = _find_step(plan, dep_id)
-            if dep is None or dep.tool_ref.tool != "confirm_join":
-                continue
-            output = self._repo.load_step_output(dep.id) or {}
-            pending = output.get("needs_dedup") or []
-            return [str(f) for f in pending]
-        return []
-
-    def _apply_dedup_strategies(self, plan, gate, dedup_strategies) -> None:
-        """Re-confirm the gate's ``confirm_join`` dependency with the user's per-feature
-        dedup strategy map (§4 dedup picker). Only the confirm step and the gate are
-        reset (the propose step's diagnostics + join plan are kept), so confirm_join
-        re-runs against the same join plan with strategies applied — resolving same-key
-        conflicts — and the executor re-pauses at the (now clear) execute gate. A
-        structured manual-mode override that doesn't need the LLM adjust router."""
-        if gate is None or not isinstance(dedup_strategies, dict) or not dedup_strategies:
-            return
-        clean = {str(k): str(v) for k, v in dedup_strategies.items() if str(v).strip()}
-        if not clean:
-            return
-        reset_any = False
-        for dep_id in gate.depends_on or []:
-            dep = _find_step(plan, dep_id)
-            if dep is None or dep.tool_ref.tool != "confirm_join":
-                continue
-            self._repo.reset_step(dep.id, inputs={**(dep.inputs or {}), "dedup_strategies": clean})
-            reset_any = True
-        if reset_any:
-            self._repo.reset_step(gate.id)
-
-    def _apply_screen_selection(self, plan, gate, selection) -> None:
-        """Override a screening gate's proposed ``selected`` with the user's edited set.
-
-        The chosen features are constrained to what the screen actually saw (any
-        scored/bucketed column — including leakage/suspected ones the user may
-        deliberately *force-select*), so an edited selection can narrow or re-pick
-        among real screened features but can never smuggle in a column the screen
-        never validated. A selection that resolves to nothing is ignored (keep the
-        proposed set) rather than training on zero features.
-        """
-        if gate is None:
-            return
-        sel = [str(f) for f in (selection or []) if str(f).strip()]
-        if not sel:
-            return
-        for dep_id in gate.depends_on or []:
-            dep = _find_step(plan, dep_id)
-            if dep is None or dep.tool_ref.tool != "screen_features":
-                continue
-            output = self._safe_output(dep_id)
-            if not isinstance(output, dict):
-                continue
-            known = screen_known_features(output)
-            chosen = [f for f in dict.fromkeys(sel) if not known or f in known]
-            if not chosen:
-                continue
-            dep.output_ref = self._repo.store_step_output(dep_id, {**output, "selected": chosen})
-            self._repo.update_step(dep)
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
