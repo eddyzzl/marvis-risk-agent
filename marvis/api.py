@@ -7,7 +7,6 @@ import traceback
 from fastapi import (
     APIRouter,
     BackgroundTasks,
-    Header,
     HTTPException,
     Request,
 )
@@ -55,6 +54,9 @@ from marvis.api_task_helpers import (
 from marvis.api_report_helpers import (
     require_confirmed_agent_conclusions as _require_confirmed_agent_conclusions,
 )
+from marvis.api_report_field_helpers import (
+    build_report_field_payload as _build_report_field_payload,
+)
 from marvis.api_scan_helpers import (
     SCAN_FAILURE_PREFIX,
     is_scan_failure as _is_scan_failure,
@@ -83,7 +85,6 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
-    ReportFieldsUpdateRequest,
     ValidateRequest,
 )
 from marvis.api_settings import router as settings_router
@@ -106,9 +107,6 @@ from marvis.pipeline import (
     run_report_stage,
     run_staged_pipeline,
 )
-from marvis.metric_tables import metric_table_sections_from_payload
-from marvis.report_fields import report_field_payload
-from marvis.report_texts import computed_report_text_values_from_payload
 from marvis.state_machine import ConflictError, IllegalTransition
 from marvis.validation.overfitting import overfitting_check_from_validation_results
 
@@ -272,21 +270,6 @@ def _task_tier(request, task) -> str:
         return tier_from_settings(request.app.state.settings).name
     except Exception:
         return "balanced"
-
-
-@router.get("/tasks/{task_id}/report-fields")
-def get_report_fields(task_id: str, request: Request) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    values, revision = repo.get_report_values(task_id)
-    payload = _validation_results_payload_for_task(request, task)
-    return report_field_payload(
-        task,
-        values,
-        revision,
-        metric_values=_metric_values_from_payload(payload),
-        metric_table_sections=_metric_table_sections_from_payload(payload),
-    )
 
 
 @router.get("/tasks/{task_id}/agent/messages")
@@ -699,61 +682,6 @@ def _confirm_agent_report_conclusions(
         "message": "agent conclusions confirmed; word report stage dispatched",
         "messages": repo.list_agent_messages(task_id),
     }
-
-
-@router.put("/tasks/{task_id}/report-fields")
-def update_report_fields(
-    task_id: str,
-    payload: ReportFieldsUpdateRequest,
-    request: Request,
-    if_match: str | None = Header(default=None, alias="If-Match"),
-) -> dict:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    if if_match is None:
-        raise HTTPException(status_code=428, detail="If-Match header is required")
-    try:
-        expected_revision = int(if_match)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="If-Match must be an integer",
-        ) from exc
-    try:
-        update_values = getattr(repo, "update_report_values_with_audit", None)
-        if callable(update_values):
-            revision = update_values(
-                task_id,
-                payload.text_values,
-                expected_revision=expected_revision,
-                audit={
-                    "kind": "report.values.update",
-                    "target_ref": task_id,
-                    "outcome": "succeeded",
-                    "detail": {
-                        "keys": sorted(payload.text_values),
-                        "expected_revision": expected_revision,
-                    },
-                },
-            )
-        else:
-            revision = repo.update_report_values(
-                task_id,
-                payload.text_values,
-                expected_revision=expected_revision,
-            )
-        values, _ = repo.get_report_values(task_id)
-    except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    results_payload = _validation_results_payload_for_task(request, task)
-    return report_field_payload(
-        task,
-        values,
-        revision,
-        metric_values=_metric_values_from_payload(results_payload),
-    )
 
 
 @router.post("/tasks/{task_id}/notebook", status_code=202)
@@ -2079,13 +2007,7 @@ def _agent_chat_evidence(
 ) -> dict:
     evidence = _agent_evidence(request, task.id)
     values, revision = repo.get_report_values(task.id)
-    payload = _validation_results_payload_for_task(request, task)
-    report_payload = report_field_payload(
-        task,
-        values,
-        revision,
-        metric_values=_metric_values_from_payload(payload),
-    )
+    report_payload = _build_report_field_payload(request, task, values, revision)
     evidence["report_fields"] = {
         "revision": report_payload["revision"],
         "text_values": report_payload["text_values"],
@@ -2375,42 +2297,6 @@ def _pipeline_settings(
         feature_columns=feature_columns or task.feature_columns,
         notebook_kernel_name=load_execution_environment(settings.workspace).kernel_name,
     )
-
-
-def _metric_values_from_payload(payload: dict | None) -> dict[str, str]:
-    if payload is None:
-        return {}
-    return computed_report_text_values_from_payload(payload)
-
-
-def _metric_table_sections_from_payload(payload: dict | None) -> list[dict]:
-    if payload is None:
-        return []
-    return metric_table_sections_from_payload(payload)
-
-
-def _validation_results_payload_for_task(request: Request, task: TaskRecord) -> dict | None:
-    if task.status not in {
-        TaskStatus.WRITING_ARTIFACTS,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.REVIEW_REQUIRED,
-    } and not (
-        task.status == TaskStatus.FAILED
-        and task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
-    ):
-        return None
-    result_path = (
-        request.app.state.settings.tasks_dir
-        / task.id
-        / "outputs"
-        / "validation_results.json"
-    )
-    if not result_path.exists():
-        return None
-    try:
-        return json.loads(result_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _read_json(path: Path) -> dict:

@@ -21,6 +21,7 @@ from marvis.execution_environment import ExecutionEnvironmentOption
 from marvis.routers.branding import router as branding_router
 from marvis.routers.evidence import router as evidence_router
 from marvis.routers.materials import router as materials_router
+from marvis.routers.report_fields import router as report_fields_router
 from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
 from marvis.routers.tasks import router as tasks_router
@@ -219,6 +220,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.jobs = {}
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.reports.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.scans.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
@@ -234,6 +236,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.include_router(router)
     app.include_router(evidence_router)
     app.include_router(materials_router)
+    app.include_router(report_fields_router)
     app.include_router(reports_router)
     app.include_router(scans_router)
     app.include_router(tasks_router)
@@ -384,6 +387,20 @@ def test_evidence_route_is_served_from_dedicated_router():
 
     assert routes[("/api/tasks/{task_id}/evidence", ("GET",))] == (
         "marvis.routers.evidence"
+    )
+
+
+def test_report_field_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in report_fields_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/report-fields", ("GET",))] == (
+        "marvis.routers.report_fields"
+    )
+    assert routes[("/api/tasks/{task_id}/report-fields", ("PUT",))] == (
+        "marvis.routers.report_fields"
     )
 
 
