@@ -25,6 +25,11 @@ import {
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
+import {
+  driverManualAnalysisHtml as driverManualAnalysisHtmlController,
+  latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
+  stripChatInstructions as stripChatInstructionsController,
+} from "./js/v2/driver_manual_analysis.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
@@ -5781,79 +5786,24 @@ function renderAgentTimeline(messages = []) {
   }
 }
 
-// Lines that only make sense in a chat ("回复「确认」继续…"). In manual mode the
-// confirm is a step-rail button, so these instructions are stripped from the
-// analysis text — what is left is the factual statistical summary.
 function stripChatInstructions(content) {
-  return String(content || "")
-    .split("\n")
-    .filter((line) => !/(回复「确认」|确认请回复|要调整可|可直接说明|请确认.*回复)/.test(line))
-    .join("\n")
-    .trim();
+  return stripChatInstructionsController(content);
 }
 
-// Manual mode for driver tasks (data_join / feature / modeling): render each step's
-// output as a plain analysis section — no speaker label, no chat bubble, no
-// pre-written dialogue. The plan overview is omitted (the step rail already shows the
-// plan) and the gate confirm lives in the rail.
 function driverManualAnalysisHtml(messages) {
-  const sections = [];
-  const latestScreenMessageId = latestInteractiveScreenMessageId(messages);
-  for (const message of messages || []) {
-    if (message?.role !== "assistant") continue;
-    const meta = message.metadata || {};
-    if (meta.kind === "overview" || meta.kind === "plan_overview") continue; // the step rail is the plan
-    if (meta.error) {
-      sections.push(
-        `<section class="driver-analysis-section is-error">${renderAgentMarkdown(message.content || "")}</section>`,
-      );
-      continue;
-    }
-    const intro = renderAgentMarkdown(stripChatInstructions(message.content || ""));
-    if (meta.join_c1) {
-      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageC1FormHtml(message)}</section>`);
-      continue;
-    }
-    if (meta.screen) {
-      // §4 interactive screening: render the editable selection table instead of the
-      // read-only metric tables, so the user can adjust the proposed feature set.
-      const interactive = String(message.id || "") === latestScreenMessageId;
-      sections.push(
-        `<section class="driver-analysis-section">${intro}${agentMessageModelingSetupHtml(message, { interactive })}${agentMessageScreenTableHtml(message, { interactive })}</section>`,
-      );
-      continue;
-    }
-    if (meta.modeling_setup) {
-      const interactive = meta.kind === "gate";
-      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageModelingSetupHtml(message, { interactive })}${agentMessageTablesHtml(message)}</section>`);
-      continue;
-    }
-    if (meta.dedup) {
-      // §4 join dedup gate: show the diagnostics tables AND the per-feature dedup picker
-      // (the user resolves non-unique-key conflicts before the join executes).
-      const diagTables = agentMessageTablesHtml(message);
-      sections.push(`<section class="driver-analysis-section">${intro}${diagTables}${agentMessageDedupPickerHtml(message)}</section>`);
-      continue;
-    }
-    if (meta.model_delivery) {
-      sections.push(`<section class="driver-analysis-section">${intro}${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}</section>`);
-      continue;
-    }
-    const tables = agentMessageTablesHtml(message);
-    if (!String(message.content || "").trim() && !tables) continue;
-    sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
-  }
-  return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
+  return driverManualAnalysisHtmlController(messages, {
+    renderAgentMarkdown,
+    renderC1Form: agentMessageC1FormHtml,
+    renderDedupPicker: agentMessageDedupPickerHtml,
+    renderModelingSetup: agentMessageModelingSetupHtml,
+    renderScreenTable: agentMessageScreenTableHtml,
+    renderTables: agentMessageTablesHtml,
+    renderModelDelivery: agentMessageModelDeliveryHtml,
+  });
 }
 
 function latestInteractiveScreenMessageId(messages = []) {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message?.role !== "assistant") continue;
-    const meta = message.metadata || {};
-    if (meta.kind === "gate") return meta.screen ? String(message.id || "") : "";
-  }
-  return "";
+  return latestInteractiveScreenMessageIdController(messages);
 }
 
 function renderDriverManualAnalysis(messages) {

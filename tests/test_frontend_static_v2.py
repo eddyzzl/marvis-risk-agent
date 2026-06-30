@@ -5151,9 +5151,11 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
 
 def test_driver_manual_analysis_omits_plan_overview_messages():
     app_js = _read_static("app.js")
-    body = _slice_function(app_js, "function driverManualAnalysisHtml")
+    module_js = _read_static("js/v2/driver_manual_analysis.js")
+    body = _slice_function(module_js, "export function driverManualAnalysisHtml")
 
     assert 'meta.kind === "overview" || meta.kind === "plan_overview"' in body
+    assert "driverManualAnalysisHtmlController(messages" in app_js
 
 
 def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():

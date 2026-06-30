@@ -42,13 +42,15 @@ def _app_slice(start: str, end: str) -> str:
 def test_screen_table_renderer_and_manual_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/screen_gate_controller.js")
+    manual_module_js = _read("js/v2/driver_manual_analysis.js")
     # the interactive renderer exists and is dispatched for screen gate messages
     assert 'renderScreenGateTable' in app_js
     assert "function agentMessageScreenTableHtml(message, options = {})" in app_js
     assert "return renderScreenGateTable(message, options);" in app_js
-    assert "if (meta.screen)" in app_js
-    assert "agentMessageScreenTableHtml(message, { interactive })" in app_js
-    assert "latestInteractiveScreenMessageId(messages)" in app_js
+    assert "if (meta.screen)" in manual_module_js
+    assert "renderScreenTable(message, { interactive })" in manual_module_js
+    assert "latestInteractiveScreenMessageIdController(messages)" in app_js
+    assert "export function latestInteractiveScreenMessageId(messages = [])" in manual_module_js
     # it reads the structured screen payload the backend attaches
     assert "export function renderScreenGateTable(message, options = {})" in module_js
     assert "message?.metadata?.screen" in module_js
@@ -92,14 +94,15 @@ def test_screen_threshold_adjust_posts_structured_params():
 def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/modeling_setup_panel.js")
+    manual_module_js = _read("js/v2/driver_manual_analysis.js")
     css = _read("css/v2-workbench.css")
     assert "submitModelingWeightAdjustController" in app_js
     assert "handleModelingWeightAdjustClickController" in app_js
     assert "function agentMessageModelingSetupHtml(message, options = {})" in app_js
     assert "return renderModelingSetupPanel(message, options);" in app_js
     assert "modelingSetupControllerContext()" in app_js
-    assert "if (meta.modeling_setup)" in app_js
-    assert "agentMessageModelingSetupHtml(message, { interactive })" in app_js
+    assert "if (meta.modeling_setup)" in manual_module_js
+    assert "renderModelingSetup(message, { interactive })" in manual_module_js
     assert "export function renderModelingSetupPanel(message, options = {})" in module_js
     assert "export async function submitModelingWeightAdjust(button, context = {})" in module_js
     assert "export function handleModelingWeightAdjustClick(event, context = {})" in module_js
@@ -237,12 +240,13 @@ def test_modeling_setup_weight_picker_renders_candidates():
 def test_model_delivery_panel_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/model_delivery_panel.js")
+    manual_module_js = _read("js/v2/driver_manual_analysis.js")
     css = _read("css/v2-workbench.css")
     assert 'import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";' in app_js
     assert "function agentMessageModelDeliveryHtml(message, options = {})" in app_js
     assert "return renderModelDeliveryPanel(message, options);" in app_js
-    assert "if (meta.model_delivery)" in app_js
-    assert "agentMessageModelDeliveryHtml(message)" in app_js
+    assert "if (meta.model_delivery)" in manual_module_js
+    assert "renderModelDelivery(message)" in manual_module_js
     assert "export function renderModelDeliveryPanel(message, options = {})" in module_js
     assert "model-delivery-readiness-grid" in module_js
     assert "candidateTable(delivery.candidates)" in module_js
@@ -718,10 +722,11 @@ def test_screen_table_has_hardcut_coloring_styles():
 
 
 def test_screen_table_only_latest_gate_is_interactive():
-    manual_slice = _app_slice("function stripChatInstructions", "function renderDriverManualAnalysis")
     output = _run_node(
         f"""
+        {""}
         import assert from "node:assert/strict";
+        import {{ driverManualAnalysisHtml }} from "./marvis/static/js/v2/driver_manual_analysis.js";
         import {{ renderScreenGateTable }} from "./marvis/static/js/v2/screen_gate_controller.js";
         function renderAgentMarkdown(value) {{ return String(value || ""); }}
         function agentMessageC1FormHtml() {{ return ""; }}
@@ -731,7 +736,15 @@ def test_screen_table_only_latest_gate_is_interactive():
         function agentMessageScreenTableHtml(message, options = {{}}) {{
           return renderScreenGateTable(message, options);
         }}
-        {manual_slice}
+        const renderers = {{
+          renderAgentMarkdown,
+          renderC1Form: agentMessageC1FormHtml,
+          renderDedupPicker: agentMessageDedupPickerHtml,
+          renderModelingSetup: agentMessageModelingSetupHtml,
+          renderScreenTable: agentMessageScreenTableHtml,
+          renderTables: agentMessageTablesHtml,
+          renderModelDelivery: () => "",
+        }};
         const messages = [
           {{
             id: "old-screen",
@@ -746,7 +759,7 @@ def test_screen_table_only_latest_gate_is_interactive():
             metadata: {{ kind: "gate", step_id: "gate-new", screen: {{ selected: ["x2"], thresholds: {{ leakage_ks: 0.35, max_missing_rate: 0.9 }} }} }},
           }},
         ];
-        const html = driverManualAnalysisHtml(messages);
+        const html = driverManualAnalysisHtml(messages, renderers);
         assert.equal(html.includes('data-screen-step-id="gate-new"'), true);
         assert.equal((html.match(/data-screen-readonly/g) || []).length, 1);
         assert.equal((html.match(/data-screen-adjust/g) || []).length, 1);
@@ -755,7 +768,7 @@ def test_screen_table_only_latest_gate_is_interactive():
         const laterGateHtml = driverManualAnalysisHtml([
           ...messages,
           {{ id: "later-gate", role: "assistant", content: "later", metadata: {{ kind: "gate", tables: [] }} }},
-        ]);
+        ], renderers);
         assert.equal((laterGateHtml.match(/data-screen-readonly/g) || []).length, 2);
         assert.equal((laterGateHtml.match(/data-screen-adjust/g) || []).length, 0);
         process.stdout.write("ok");
@@ -819,9 +832,10 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
 def test_dedup_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/join_gate_controller.js")
+    manual_module_js = _read("js/v2/driver_manual_analysis.js")
     assert "function agentMessageDedupPickerHtml(message)" in app_js
     assert "return renderDedupPicker(message);" in app_js
-    assert "if (meta.dedup)" in app_js
+    assert "if (meta.dedup)" in manual_module_js
     assert "export function renderDedupPicker(message)" in module_js
     assert "message?.metadata?.dedup" in module_js
     # a first/last strategy <select> per conflicting feature
@@ -847,9 +861,10 @@ def test_dedup_picker_posts_strategies():
 def test_join_c1_form_renderer_and_submit_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/join_gate_controller.js")
+    manual_module_js = _read("js/v2/driver_manual_analysis.js")
     assert "function agentMessageC1FormHtml(message)" in app_js
     assert "return renderJoinC1Form(message);" in app_js
-    assert "if (meta.join_c1)" in app_js
+    assert "if (meta.join_c1)" in manual_module_js
     assert "export function renderJoinC1Form(message)" in module_js
     assert 'class="c1-role"' in module_js
     assert "data-c1-dataset" in module_js
