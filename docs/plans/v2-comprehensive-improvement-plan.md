@@ -370,10 +370,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Remaining: validate/display positive numeric values, missingness, leakage risk, and richer business rationale; keep excluding weight from features.
 
 7. Hard-coded metric gates conflict with "no fixed metric target".
-   - Current behavior: template still contains `oot_ks >= 0.3331`.
+   - Current behavior: the modeling template no longer hard-fails on `oot_ks >= 0.3331`; fixed thresholds now live only in generic reviewer/post-check fixtures or configurable modeling policy artifacts.
    - Fix:
-     - Replace fixed success gates with configurable acceptance policy.
-     - Default to recommendation language: pass/warn/fail based on domain thresholds, but never silently block a valid business model only because one fixed threshold was missed.
+     - Done: replace the fixed modeling-template success gate with explicit selection/delivery policy and monitoring-policy artifacts.
+     - Remaining: broaden real business-policy fixtures and report language so pass/warn/fail thresholds are always visibly configurable rather than implied by one universal metric target.
 
 8. Reports should surface missing business context.
    - Current behavior: binary reports are richer; non-binary reports are minimal; chat renderer now shows unavailable business sections from `section_status`.
