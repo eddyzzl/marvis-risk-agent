@@ -6132,7 +6132,7 @@ function handleDriverReportDownloadClick(event) {
   const button = event.target?.closest?.("[data-driver-report-download]");
   if (!button || !selectedTaskId) return;
   event.preventDefault();
-  window.location.href = `api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
+  window.location.href = `/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDriverReportDownloadClick);

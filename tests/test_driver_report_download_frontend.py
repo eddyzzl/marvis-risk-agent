@@ -18,14 +18,16 @@ def _read(name: str) -> str:
 
 def test_plan_rail_has_report_download_button_and_handler():
     app_js = _read("app.js")
+    plan_rail_js = _read("js/v2/plan_rail_controller.js")
 
     # a 下载报告 button sits inline on the producing report step row once it completes
-    assert 'data-driver-report-download="1"' in app_js
-    assert "plan-step-download" in app_js  # inline on the step row, not a floating rail button
-    assert "下载报告" in app_js
-    assert "generate_model_report" in app_js
-    assert "generate_feature_report" in app_js
+    assert 'data-driver-report-download="1"' in plan_rail_js
+    assert "plan-step-download" in plan_rail_js  # inline on the step row, not a floating rail button
+    assert "下载报告" in plan_rail_js
+    assert "generate_model_report" in plan_rail_js
+    assert "generate_feature_report" in plan_rail_js
 
     # the handler navigates to the driver-report download endpoint
     assert "function handleDriverReportDownloadClick" in app_js
-    assert "/driver-report/download" in app_js
+    assert "`/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" in app_js
+    assert "`api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`" not in app_js

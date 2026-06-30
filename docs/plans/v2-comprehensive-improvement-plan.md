@@ -141,6 +141,8 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `243 passed` after updating app-shell/static contracts for the extracted driver gate confirm controller.
   - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the driver gate confirm extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver gate confirm extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_driver_report_download_frontend.py -q`: `1 passed` after making driver-report downloads use an absolute `/api/...` URL and updating the PlanRailController affordance test.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver-report download URL fix.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent Memory router/support extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `PluginRepository` audit helper de-duplication.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelDeliveryPanel` metadata/rendering update.
