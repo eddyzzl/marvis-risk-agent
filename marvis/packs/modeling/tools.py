@@ -1539,6 +1539,7 @@ def _monitoring_policy_payload(
         for check_id, spec in thresholds.items()
     ]
     overall_status = _monitoring_overall_status(checks)
+    sample_weight_policy = _sample_weight_policy_payload(experiment=experiment, artifact=artifact)
     return {
         "schema_version": 1,
         "policy_version": str(source_policy.get("policy_version") or MONITORING_POLICY_VERSION),
@@ -1555,6 +1556,7 @@ def _monitoring_policy_payload(
         "split_col": getattr(experiment.config, "split_col", ""),
         "baseline_metrics": baseline_metrics,
         "checks": checks,
+        "sample_weight_policy": sample_weight_policy,
         "selection_policy_status": str(selection_policy_decision.get("status") or ""),
         "review_cadence": str(source_policy.get("review_cadence") or "monthly"),
         "owner": str(source_policy.get("owner") or "model_risk"),
@@ -1644,6 +1646,64 @@ def _monitoring_recommendation(status: str) -> str:
     if status == "fail":
         return "需模型风险复核后再交付"
     return "需补充监控阈值或业务说明"
+
+
+def _sample_weight_policy_payload(*, experiment, artifact: ModelArtifact) -> dict:
+    config_params = getattr(getattr(experiment, "config", None), "params", {})
+    config_col = _sample_weight_col_from_params(config_params)
+    artifact_col = _sample_weight_col_from_params(artifact.params)
+    sample_weight_col = artifact_col or config_col
+    used = bool(sample_weight_col)
+    source = "artifact_params" if artifact_col else "train_config_params" if config_col else "none"
+    approval_items = [
+        "训练未使用样本权重；如后续引入拒绝推断、成本权重或抽样校正，需要重新执行筛选、调参、训练和审批。"
+    ]
+    monitoring_checks: list[dict] = []
+    if used:
+        approval_items = [
+            "确认样本权重列的业务定义、生成逻辑、适用样本范围和取值边界。",
+            "审批时同时查看加权与非加权验证指标，确认模型收益不是仅由权重口径驱动。",
+            "上线监控需跟踪权重列可用率、非正值占比和分布漂移，权重口径变化时触发重新审批。",
+        ]
+        monitoring_checks = [
+            {
+                "id": "sample_weight_availability",
+                "metric": f"{sample_weight_col}.missing_or_non_positive_rate",
+                "status": "needs_baseline",
+                "recommendation": "配置缺失、非正值和异常高权重占比阈值。",
+            },
+            {
+                "id": "sample_weight_distribution",
+                "metric": f"{sample_weight_col}.population_stability",
+                "status": "needs_baseline",
+                "recommendation": "配置训练基线分布并按月监控 PSI/分位数漂移。",
+            },
+        ]
+    return _json_safe({
+        "schema_version": 1,
+        "used": used,
+        "sample_weight_col": sample_weight_col,
+        "source": source,
+        "approval_policy": {
+            "requires_manual_review": used,
+            "review_items": approval_items,
+        },
+        "monitoring_defaults": {
+            "requires_monitoring": used,
+            "review_cadence": "monthly" if used else "standard",
+            "checks": monitoring_checks,
+        },
+    })
+
+
+def _sample_weight_col_from_params(params) -> str:
+    if not isinstance(params, dict):
+        return ""
+    for key in ("sample_weight_col", "sample_weight_column", "weight_col"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _challenger_comparison_payload(
@@ -1907,6 +1967,7 @@ def _model_card_payload(
 ) -> dict:
     config = experiment.config
     metrics = _json_safe(experiment.metrics) or {}
+    sample_weight_policy = _sample_weight_policy_payload(experiment=experiment, artifact=artifact)
     limitations = _model_card_limitations(
         capabilities=capabilities,
         selection_policy_decision=selection_policy_decision,
@@ -1931,7 +1992,10 @@ def _model_card_payload(
         "seed": getattr(config, "seed", None),
         "feature_count": len(artifact.feature_list),
         "feature_preview": list(artifact.feature_list[:30]),
-        "sample_weight_col": str(artifact.params.get("sample_weight_col") or ""),
+        "sample_weight_col": str(sample_weight_policy.get("sample_weight_col") or ""),
+        "training": {
+            "sample_weight": sample_weight_policy,
+        },
         "key_metrics": _model_card_key_metrics(metrics),
         "governance": {
             "selection_policy_status": str(selection_policy_decision.get("status") or "not_requested"),
@@ -1955,7 +2019,12 @@ def _model_card_payload(
         },
         "capabilities": _json_safe(capabilities),
         "limitations": limitations,
-        "next_review_actions": _model_card_next_review_actions(limitations, monitoring_policy, challenger_comparison),
+        "next_review_actions": _model_card_next_review_actions(
+            limitations,
+            monitoring_policy,
+            challenger_comparison,
+            sample_weight_policy,
+        ),
     })
 
 
@@ -2039,10 +2108,13 @@ def _model_card_next_review_actions(
     limitations: list[str],
     monitoring_policy: dict,
     challenger_comparison: dict,
+    sample_weight_policy: dict | None = None,
 ) -> list[str]:
     actions = ["确认模型卡、审批包、监控策略与交付产物路径一致。"]
     if limitations:
         actions.append("逐项复核模型限制与放行说明。")
+    if isinstance(sample_weight_policy, dict) and sample_weight_policy.get("used"):
+        actions.append("复核样本权重业务口径、加权/非加权指标差异和上线权重列监控阈值。")
     if monitoring_policy:
         actions.append("按监控策略配置上线后的漂移/稳定性复核。")
     if challenger_comparison:
@@ -2081,6 +2153,7 @@ def _write_approval_package(
         comparison_json_artifact = uow.stage_file(base_dir, f"{artifact.id}.champion_comparison.json")
         comparison_markdown_artifact = uow.stage_file(base_dir, f"{artifact.id}.champion_comparison.md")
     config = experiment.config
+    sample_weight_policy = _sample_weight_policy_payload(experiment=experiment, artifact=artifact)
     payload = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -2095,6 +2168,10 @@ def _write_approval_package(
         "split_col": getattr(config, "split_col", ""),
         "split_values": _json_safe(getattr(config, "split_values", {})),
         "seed": getattr(config, "seed", None),
+        "sample_weight_col": str(sample_weight_policy.get("sample_weight_col") or ""),
+        "training": {
+            "sample_weight": sample_weight_policy,
+        },
         "features": list(artifact.feature_list),
         "feature_count": len(artifact.feature_list),
         "metrics": _json_safe(experiment.metrics),
@@ -2205,6 +2282,12 @@ def _approval_package_markdown(payload: dict) -> str:
     )
     features = [str(item) for item in (payload.get("features") or []) if str(item)]
     violations = [item for item in (policy.get("violations") or []) if isinstance(item, dict)]
+    training = payload.get("training") if isinstance(payload.get("training"), dict) else {}
+    sample_weight = (
+        training.get("sample_weight")
+        if isinstance(training.get("sample_weight"), dict)
+        else {}
+    )
     lines = [
         "# 模型审批包",
         "",
@@ -2217,6 +2300,7 @@ def _approval_package_markdown(payload: dict) -> str:
         f"- 目标列: `{_md_inline(payload.get('target_col'))}`",
         f"- 样本集: `{_md_inline(payload.get('sample_dataset_id') or payload.get('dataset_id'))}`",
         f"- 特征数: {_md_inline(payload.get('feature_count'))}",
+        f"- 样本权重: `{_md_inline(payload.get('sample_weight_col') or '未使用')}`",
         "",
         "## 关键指标",
         "",
@@ -2240,6 +2324,8 @@ def _approval_package_markdown(payload: dict) -> str:
         f"- 状态: `{_md_inline(policy.get('status') or 'not_requested')}`",
         f"- Override原因: {_md_inline(policy.get('override_reason') or '-')}",
     ])
+    if sample_weight:
+        lines.extend(_sample_weight_policy_markdown_section(sample_weight, heading="## 样本权重治理"))
     if violations:
         lines.extend(["", "| 违规项 | 说明 |", "| --- | --- |"])
         for item in violations:
@@ -2340,8 +2426,56 @@ def _approval_package_markdown(payload: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sample_weight_policy_markdown_section(policy: dict, *, heading: str) -> list[str]:
+    approval = policy.get("approval_policy") if isinstance(policy.get("approval_policy"), dict) else {}
+    monitoring = (
+        policy.get("monitoring_defaults")
+        if isinstance(policy.get("monitoring_defaults"), dict)
+        else {}
+    )
+    review_items = [str(item) for item in (approval.get("review_items") or []) if str(item)]
+    monitor_checks = [
+        item for item in (monitoring.get("checks") or [])
+        if isinstance(item, dict)
+    ]
+    lines = [
+        "",
+        heading,
+        "",
+        f"- 是否使用: `{_md_inline('是' if policy.get('used') else '否')}`",
+        f"- 权重列: `{_md_inline(policy.get('sample_weight_col') or '未使用')}`",
+        f"- 来源: `{_md_inline(policy.get('source') or 'none')}`",
+        f"- 需要人工复核: `{_md_inline('是' if approval.get('requires_manual_review') else '否')}`",
+    ]
+    if review_items:
+        lines.extend(["", "### 审批复核项", ""])
+        for item in review_items:
+            lines.append(f"- {_md_inline(item)}")
+    if monitor_checks:
+        lines.extend([
+            "",
+            "### 监控默认项",
+            "",
+            "| 检查项 | 指标 | 状态 | 建议 |",
+            "| --- | --- | --- | --- |",
+        ])
+        for item in monitor_checks:
+            lines.append(
+                f"| {_md_cell(item.get('id') or '-')} | "
+                f"{_md_cell(item.get('metric') or '-')} | "
+                f"{_md_cell(item.get('status') or '-')} | "
+                f"{_md_cell(item.get('recommendation') or '-')} |"
+            )
+    return lines
+
+
 def _monitoring_policy_markdown(policy: dict) -> str:
     checks = [item for item in (policy.get("checks") or []) if isinstance(item, dict)]
+    sample_weight = (
+        policy.get("sample_weight_policy")
+        if isinstance(policy.get("sample_weight_policy"), dict)
+        else {}
+    )
     lines = [
         "# 模型监控策略",
         "",
@@ -2373,6 +2507,8 @@ def _monitoring_policy_markdown(policy: dict) -> str:
             )
     else:
         lines.append("| - | - | - | - | - | - |")
+    if sample_weight:
+        lines.extend(_sample_weight_policy_markdown_section(sample_weight, heading="## 样本权重监控"))
     if policy.get("notes"):
         lines.extend(["", "## 备注", "", str(policy.get("notes"))])
     return "\n".join(lines) + "\n"
@@ -2386,6 +2522,12 @@ def _model_card_markdown(card: dict) -> str:
     governance = card.get("governance") if isinstance(card.get("governance"), dict) else {}
     delivery = card.get("delivery") if isinstance(card.get("delivery"), dict) else {}
     calibration = delivery.get("calibration") if isinstance(delivery.get("calibration"), dict) else {}
+    training = card.get("training") if isinstance(card.get("training"), dict) else {}
+    sample_weight = (
+        training.get("sample_weight")
+        if isinstance(training.get("sample_weight"), dict)
+        else {}
+    )
     limitations = [str(item) for item in (card.get("limitations") or []) if str(item)]
     review_actions = [str(item) for item in (card.get("next_review_actions") or []) if str(item)]
     feature_preview = [str(item) for item in (card.get("feature_preview") or []) if str(item)]
@@ -2418,6 +2560,8 @@ def _model_card_markdown(card: dict) -> str:
             )
     else:
         lines.append("| - | - |")
+    if sample_weight:
+        lines.extend(_sample_weight_policy_markdown_section(sample_weight, heading="## 样本权重治理"))
     lines.extend([
         "",
         "## 治理状态",

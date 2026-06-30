@@ -47,14 +47,17 @@ def _metrics() -> ModelMetrics:
     )
 
 
-def _config(dataset_id: str) -> TrainConfig:
+def _config(dataset_id: str, *, sample_weight_col: str = "") -> TrainConfig:
+    params = {"time_col": "apply_month"}
+    if sample_weight_col:
+        params["sample_weight_col"] = sample_weight_col
     return TrainConfig(
         dataset_id=dataset_id,
         features=("x1", "x2"),
         target_col="y",
         split_col="split",
         split_values={"train": "train", "test": "test", "oot": "oot"},
-        params={"time_col": "apply_month"},
+        params=params,
         seed=19,
         early_stopping_rounds=None,
     )
@@ -78,7 +81,7 @@ def _create_source_task(repo: TaskRepository, source_dir: Path):
     )
 
 
-def _seed_experiment(tmp_path: Path):
+def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = ""):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     source_dir = tmp_path / "source"
@@ -91,6 +94,8 @@ def _seed_experiment(tmp_path: Path):
         "split": ["train", "train", "test", "test", "oot", "oot"],
         "apply_month": ["2026-01", "2026-01", "2026-02", "2026-02", "2026-03", "2026-03"],
     })
+    if sample_weight_col:
+        frame[sample_weight_col] = [1.0, 1.2, 0.8, 1.5, 1.0, 2.0]
     upload_path = tmp_path / "sample.parquet"
     frame.to_parquet(upload_path, index=False)
     registry = DatasetRegistry(
@@ -99,17 +104,23 @@ def _seed_experiment(tmp_path: Path):
         settings.datasets_dir,
     )
     dataset = registry.register_existing(upload_path, task_id=source_task.id, role="modeling_sample")
-    model = LogisticRegression().fit(frame[["x1", "x2"]], frame["y"])
+    fit_kwargs = {}
+    if sample_weight_col:
+        fit_kwargs["sample_weight"] = frame[sample_weight_col]
+    model = LogisticRegression().fit(frame[["x1", "x2"]], frame["y"], **fit_kwargs)
     model_dir = settings.tasks_dir / source_task.id / "modeling_artifacts"
+    artifact_params = {"C": 1.0}
+    if sample_weight_col:
+        artifact_params["sample_weight_col"] = sample_weight_col
     artifact = save_model(
         model,
         "lr",
         model_dir,
         feature_list=("x1", "x2"),
-        params={"C": 1.0},
+        params=artifact_params,
     )
     store = ExperimentStore(settings.db_path)
-    experiment_id = store.create(source_task.id, "lr", _config(dataset.id))
+    experiment_id = store.create(source_task.id, "lr", _config(dataset.id, sample_weight_col=sample_weight_col))
     store.attach_result(
         experiment_id,
         TrainResult(
@@ -326,6 +337,54 @@ def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monke
     assert stored.pmml_path is None
     assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.pmml") == []
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
+
+
+def test_post_training_action_writes_sample_weight_governance_artifacts(tmp_path):
+    settings, _store, source_task, dataset, artifact = _seed_experiment(
+        tmp_path,
+        sample_weight_col="case_weight",
+    )
+    ctx = SimpleNamespace(
+        task_id=source_task.id,
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=0,
+    )
+
+    output = modeling_tools.tool_post_training_action(
+        {
+            "experiment_id": artifact.experiment_id,
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml"],
+        },
+        ctx,
+    )
+
+    sample_weight = output["model_card"]["training"]["sample_weight"]
+    assert sample_weight["used"] is True
+    assert sample_weight["sample_weight_col"] == "case_weight"
+    assert sample_weight["approval_policy"]["requires_manual_review"] is True
+    assert sample_weight["monitoring_defaults"]["checks"][0]["id"] == "sample_weight_availability"
+    assert output["monitoring_policy"]["sample_weight_policy"] == sample_weight
+    assert "样本权重业务口径" in output["model_card"]["next_review_actions"][1]
+
+    approval_payload = json.loads(Path(output["approval_package_path"]).read_text(encoding="utf-8"))
+    monitoring_payload = json.loads(Path(output["monitoring_policy_path"]).read_text(encoding="utf-8"))
+    model_card_payload = json.loads(Path(output["model_card_path"]).read_text(encoding="utf-8"))
+    assert approval_payload["sample_weight_col"] == "case_weight"
+    assert approval_payload["training"]["sample_weight"] == sample_weight
+    assert monitoring_payload["sample_weight_policy"] == sample_weight
+    assert model_card_payload["training"]["sample_weight"] == sample_weight
+
+    approval_markdown = Path(output["approval_package_markdown_path"]).read_text(encoding="utf-8")
+    monitoring_markdown = Path(output["monitoring_policy_markdown_path"]).read_text(encoding="utf-8")
+    model_card_markdown = Path(output["model_card_markdown_path"]).read_text(encoding="utf-8")
+    assert "## 样本权重治理" in approval_markdown
+    assert "## 样本权重治理" in model_card_markdown
+    assert "## 样本权重监控" in monitoring_markdown
+    assert "case_weight" in approval_markdown
+    assert "加权与非加权验证指标" in approval_markdown
+    assert "case_weight.missing_or_non_positive_rate" in monitoring_markdown
 
 
 @pytest.mark.parametrize("algorithm", ["lgb", "xgb"])
