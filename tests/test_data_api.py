@@ -10,6 +10,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
+from marvis.routers.data import router as data_router
 from marvis.settings import build_settings
 
 
@@ -28,6 +29,7 @@ def _client(tmp_path):
     app = FastAPI()
     app.state.settings = settings
     app.include_router(router)
+    app.include_router(data_router)
     return TestClient(app), settings
 
 
@@ -64,6 +66,21 @@ def _register_csv(settings, tmp_path, task_id: str, name: str, frame: pd.DataFra
     path = tmp_path / f"{name}.csv"
     frame.to_csv(path, index=False)
     return _registry(settings).register_from_upload(task_id, path, role=role)
+
+
+def test_data_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in data_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/datasets", ("GET",))] == "marvis.routers.data"
+    assert routes[("/api/tasks/{task_id}/datasets/upload", ("POST",))] == "marvis.routers.data"
+    assert routes[("/api/datasets/{dataset_id}/preview", ("GET",))] == "marvis.routers.data"
+    assert routes[("/api/tasks/{task_id}/joins/propose", ("POST",))] == "marvis.routers.data"
+    assert routes[("/api/joins/{join_plan_id}", ("GET",))] == "marvis.routers.data"
+    assert routes[("/api/joins/{join_plan_id}/confirm", ("POST",))] == "marvis.routers.data"
+    assert routes[("/api/joins/{join_plan_id}/execute", ("POST",))] == "marvis.routers.data"
 
 
 def test_dataset_upload_list_and_preview_api(tmp_path):
