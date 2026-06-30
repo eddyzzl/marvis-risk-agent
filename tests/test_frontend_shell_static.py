@@ -303,8 +303,9 @@ def test_unselected_workspace_shows_centered_welcome_only():
 def test_empty_workspace_greeting_changes_by_local_time():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_state_js = _read_static("js/task-workspace-state.js")
 
-    assert "function workspaceGreetingForHour(hour)" in app_js
+    assert "export function workspaceGreetingForHour(hour)" in workspace_state_js
     assert "function updateWorkspaceGreeting(now = new Date())" in app_js
     assert "workspaceGreetingForHour(now.getHours())" in app_js
     assert "$(\"workspaceGreetingText\").textContent = greeting" in app_js
@@ -312,18 +313,17 @@ def test_empty_workspace_greeting_changes_by_local_time():
     assert "我来帮您完成模型验证工作" not in app_js
     assert "updateWorkspaceGreeting();" in app_js
 
-    assert 'return "早上好"' in app_js
-    assert 'return "上午好"' in app_js
-    assert 'return "下午好"' in app_js
-    assert 'return "晚上好"' in app_js
+    assert 'return "早上好"' in workspace_state_js
+    assert 'return "上午好"' in workspace_state_js
+    assert 'return "下午好"' in workspace_state_js
+    assert 'return "晚上好"' in workspace_state_js
     assert 'document.getElementById("workspaceGreetingText")' in index_html
     assert 'new Date().getHours()' in index_html
     assert index_html.index('id="workspaceGreetingText"') < index_html.index('new Date().getHours()')
     assert index_html.index('new Date().getHours()') < index_html.index('id="welcomeTaskCards"')
 
-    greeting_start = app_js.index("function workspaceGreetingForHour(hour)")
-    greeting_end = app_js.index("function updateWorkspaceGreeting", greeting_start)
-    greeting_logic = app_js[greeting_start:greeting_end]
+    greeting_start = workspace_state_js.index("export function workspaceGreetingForHour(hour)")
+    greeting_logic = workspace_state_js[greeting_start:]
     assert "hour >= 5 && hour < 9" in greeting_logic
     assert "hour >= 9 && hour < 12" in greeting_logic
     assert "hour >= 12 && hour < 18" in greeting_logic
@@ -331,12 +331,10 @@ def test_empty_workspace_greeting_changes_by_local_time():
 
 
 def test_workspace_greeting_logic_runs_under_node():
-    app_js = _read_static("app.js")
-    start = app_js.index("function workspaceGreetingForHour(hour)")
-    end = app_js.index("function updateWorkspaceGreeting", start)
+    module_url = (STATIC_DIR / "js" / "task-workspace-state.js").as_uri()
     script = "\n".join(
         [
-            app_js[start:end],
+            f"import {{ workspaceGreetingForHour }} from {module_url!r};",
             "console.log([",
             "  workspaceGreetingForHour(7),",
             "  workspaceGreetingForHour(10),",
@@ -346,7 +344,7 @@ def test_workspace_greeting_logic_runs_under_node():
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,

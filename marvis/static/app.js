@@ -15,6 +15,13 @@ import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import {
+  loadResultScrollPositions as loadStoredResultScrollPositions,
+  persistResultScrollPositions as persistStoredResultScrollPositions,
+  rememberSelectedTaskId as rememberStoredSelectedTaskId,
+  storedSelectedTaskId as readStoredSelectedTaskId,
+  workspaceGreetingForHour,
+} from "./js/task-workspace-state.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
@@ -2912,63 +2919,19 @@ async function saveLLMEngineEdit() {
 }
 
 function rememberSelectedTaskId(taskId) {
-  try {
-    if (taskId) {
-      localStorage.setItem(selectedTaskStorageKey, taskId);
-    } else {
-      localStorage.removeItem(selectedTaskStorageKey);
-    }
-  } catch (_) {
-    // Browser storage can be unavailable in private or embedded contexts.
-  }
+  rememberStoredSelectedTaskId(selectedTaskStorageKey, taskId);
 }
 
 function storedSelectedTaskId() {
-  try {
-    return localStorage.getItem(selectedTaskStorageKey) || "";
-  } catch (_) {
-    return "";
-  }
+  return readStoredSelectedTaskId(selectedTaskStorageKey);
 }
 
 function loadResultScrollPositions() {
-  resultScrollPositionsByTask.clear();
-  let raw = "";
-  try {
-    raw = localStorage.getItem(resultScrollPositionsStorageKey) || "";
-  } catch (_) {
-    return;
-  }
-  if (!raw) return;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-    Object.entries(parsed).forEach(([taskId, scrollTop]) => {
-      const normalized = Number(scrollTop);
-      if (taskId && Number.isFinite(normalized) && normalized >= 0) {
-        resultScrollPositionsByTask.set(taskId, normalized);
-      }
-    });
-  } catch (_) {
-    // Ignore stale or malformed browser storage.
-  }
+  loadStoredResultScrollPositions(resultScrollPositionsStorageKey, resultScrollPositionsByTask);
 }
 
 function persistResultScrollPositions() {
-  try {
-    const payload = {};
-    resultScrollPositionsByTask.forEach((scrollTop, taskId) => {
-      if (!taskId || !Number.isFinite(scrollTop) || scrollTop < 0) return;
-      payload[taskId] = scrollTop;
-    });
-    if (Object.keys(payload).length === 0) {
-      localStorage.removeItem(resultScrollPositionsStorageKey);
-      return;
-    }
-    localStorage.setItem(resultScrollPositionsStorageKey, JSON.stringify(payload));
-  } catch (_) {
-    // Browser storage can be unavailable in private or embedded contexts.
-  }
+  persistStoredResultScrollPositions(resultScrollPositionsStorageKey, resultScrollPositionsByTask);
 }
 
 function scheduleResultScrollPositionsPersist() {
@@ -3037,13 +3000,6 @@ function runModeLabel(mode) {
 
 function selectedTaskIsAgentMode(task = selectedTask) {
   return task?.run_mode === "agent";
-}
-
-function workspaceGreetingForHour(hour) {
-  if (hour >= 5 && hour < 9) return "早上好";
-  if (hour >= 9 && hour < 12) return "上午好";
-  if (hour >= 12 && hour < 18) return "下午好";
-  return "晚上好";
 }
 
 function updateWorkspaceGreeting(now = new Date()) {
