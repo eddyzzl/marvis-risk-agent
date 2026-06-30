@@ -245,6 +245,7 @@ def test_driver_failed_message_carries_retry_contract(tmp_path):
     envelope = msg.metadata["failure_envelope"]
     assert envelope["schema_version"] == "failure.v1"
     assert envelope["failed_step_id"] == "screen"
+    assert envelope["error_kind"] == "validation"
     assert envelope["retryable"] is True
     assert envelope["stale_token"] == "plan-1:screen:3"
     assert envelope["downstream_reset_steps"] == ["screen", "train"]

@@ -1029,6 +1029,23 @@ class PlanRepository:
             result.append(item)
         return result
 
+    def latest_failed_step_run_error_kind(self, step_id: str) -> str | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT error_kind
+                  FROM plan_step_runs
+                 WHERE step_id = ?
+                   AND status IN ('failed', 'interrupted')
+                 ORDER BY attempt DESC, COALESCE(finished_at, started_at) DESC
+                 LIMIT 1
+                """,
+                (step_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["error_kind"] or "").strip() or None
+
     def list_running_step_runs(self, plan_id: str) -> list[dict]:
         with connect(self.db_path) as conn:
             rows = conn.execute(

@@ -356,6 +356,7 @@ class PlanDriver:
         detail = f"「{failed.title}」失败:{failed.error}" if failed and failed.error else "执行中断。"
         meta = {"plan_id": plan.id, "step_id": failed.id if failed else None, "run_seq": run_seq}
         reset_steps: tuple[str, ...] = ()
+        error_kind = "execution"
         if failed is not None:
             downstream = _downstream_step_ids(plan, [failed.id])
             reset_steps = tuple(
@@ -363,6 +364,9 @@ class PlanDriver:
                 for step in sorted(plan.steps, key=lambda item: (item.index, item.id))
                 if step.id == failed.id or step.id in downstream
             )
+            latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)
+            if callable(latest_error_kind):
+                error_kind = latest_error_kind(failed.id) or error_kind
         meta["failure_envelope"] = build_failure_envelope(
             plan_id=plan.id,
             step_id=failed.id if failed else None,
@@ -370,6 +374,7 @@ class PlanDriver:
             message=detail,
             step_inputs=failed.inputs if failed else None,
             downstream_reset_steps=reset_steps,
+            error_kind=error_kind,
             retryable=failed is not None,
         ).to_dict()
         return DriverMessage(

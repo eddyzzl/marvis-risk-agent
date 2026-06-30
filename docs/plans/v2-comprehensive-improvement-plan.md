@@ -43,6 +43,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_frontend_shell_static.py::test_unselected_workspace_shows_centered_welcome_only tests/test_frontend_screen_table.py tests/test_frontend_static_v2.py::test_frontend_uses_v2_task_actions_only`: `15 passed` after adding semantic visual tokens and extracting theme handling to `static/js/theme.js`.
   - `tests/test_db.py tests/test_orch_db.py tests/test_plugin_db.py tests/test_modeling_db.py tests/test_strategy_db.py tests/test_drafts_db.py`: `72 passed` after extracting schema/connection setup into `marvis/db_schema.py`.
   - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py`: `35 passed` after enriching failure envelopes with editable input defaults and explicit downstream reset step ids.
+  - `tests/test_plan_driver.py`: `38 passed` after propagating the latest failed step-run `error_kind` into `FailureEnvelope` so validation/postcheck/runtime failures are distinguishable in retry UX.
   - `tests/test_orch_executor.py tests/test_orch_db.py`: `44 passed` after adding tool version, manifest hash, source dataset refs, and artifact refs to persisted step evidence.
   - `tests/test_agent_autodrive.py`: `24 passed` after adding a deterministic AUTO low-risk control allowlist for declared-but-expensive tuning and delivery actions.
   - `tests/test_orch_api.py tests/test_frontend_v2_plan.py tests/test_frontend_static_v2.py`: `238 passed` after exposing failure envelopes on plan step API payloads and rendering retry defaults/reset scope in both V2 plan views.
@@ -92,6 +93,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the failure-envelope retry contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the failure-envelope `error_kind` propagation update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the evidence lineage update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO high-risk control guard update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the frontend failure retry contract update.
@@ -285,7 +287,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Problem: user and AUTO need one consistent contract for what is retryable, what inputs can be edited, how typed controls map back to JSON, and what downstream steps reset.
    - Fix: add `FailureEnvelope` with `failed_step_id`, `error_kind`, `retryable`, `editable_input_schema`, `suggested_actions`, `stale_token`, `downstream_reset`.
    - Tests: force tool failure, edit retry inputs, verify downstream reset and recovered completion.
-   - Current update: modular V2 plan view and main plan rail render schema-derived retry fields and submit typed values before falling back to raw JSON.
+   - Current update: modular V2 plan view and main plan rail render schema-derived retry fields and submit typed values before falling back to raw JSON; failure envelopes now source `error_kind` from the latest failed/interrupted step-run ledger row instead of defaulting every failure to `execution`.
 
 ### P1: Evidence, Transactions, And Runtime Safety
 
@@ -545,7 +547,7 @@ Tasks:
 - Partial: add output renderers, gate payload helpers, dependency gate adapters, and basic adjust specs; per-tool gate adapters and schema-driven adjust specs remain.
 - Done: extend AUTO to structured bounded decisions.
 - Partial: add stale-token style `expected_step_id` enforcement for structured screen controls; expand to all gate actions.
-- Mostly done: add retry/failure contract metadata, downstream reset behavior, and first schema-driven retry fields; deeper per-tool form adapters remain.
+- Mostly done: add retry/failure contract metadata, downstream reset behavior, real step-run `error_kind` propagation, and first schema-driven retry fields; deeper per-tool form adapters remain.
 
 Acceptance:
 - Existing manual driver flows still work.
