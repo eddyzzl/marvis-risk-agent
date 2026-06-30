@@ -48,3 +48,8 @@ class _TrainingDatasetBackend:
         if nrows is not None:
             frame = frame.head(int(nrows))
         return frame.copy()
+
+    def column_names(self, path: Path) -> list[str]:
+        if Path(path) != self._dataset.path:
+            return self._fallback.column_names(path)
+        return [str(column) for column in self._dataset.frame.columns]

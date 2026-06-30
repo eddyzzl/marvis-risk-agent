@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import re
+from types import SimpleNamespace
 from typing import Any
 import uuid
 
@@ -2808,17 +2809,18 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
             amount_col=business.loan_amount_col,
         )
 
-    report_dataset_path, score_col = _report_scored_dataset(
+    report_dataset_path, score_col, report_frame = _report_scored_dataset(
         runtime,
         dataset_path,
         artifact,
         experiment.config,
         task_id=ctx.task_id,
     )
+    report_runtime = _cached_dataset_runtime(runtime, report_dataset_path, frame=report_frame)
     low_pricing = None
     if _section_available(statuses, "low_pricing") and business.interest_rate_col:
         low_pricing = stress_low_pricing(
-            runtime.backend,
+            report_runtime.backend,
             report_dataset_path,
             score_col=score_col,
             target_col=experiment.config.target_col,
@@ -2826,7 +2828,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
             low_pricing_threshold=None,
         )
     oot_bin = _report_bin_table(
-        runtime,
+        report_runtime,
         report_dataset_path,
         score_col=score_col,
         target_col=experiment.config.target_col,
@@ -2847,16 +2849,22 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         else score_col
     )
     score_bands = _score_band_rows(
-        runtime,
+        report_runtime,
         report_dataset_path,
         score_col=score_band_col,
         target_col=experiment.config.target_col,
         config=experiment.config,
     )
-    stress_product_removal = _stress_product_removal(runtime, dataset_path, artifact, experiment.config, feature_dictionary)
+    stress_product_removal = _stress_product_removal(
+        report_runtime,
+        report_dataset_path,
+        artifact,
+        experiment.config,
+        feature_dictionary,
+    )
     split_profile = _dataset_split_profile(
-        runtime,
-        dataset_path,
+        report_runtime,
+        report_dataset_path,
         experiment.config,
         window_col=business.loan_month_col,
     )
@@ -2871,7 +2879,7 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         scorecard_table=scorecard_table,
         score_bands=score_bands,
         calibration=calibration,
-        univariate=_univariate_rows(runtime, dataset_path, artifact, experiment.config),
+        univariate=_univariate_rows(report_runtime, report_dataset_path, artifact, experiment.config),
         oot_bin_table=oot_bin,
         stress_product_removal=stress_product_removal,
         stress_low_pricing=low_pricing,
@@ -3791,12 +3799,12 @@ def _report_scored_dataset(
     config: TrainConfig,
     *,
     task_id: str,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, pd.DataFrame | None]:
     columns = runtime.backend.column_names(dataset_path)
     if "score" in columns:
-        return dataset_path, "score"
+        return dataset_path, "score", None
     if artifact is None:
-        return dataset_path, _report_score_col(runtime, dataset_path, artifact, config)
+        return dataset_path, _report_score_col(runtime, dataset_path, artifact, config), None
 
     frame = runtime.backend.read_frame(dataset_path)
     scorer = _ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact))
@@ -3810,10 +3818,26 @@ def _report_scored_dataset(
         frame.to_parquet(artifact.path, index=False)
         final_path = artifact.promote()
         artifact.commit()
-        return final_path, MODEL_REPORT_SCORE_COL
+        return final_path, MODEL_REPORT_SCORE_COL, frame
     except Exception:
         artifact.rollback()
         raise
+
+
+def _cached_dataset_runtime(
+    runtime: _Runtime,
+    dataset_path: Path,
+    *,
+    frame: pd.DataFrame | None = None,
+):
+    dataset = (
+        TrainingDataset(path=Path(dataset_path), frame=frame)
+        if frame is not None
+        else TrainingDataset.load(runtime.backend, dataset_path)
+    )
+    proxy = SimpleNamespace(**vars(runtime))
+    proxy.backend = dataset.backend_adapter(runtime.backend)
+    return proxy
 
 
 def _artifact_model_base_dir(runtime: _Runtime, artifact: ModelArtifact) -> Path:

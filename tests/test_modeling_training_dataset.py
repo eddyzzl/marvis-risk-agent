@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pandas as pd
 
 from marvis.packs.modeling import tools as modeling_tools
-from marvis.packs.modeling.contracts import ModelArtifact, ModelMetrics, TrainResult
+from marvis.packs.modeling.contracts import ModelArtifact, ModelMetrics, TrainConfig, TrainResult
+from marvis.packs.modeling.report_compute import BusinessColumns
 
 
 class _CountingBackend:
@@ -20,6 +21,9 @@ class _CountingBackend:
         if nrows is not None:
             frame = frame.head(nrows)
         return frame.copy()
+
+    def column_names(self, path: Path):
+        return [str(column) for column in self.frame.columns]
 
 
 class _FakeRegistry:
@@ -75,6 +79,19 @@ def _metrics(oot_ks: float) -> ModelMetrics:
         overfit_train_test_gap=0.0,
         overfit_train_oot_gap=0.0,
         overfit_flag=False,
+    )
+
+
+def _report_config() -> TrainConfig:
+    return TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=7,
+        early_stopping_rounds=None,
     )
 
 
@@ -138,3 +155,56 @@ def test_train_models_uses_training_dataset_cache_for_multiple_recipes(tmp_path,
     assert backend.read_count == 1
     assert out["experiment_ids"] == ["exp-lgb", "exp-lr"]
     assert out["best_experiment_id"] == "exp-lgb"
+
+
+def test_cached_report_runtime_uses_existing_scored_frame_without_backend_read(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.10, 0.20, 0.30, 0.60, 0.80, 0.90],
+        "y": [0, 0, 1, 0, 1, 1],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+        "amount": [100, 120, 140, 160, 180, 200],
+    })
+    backend = _CountingBackend(frame)
+    dataset_path = tmp_path / "scored.parquet"
+    runtime = SimpleNamespace(backend=backend)
+
+    cached_runtime = modeling_tools._cached_dataset_runtime(runtime, dataset_path, frame=frame)
+
+    assert cached_runtime.backend.column_names(dataset_path) == ["score", "y", "split", "amount"]
+    score_bands = modeling_tools._score_band_rows(
+        cached_runtime,
+        dataset_path,
+        score_col="score",
+        target_col="y",
+        config=_report_config(),
+        bin_count=2,
+    )
+    oot_bins = modeling_tools._report_bin_table(
+        cached_runtime,
+        dataset_path,
+        score_col="score",
+        target_col="y",
+        config=_report_config(),
+        business=BusinessColumns(loan_amount_col="amount"),
+    )
+
+    assert backend.read_count == 0
+    assert {row["split"] for row in score_bands} == {"train", "test", "oot"}
+    assert oot_bins
+
+
+def test_cached_report_runtime_loads_dataset_once_when_frame_not_supplied(tmp_path):
+    frame = pd.DataFrame({
+        "score": [0.10, 0.20, 0.80, 0.90],
+        "y": [0, 0, 1, 1],
+        "split": ["train", "test", "oot", "oot"],
+    })
+    backend = _CountingBackend(frame)
+    dataset_path = tmp_path / "scored.parquet"
+    runtime = SimpleNamespace(backend=backend)
+
+    cached_runtime = modeling_tools._cached_dataset_runtime(runtime, dataset_path)
+    assert cached_runtime.backend.read_frame(dataset_path, columns=["score"]).shape == (4, 1)
+    assert cached_runtime.backend.read_frame(dataset_path, columns=["y", "split"]).shape == (4, 2)
+
+    assert backend.read_count == 1
