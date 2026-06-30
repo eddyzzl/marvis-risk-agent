@@ -26,6 +26,7 @@ from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
 from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
+from marvis.routers.validation_agent import router as validation_agent_router
 from marvis.routers.validation_stages import router as validation_stages_router
 
 
@@ -249,6 +250,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.include_router(scans_router)
     app.include_router(stage_controls_router)
     app.include_router(tasks_router)
+    app.include_router(validation_agent_router)
     app.include_router(validation_stages_router)
     return TestClient(app)
 
@@ -448,6 +450,35 @@ def test_validation_stage_routes_are_served_from_dedicated_router():
     )
     assert routes[("/api/tasks/{task_id}/validate", ("POST",))] == (
         "marvis.routers.validation_stages"
+    )
+
+
+def test_validation_agent_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in validation_agent_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/agent/messages", ("GET",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/start", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/messages", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/stop", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/summarize", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/report-draft", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/report-draft/confirm", ("POST",))] == (
+        "marvis.routers.validation_agent"
     )
 
 
