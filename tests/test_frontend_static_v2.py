@@ -6100,6 +6100,7 @@ def test_agent_message_renderer_outputs_distillation_reference_audit_fields():
 
 def test_agent_memory_management_view_wires_actions_and_api_paths():
     app_js = _read_static("app.js")
+    memory_panel_js = _read_static("js/agent-memory-panel.js")
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
@@ -6115,21 +6116,21 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '<option value="active">启用</option>' in status_filter
     assert '<option value="deleted">已删除</option>' in index_html
     assert '<option value="rejected">已拒绝</option>' in index_html
-    assert 'data-agent-memory-action="inspect"' in app_js
-    assert 'data-agent-memory-action="disable"' in app_js
-    assert 'data-agent-memory-action="enable"' in app_js
-    assert 'data-agent-memory-action="delete"' in app_js
-    assert 'data-agent-memory-action="rollback"' in app_js
-    assert 'memoryStatus === "active" && !memory.superseded_by' in app_js
+    assert 'data-agent-memory-action="inspect"' in memory_panel_js
+    assert 'data-agent-memory-action="disable"' in memory_panel_js
+    assert 'data-agent-memory-action="enable"' in memory_panel_js
+    assert 'data-agent-memory-action="delete"' in memory_panel_js
+    assert 'data-agent-memory-action="rollback"' in memory_panel_js
+    assert 'memoryStatus === "active" && !memory.superseded_by' in memory_panel_js
 
-    assert '"api/agent-memory"' in app_js
-    assert '"api/agent-memory/distillations"' in app_js
-    assert '`api/agent-memory/distillations/${encodeURIComponent(memoryId)}`' in app_js
-    assert 'api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" })' in app_js
-    assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in app_js
+    assert '"api/agent-memory"' in memory_panel_js
+    assert '"api/agent-memory/distillations"' in memory_panel_js
+    assert '`api/agent-memory/distillations/${encodeURIComponent(memoryId)}`' in memory_panel_js
+    assert 'api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" })' in memory_panel_js
+    assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in memory_panel_js
     assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
     assert "function syncAgentMemoryViewControls" in app_js
@@ -6148,14 +6149,14 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
 
 
 def test_agent_memory_delete_keeps_audit_detail_visible():
-    app_js = _read_static("app.js")
-    delete_start = app_js.index("async function deleteAgentMemory")
-    delete_end = app_js.index("async function rollbackAgentMemoryDistillation", delete_start)
-    delete_body = app_js[delete_start:delete_end]
+    memory_panel_js = _read_static("js/agent-memory-panel.js")
+    delete_start = memory_panel_js.index("async function remove")
+    delete_end = memory_panel_js.index("async function rollbackDistillation", delete_start)
+    delete_body = memory_panel_js[delete_start:delete_end]
 
-    assert "renderAgentMemoryDetail(payload?.memory || null, payload?.events || [])" in delete_body
-    assert "await loadAgentMemoryItems()" not in delete_body
-    assert "renderAgentMemoryItems()" in delete_body
+    assert "renderDetail(payload?.memory || null, payload?.events || [])" in delete_body
+    assert "await loadItems()" not in delete_body
+    assert "renderItems()" in delete_body
 
 
 def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs():
