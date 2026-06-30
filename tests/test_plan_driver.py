@@ -1400,6 +1400,7 @@ def test_driver_adjust_resets_downstream_outputs_before_final_gate(tmp_path):
         user_text="把调参轮数改成 12",
         run_seq=1,
         adjust_params={"n_trials": 12},
+        expected_step_id="report",
     )
 
     assert turn.status == PlanStatus.AWAITING_CONFIRM.value

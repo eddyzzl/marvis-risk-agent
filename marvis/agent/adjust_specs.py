@@ -8,7 +8,8 @@ UNIT_INTERVAL_ADJUST_PARAMS = frozenset({"leakage_ks", "max_missing_rate"})
 POSITIVE_INT_ADJUST_PARAMS = frozenset({"n_trials", "num_boost_round"})
 NONNEGATIVE_INT_ADJUST_PARAMS = frozenset({"seed"})
 SAMPLE_WEIGHT_ADJUST_PARAMS = frozenset({"sample_weight_col"})
-MODELING_SETUP_ADJUST_PARAMS = frozenset({"target_type", "recipes", "sample_weight_col", "n_trials"})
+MODELING_SETUP_ADJUST_PARAMS = frozenset({"target_type", "recipes", "sample_weight_col"})
+TUNING_ADJUST_PARAMS = frozenset({"n_trials", "num_boost_round"})
 
 
 def has_screen_adjust(params: dict | None) -> bool:
@@ -29,6 +30,13 @@ def has_modeling_setup_adjust(params: dict | None) -> bool:
     return bool(
         isinstance(params, dict)
         and (set(str(key) for key in params) & MODELING_SETUP_ADJUST_PARAMS)
+    )
+
+
+def has_tuning_adjust(params: dict | None) -> bool:
+    return bool(
+        isinstance(params, dict)
+        and (set(str(key) for key in params) & TUNING_ADJUST_PARAMS)
     )
 
 
@@ -81,4 +89,5 @@ __all__ = [
     "has_modeling_setup_adjust",
     "has_sample_weight_adjust",
     "has_screen_adjust",
+    "has_tuning_adjust",
 ]
