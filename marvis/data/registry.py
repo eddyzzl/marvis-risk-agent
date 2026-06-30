@@ -74,6 +74,30 @@ class DatasetRegistry:
         self._repo.create_dataset(dataset)
         return dataset
 
+    def register_existing_on_connection(
+        self,
+        conn,
+        parquet_path: Path,
+        *,
+        task_id: str,
+        role: str,
+        anchor_target: str | None = None,
+        seed: int = 0,
+    ) -> Dataset:
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        dataset = self._dataset_from_existing(
+            parquet_path,
+            task_id=task_id,
+            role=role,
+            anchor_target=anchor_target,
+            seed=seed,
+        )
+        create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
+        if not callable(create_on_connection):
+            raise DataBackendError("dataset repository does not support connection-scoped dataset writes")
+        create_on_connection(conn, dataset)
+        return dataset
+
     def register_existing_with_audit(
         self,
         parquet_path: Path,

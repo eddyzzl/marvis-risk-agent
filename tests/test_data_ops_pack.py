@@ -232,6 +232,44 @@ def test_data_ops_derived_frame_registration_failure_rolls_back_staged_file(tmp_
     assert not (output_dir / ".staging").exists()
 
 
+def test_data_ops_derived_frame_connection_failure_rolls_back_promoted_file(tmp_path, monkeypatch):
+    _runner, registry, repo = _runtime(tmp_path)
+    source = _register_csv(
+        registry,
+        tmp_path,
+        "source",
+        pd.DataFrame({"acct": ["A1"], "bad_flag": [0], "value": [1]}),
+        role="feature",
+    )
+
+    def fail_create_dataset_on_connection(conn, dataset):
+        raise RuntimeError("db commit down")
+
+    monkeypatch.setattr(repo, "create_dataset_on_connection", fail_create_dataset_on_connection)
+    runtime = SimpleNamespace(
+        datasets_root=registry._root,
+        registry=registry,
+        repo=repo,
+    )
+    ctx = SimpleNamespace(task_id="task-1", seed=0)
+
+    with pytest.raises(RuntimeError, match="db commit down"):
+        data_ops_tools._register_derived_frame(
+            runtime,
+            ctx,
+            pd.DataFrame({"acct": ["A1"], "bad_flag": [0], "value": [2]}),
+            subdir="clean",
+            filename="clean.parquet",
+            role="feature",
+            anchor_target=source.id,
+        )
+
+    output_dir = registry._root / "task-1" / "clean"
+    assert [dataset.id for dataset in registry.list_for_task("task-1")] == [source.id]
+    assert not list(output_dir.glob("*.parquet"))
+    assert not (output_dir / ".staging").exists()
+
+
 def test_dedup_rows_reports_same_key_conflict_without_dropping(tmp_path):
     """spec §6: a same-key value conflict is reported, never silently dropped — only an
     explicit strategy resolves it."""

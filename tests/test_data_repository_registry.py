@@ -556,6 +556,35 @@ def test_dataset_registry_register_existing_with_audit_records_lineage(tmp_path)
     assert audits[0]["detail"]["source_dataset_id"] == sample.id
 
 
+def test_dataset_registry_register_existing_on_connection(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+    source = tmp_path / "source.parquet"
+    derived_path = tmp_path / "derived.parquet"
+    pd.DataFrame({"bad_flag": [0, 1], "x": [10, 20]}).to_parquet(source, index=False)
+    pd.DataFrame({"bad_flag": [0, 1], "x": [10, 20], "split": ["train", "test"]}).to_parquet(
+        derived_path,
+        index=False,
+    )
+    sample = registry.register_existing(source, task_id="task-1", role="sample")
+
+    with repo.transaction() as conn:
+        derived = registry.register_existing_on_connection(
+            conn,
+            derived_path,
+            task_id="task-1",
+            role="derived",
+            anchor_target=sample.id,
+        )
+
+    assert repo.get_dataset(derived.id) is not None
+    assert derived.target_col == "bad_flag"
+
+
 def test_dataset_registry_register_existing_with_audit_failure_removes_copied_dataset(
     tmp_path,
     monkeypatch,

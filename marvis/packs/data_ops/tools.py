@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.dedup import two_level_dedup
@@ -248,22 +248,34 @@ def _register_derived_frame(
     role: str,
     anchor_target: str,
 ):
-    artifact_store = TransactionalArtifactStore(runtime.datasets_root / ctx.task_id / subdir)
-    artifact = artifact_store.stage(filename)
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(runtime.datasets_root / ctx.task_id / subdir, filename)
     try:
         frame.to_parquet(artifact.path, index=False)
-        final_path = artifact.promote()
-        result = runtime.registry.register_existing(
-            final_path,
-            task_id=ctx.task_id,
-            role=role,
-            anchor_target=anchor_target,
-            seed=_seed(ctx),
+        register_on_connection = getattr(runtime.registry, "register_existing_on_connection", None)
+        if callable(register_on_connection):
+            return uow.finalize_with_connection(
+                runtime.repo.transaction,
+                lambda conn: register_on_connection(
+                    conn,
+                    artifact.final_path,
+                    task_id=ctx.task_id,
+                    role=role,
+                    anchor_target=anchor_target,
+                    seed=_seed(ctx),
+                ),
+            )
+        return uow.finalize(
+            lambda: runtime.registry.register_existing(
+                artifact.final_path,
+                task_id=ctx.task_id,
+                role=role,
+                anchor_target=anchor_target,
+                seed=_seed(ctx),
+            )
         )
-        artifact.commit()
-        return result
     except Exception:
-        artifact.rollback()
+        uow.rollback()
         raise
 
 
