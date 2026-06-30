@@ -41,42 +41,52 @@ def _app_slice(start: str, end: str) -> str:
 
 def test_screen_table_renderer_and_manual_branch_are_wired():
     app_js = _read("app.js")
+    module_js = _read("js/v2/screen_gate_controller.js")
     # the interactive renderer exists and is dispatched for screen gate messages
+    assert 'renderScreenGateTable' in app_js
     assert "function agentMessageScreenTableHtml(message, options = {})" in app_js
+    assert "return renderScreenGateTable(message, options);" in app_js
     assert "if (meta.screen)" in app_js
     assert "agentMessageScreenTableHtml(message, { interactive })" in app_js
     assert "latestInteractiveScreenMessageId(messages)" in app_js
     # it reads the structured screen payload the backend attaches
-    assert "message?.metadata?.screen" in app_js
+    assert "export function renderScreenGateTable(message, options = {})" in module_js
+    assert "message?.metadata?.screen" in module_js
     # checkbox per feature, pre-checked from the proposed selected set
-    assert 'class="screen-pick"' in app_js
-    assert "screen.selected" in app_js
+    assert 'class="screen-pick"' in module_js
+    assert "screen.selected" in module_js
 
 
 def test_screen_confirm_posts_edited_selection():
     app_js = _read("app.js")
+    module_js = _read("js/v2/screen_gate_controller.js")
     assert "function submitScreenSelection(button)" in app_js
-    assert "data-screen-confirm" in app_js
+    assert "submitScreenSelectionController(button, screenGateControllerContext())" in app_js
+    assert "export async function submitScreenSelection(button, context = {})" in module_js
+    assert "data-screen-confirm" in module_js
     # collects checked, non-disabled features and posts them as `selection`
     # with the rendered gate token so stale tabs cannot confirm a newer gate.
-    assert ".screen-pick:checked" in app_js
-    assert '"content": "确认"' in app_js or 'content: "确认"' in app_js
-    assert "selection" in app_js
-    assert "expected_step_id" in app_js
+    assert ".screen-pick:checked" in module_js
+    assert '"content": "确认"' in module_js or 'content: "确认"' in module_js
+    assert "selection" in module_js
+    assert "expected_step_id" in module_js
     # a delegated document click handler drives it (mirrors the C1 form pattern)
     assert "handleScreenConfirmClick" in app_js
 
 
 def test_screen_threshold_adjust_posts_structured_params():
     app_js = _read("app.js")
-    assert 'class="screen-threshold-input"' in app_js
-    assert "data-screen-threshold=\"leakage_ks\"" in app_js
-    assert "data-screen-threshold=\"max_missing_rate\"" in app_js
+    module_js = _read("js/v2/screen_gate_controller.js")
+    assert 'class="screen-threshold-input"' in module_js
+    assert "data-screen-threshold=\"leakage_ks\"" in module_js
+    assert "data-screen-threshold=\"max_missing_rate\"" in module_js
     assert "function submitScreenThresholdAdjust(button)" in app_js
-    assert "adjust_params" in app_js
+    assert "submitScreenThresholdAdjustController(button, screenGateControllerContext())" in app_js
+    assert "export async function submitScreenThresholdAdjust(button, context = {})" in module_js
+    assert "adjust_params" in module_js
     assert "handleScreenAdjustClick" in app_js
-    assert 'class="screen-num"' in app_js
-    assert "阈值不能为空" in app_js
+    assert 'class="screen-num"' in module_js
+    assert "阈值不能为空" in module_js
 
 
 def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
@@ -708,20 +718,19 @@ def test_screen_table_has_hardcut_coloring_styles():
 
 
 def test_screen_table_only_latest_gate_is_interactive():
-    screen_slice = _app_slice("function screenNum", "async function submitScreenThresholdAdjust")
     manual_slice = _app_slice("function stripChatInstructions", "function renderDriverManualAnalysis")
     output = _run_node(
         f"""
         import assert from "node:assert/strict";
-        function escapeHtml(value) {{
-          return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-        }}
+        import {{ renderScreenGateTable }} from "./marvis/static/js/v2/screen_gate_controller.js";
         function renderAgentMarkdown(value) {{ return String(value || ""); }}
         function agentMessageC1FormHtml() {{ return ""; }}
         function agentMessageDedupPickerHtml() {{ return ""; }}
         function agentMessageModelingSetupHtml() {{ return ""; }}
         function agentMessageTablesHtml() {{ return ""; }}
-        {screen_slice}
+        function agentMessageScreenTableHtml(message, options = {{}}) {{
+          return renderScreenGateTable(message, options);
+        }}
         {manual_slice}
         const messages = [
           {{
@@ -756,29 +765,33 @@ def test_screen_table_only_latest_gate_is_interactive():
 
 
 def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
-    adjust_slice = _app_slice("async function submitScreenThresholdAdjust", "async function submitScreenSelection")
     output = _run_node(
         f"""
+        {""}
         import assert from "node:assert/strict";
-        let selectedTaskId = "task-1";
+        import {{ submitScreenThresholdAdjust }} from "./marvis/static/js/v2/screen_gate_controller.js";
         let agentMessages = [];
+        let rendered = 0;
         const statuses = [];
         const calls = [];
-        function setActionStatus(message, kind) {{ statuses.push([message, kind]); }}
-        function agentAcceptanceModeValue() {{ return "manual"; }}
-        function renderAgentConversation() {{}}
-        async function api(url, options) {{
-          calls.push([url, JSON.parse(options.body)]);
-          return {{ messages: [{{ id: "m2" }}] }};
-        }}
-        {adjust_slice}
+        const context = {{
+          selectedTaskId: "task-1",
+          agentAcceptanceModeValue: () => "manual",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: (messages) => {{ agentMessages = messages || agentMessages; }},
+          renderAgentConversation: () => {{ rendered += 1; }},
+          api: async (url, options) => {{
+            calls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [{{ id: "m2" }}] }};
+          }},
+        }};
         const emptyWrap = {{
           dataset: {{}},
           querySelectorAll: () => [
             {{ getAttribute: (name) => name === "data-screen-threshold" ? "leakage_ks" : null, value: "" }},
           ],
         }};
-        await submitScreenThresholdAdjust({{ disabled: false, closest: () => emptyWrap }});
+        await submitScreenThresholdAdjust({{ disabled: false, closest: () => emptyWrap }}, context);
         assert.deepEqual(calls, []);
         assert.deepEqual(statuses.at(-1), ["阈值不能为空。", "error"]);
 
@@ -789,12 +802,14 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
             {{ getAttribute: (name) => name === "data-screen-threshold" ? "max_missing_rate" : null, value: "0.91" }},
           ],
         }}) }};
-        await submitScreenThresholdAdjust(validButton);
+        await submitScreenThresholdAdjust(validButton, context);
         assert.equal(validButton.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1].adjust_params, {{ leakage_ks: 0.33, max_missing_rate: 0.91 }});
         assert.equal(calls[0][1].expected_step_id, "gate-screen");
         assert.equal(calls[0][1].acceptance_mode, "manual");
+        assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
+        assert.equal(rendered, 1);
         process.stdout.write("ok");
         """
     )
