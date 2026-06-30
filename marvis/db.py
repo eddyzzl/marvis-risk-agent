@@ -35,13 +35,10 @@ from marvis.packs.modeling.contracts import (
     ModelMetrics,
     TrainConfig,
 )
-from marvis.plugins.errors import PluginNotFoundError
-from marvis.plugins.manifest import PluginManifest, ToolRef, manifest_to_dict
+from marvis.plugins.manifest import ToolRef
 from marvis.redaction import redact_value
-from marvis.repositories.drafts import (
-    DraftRepository as DraftRepository,  # noqa: F401
-    _set_draft_status_row,
-)
+from marvis.repositories.drafts import DraftRepository as DraftRepository  # noqa: F401
+from marvis.repositories.plugins import PluginRepository as PluginRepository  # noqa: F401
 from marvis.repositories.strategy import StrategyRepository as StrategyRepository  # noqa: F401
 from marvis.orchestrator.contracts import (
     AgentStatus,
@@ -1820,132 +1817,6 @@ class ModelingRepository:
         return [_model_artifact_from_row(row) for row in rows]
 
 
-class PluginRepository:
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-
-    def upsert_plugin(self, manifest: PluginManifest, *, enabled: bool) -> None:
-        with connect(self.db_path) as conn:
-            _upsert_plugin_row(conn, manifest, enabled=enabled)
-
-    def upsert_plugin_with_audit(
-        self,
-        manifest: PluginManifest,
-        *,
-        enabled: bool,
-        audit: dict,
-    ) -> None:
-        with connect(self.db_path) as conn:
-            _upsert_plugin_row(conn, manifest, enabled=enabled)
-            _write_audit_row(conn, **audit)
-
-    def promote_draft_with_plugin_audits(
-        self,
-        manifest: PluginManifest,
-        *,
-        enabled: bool,
-        draft_id: str,
-        plugin_audit: dict,
-        draft_audit: dict,
-    ) -> None:
-        with connect(self.db_path) as conn:
-            _upsert_plugin_row(conn, manifest, enabled=enabled)
-            _write_audit_row(conn, **plugin_audit)
-            _set_draft_status_row(conn, draft_id, "promoted")
-            _write_audit_row(conn, **draft_audit)
-
-    def set_enabled(self, name: str, enabled: bool) -> None:
-        with connect(self.db_path) as conn:
-            _set_plugin_enabled_row(conn, name, enabled)
-
-    def set_enabled_with_audit(self, name: str, enabled: bool, *, audit: dict) -> None:
-        with connect(self.db_path) as conn:
-            _set_plugin_enabled_row(conn, name, enabled)
-            _write_audit_row(conn, **audit)
-
-    def delete_plugin(self, name: str) -> None:
-        with connect(self.db_path) as conn:
-            _delete_plugin_row(conn, name)
-
-    def delete_plugin_with_audit(self, name: str, *, audit: dict) -> None:
-        with connect(self.db_path) as conn:
-            _delete_plugin_row(conn, name)
-            _write_audit_row(conn, **audit)
-
-    def get_plugin(self, name: str) -> dict | None:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT p.*, COUNT(t.name) AS tool_count
-                  FROM plugins p
-                  LEFT JOIN tools t ON t.plugin = p.name
-                 WHERE p.name = ?
-                 GROUP BY p.name
-                """,
-                (name,),
-            ).fetchone()
-        return _plugin_row_to_dict(row) if row is not None else None
-
-    def list_plugins(self, *, include_disabled: bool = False) -> list[dict]:
-        where = "" if include_disabled else "WHERE p.enabled = 1"
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT p.*, COUNT(t.name) AS tool_count
-                  FROM plugins p
-                  LEFT JOIN tools t ON t.plugin = p.name
-                  {where}
-                 GROUP BY p.name
-                 ORDER BY p.name
-                """
-            ).fetchall()
-        return [_plugin_row_to_dict(row) for row in rows]
-
-    def list_tools(self) -> list[dict]:
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT plugin, name, summary, input_schema_json,
-                       output_schema_json, determinism, timeout_seconds,
-                       failure_policy, side_effects_json, entrypoint,
-                       memory_limit_mb
-                  FROM tools
-                 ORDER BY plugin, name
-                """
-            ).fetchall()
-        return [_tool_row_to_dict(row) for row in rows]
-
-    def write_audit(
-        self,
-        *,
-        kind: str,
-        target_ref: str,
-        actor: str = "system",
-        inputs_hash: str | None = None,
-        outcome: str | None = None,
-        detail: dict | None = None,
-    ) -> None:
-        with connect(self.db_path) as conn:
-            _write_audit_row(
-                conn,
-                kind=kind,
-                target_ref=target_ref,
-                actor=actor,
-                inputs_hash=inputs_hash,
-                outcome=outcome,
-                detail=detail,
-            )
-
-    def list_audit(
-        self,
-        *,
-        kind: str | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[dict]:
-        return _list_audit_rows(self.db_path, kind=kind, limit=limit, offset=offset)
-
-
 def _row_to_agent_message(row: sqlite3.Row) -> dict:
     metadata = _load_json_object(row["metadata_json"])
     return {
@@ -1956,38 +1827,6 @@ def _row_to_agent_message(row: sqlite3.Row) -> dict:
         "content": row["content"],
         "created_at": row["created_at"],
         "metadata": metadata,
-    }
-
-
-def _plugin_row_to_dict(row: sqlite3.Row) -> dict:
-    return {
-        "name": row["name"],
-        "version": row["version"],
-        "display_name": row["display_name"],
-        "description": row["description"],
-        "module": row["module"],
-        "manifest_json": row["manifest_json"],
-        "checksum": row["checksum"],
-        "builtin": bool(row["builtin"]),
-        "enabled": bool(row["enabled"]),
-        "installed_at": row["installed_at"],
-        "tool_count": int(row["tool_count"]),
-    }
-
-
-def _tool_row_to_dict(row: sqlite3.Row) -> dict:
-    return {
-        "plugin": row["plugin"],
-        "name": row["name"],
-        "summary": row["summary"],
-        "input_schema_json": row["input_schema_json"],
-        "output_schema_json": row["output_schema_json"],
-        "determinism": row["determinism"],
-        "timeout_seconds": int(row["timeout_seconds"]),
-        "failure_policy": row["failure_policy"],
-        "side_effects_json": row["side_effects_json"],
-        "entrypoint": row["entrypoint"],
-        "memory_limit_mb": int(row["memory_limit_mb"]),
     }
 
 
@@ -2140,96 +1979,6 @@ def _set_sub_agent_status_row(
     )
     if cursor.rowcount == 0:
         raise KeyError(sub_id)
-
-
-def _upsert_plugin_row(
-    conn: sqlite3.Connection,
-    manifest: PluginManifest,
-    *,
-    enabled: bool,
-) -> None:
-    manifest_json = json.dumps(
-        manifest_to_dict(manifest),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    now = _now()
-    conn.execute(
-        """
-        INSERT INTO plugins(
-            name, version, display_name, description, module,
-            manifest_json, checksum, builtin, enabled, installed_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            display_name = excluded.display_name,
-            description = excluded.description,
-            module = excluded.module,
-            manifest_json = excluded.manifest_json,
-            checksum = excluded.checksum,
-            builtin = excluded.builtin,
-            enabled = excluded.enabled,
-            installed_at = excluded.installed_at
-        """,
-        (
-            manifest.name,
-            manifest.version,
-            manifest.display_name,
-            manifest.description,
-            manifest.module,
-            manifest_json,
-            manifest.checksum,
-            int(manifest.builtin),
-            int(enabled),
-            now,
-        ),
-    )
-    conn.execute("DELETE FROM tools WHERE plugin = ?", (manifest.name,))
-    for tool in manifest.tools:
-        conn.execute(
-            """
-            INSERT INTO tools(
-                plugin, name, summary, input_schema_json,
-                output_schema_json, determinism, timeout_seconds,
-                failure_policy, side_effects_json, entrypoint,
-                memory_limit_mb
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                manifest.name,
-                tool.name,
-                tool.summary,
-                json.dumps(tool.input_schema, ensure_ascii=False, separators=(",", ":")),
-                json.dumps(tool.output_schema, ensure_ascii=False, separators=(",", ":")),
-                tool.determinism,
-                tool.timeout_seconds,
-                tool.failure_policy,
-                json.dumps(list(tool.side_effects), ensure_ascii=False, separators=(",", ":")),
-                tool.entrypoint,
-                tool.memory_limit_mb,
-            ),
-        )
-
-
-def _set_plugin_enabled_row(
-    conn: sqlite3.Connection,
-    name: str,
-    enabled: bool,
-) -> None:
-    cursor = conn.execute(
-        "UPDATE plugins SET enabled = ? WHERE name = ?",
-        (int(enabled), name),
-    )
-    if cursor.rowcount == 0:
-        raise PluginNotFoundError(name)
-
-
-def _delete_plugin_row(conn: sqlite3.Connection, name: str) -> None:
-    cursor = conn.execute("DELETE FROM plugins WHERE name = ?", (name,))
-    if cursor.rowcount == 0:
-        raise PluginNotFoundError(name)
 
 
 def _plan_payload_from_rows(plan_row: sqlite3.Row, step_rows: list[sqlite3.Row]) -> dict:

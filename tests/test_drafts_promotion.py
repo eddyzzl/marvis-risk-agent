@@ -2,9 +2,9 @@ import sys
 
 import pytest
 
-from marvis.db import DraftRepository, PluginRepository, init_db
-import marvis.db as db_module
 import marvis.repositories.drafts as draft_repo_module
+import marvis.repositories.plugins as plugin_repo_module
+from marvis.db import DraftRepository, PluginRepository, init_db
 from marvis.drafts import DraftTool
 from marvis.drafts.promotion import (
     PromotionError,
@@ -115,14 +115,14 @@ def test_promote_draft_rolls_back_plugin_and_files_when_draft_audit_fails(
         test_cases=[{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}],
     )
     status_before_promote = drafts.get(draft.id).status
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = plugin_repo_module._write_audit_row
 
     def fail_draft_promote_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "draft.promote":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_draft_promote_audit)
+    monkeypatch.setattr(plugin_repo_module, "_write_audit_row", fail_draft_promote_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         promote_draft(draft, registry=plugin_registry, drafts=drafts, plugins_dir=plugins_dir, check=check)

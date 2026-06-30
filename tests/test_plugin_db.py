@@ -2,8 +2,8 @@ import json
 
 import pytest
 
+import marvis.repositories.plugins as plugin_repo_module
 from marvis.db import PluginRepository, connect, init_db
-import marvis.db as db_module
 from marvis.plugins.errors import PluginNotFoundError
 from marvis.plugins.manifest import parse_manifest
 
@@ -42,6 +42,10 @@ def _manifest(version: str = "0.1.0", *, tools: list[dict] | None = None):
         },
         builtin=True,
     )
+
+
+def test_plugin_repository_is_reexported_from_db_for_compatibility():
+    assert PluginRepository is plugin_repo_module.PluginRepository
 
 
 def test_plugin_repository_upserts_and_lists_plugins_and_tools(tmp_path):
@@ -125,7 +129,7 @@ def test_plugin_repository_rolls_back_register_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plugin_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.upsert_plugin_with_audit(
@@ -155,7 +159,7 @@ def test_plugin_repository_rolls_back_enabled_change_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plugin_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.set_enabled_with_audit(
@@ -184,7 +188,7 @@ def test_plugin_repository_rolls_back_delete_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plugin_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.delete_plugin_with_audit(
@@ -212,7 +216,7 @@ def test_plugin_repository_writes_audit_records(tmp_path, monkeypatch):
             "2026-06-19T00:02:00Z",
         ]
     )
-    monkeypatch.setattr(db_module, "_now", lambda: next(timestamps))
+    monkeypatch.setattr(plugin_repo_module, "_now", lambda: next(timestamps))
 
     repo.write_audit(
         kind="tool.invoke",
