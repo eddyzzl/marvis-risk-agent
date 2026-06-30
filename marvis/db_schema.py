@@ -591,6 +591,16 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_task ON strategies(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_backtests_strategy ON backtests(strategy_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_task ON draft_tools(task_id, status)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_draft_tools_task_order ON draft_tools(task_id, created_at, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_draft_tools_task_created ON draft_tools(task_id, status, created_at, id)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_order ON draft_tools(created_at, id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_draft_tools_created ON draft_tools(status, created_at, id)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_runs_draft ON draft_runs(draft_id)")
         _ensure_column(conn, "model_artifacts", "feature_importance_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "model_artifacts", "scorecard_table_json", "TEXT NOT NULL DEFAULT '[]'")

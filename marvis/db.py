@@ -1960,57 +1960,93 @@ class DraftRepository:
             ).fetchone()
         return None if row is None else _draft_tool_from_row(row)
 
-    def list_drafts(self, task_id: str, *, status: str | None = None) -> list[DraftTool]:
+    def list_drafts(
+        self,
+        task_id: str,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DraftTool]:
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        limit_clause = " LIMIT ? OFFSET ?" if bounded_limit is not None else ""
         with connect(self.db_path) as conn:
             if status is None:
+                params: tuple = (task_id,)
+                if bounded_limit is not None:
+                    params = (*params, bounded_limit, bounded_offset)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, task_id, name, summary, code, input_schema_json,
                            output_schema_json, determinism, source, learning_note_id,
                            status, created_at
                       FROM draft_tools
                      WHERE task_id = ?
                      ORDER BY created_at, id
+                     {limit_clause}
                     """,
-                    (task_id,),
+                    params,
                 ).fetchall()
             else:
+                params = (task_id, status)
+                if bounded_limit is not None:
+                    params = (*params, bounded_limit, bounded_offset)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, task_id, name, summary, code, input_schema_json,
                            output_schema_json, determinism, source, learning_note_id,
                            status, created_at
                       FROM draft_tools
                      WHERE task_id = ? AND status = ?
                      ORDER BY created_at, id
+                     {limit_clause}
                     """,
-                    (task_id, status),
+                    params,
                 ).fetchall()
         return [_draft_tool_from_row(row) for row in rows]
 
-    def list_all_drafts(self, *, status: str | None = None) -> list[DraftTool]:
+    def list_all_drafts(
+        self,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DraftTool]:
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        limit_clause = " LIMIT ? OFFSET ?" if bounded_limit is not None else ""
         with connect(self.db_path) as conn:
             if status is None:
+                params: tuple = ()
+                if bounded_limit is not None:
+                    params = (bounded_limit, bounded_offset)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, task_id, name, summary, code, input_schema_json,
                            output_schema_json, determinism, source, learning_note_id,
                            status, created_at
                       FROM draft_tools
                      ORDER BY created_at, id
-                    """
+                     {limit_clause}
+                    """,
+                    params,
                 ).fetchall()
             else:
+                params = (status,)
+                if bounded_limit is not None:
+                    params = (*params, bounded_limit, bounded_offset)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, task_id, name, summary, code, input_schema_json,
                            output_schema_json, determinism, source, learning_note_id,
                            status, created_at
                       FROM draft_tools
                      WHERE status = ?
                      ORDER BY created_at, id
+                     {limit_clause}
                     """,
-                    (status,),
+                    params,
                 ).fetchall()
         return [_draft_tool_from_row(row) for row in rows]
 

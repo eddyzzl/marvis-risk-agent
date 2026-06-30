@@ -20,8 +20,20 @@ class DraftRegistry:
             raise DraftNotFound(draft_id)
         return draft
 
-    def list_for_task(self, task_id: str, *, status: str | None = None) -> list[DraftTool]:
-        return self._repo.list_drafts(task_id, status=status)
+    def list_for_task(
+        self,
+        task_id: str,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DraftTool]:
+        return self._repo.list_drafts(
+            task_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
 
     def set_status(self, draft_id: str, status: str) -> None:
         self._repo.set_status(draft_id, status)

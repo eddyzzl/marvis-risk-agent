@@ -20,13 +20,40 @@ router = APIRouter(prefix="/api/drafts", tags=["drafts"])
 
 
 @router.get("")
-def list_drafts(request: Request, task_id: str | None = None, status: str | None = None) -> dict:
+def list_drafts(
+    request: Request,
+    task_id: str | None = None,
+    status: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
     repo = request.app.state.draft_repo
+    bounded_limit = None if limit is None else max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
+    query_limit = bounded_limit + 1 if bounded_limit is not None else None
     if task_id:
-        drafts = request.app.state.draft_registry.list_for_task(task_id, status=status)
+        drafts = request.app.state.draft_registry.list_for_task(
+            task_id,
+            status=status,
+            limit=query_limit,
+            offset=bounded_offset,
+        )
     else:
-        drafts = repo.list_all_drafts(status=status)
-    return {"drafts": [_public_draft(draft, include_code=False) for draft in drafts]}
+        drafts = repo.list_all_drafts(
+            status=status,
+            limit=query_limit,
+            offset=bounded_offset,
+        )
+    has_more = False
+    if bounded_limit is not None and len(drafts) > bounded_limit:
+        has_more = True
+        drafts = drafts[:bounded_limit]
+    return {
+        "drafts": [_public_draft(draft, include_code=False) for draft in drafts],
+        "has_more": has_more,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 @router.get("/{draft_id}")

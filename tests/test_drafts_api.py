@@ -75,6 +75,18 @@ def test_list_and_detail_draft_endpoints(tmp_path):
     assert listed.json()["drafts"][0]["code"] is None
     assert [draft["id"] for draft in all_listed.json()["drafts"]] == ["draft-1", "draft-2"]
     assert [draft["id"] for draft in tested.json()["drafts"]] == ["draft-2"]
+    paged = client.get("/api/drafts", params={"limit": 1})
+    second_page = client.get("/api/drafts", params={"limit": 1, "offset": 1})
+    capped = client.get("/api/drafts", params={"limit": 9999})
+    assert [draft["id"] for draft in paged.json()["drafts"]] == ["draft-1"]
+    assert paged.json()["has_more"] is True
+    assert paged.json()["limit"] == 1
+    assert paged.json()["offset"] == 0
+    assert [draft["id"] for draft in second_page.json()["drafts"]] == ["draft-2"]
+    assert second_page.json()["has_more"] is False
+    assert second_page.json()["limit"] == 1
+    assert second_page.json()["offset"] == 1
+    assert capped.json()["limit"] == 500
     assert detail.status_code == 200
     assert detail.json()["draft"]["code"].startswith("def calc_margin")
     assert detail.json()["runs"] == []

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 import marvis.db as db_module
@@ -51,16 +53,27 @@ def test_draft_repository_round_trips_note_draft_and_run(tmp_path):
     repo = DraftRepository(db_path)
     note = _note()
     draft = _draft()
+    draft2 = replace(
+        draft,
+        id="draft-2",
+        status="tested",
+        created_at="2026-06-19T00:03:00Z",
+    )
     run = _run()
 
     repo.save_learning_note(note)
     repo.save_draft(draft)
+    repo.save_draft(draft2)
     repo.save_draft_run(run)
 
     assert repo.get_learning_note(note.id) == note
     assert repo.get_draft(draft.id) == draft
-    assert repo.list_drafts("task-1") == [draft]
+    assert repo.list_drafts("task-1") == [draft, draft2]
     assert repo.list_drafts("task-1", status="draft") == [draft]
+    assert repo.list_drafts("task-1", limit=1) == [draft]
+    assert repo.list_drafts("task-1", limit=1, offset=1) == [draft2]
+    assert repo.list_all_drafts(limit=1) == [draft]
+    assert repo.list_all_drafts(status="tested", limit=1) == [draft2]
     assert repo.list_runs(draft.id) == [run]
 
 
