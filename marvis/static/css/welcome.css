@@ -1,5 +1,5 @@
 .welcome-task-card:focus-visible {
-  outline: 3px solid rgba(0, 113, 227, 0.28);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -382,8 +382,8 @@
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.03em;
-  color: #fff;
-  background: color-mix(in srgb, var(--tone, var(--accent)) 78%, #1a1a1a);
+  color: var(--action-on-solid);
+  background: color-mix(in srgb, var(--tone, var(--accent)) 78%, var(--tone-badge-mix));
 }
 
 /* Transient bottom-center toast for the coming-soon notice. */
@@ -398,9 +398,9 @@
   border-radius: 12px;
   font-size: 14px;
   font-weight: 500;
-  color: #fff;
-  background: rgba(22, 24, 30, 0.94);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.26);
+  color: var(--toast-text);
+  background: var(--toast-bg);
+  box-shadow: var(--toast-shadow);
   opacity: 0;
   pointer-events: none;
   transition:

@@ -91,6 +91,10 @@
   --brand-icon-color: color-mix(in srgb, var(--brand-primary) 42%, var(--text));
   --brand-icon-ring: color-mix(in srgb, var(--brand-primary) 18%, transparent);
   --action-on-solid: #ffffff;
+  --tone-badge-mix: #1a1a1a;
+  --toast-text: #ffffff;
+  --toast-bg: rgba(22, 24, 30, 0.94);
+  --toast-shadow: 0 10px 30px rgba(0, 0, 0, 0.26);
   --button-disabled-bg: #ededf0;
   --button-primary-bg: var(--brand-primary);
   --button-primary-bg-hover: var(--brand-primary-hover);
@@ -239,6 +243,10 @@ body[data-theme="dark"] {
   --button-primary-border-hover: #5d5d64;
   --button-primary-text: #f2f2f2;
   --button-primary-text-hover: #ffffff;
+  --tone-badge-mix: #111318;
+  --toast-text: #f2f2f2;
+  --toast-bg: rgba(17, 19, 24, 0.96);
+  --toast-shadow: 0 10px 30px rgba(0, 0, 0, 0.44);
   --button-outline-border: #96999f;
   --button-outline-border-hover: #a2a5ab;
   --button-outline-text: #96999f;
