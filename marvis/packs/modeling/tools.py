@@ -1083,7 +1083,7 @@ def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
                 "message": f"要求特征数不超过 {max_feature_count},但该候选有 {feature_count} 个特征。",
             })
     max_oot_psi = policy.get("max_oot_psi")
-    oot_psi = profile.get("psi_oot_vs_train")
+    oot_psi = profile.get("policy_psi_oot_vs_train")
     if isinstance(max_oot_psi, (int, float)):
         if not isinstance(oot_psi, (int, float)):
             violations.append({
@@ -1094,11 +1094,13 @@ def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
                 ),
             })
         elif oot_psi > float(max_oot_psi):
+            psi_source = str(profile.get("policy_psi_source") or "psi_oot_vs_train")
+            psi_label = "加权 OOT PSI" if psi_source == "weighted_psi_oot_vs_train" else "OOT PSI"
             violations.append({
                 "code": "max_oot_psi",
                 "message": (
                     f"要求 OOT PSI 不超过 {_format_number_token(float(max_oot_psi))},"
-                    f"但该候选为 {_format_number_token(float(oot_psi))}。"
+                    f"但该候选{psi_label}为 {_format_number_token(float(oot_psi))}。"
                 ),
             })
     return violations
@@ -1158,9 +1160,17 @@ def _row_policy_profile(row: dict) -> dict:
         "native_model_supported": bool(caps.get("native_model_supported")),
         "feature_count": feature_count if isinstance(feature_count, int) else None,
     }
-    psi_oot = item.get("psi_oot_vs_train")
-    if isinstance(psi_oot, (int, float)):
-        profile["psi_oot_vs_train"] = float(psi_oot)
+    psi_oot = _finite_float_or_none(item.get("psi_oot_vs_train"))
+    weighted_psi_oot = _finite_float_or_none(item.get("weighted_psi_oot_vs_train"))
+    if psi_oot is not None:
+        profile["psi_oot_vs_train"] = psi_oot
+    if weighted_psi_oot is not None:
+        profile["weighted_psi_oot_vs_train"] = weighted_psi_oot
+        profile["policy_psi_oot_vs_train"] = weighted_psi_oot
+        profile["policy_psi_source"] = "weighted_psi_oot_vs_train"
+    elif psi_oot is not None:
+        profile["policy_psi_oot_vs_train"] = psi_oot
+        profile["policy_psi_source"] = "psi_oot_vs_train"
     return profile
 
 
@@ -1182,6 +1192,14 @@ def _nonnegative_float_or_none(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
+
+
+def _finite_float_or_none(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
 
 
 def _score_first(row: dict, keys: tuple[str, ...], *, minimize: bool = False) -> float:

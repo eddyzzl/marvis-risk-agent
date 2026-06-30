@@ -1290,6 +1290,50 @@ def test_selection_policy_rejects_missing_feature_and_psi_evidence():
     assert overridden["override_reason"].startswith("历史候选缺少早期证据")
 
 
+def test_selection_policy_prefers_weighted_oot_psi_when_available():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "weighted-drift",
+            "recipe": "lgb",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "psi_oot_vs_train": 0.04,
+            "weighted_psi_oot_vs_train": 0.22,
+        },
+        {"max_oot_psi": 0.15},
+        explicit=False,
+    )
+
+    assert decision["status"] == "blocked"
+    assert decision["profile"]["psi_oot_vs_train"] == 0.04
+    assert decision["profile"]["weighted_psi_oot_vs_train"] == 0.22
+    assert decision["profile"]["policy_psi_oot_vs_train"] == 0.22
+    assert decision["profile"]["policy_psi_source"] == "weighted_psi_oot_vs_train"
+    assert decision["violations"][0]["code"] == "max_oot_psi"
+    assert "加权 OOT PSI" in decision["violations"][0]["message"]
+
+
+def test_selection_policy_uses_weighted_oot_psi_when_raw_missing():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "weighted-only",
+            "recipe": "lgb",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "weighted_psi_oot_vs_train": 0.08,
+        },
+        {"max_oot_psi": 0.15},
+        explicit=False,
+    )
+
+    assert decision["status"] == "accepted"
+    assert decision["profile"]["policy_psi_oot_vs_train"] == 0.08
+    assert decision["profile"]["policy_psi_source"] == "weighted_psi_oot_vs_train"
+    assert decision["violations"] == []
+
+
 def test_selection_policy_string_false_is_not_enabled():
     from marvis.packs.modeling.tools import _normalize_selection_policy
 
