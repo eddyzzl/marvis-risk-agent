@@ -2,9 +2,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 import json
 import logging
-import os
 from pathlib import Path, PurePosixPath
-import re
 import shutil
 import traceback
 from urllib.parse import unquote
@@ -69,6 +67,12 @@ from marvis.agent.turn_handlers import (
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
 )
+from marvis.api_task_helpers import (
+    ACTIVE_JOB_DETAIL,
+    dispatch_platform_hook as _dispatch_platform_hook,
+    get_task_or_404 as _get_task_or_404,
+    reject_if_task_has_active_job as _reject_if_task_has_active_job,
+)
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TASK_TYPE_DATA_JOIN,
@@ -79,7 +83,6 @@ from marvis.domain import (
     TASK_TYPE_VINTAGE,
     FileArtifact,
     FileRole,
-    TaskCreate,
     TaskRecord,
     TaskStatus,
 )
@@ -96,7 +99,6 @@ from marvis.api_schemas import (
     AgentMessageRequest,
     AgentModelRequest,
     AgentReportDraftConfirmRequest,
-    CreateTaskRequest,
     ReportFieldsUpdateRequest,
     ValidateRequest,
 )
@@ -109,7 +111,6 @@ from marvis.api_data_payloads import (
 from marvis.api_settings import router as settings_router
 from marvis.api_task_payloads import (
     normalized_status_reason as _normalized_status_reason,
-    task_payload as _task_payload,
     task_report_download_filename as _task_report_download_filename,
 )
 from marvis.notebook_contract import (
@@ -122,7 +123,6 @@ from marvis.notebook_cancellation import (
 )
 from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
 from marvis.notebook_steps import notebook_step_preview
-from marvis.model_algorithms import normalize_algorithm
 from marvis.pipeline import (
     NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
@@ -147,7 +147,6 @@ from marvis.validation.overfitting import overfitting_check_from_validation_resu
 router = APIRouter(prefix="/api")
 router.include_router(settings_router)
 logger = logging.getLogger(__name__)
-MODEL_ID_RE = re.compile(r"^[\w一-鿿\- ]{1,64}$", re.UNICODE)
 AGENT_STOP_ACK_CONTENT = "已停止当前动作，请问有什么指示？"
 AGENT_STOP_STATUS_MESSAGE = "已停止当前动作"
 MATERIAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
@@ -168,7 +167,6 @@ RMC_CONTRACT_NAME_LABELS = {
     "RMC_ALGORITHM": "RMC_ALGORITHM（模型算法）",
 }
 SCAN_FAILURE_PREFIX = SCAN_STAGE_FAILURE_PREFIX
-ACTIVE_JOB_DETAIL = "task already has an active stage"
 AGENT_ACCEPTANCE_NORMAL = "normal"
 AGENT_ACCEPTANCE_AUTO = "auto_accept"
 AGENT_ACCEPTANCE_MODES = {AGENT_ACCEPTANCE_NORMAL, AGENT_ACCEPTANCE_AUTO}
@@ -262,11 +260,6 @@ def _coerce_key_pairs(raw_pairs: list, *, anchor, feature) -> list[KeyPair]:
     return pairs
 
 
-def _reject_if_task_has_active_job(repo: TaskRepository, task_id: str) -> None:
-    if repo.task_has_active_job(task_id):
-        raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL)
-
-
 def _start_task_job(repo: TaskRepository, task_id: str, kind: str) -> str:
     try:
         return repo.start_job(task_id, kind)
@@ -282,21 +275,6 @@ def _fail_queued_job(repo: TaskRepository, job_id: str, exc: Exception) -> None:
         error_value=str(exc),
         traceback="",
     )
-
-
-def _dispatch_platform_hook(
-    hook_dispatcher,
-    event: str | None,
-    payload: dict,
-    *,
-    task_id: str | None,
-) -> None:
-    if hook_dispatcher is None or not event or not task_id:
-        return
-    try:
-        hook_dispatcher.dispatch(event, payload, task_id=task_id)
-    except Exception as exc:
-        logger.warning("platform hook dispatch failed for %s/%s: %s", event, task_id, exc)
 
 
 def _run_stage_job(
@@ -363,21 +341,6 @@ def _stage_hook_payload(
     return payload
 
 
-def _task_hook_payload(task: TaskRecord) -> dict:
-    payload = {
-        "task_id": task.id,
-        "task_type": task.task_type,
-        "status": task.status.value,
-        "run_mode": task.run_mode,
-        "algorithm": task.algorithm,
-    }
-    if getattr(task, "target_type", ""):
-        payload["target_type"] = task.target_type
-    if getattr(task, "sample_weight_col", ""):
-        payload["sample_weight_col"] = task.sample_weight_col
-    return payload
-
-
 def _scan_hook_payload(payload: dict) -> dict:
     checks = payload.get("checks") if isinstance(payload.get("checks"), list) else []
     failed_codes = [
@@ -440,59 +403,6 @@ def _stage_returned_cancelled_task(repo: TaskRepository, task_id: str | None) ->
     )
 
 
-def _get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:
-    try:
-        return repo.get_task(task_id)
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task not found: {task_id}",
-        ) from exc
-
-
-def _validate_model_identifier(field_name: str, value: str) -> None:
-    if not MODEL_ID_RE.match(value):
-        raise HTTPException(
-            status_code=422,
-            detail=f"{field_name} contains illegal characters",
-        )
-
-
-def _normalize_source_dir(source_dir: str, settings) -> Path:
-    resolved = Path(source_dir).expanduser().resolve()
-    allowed_roots = _allowed_material_roots(settings)
-    if not any(_path_is_within(root, resolved) for root in allowed_roots):
-        allowed = "、".join(str(root) for root in allowed_roots)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"source_dir must be under an allowed material root: {allowed}. "
-                "Set RMC_MATERIAL_ROOTS to allow another local material directory."
-            ),
-        )
-    return resolved
-
-
-def _allowed_material_roots(settings) -> tuple[Path, ...]:
-    roots = [settings.workspace, Path.home()]
-    extra_roots = os.environ.get("RMC_MATERIAL_ROOTS", "")
-    roots.extend(Path(raw).expanduser() for raw in extra_roots.split(os.pathsep) if raw)
-    resolved: list[Path] = []
-    for root in roots:
-        candidate = root.resolve()
-        if candidate not in resolved:
-            resolved.append(candidate)
-    return tuple(resolved)
-
-
-def _path_is_within(root: Path, candidate: Path) -> bool:
-    try:
-        assert_within(root, candidate)
-    except PermissionError:
-        return False
-    return True
-
-
 def _new_material_upload_dir(settings) -> Path:
     uploads_root = Path(settings.workspace).resolve() / "material_uploads"
     uploads_root.mkdir(parents=True, exist_ok=True)
@@ -535,21 +445,6 @@ async def _save_upload_file(upload: UploadFile, destination: Path) -> int:
     return size_bytes
 
 
-def _normalized_capability_tier(value: str | None) -> str:
-    """Validate a per-task capability tier name (conservative/balanced/aggressive);
-    unknown or empty → '' so the driver falls back to the global settings default.
-    Never raises — task creation stays lenient about this autonomy-only knob."""
-    from marvis.orchestrator.capability import TIERS
-
-    name = str(value or "").strip().lower()
-    return name if name in TIERS else ""
-
-
-def _normalized_target_type(value: str | None) -> str:
-    name = str(value or "").strip().lower()
-    return name if name in {"binary", "continuous", "multiclass"} else ""
-
-
 def _task_tier(request, task) -> str:
     """The capability tier name for a task's plan: the per-task pick if set, else the
     global settings default (spec §5.1). Affects only the autonomy budget
@@ -562,56 +457,6 @@ def _task_tier(request, task) -> str:
         return tier_from_settings(request.app.state.settings).name
     except Exception:
         return "balanced"
-
-
-@router.post("/tasks")
-def create_task(payload: CreateTaskRequest, request: Request) -> dict:
-    _validate_model_identifier("model_name", payload.model_name)
-    if payload.model_version:
-        _validate_model_identifier("model_version", payload.model_version)
-    try:
-        algorithm = normalize_algorithm(payload.algorithm, allow_empty=True)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Normalize source_dir once at write time so pipeline.py and /scan agree
-    # on the canonical absolute path (expanduser handles ~, resolve drops ..)
-    normalized_source_dir = str(
-        _normalize_source_dir(payload.source_dir, request.app.state.settings)
-    )
-    repo = _repo(request)
-    task = repo.create_task(
-        TaskCreate(
-            task_type=payload.task_type,
-            model_name=payload.model_name,
-            model_version=payload.model_version,
-            validator=payload.validator,
-            source_dir=normalized_source_dir,
-            algorithm=algorithm,
-            run_mode=payload.run_mode,
-            target_col=payload.target_col,
-            score_col=payload.score_col,
-            split_col=payload.split_col,
-            time_col=payload.time_col,
-            feature_columns=payload.feature_columns,
-            target_type=_normalized_target_type(payload.target_type),
-            recipes=payload.recipes,
-            sample_weight_col=str(payload.sample_weight_col or "").strip(),
-            metrics=payload.metrics,
-            capability_tier=_normalized_capability_tier(payload.capability_tier),
-            notebook_path=payload.notebook_path,
-            sample_path=payload.sample_path,
-            pmml_path=payload.pmml_path,
-            dictionary_path=payload.dictionary_path,
-            report_values=payload.report_values,
-        )
-    )
-    _dispatch_platform_hook(
-        getattr(request.app.state, "hook_dispatcher", None),
-        "task.created",
-        _task_hook_payload(task),
-        task_id=task.id,
-    )
-    return _task_payload(repo, task, request.app.state.settings.tasks_dir)
 
 
 @router.post("/material-uploads", status_code=201)
@@ -672,39 +517,6 @@ async def upload_materials(
         raise
 
     return {"source_dir": str(upload_dir), "files": saved_files}
-
-
-@router.get("/tasks/{task_id}")
-def get_task(task_id: str, request: Request) -> dict:
-    repo = _repo(request)
-    return _task_payload(
-        repo,
-        _get_task_or_404(repo, task_id),
-        request.app.state.settings.tasks_dir,
-    )
-
-
-@router.delete("/tasks/{task_id}", status_code=204)
-def delete_task(task_id: str, request: Request) -> None:
-    repo = _repo(request)
-    _get_task_or_404(repo, task_id)
-    _reject_if_task_has_active_job(repo, task_id)
-
-    settings = request.app.state.settings
-    task_dir = assert_within(settings.tasks_dir, settings.tasks_dir / task_id)
-    close_live_notebook_session(task_id)
-    try:
-        repo.delete_task(task_id)
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task not found: {task_id}",
-        ) from exc
-    try:
-        if task_dir.exists():
-            shutil.rmtree(task_dir)
-    except OSError as exc:
-        logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
 
 
 @router.get("/tasks/{task_id}/datasets")

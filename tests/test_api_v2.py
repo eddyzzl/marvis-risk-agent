@@ -1051,12 +1051,15 @@ def test_branding_and_task_list_routes_are_served_from_dedicated_routers():
         for route in branding_router.routes
     }
     task_routes = {
-        route.path: route.endpoint.__module__
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
         for route in tasks_router.routes
     }
 
     assert branding_routes["/api/branding"] == "marvis.routers.branding"
-    assert task_routes["/api/tasks"] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks", ("GET",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks", ("POST",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks/{task_id}", ("GET",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks/{task_id}", ("DELETE",))] == "marvis.routers.tasks"
 
 
 def test_list_tasks_supports_limit_offset_headers(tmp_path: Path, monkeypatch):
