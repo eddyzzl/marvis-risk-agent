@@ -284,6 +284,44 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
     assert delivery_output["model_card"]["delivery"]["validation_handoff_status"] == "succeeded"
 
 
+def test_modeling_business_materials_without_split_survive_auto_split(client: TestClient, tmp_path: Path):
+    src = _business_material_dir(tmp_path, n=360)
+    sample_path = src / "sample.parquet"
+    frame = pd.read_parquet(sample_path).drop(columns=["model_flag"])
+    frame.to_parquet(sample_path, index=False)
+    resp = client.post("/api/tasks", json={
+        "model_name": "业务材料无切分",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lr"],
+    })
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
+    opening = next(m for m in messages if m["role"] == "assistant")
+    assert "已自动" in opening["content"] and "train/test" in opening["content"]
+    assert "已识别建模报告业务列" in opening["content"]
+
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    report_step = next(step for step in plan.steps if step.tool_ref == ToolRef("modeling", "generate_model_report"))
+    for column in ["loan_month", "rate", "amount", "term", "drawdown", "limit", "mob1", "mob2", "mob3"]:
+        assert column in split_step.inputs["passthrough_cols"]
+    assert report_step.inputs["business_columns"]["loan_month_col"] == "loan_month"
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert split_gate["metadata"].get("kind") == "gate"
+    assert not split_gate["metadata"].get("error")
+    assert "样本切分完成" in split_gate["content"]
+
+
 def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: Path):
     """§8.3 multiclass runs through the WHOLE conversational flow (split → screen → tune →
     train → report). Guards two real bugs fixed together: (1) a non-lgb primary recipe skips

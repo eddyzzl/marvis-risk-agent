@@ -351,7 +351,7 @@ def test_post_training_action_skips_native_tree_booster_without_failing(tmp_path
         feature_list=("x1", "x2"),
         params={},
     )
-    experiment_id = store.create(source_task.id, "lgb", _config(dataset.id))
+    experiment_id = store.create(source_task.id, algorithm, _config(dataset.id))
     store.attach_result(
         experiment_id,
         TrainResult(

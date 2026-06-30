@@ -157,6 +157,8 @@ def build_modeling_proposal(
         join_feature_ids = []
         joined = False
     path = registry.resolve_path(dataset.id)
+    available_columns = backend.column_names(path)
+    business_columns = _infer_business_columns(available_columns)
     requested_target_type = _normalize_target_type(target_type)
     if recipes:
         recipe_list = [str(item).strip() for item in recipes]
@@ -195,7 +197,7 @@ def build_modeling_proposal(
     weight_candidates = [item["column"] for item in weight_diagnostics if item.get("valid")]
     selected_weight_col = _normalize_sample_weight_col(
         sample_weight_col,
-        available_columns=backend.column_names(path),
+        available_columns=available_columns,
     )
     if selected_weight_col:
         if selected_weight_col == setup.target_col or selected_weight_col == str(setup.split_col or ""):
@@ -239,14 +241,22 @@ def build_modeling_proposal(
         )
     else:
         dataset_id, split_col, split_values, counts, note = _generate_split(
-            registry, backend, dataset, setup, seed
+            registry,
+            backend,
+            dataset,
+            setup,
+            seed,
+            passthrough_cols=_unique([
+                selected_weight_col,
+                *weight_candidates,
+                *_business_passthrough_cols(business_columns),
+            ]),
         )
         notes.append(note)
     if len(recipe_list) > 1:
         notes.append(f"算法:{'/'.join(recipe_list)}(多算法训练后按 {_selection_metric_label(target_type)} 取最优)。")
     else:
         notes.append(f"算法:`{recipe_list[0]}`(可选 {'/'.join(_SUPPORTED_RECIPES)})。")
-    business_columns = _infer_business_columns(backend.column_names(path))
     feature_dictionary_id = _resolve_feature_dictionary_id(registry, task_id, source_dir)
     if business_columns:
         notes.append("已识别建模报告业务列,将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
@@ -505,7 +515,7 @@ def _unique(values: list[str]) -> list[str]:
     return [value for value in dict.fromkeys(str(item).strip() for item in values) if value]
 
 
-def _generate_split(registry, backend, dataset, setup, seed):
+def _generate_split(registry, backend, dataset, setup, seed, *, passthrough_cols: list[str] | None = None):
     """No split column → build a grouped train/test split (spec §2 G1). No OOT is
     fabricated; downstream OOT metrics degrade to n/a."""
     from marvis.packs.modeling.errors import ModelingError
@@ -521,6 +531,7 @@ def _generate_split(registry, backend, dataset, setup, seed):
             feature_cols=list(setup.candidates),
             split_col=None,
             split_config={"test_size": 0.25, "group_cols": group_cols},
+            passthrough_cols=passthrough_cols,
             seed=seed,
         )
     except ModelingError as exc:
