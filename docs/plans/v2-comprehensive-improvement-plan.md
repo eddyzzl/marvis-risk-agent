@@ -131,6 +131,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `212 passed` after tokenizing generic download actions, send-stop composer controls, disabled/focus states, and user-message composer bubbles.
   - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the generic action/composer token update, confirming the current Chromium smoke suite still loads the app shell, task list, plan rail, and modeling delivery metadata.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_modeling_panels_use_semantic_model_visual_tokens tests/test_frontend_screen_table.py::test_modeling_setup_weight_picker_renderer_and_branch_are_wired tests/test_frontend_screen_table.py::test_model_delivery_panel_renderer_and_branch_are_wired -q`: `3 passed` after centralizing modeling setup/delivery panel state tokens.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_api.py tests/test_orch_templates.py tests/test_modeling_recipes.py::test_build_modeling_proposal_derives_continuous_target_type_from_regressor tests/test_modeling_recipes.py::test_build_modeling_proposal_uses_explicit_target_type_default_recipe tests/test_modeling_recipes.py::test_build_modeling_proposal_stays_binary_for_classification_recipes tests/test_modeling_recipes.py::test_build_modeling_proposal_derives_multiclass_target_type_from_recipe -q`: `24 passed` after making default selection policies target-type-aware so continuous/multiclass workflows do not hard-block on PMML/handoff requirements they cannot satisfy.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py::test_artifact_unit_of_work_commits_artifacts_after_db_context_succeeds tests/test_artifacts_transactional.py::test_artifact_unit_of_work_rolls_back_artifact_when_db_context_fails tests/test_data_repository_registry.py::test_dataset_repository_connection_scoped_join_result_rolls_back_with_transaction tests/test_data_repository_registry.py::test_join_engine_uses_connection_scoped_artifact_unit_of_work tests/test_data_repository_registry.py::test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fails -q`: `5 passed` after making join-result registration use a SQLite connection-scoped artifact unit of work.
 
 ## Executive Summary
@@ -336,6 +337,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Done: add versioned monitoring-threshold policy artifacts with target-type-aware checks and configurable thresholds.
      - Done: add real app-shell Playwright smoke for a modeling task with plan rail and delivery metadata.
      - Done: calibrated-score PMML limitation is explicit in delivery capabilities, PMML readiness reason, model card, and approval package.
+     - Done: default selection policy is now target-type-aware; binary remains PMML/handoff strict, while continuous/multiclass flows select a model and surface unsupported delivery actions as skip/limitations rather than failing selection.
      - Remaining: run real business-material smoke.
 
 4. G5 post-training closure is not a workflow.
@@ -351,6 +353,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
        - create PMML-backed challenger/backtest validation task packages with JSON and Markdown plans.
        - generate versioned monitoring-policy JSON and Markdown artifacts.
      - Done: cover native LightGBM Booster G5 delivery close so unsupported PMML/handoff actions skip with explicit limitations and no validation task side effects.
+     - Done: cover multiclass end-to-end close so non-PMML/non-handoff candidates do not trigger a false selection-policy failure before report/delivery.
      - Remaining:
        - run real business-material smoke.
        - expand remaining native/unsupported exporter edge-case fixtures beyond the current PMML-compatible, calibrated-model, and native Booster paths.

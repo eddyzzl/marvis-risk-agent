@@ -708,7 +708,9 @@ def test_build_modeling_proposal_derives_continuous_target_type_from_regressor(t
     assert proposal.target_col == "income"
     assert proposal.bad_rate is None
     assert "income" not in proposal.feature_cols
-    assert proposal.template_slots()["target_type"] == "continuous"
+    slots = proposal.template_slots()
+    assert slots["target_type"] == "continuous"
+    assert slots["selection_policy"] == {"require_pmml": False, "require_handoff": False}
 
 
 def test_build_modeling_proposal_uses_explicit_target_type_default_recipe(tmp_path):
@@ -754,7 +756,9 @@ def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_pat
     assert proposal.target_type == "binary"
     assert proposal.target_col == "y"
     assert proposal.bad_rate is not None
-    assert proposal.template_slots()["target_type"] == "binary"
+    slots = proposal.template_slots()
+    assert slots["target_type"] == "binary"
+    assert slots["selection_policy"] == {"require_pmml": True, "require_handoff": True}
 
 
 def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature_leakage(tmp_path):
@@ -836,7 +840,9 @@ def test_build_modeling_proposal_derives_multiclass_target_type_from_recipe(tmp_
     assert proposal.target_col == "risk_grade"
     assert proposal.bad_rate is None
     assert "risk_grade" not in proposal.feature_cols
-    assert proposal.template_slots()["target_type"] == "multiclass"
+    slots = proposal.template_slots()
+    assert slots["target_type"] == "multiclass"
+    assert slots["selection_policy"] == {"require_pmml": False, "require_handoff": False}
 
 
 def test_build_modeling_proposal_rejects_mixed_recipe_families(tmp_path):

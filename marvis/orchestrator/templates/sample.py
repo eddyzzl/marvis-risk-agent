@@ -357,6 +357,7 @@ MODELING = WorkflowTemplate(
         SlotSpec("feature_dictionary_id", False, "task_context", "Optional feature dictionary dataset id"),
         SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
         SlotSpec("champion_reference", False, "task_context", "Optional prior Champion reference for post-training comparison"),
+        SlotSpec("selection_policy", False, "task_context", "Final model selection delivery policy"),
     ),
     steps=(
         StepTemplate(
@@ -500,10 +501,7 @@ MODELING = WorkflowTemplate(
             inputs_template={
                 "experiment_ids": "$ref:训练模型.output.experiment_ids",
                 "target_type": "$ref:选择建模规格.output.target_type",
-                "selection_policy": {
-                    "require_pmml": True,
-                    "require_handoff": True,
-                },
+                "selection_policy": "{slot:selection_policy}",
             },
             depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
             post_checks=(
@@ -585,6 +583,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
         SlotSpec("project_meta", False, "user", "Optional model report project metadata"),
         SlotSpec("champion_reference", False, "task_context", "Optional prior Champion reference for post-training comparison"),
         SlotSpec("dedup_strategies", False, "task_context", "Optional per-feature dedup strategy map"),
+        SlotSpec("selection_policy", False, "task_context", "Final model selection delivery policy"),
     ),
     steps=(
         StepTemplate(
@@ -751,10 +750,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "experiment_ids": "$ref:训练模型.output.experiment_ids",
                 "target_type": "$ref:选择建模规格.output.target_type",
-                "selection_policy": {
-                    "require_pmml": True,
-                    "require_handoff": True,
-                },
+                "selection_policy": "{slot:selection_policy}",
             },
             depends_on_titles=("选择建模规格", "调参", "训练模型", "对比实验"),
             post_checks=(

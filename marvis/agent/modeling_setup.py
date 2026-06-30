@@ -54,6 +54,7 @@ class ModelingProposal:
     sample_weight_diagnostics: list[dict] = field(default_factory=list)
 
     def template_slots(self) -> dict:
+        selection_policy = _default_selection_policy(self.target_type)
         if self.template_id == "modeling_with_join":
             return {
                 "anchor_id": self.anchor_id or self.dataset_id,
@@ -73,6 +74,7 @@ class ModelingProposal:
                 "sample_weight_candidates": list(self.sample_weight_candidates),
                 "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
                 "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
+                "selection_policy": selection_policy,
             }
         return {
             "dataset_id": self.dataset_id,
@@ -92,6 +94,7 @@ class ModelingProposal:
             "sample_weight_candidates": list(self.sample_weight_candidates),
             "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
             "passthrough_cols": _unique([self.sample_weight_col, *self.sample_weight_candidates]),
+            "selection_policy": selection_policy,
         }
 
 
@@ -286,6 +289,12 @@ def _default_recipe_for_target_type(target_type: str) -> str:
     if target_type == "multiclass":
         return "lgb_multiclass"
     return "lgb"
+
+
+def _default_selection_policy(target_type: str) -> dict[str, bool]:
+    if target_type == "binary":
+        return {"require_pmml": True, "require_handoff": True}
+    return {"require_pmml": False, "require_handoff": False}
 
 
 def _sample_weight_diagnostics(

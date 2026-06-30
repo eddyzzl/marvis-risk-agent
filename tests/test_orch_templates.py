@@ -161,6 +161,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
             "business_columns": {"loan_month_col": "loan_month"},
             "feature_dictionary_id": "dict-1",
             "project_meta": {"项目名称": "通用A卡"},
+            "selection_policy": {"require_pmml": True, "require_handoff": True},
         },
         task_id="task-1",
     )
@@ -245,6 +246,7 @@ def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
             "recipe": "lgb",
             "recipes": ["lgb"],
             "seed": 23,
+            "selection_policy": {"require_pmml": True, "require_handoff": True},
         },
         task_id="task-1",
     )
