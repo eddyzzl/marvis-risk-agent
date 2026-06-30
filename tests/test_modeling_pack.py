@@ -329,6 +329,26 @@ def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
         for left, right in zip(notebook_scores, raw_scores, strict=False)
     )
 
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    capabilities = post_training.output["capabilities"]
+    assert capabilities["calibrated"] is True
+    assert capabilities["pmml_includes_calibration"] is False
+    assert capabilities["calibration"]["method"] == "sigmoid"
+    assert any("PMML" in item and "校准" in item for item in capabilities["limitations"])
+    assert post_training.output["model_card"]["delivery"]["pmml_includes_calibration"] is False
+    assert any("PMML" in item and "校准" in item for item in post_training.output["model_card"]["limitations"])
+    assert "PMML" in Path(post_training.output["model_card_markdown_path"]).read_text(encoding="utf-8")
+    assert "校准" in Path(post_training.output["approval_package_markdown_path"]).read_text(encoding="utf-8")
+
 
 def test_select_features_supports_woe_space_on_train_split(tmp_path):
     runner, _plugin_registry, registry, _backend, _settings, task = _runtime(tmp_path)

@@ -1382,7 +1382,11 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
     if "export_pmml" in requested_actions:
         if capabilities.get("pmml_supported"):
             pmml_path = str(_pmml_path(runtime, artifact))
-            actions.append({"action": "export_pmml", "status": "succeeded", "pmml_path": pmml_path})
+            action = {"action": "export_pmml", "status": "succeeded", "pmml_path": pmml_path}
+            note = _pmml_delivery_note(capabilities)
+            if note:
+                action["reason"] = note
+            actions.append(action)
         else:
             actions.append({"action": "export_pmml", "status": "skipped", "reason": reason})
 
@@ -1399,6 +1403,7 @@ def tool_post_training_action(inputs: dict, ctx) -> dict:
                 "action": "handoff_to_validation",
                 "status": "succeeded",
                 "validation_task_id": validation_task_id,
+                "reason": _handoff_delivery_note(capabilities),
             })
         else:
             actions.append({
@@ -1938,6 +1943,8 @@ def _model_card_payload(
         "delivery": {
             "native_model_path": str(artifact.model_path or ""),
             "pmml_path": str(pmml_path or ""),
+            "pmml_includes_calibration": capabilities.get("pmml_includes_calibration", True),
+            "calibration": _json_safe(capabilities.get("calibration") or {}),
             "validation_task_id": str(validation_task_id or ""),
             "challenger_task_id": str(challenger_task_id or ""),
             "challenger_package_path": str(challenger_package_path or ""),
@@ -1993,10 +2000,21 @@ def _model_card_limitations(
     monitoring_policy: dict,
     challenger_comparison: dict,
 ) -> list[str]:
-    limitations: list[str] = []
+    limitations: list[str] = [
+        str(item)
+        for item in (capabilities.get("limitations") or [])
+        if str(item)
+    ]
     if not capabilities.get("pmml_supported"):
         reason = str(capabilities.get("reason") or "PMML export is not supported for this artifact.")
         limitations.append(reason)
+    calibration = capabilities.get("calibration") if isinstance(capabilities.get("calibration"), dict) else {}
+    if calibration and capabilities.get("pmml_includes_calibration") is False:
+        method = str(calibration.get("method") or "unknown")
+        limitations.append(
+            f"模型已进行 {method} 概率校准，但 PMML 产物不包含校准器；"
+            "验证移交 Notebook 会加载 calibration.joblib 应用校准。"
+        )
     policy_status = str(selection_policy_decision.get("status") or "")
     if policy_status in {"blocked", "overridden"}:
         limitations.append(f"Selection policy status is {policy_status}.")
@@ -2173,6 +2191,12 @@ def _approval_package_markdown(payload: dict) -> str:
     )
     artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
     actions = [item for item in (payload.get("delivery_actions") or []) if isinstance(item, dict)]
+    capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
+    limitations = [
+        str(item)
+        for item in (capabilities.get("limitations") or [])
+        if str(item)
+    ]
     monitoring = payload.get("monitoring_policy") if isinstance(payload.get("monitoring_policy"), dict) else {}
     comparison = (
         payload.get("challenger_comparison")
@@ -2222,6 +2246,10 @@ def _approval_package_markdown(payload: dict) -> str:
             lines.append(
                 f"| {_md_cell(item.get('code') or '-')} | {_md_cell(item.get('message') or '-')} |"
             )
+    if limitations:
+        lines.extend(["", "## 交付限制", ""])
+        for item in limitations:
+            lines.append(f"- {_md_inline(item)}")
     if monitoring:
         lines.extend([
             "",
@@ -2357,6 +2385,7 @@ def _model_card_markdown(card: dict) -> str:
     ]
     governance = card.get("governance") if isinstance(card.get("governance"), dict) else {}
     delivery = card.get("delivery") if isinstance(card.get("delivery"), dict) else {}
+    calibration = delivery.get("calibration") if isinstance(delivery.get("calibration"), dict) else {}
     limitations = [str(item) for item in (card.get("limitations") or []) if str(item)]
     review_actions = [str(item) for item in (card.get("next_review_actions") or []) if str(item)]
     feature_preview = [str(item) for item in (card.get("feature_preview") or []) if str(item)]
@@ -2374,6 +2403,7 @@ def _model_card_markdown(card: dict) -> str:
         f"- 样本集: `{_md_inline(card.get('sample_dataset_id') or card.get('dataset_id'))}`",
         f"- 特征数: {_md_inline(card.get('feature_count'))}",
         f"- 样本权重: `{_md_inline(card.get('sample_weight_col') or '未使用')}`",
+        f"- 概率校准: `{_md_inline(calibration.get('method') if calibration else '未校准')}`",
         "",
         "## 关键指标",
         "",
@@ -2404,6 +2434,7 @@ def _model_card_markdown(card: dict) -> str:
         "| --- | --- |",
         f"| 原生模型 | `{_md_cell(delivery.get('native_model_path') or '-')}` |",
         f"| PMML | `{_md_cell(delivery.get('pmml_path') or delivery.get('export_pmml_status') or '-')}` |",
+        f"| PMML包含校准 | `{_md_cell(delivery.get('pmml_includes_calibration'))}` |",
         f"| 验证移交 | `{_md_cell(delivery.get('validation_task_id') or delivery.get('validation_handoff_status') or '-')}` |",
         f"| Challenger/Backtest | `{_md_cell(delivery.get('challenger_task_id') or delivery.get('challenger_backtest_status') or '-')}` |",
     ])
@@ -2838,26 +2869,97 @@ def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
 
 def _artifact_capabilities(artifact: ModelArtifact, *, base_dir: Path | None = None) -> dict:
     pmml_supported, payload_reason = _pmml_payload_support(artifact, base_dir=base_dir)
-    if pmml_supported:
-        reason = None
-    elif payload_reason:
-        reason = payload_reason
-    elif artifact.algorithm == "catboost":
-        reason = (
-            "CatBoost 可保留原生 .pkl 模型和报告;当前 sklearn2pmml/JPMML "
-            "不支持 CatBoostClassifier 直接导出 PMML,因此验证移交需使用 lr/lgb/xgb/scorecard。"
-        )
-    else:
-        reason = (
-            f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
-            f"{artifact.algorithm} 可保留原生模型文件和报告。"
-        )
+    calibration = _artifact_calibration_for_capabilities(artifact)
+    reason = None if pmml_supported else _unsupported_pmml_reason(artifact, payload_reason)
+    limitations = _artifact_delivery_limitations(
+        artifact,
+        pmml_supported=pmml_supported,
+        unsupported_reason=reason,
+        calibration=calibration,
+    )
     return {
         "pmml_supported": pmml_supported,
         "handoff_supported": pmml_supported,
         "native_model_supported": True,
         "reason": reason,
+        "calibrated": bool(calibration),
+        "calibration": calibration,
+        "pmml_includes_calibration": (
+            bool(calibration.get("pmml_includes_calibration"))
+            if calibration
+            else True
+        ),
+        "limitations": limitations,
     }
+
+
+def _unsupported_pmml_reason(artifact: ModelArtifact, payload_reason: str | None) -> str:
+    if payload_reason:
+        return payload_reason
+    if artifact.algorithm == "catboost":
+        return (
+            "CatBoost 可保留原生 .pkl 模型和报告;当前 sklearn2pmml/JPMML "
+            "不支持 CatBoostClassifier 直接导出 PMML,因此验证移交需使用 lr/lgb/xgb/scorecard。"
+        )
+    return (
+        f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
+        f"{artifact.algorithm} 可保留原生模型文件和报告。"
+    )
+
+
+def _artifact_calibration_for_capabilities(artifact: ModelArtifact) -> dict:
+    calibration = _artifact_calibration_metadata(artifact)
+    if not calibration:
+        return {}
+    keys = (
+        "method",
+        "split",
+        "split_value",
+        "sample_count",
+        "positive_count",
+        "brier_raw",
+        "brier_calibrated",
+        "ece_raw",
+        "ece_calibrated",
+        "pmml_includes_calibration",
+        "path",
+    )
+    return _json_safe({key: calibration.get(key) for key in keys if key in calibration}) or {}
+
+
+def _artifact_delivery_limitations(
+    artifact: ModelArtifact,
+    *,
+    pmml_supported: bool,
+    unsupported_reason: str | None,
+    calibration: dict,
+) -> list[str]:
+    limitations: list[str] = []
+    if not pmml_supported:
+        limitations.append(unsupported_reason or _unsupported_pmml_reason(artifact, None))
+    if calibration and calibration.get("pmml_includes_calibration") is False:
+        method = str(calibration.get("method") or "unknown")
+        limitations.append(
+            f"模型已进行 {method} 概率校准，但 PMML 产物不包含校准器；"
+            "验证移交 Notebook 会加载 calibration.joblib 应用校准。"
+        )
+    return _unique_strings(limitations)
+
+
+def _pmml_delivery_note(capabilities: dict) -> str:
+    limitations = [
+        str(item)
+        for item in capabilities.get("limitations") or []
+        if str(item)
+    ]
+    return " ".join(limitations)
+
+
+def _handoff_delivery_note(capabilities: dict) -> str:
+    calibration = capabilities.get("calibration") if isinstance(capabilities.get("calibration"), dict) else {}
+    if calibration and capabilities.get("pmml_includes_calibration") is False:
+        return "验证移交 Notebook 会加载 calibration.joblib 应用校准。"
+    return ""
 
 
 def _require_pmml_supported(

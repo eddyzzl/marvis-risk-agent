@@ -429,11 +429,21 @@ def _is_delivery_metric_key(key: str) -> bool:
 
 def _capabilities(value) -> dict:
     caps = value if isinstance(value, dict) else {}
+    calibration = caps.get("calibration") if isinstance(caps.get("calibration"), dict) else {}
+    limitations = [
+        str(item)
+        for item in (caps.get("limitations") or [])
+        if str(item)
+    ]
     return {
         "pmml_supported": bool(caps.get("pmml_supported")),
         "handoff_supported": bool(caps.get("handoff_supported")),
         "native_model_supported": bool(caps.get("native_model_supported")),
         "reason": str(caps.get("reason") or ""),
+        "calibrated": bool(caps.get("calibrated")),
+        "calibration": dict(calibration),
+        "pmml_includes_calibration": bool(caps.get("pmml_includes_calibration", True)),
+        "limitations": limitations,
     }
 
 
@@ -538,6 +548,17 @@ def _delivery_label(caps: dict) -> str:
     if caps.get("native_model_supported"):
         return "仅原生"
     return "不可交付"
+
+
+def _capability_note(caps: dict) -> str:
+    limitations = [
+        str(item)
+        for item in (caps.get("limitations") or [])
+        if str(item)
+    ]
+    if limitations:
+        return " ".join(limitations)
+    return str(caps.get("reason") or "")
 
 
 def _policy_signals(row: dict | None) -> dict:
@@ -794,7 +815,7 @@ def _delivery_readiness(
             "status": pmml_action.get("status")
             or ("ready" if capabilities.get("pmml_supported") else "unsupported"),
             "artifact": pmml_path or pmml_action.get("pmml_path", ""),
-            "reason": pmml_action.get("reason") or capabilities.get("reason", ""),
+            "reason": pmml_action.get("reason") or _capability_note(capabilities),
         },
         {
             "id": "validation_handoff",

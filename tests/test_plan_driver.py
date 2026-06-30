@@ -693,6 +693,10 @@ def test_post_training_gate_merges_report_readiness(tmp_path):
                 "pmml_supported": True,
                 "handoff_supported": True,
                 "native_model_supported": True,
+                "calibrated": True,
+                "calibration": {"method": "sigmoid", "pmml_includes_calibration": False},
+                "pmml_includes_calibration": False,
+                "limitations": ["模型已进行 sigmoid 概率校准，但 PMML 产物不包含校准器。"],
             },
         },
         {
@@ -795,6 +799,10 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
                 "pmml_supported": True,
                 "handoff_supported": True,
                 "native_model_supported": True,
+                "calibrated": True,
+                "calibration": {"method": "sigmoid", "pmml_includes_calibration": False},
+                "pmml_includes_calibration": False,
+                "limitations": ["模型已进行 sigmoid 概率校准，但 PMML 产物不包含校准器。"],
             },
             "actions": [
                 {"action": "export_pmml", "status": "succeeded", "pmml_path": "/tmp/model.pmml"},
@@ -837,6 +845,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["challenger_comparison_path"] == "/tmp/art-lgb.champion_comparison.json"
     assert delivery["challenger_comparison_markdown_path"] == "/tmp/art-lgb.champion_comparison.md"
     assert delivery["challenger_comparison"]["status"] == "warn"
+    assert delivery["capabilities"]["calibrated"] is True
+    assert delivery["capabilities"]["pmml_includes_calibration"] is False
+    assert delivery["capabilities"]["calibration"]["method"] == "sigmoid"
     assert delivery["report"]["status"] == "ready"
     assert delivery["report"]["available_sections"] == 2
     assert delivery["report"]["report_path"] == "/tmp/model_report.xlsx"
@@ -861,6 +872,9 @@ def test_done_message_carries_post_training_delivery_payload(tmp_path):
     assert delivery["readiness"][4]["artifact"] == "/tmp/art-lgb.monitoring_policy.md"
     assert delivery["readiness"][5]["id"] == "challenger_comparison"
     assert delivery["readiness"][5]["artifact"] == "/tmp/art-lgb.champion_comparison.md"
+    assert delivery["readiness"][6]["id"] == "pmml"
+    assert "PMML" in delivery["readiness"][6]["reason"]
+    assert "校准" in delivery["readiness"][6]["reason"]
     assert delivery["readiness"][8]["id"] == "challenger_backtest"
     assert delivery["readiness"][8]["artifact"] == "task-challenger"
     assert delivery["readiness"][-1]["id"] == "approval_policy"
