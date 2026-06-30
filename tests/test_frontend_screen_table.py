@@ -254,6 +254,34 @@ def test_model_delivery_panel_renderer_and_branch_are_wired():
     assert ".model-delivery-report-summary" in css
 
 
+def test_modeling_panels_use_semantic_model_visual_tokens():
+    styles_css = _read("styles.css")
+    v2_css = _read("css/v2-workbench.css")
+    start = v2_css.index("/* Modeling setup gate controls. */")
+    end = v2_css.index("/* §4 interactive feature-screening selection table", start)
+    modeling_panel_css = v2_css[start:end]
+
+    for token in [
+        "--model-panel-border",
+        "--model-panel-border-soft",
+        "--model-panel-surface",
+        "--model-panel-surface-soft",
+        "--model-panel-text",
+        "--model-panel-text-muted",
+        "--model-signal-info",
+        "--model-signal-ready",
+        "--model-signal-warning",
+        "--model-signal-error",
+    ]:
+        assert token in styles_css
+        assert token in modeling_panel_css
+
+    assert "#" not in modeling_panel_css
+    assert "var(--success," not in modeling_panel_css
+    assert "var(--warning," not in modeling_panel_css
+    assert "var(--danger," not in modeling_panel_css
+
+
 def test_model_delivery_panel_renders_selection_and_actions():
     output = _run_node(
         f"""
