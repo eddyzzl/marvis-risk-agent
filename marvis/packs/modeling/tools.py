@@ -211,13 +211,12 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
         reject_weight=float(inputs.get("reject_weight") or 1.0),
     )
     out_dir = runtime.datasets_root / str(ctx.task_id) / "modeling"
-    artifact = TransactionalArtifactStore(out_dir).stage(f"reject_inference_{uuid.uuid4().hex}.parquet")
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(out_dir, f"reject_inference_{uuid.uuid4().hex}.parquet")
     try:
         result.frame.to_parquet(artifact.path, index=False)
-        final_path = artifact.promote()
-        registered = runtime.registry.register_existing_with_audit(
-            final_path,
-            audit_factory=lambda registered_dataset: {
+        def audit_factory(registered_dataset):
+            return {
                 "kind": "modeling.reject_inference.created",
                 "target_ref": registered_dataset.id,
                 "outcome": "succeeded",
@@ -228,15 +227,22 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
                     "decision_col": str(inputs["decision_col"]),
                     "sample_weight_col": result.sample_weight_col,
                 },
-            },
-            task_id=str(ctx.task_id),
-            role="reject_inference",
-            anchor_target=dataset.id,
-            seed=_effective_seed(inputs, ctx),
+            }
+
+        registered = uow.finalize_with_connection(
+            runtime.repo.transaction,
+            lambda conn: runtime.registry.register_existing_with_audit_on_connection(
+                conn,
+                artifact.final_path,
+                audit_factory=audit_factory,
+                task_id=str(ctx.task_id),
+                role="reject_inference",
+                anchor_target=dataset.id,
+                seed=_effective_seed(inputs, ctx),
+            ),
         )
-        artifact.commit()
     except Exception:
-        artifact.rollback()
+        uow.rollback()
         raise
     return {
         "result_dataset_id": registered.id,

@@ -96,6 +96,37 @@ def test_prepare_modeling_frame_audit_failure_rolls_back_dataset_and_file(tmp_pa
     assert not (tmp_path / "datasets" / "task-1" / "modeling" / ".staging").exists()
 
 
+def test_prepare_modeling_frame_connection_failure_rolls_back_dataset_and_file(tmp_path, monkeypatch):
+    frame = pd.DataFrame({
+        "x1": [1, 2, 3, 4],
+        "x2": [10, 20, 30, 40],
+        "y": [0, 1, 0, 1],
+        "split": ["train", "train", "test", "oot"],
+    })
+    backend, registry, dataset = _register_frame(tmp_path, frame)
+
+    def fail_create_dataset_on_connection(conn, registered):
+        raise RuntimeError("dataset insert down")
+
+    monkeypatch.setattr(registry._repo, "create_dataset_on_connection", fail_create_dataset_on_connection)
+
+    with pytest.raises(RuntimeError, match="dataset insert down"):
+        prepare_modeling_frame(
+            registry,
+            backend,
+            dataset.id,
+            target_col="y",
+            feature_cols=["x1", "x2"],
+            split_col="split",
+            split_config=None,
+            seed=3,
+        )
+
+    assert [stored.id for stored in registry.list_for_task("task-1")] == [dataset.id]
+    assert not list((tmp_path / "datasets" / "task-1" / "modeling").glob("*.parquet"))
+    assert not (tmp_path / "datasets" / "task-1" / "modeling" / ".staging").exists()
+
+
 def test_prepare_modeling_frame_auto_split_is_seed_reproducible(tmp_path):
     frame = pd.DataFrame({
         "row_id": list(range(100)),

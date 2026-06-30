@@ -1455,6 +1455,16 @@ class DatasetRepository:
             _insert_dataset_row(conn, dataset)
             _write_audit_row(conn, **audit)
 
+    def create_dataset_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        dataset: Dataset,
+        *,
+        audit: dict,
+    ) -> None:
+        _insert_dataset_row(conn, dataset)
+        _write_audit_row(conn, **audit)
+
     def get_dataset(self, dataset_id: str) -> Dataset | None:
         with connect(self.db_path) as conn:
             row = conn.execute(

@@ -11,10 +11,12 @@ from openpyxl import load_workbook
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+import marvis.db as db_module
 from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
+from marvis.packs.modeling import tools as modeling_tools
 from marvis.packs.modeling.tools import _ModelArtifactScorer, _effective_seed
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -210,6 +212,48 @@ def test_reject_inference_tool_registers_augmented_dataset(tmp_path):
     )[0]
     assert audit["target_ref"] == result.output["result_dataset_id"]
     assert audit["detail"]["source_dataset_id"] == dataset.id
+
+
+def test_reject_inference_audit_failure_rolls_back_dataset_and_file(tmp_path, monkeypatch):
+    _runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.9, 0.8],
+        "bad": [0, 1, None, None],
+        "decision": ["approved", "approved", "rejected", "rejected"],
+    })
+    path = tmp_path / "reject_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+    original_write_audit = db_module._write_audit_row
+
+    def fail_reject_inference_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.reject_inference.created":
+            raise RuntimeError("reject audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(db_module, "_write_audit_row", fail_reject_inference_audit)
+
+    with pytest.raises(RuntimeError, match="reject audit down"):
+        modeling_tools.tool_reject_inference(
+            {
+                "dataset_id": dataset.id,
+                "target_col": "bad",
+                "decision_col": "decision",
+                "score_col": "score",
+                "reject_bad_rate": 0.5,
+            },
+            SimpleNamespace(
+                workspace=settings.workspace,
+                datasets_root=settings.datasets_dir,
+                task_id=task.id,
+                seed=0,
+            ),
+        )
+
+    output_dir = registry._root / task.id / "modeling"
+    assert [stored.id for stored in registry.list_for_task(task.id)] == [dataset.id]
+    assert not list(output_dir.glob("reject_inference_*.parquet"))
+    assert not (output_dir / ".staging").exists()
 
 
 def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):

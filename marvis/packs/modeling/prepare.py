@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.feature.candidates import candidate_numeric_features
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
@@ -67,10 +67,10 @@ def prepare_modeling_frame(
         prepared = prepared[_unique([*feature_cols, *passthrough, target_col, SPLIT_COLUMN])].copy()
 
     out_path = _output_path(registry, dataset)
-    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         prepared.to_parquet(artifact.path, index=False)
-        final_path = artifact.promote()
         register_kwargs = {
             "task_id": dataset.task_id,
             "role": "derived",
@@ -85,22 +85,47 @@ def prepare_modeling_frame(
                 "split_col": split_col or SPLIT_COLUMN,
                 **dict(audit_detail or {}),
             }
-            registered = registry.register_existing_with_audit(
-                final_path,
-                audit_factory=lambda registered: {
+            def audit_factory(registered):
+                return {
                     "kind": audit_kind,
                     "target_ref": registered.id,
                     "outcome": "succeeded",
                     "detail": detail,
-                },
-                **register_kwargs,
+                }
+
+            register_with_audit_on_connection = getattr(
+                registry,
+                "register_existing_with_audit_on_connection",
+                None,
             )
-        else:
-            registered = registry.register_existing(final_path, **register_kwargs)
-        artifact.commit()
-        return registered
+            transaction = getattr(registry, "transaction", None)
+            if callable(register_with_audit_on_connection) and callable(transaction):
+                return uow.finalize_with_connection(
+                    transaction,
+                    lambda conn: register_with_audit_on_connection(
+                        conn,
+                        artifact.final_path,
+                        audit_factory=audit_factory,
+                        **register_kwargs,
+                    ),
+                )
+            return uow.finalize(
+                lambda: registry.register_existing_with_audit(
+                    artifact.final_path,
+                    audit_factory=audit_factory,
+                    **register_kwargs,
+                )
+            )
+        register_on_connection = getattr(registry, "register_existing_on_connection", None)
+        transaction = getattr(registry, "transaction", None)
+        if callable(register_on_connection) and callable(transaction):
+            return uow.finalize_with_connection(
+                transaction,
+                lambda conn: register_on_connection(conn, artifact.final_path, **register_kwargs),
+            )
+        return uow.finalize(lambda: registry.register_existing(artifact.final_path, **register_kwargs))
     except Exception:
-        artifact.rollback()
+        uow.rollback()
         raise
 
 
