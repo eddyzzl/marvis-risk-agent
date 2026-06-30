@@ -11,6 +11,8 @@ import zlib
 
 DEFAULT_CONDA_ENV_NAME = "marvis"
 DEFAULT_CONDA_PYTHON = "3.12"
+LAUNCHER_ENV_FILE = ".marvis-launcher-env"
+DELEGATED_COMMANDS = {None, "serve", "validate"}
 
 
 @dataclass(frozen=True)
@@ -22,8 +24,12 @@ class ServeOptions:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = _parse_args(raw_argv)
     try:
+        if _should_delegate_to_dedicated_conda_env(args):
+            _delegate_to_dedicated_conda_env(raw_argv, env_name=_launcher_env_name())
+            return
         if args.command == "validate":
             _validate(args)
         elif args.command == "update":
@@ -32,7 +38,7 @@ def main(argv: list[str] | None = None) -> None:
             if result.get("install_target", "").startswith("conda:"):
                 env_name = result["install_target"].split(":", 1)[1]
                 print(f"MARVIS was installed into conda environment '{env_name}'.")
-                print(f"Run `conda activate {env_name}` before starting MARVIS.")
+                print("Run `marvis` to start MARVIS.")
         elif args.command == "version":
             _print_version()
         else:
@@ -231,6 +237,7 @@ def _update(args: argparse.Namespace) -> dict[str, str]:
                 _conda_env_install_command(args.env_name, with_deps=install_with_deps),
                 cwd=repo,
             )
+            _write_launcher_env_name(repo, args.env_name)
             install_target = f"conda:{args.env_name}"
         else:
             _run_process(_editable_install_command(with_deps=args.with_deps), cwd=repo)
@@ -270,6 +277,61 @@ def _should_use_dedicated_conda_env(args: argparse.Namespace) -> bool:
     if not args.env_name:
         return False
     return _current_python_is_conda_base()
+
+
+def _should_delegate_to_dedicated_conda_env(args: argparse.Namespace) -> bool:
+    if args.command not in DELEGATED_COMMANDS:
+        return False
+    return _current_python_is_conda_base()
+
+
+def _launcher_env_name() -> str:
+    env_name = os.environ.get("MARVIS_CONDA_ENV")
+    if env_name:
+        return env_name
+    try:
+        repo = _git_root(_package_root())
+    except RuntimeError:
+        return DEFAULT_CONDA_ENV_NAME
+    path = repo / LAUNCHER_ENV_FILE
+    try:
+        configured = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return DEFAULT_CONDA_ENV_NAME
+    return configured or DEFAULT_CONDA_ENV_NAME
+
+
+def _write_launcher_env_name(repo: Path, env_name: str) -> None:
+    try:
+        (repo / LAUNCHER_ENV_FILE).write_text(f"{env_name}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _delegate_to_dedicated_conda_env(raw_argv: list[str], *, env_name: str) -> None:
+    repo = _git_root(_package_root())
+    created = _ensure_conda_env(env_name, cwd=repo)
+    if created or not _conda_env_has_marvis(env_name):
+        _run_process(_conda_env_install_command(env_name, with_deps=True), cwd=repo)
+    command = [_conda_command(), "run", "-n", env_name, "marvis", *raw_argv]
+    _run_process(command, cwd=Path.cwd())
+
+
+def _conda_env_has_marvis(env_name: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [_conda_command(), "run", "-n", env_name, "marvis", "version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "marvis detected conda base, but the conda command was not found; "
+            "activate conda first"
+        ) from exc
+    return completed.returncode == 0
 
 
 def _current_python_is_conda_base() -> bool:

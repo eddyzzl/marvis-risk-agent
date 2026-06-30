@@ -166,14 +166,13 @@ The command runs `git fetch origin`, `git pull --ff-only origin main`, then refr
 python -m pip install -e . --no-deps
 ```
 
-If `marvis update` is run from Anaconda/conda `base`, MARVIS creates or reuses a dedicated `marvis` environment and installs there instead of modifying `base`. After the update, activate it before starting the app:
+If `marvis update` is run from Anaconda/conda `base`, MARVIS creates or reuses a dedicated `marvis` environment and installs there instead of modifying `base`. After the update, start the app with the same single command:
 
 ```bash
-conda activate marvis
 marvis
 ```
 
-This default is intentional for Anaconda and Windows machines where unrelated packages in the same environment may have strict pins. Use `--env-name <name>` to choose another dedicated conda environment. If a future release adds new runtime dependencies, run `marvis update --with-deps` from a dedicated MARVIS environment, not from Anaconda `base`.
+The `base` launcher automatically delegates runtime commands into the dedicated environment. This default is intentional for Anaconda and Windows machines where unrelated packages in the same environment may have strict pins. Use `--env-name <name>` to choose another dedicated conda environment. If a future release adds new runtime dependencies, run `marvis update --with-deps` from a dedicated MARVIS environment, not from Anaconda `base`.
 
 If tracked local files have uncommitted changes, `marvis update` refuses to continue. Commit, stash, or back up those tracked changes before updating. Untracked local files are allowed unless Git itself detects that a pull would overwrite them.
 
@@ -184,13 +183,13 @@ git pull --ff-only origin main
 python -m pip install -e . --no-deps
 ```
 
-From Anaconda `base`, use a dedicated environment for that first manual upgrade:
+From Anaconda `base`, install only the lightweight MARVIS launcher first, then let `marvis update` prepare the dedicated environment:
 
 ```bash
 git pull --ff-only origin main
-conda create -y -n marvis python=3.12 pip
-conda run -n marvis python -m pip install -e .
-conda activate marvis
+python -m pip install -e . --no-deps
+marvis update
+marvis
 ```
 
 After that, future upgrades can use `marvis update`.

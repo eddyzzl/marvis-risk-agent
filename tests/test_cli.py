@@ -36,6 +36,7 @@ def test_main_without_subcommand_starts_default_profile(monkeypatch):
     def fake_serve(args):
         observed.append(cli._resolve_serve_options(args))
 
+    monkeypatch.setattr(cli, "_current_python_is_conda_base", lambda: False)
     monkeypatch.setattr(cli, "_serve", fake_serve)
 
     cli.main([])
@@ -43,6 +44,109 @@ def test_main_without_subcommand_starts_default_profile(monkeypatch):
     assert observed[0].host == "127.0.0.1"
     assert observed[0].port == 8000
     assert observed[0].workspace == Path("./workspace")
+
+
+def test_main_from_conda_base_delegates_default_run(monkeypatch):
+    observed = []
+
+    def fake_delegate(raw_argv, *, env_name):
+        observed.append((raw_argv, env_name))
+
+    monkeypatch.setattr(cli, "_current_python_is_conda_base", lambda: True)
+    monkeypatch.setattr(cli, "_launcher_env_name", lambda: "marvis")
+    monkeypatch.setattr(cli, "_delegate_to_dedicated_conda_env", fake_delegate)
+    monkeypatch.setattr(cli, "_serve", lambda args: pytest.fail("serve should delegate"))
+
+    cli.main(["--port", "8017"])
+
+    assert observed == [(["--port", "8017"], "marvis")]
+
+
+def test_conda_base_delegation_only_applies_to_runtime_commands(monkeypatch):
+    monkeypatch.setattr(cli, "_current_python_is_conda_base", lambda: True)
+
+    assert cli._should_delegate_to_dedicated_conda_env(cli._parse_args([])) is True
+    assert cli._should_delegate_to_dedicated_conda_env(cli._parse_args(["serve"])) is True
+    assert cli._should_delegate_to_dedicated_conda_env(
+        cli._parse_args(["validate", "task-1"])
+    ) is True
+    assert cli._should_delegate_to_dedicated_conda_env(cli._parse_args(["update"])) is False
+    assert cli._should_delegate_to_dedicated_conda_env(cli._parse_args(["version"])) is False
+
+
+def test_delegate_to_dedicated_env_creates_env_installs_and_runs(monkeypatch, tmp_path):
+    process_commands = []
+
+    monkeypatch.setattr(cli, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
+    monkeypatch.setattr(cli, "_ensure_conda_env", lambda env_name, *, cwd: True)
+    monkeypatch.setattr(cli, "_conda_env_has_marvis", lambda env_name: pytest.fail("new env skips probe"))
+    monkeypatch.setattr(cli, "_conda_command", lambda: "conda")
+    monkeypatch.setattr(
+        cli,
+        "_run_process",
+        lambda command, *, cwd: process_commands.append((command, cwd)),
+    )
+
+    cli._delegate_to_dedicated_conda_env(["--port", "8017"], env_name="marvis")
+
+    assert process_commands == [
+        (
+            [
+                "conda",
+                "run",
+                "-n",
+                "marvis",
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                ".",
+            ],
+            tmp_path,
+        ),
+        (["conda", "run", "-n", "marvis", "marvis", "--port", "8017"], Path.cwd()),
+    ]
+
+
+def test_delegate_to_existing_dedicated_env_runs_without_reinstall(monkeypatch, tmp_path):
+    process_commands = []
+
+    monkeypatch.setattr(cli, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
+    monkeypatch.setattr(cli, "_ensure_conda_env", lambda env_name, *, cwd: False)
+    monkeypatch.setattr(cli, "_conda_env_has_marvis", lambda env_name: True)
+    monkeypatch.setattr(cli, "_conda_command", lambda: "conda")
+    monkeypatch.setattr(
+        cli,
+        "_run_process",
+        lambda command, *, cwd: process_commands.append((command, cwd)),
+    )
+
+    cli._delegate_to_dedicated_conda_env(["serve", "--port", "8017"], env_name="marvis")
+
+    assert process_commands == [
+        (["conda", "run", "-n", "marvis", "marvis", "serve", "--port", "8017"], Path.cwd())
+    ]
+
+
+def test_launcher_env_name_prefers_env_var(monkeypatch, tmp_path):
+    monkeypatch.setenv("MARVIS_CONDA_ENV", "custom-marvis")
+    monkeypatch.setattr(cli, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
+    (tmp_path / cli.LAUNCHER_ENV_FILE).write_text("file-marvis\n", encoding="utf-8")
+
+    assert cli._launcher_env_name() == "custom-marvis"
+
+
+def test_launcher_env_name_reads_repo_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("MARVIS_CONDA_ENV", raising=False)
+    monkeypatch.setattr(cli, "_package_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_git_root", lambda path: tmp_path)
+    (tmp_path / cli.LAUNCHER_ENV_FILE).write_text("file-marvis\n", encoding="utf-8")
+
+    assert cli._launcher_env_name() == "file-marvis"
 
 
 def test_serve_profile_defaults_for_main_and_v1_1():
@@ -267,6 +371,7 @@ def test_update_from_conda_base_creates_dedicated_env(monkeypatch, tmp_path):
         ),
     ]
     assert result["install_target"] == "conda:marvis"
+    assert (tmp_path / cli.LAUNCHER_ENV_FILE).read_text(encoding="utf-8") == "marvis\n"
 
 
 def test_update_from_conda_base_reuses_dedicated_env_without_deps(monkeypatch, tmp_path):
@@ -315,3 +420,4 @@ def test_update_from_conda_base_reuses_dedicated_env_without_deps(monkeypatch, t
         ),
     ]
     assert result["install_target"] == "conda:marvis"
+    assert (tmp_path / cli.LAUNCHER_ENV_FILE).read_text(encoding="utf-8") == "marvis\n"
