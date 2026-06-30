@@ -44,10 +44,12 @@ from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
 from marvis.routers.agent_memory import router as agent_memory_router
+from marvis.routers.branding import router as branding_router
 from marvis.routers.drafts import router as drafts_router
 from marvis.routers.plans import router as plans_router
 from marvis.routers.plugins import router as plugins_router
 from marvis.routers.skills import router as skills_router
+from marvis.routers.tasks import router as tasks_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
@@ -182,10 +184,12 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app.include_router(api_router)
     app.include_router(agent_memory_router)
+    app.include_router(branding_router)
     app.include_router(plugins_router)
     app.include_router(drafts_router)
     app.include_router(plans_router)
     app.include_router(skills_router)
+    app.include_router(tasks_router)
 
     @app.exception_handler(IllegalTransition)
     def _illegal_transition(_request, exc: IllegalTransition):

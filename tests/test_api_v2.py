@@ -18,6 +18,8 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.execution_environment import ExecutionEnvironmentOption
+from marvis.routers.branding import router as branding_router
+from marvis.routers.tasks import router as tasks_router
 
 
 class FakeTaskRepository:
@@ -212,6 +214,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
 
     app = FastAPI()
     app.state.settings = SimpleNamespace(
@@ -222,6 +225,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     )
     app.state.settings.tasks_dir.mkdir()
     app.include_router(router)
+    app.include_router(tasks_router)
     return TestClient(app)
 
 
@@ -1039,6 +1043,20 @@ def test_list_tasks_returns_array(tmp_path: Path, monkeypatch):
     response = client.get("/api/tasks")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_branding_and_task_list_routes_are_served_from_dedicated_routers():
+    branding_routes = {
+        route.path: route.endpoint.__module__
+        for route in branding_router.routes
+    }
+    task_routes = {
+        route.path: route.endpoint.__module__
+        for route in tasks_router.routes
+    }
+
+    assert branding_routes["/api/branding"] == "marvis.routers.branding"
+    assert task_routes["/api/tasks"] == "marvis.routers.tasks"
 
 
 def test_list_tasks_supports_limit_offset_headers(tmp_path: Path, monkeypatch):

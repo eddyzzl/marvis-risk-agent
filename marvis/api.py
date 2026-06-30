@@ -18,7 +18,6 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
-    Response,
     UploadFile,
 )
 from fastapi.responses import FileResponse, HTMLResponse
@@ -50,7 +49,6 @@ from marvis.agent_memory.api_support import (
 )
 from marvis.agent_memory.extractors import extract_user_preference
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.branding import load_branding
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import KeyPair
@@ -535,37 +533,6 @@ async def _save_upload_file(upload: UploadFile, destination: Path) -> int:
             output.write(chunk)
     await upload.close()
     return size_bytes
-
-
-@router.get("/branding")
-def get_branding(request: Request) -> dict[str, object]:
-    return load_branding(request.app.state.settings.workspace)
-
-
-@router.get("/tasks")
-def list_tasks(
-    request: Request,
-    response: Response,
-    limit: int | None = None,
-    offset: int = 0,
-) -> list[dict]:
-    repo = _repo(request)
-    bounded_limit = None if limit is None else max(1, min(int(limit), 500))
-    bounded_offset = max(0, int(offset))
-    query_limit = bounded_limit + 1 if bounded_limit is not None else None
-    tasks = repo.list_tasks(limit=query_limit, offset=bounded_offset)
-    has_more = False
-    if bounded_limit is not None and len(tasks) > bounded_limit:
-        has_more = True
-        tasks = tasks[:bounded_limit]
-    if bounded_limit is not None or bounded_offset:
-        response.headers["X-Result-Limit"] = "" if bounded_limit is None else str(bounded_limit)
-        response.headers["X-Result-Offset"] = str(bounded_offset)
-        response.headers["X-Result-Has-More"] = "true" if has_more else "false"
-    return [
-        _task_payload(repo, task, request.app.state.settings.tasks_dir)
-        for task in tasks
-    ]
 
 
 def _normalized_capability_tier(value: str | None) -> str:
