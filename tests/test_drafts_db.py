@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 import marvis.db as db_module
+import marvis.repositories.drafts as draft_repo_module
 from marvis.db import DraftRepository, connect, init_db
 from marvis.drafts import DraftRun, DraftStateError, DraftTool, LearningNote
 
@@ -45,6 +46,10 @@ def _run() -> DraftRun:
         error=None,
         at="2026-06-19T00:02:00Z",
     )
+
+
+def test_draft_repository_is_reexported_from_db_for_compatibility():
+    assert DraftRepository is draft_repo_module.DraftRepository
 
 
 def test_draft_repository_round_trips_note_draft_and_run(tmp_path):
@@ -111,7 +116,7 @@ def test_draft_repository_rolls_back_learning_note_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.save_learning_note_with_audit(
@@ -160,7 +165,7 @@ def test_draft_repository_rolls_back_draft_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.save_draft_with_audit(
@@ -231,7 +236,7 @@ def test_draft_repository_rolls_back_run_and_status_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.save_draft_run_with_status_audit(

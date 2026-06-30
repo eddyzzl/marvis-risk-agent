@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-import marvis.db as db_module
+import marvis.repositories.drafts as draft_repo_module
 from marvis.db import DraftRepository, PluginRepository, init_db
 from marvis.drafts import DraftStateError, DraftTool
 from marvis.drafts.registry import DraftRegistry
@@ -157,14 +157,14 @@ def test_draft_sandbox_rolls_back_run_and_tested_status_when_record_audit_fails(
         "    return {'margin': inputs['revenue'] - inputs['cost']}\n"
     )
     drafts.add(draft)
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = draft_repo_module._write_audit_row
 
     def fail_run_record_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "draft.run.record":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_run_record_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_run_record_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         sandbox.run_draft(draft.id, {"revenue": 10, "cost": 3}, task_id="task-1")

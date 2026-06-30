@@ -4,6 +4,7 @@ import pytest
 
 from marvis.db import DraftRepository, PluginRepository, init_db
 import marvis.db as db_module
+import marvis.repositories.drafts as draft_repo_module
 from marvis.drafts import DraftTool
 from marvis.drafts.promotion import (
     PromotionError,
@@ -181,7 +182,7 @@ def test_reject_draft_rolls_back_status_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         reject_draft(draft, drafts=drafts, reason="not useful")
@@ -202,7 +203,7 @@ def test_draft_repository_rolls_back_promoted_status_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(draft_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.set_status_with_audit(
