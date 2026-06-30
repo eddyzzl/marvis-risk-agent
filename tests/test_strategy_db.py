@@ -1,6 +1,7 @@
 import pytest
 
 import marvis.db as db_module
+import marvis.repositories.strategy as strategy_repo_module
 from marvis.db import StrategyRepository, connect, init_db
 from marvis.packs.strategy import BacktestResult, build_strategy
 
@@ -92,7 +93,7 @@ def test_strategy_repository_rolls_back_strategy_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(strategy_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.create_strategy_with_audit(
@@ -150,7 +151,7 @@ def test_strategy_repository_rolls_back_backtest_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(strategy_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.save_backtest_with_audit(
