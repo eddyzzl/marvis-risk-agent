@@ -441,6 +441,59 @@ def test_decide_gate_blocks_adjust_when_gate_has_high_risk_flag():
     assert "Gate 风险标记" in fake.calls[0]["user_prompt"]
 
 
+def test_decide_gate_blocks_strategy_manual_review_risk_flag():
+    fake = _FakeLLM(action="adjust", reason="自动放宽切分阈值")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "自动放宽切分阈值",
+        "params": {"max_missing_rate": 0.95},
+    })
+    gate = {
+        "content": "策略切分建议完成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "strategy_policy",
+                "target_step_id": "strategy-cutoff",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "risk_flags": ["strategy_cutoff_manual_review_required"],
+                "controls": [
+                    {"id": "max_missing_rate", "kind": "number"},
+                ],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "风险标记:strategy_cutoff_manual_review_required" in decision["reason"]
+
+
+def test_decide_gate_blocks_vintage_approval_replan_risk_flag():
+    fake = _FakeLLM(action="replan", reason="重做 vintage 口径")
+    fake._payload = json.dumps({
+        "action": "replan",
+        "reason": "重做 vintage 口径",
+        "replan_goal": "切换观察窗并重跑 vintage",
+    })
+    gate = {
+        "content": "Vintage 分析完成",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "vintage_policy",
+                "target_step_id": "vintage-window",
+                "allowed_actions": ["confirm", "replan", "halt"],
+                "risk_flags": ["vintage_window_approval_required"],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "风险标记:vintage_window_approval_required" in decision["reason"]
+
+
 def test_decide_gate_blocks_replan_when_gate_declares_wide_reset_scope():
     fake = _FakeLLM(action="replan", reason="换一套流程")
     fake._payload = json.dumps({
