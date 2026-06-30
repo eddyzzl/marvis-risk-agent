@@ -807,9 +807,10 @@ def test_initialization_failure_shows_service_connection_error():
 
 def test_create_task_payload_omits_notebook_contract_fields():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     for field in ["report_values"]:
-        assert f"{field}:" in app_js
+        assert f"{field}:" in create_dialog_js
 
     for removed_field in [
         "algorithm:",
@@ -824,20 +825,24 @@ def test_create_task_payload_omits_notebook_contract_fields():
         "feature_columns:",
     ]:
         assert removed_field not in app_js
+        assert removed_field not in create_dialog_js
 
 
 def test_create_task_uses_single_model_name_field():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     assert 'id="modelName"' in index_html
     assert "模型名称" in index_html
     assert 'id="modelVersion"' not in index_html
     assert "模型版本" not in index_html
-    assert 'model_version: ""' in app_js
+    assert 'model_version: ""' in create_dialog_js
     assert '$("modelVersion")' not in app_js
-    assert "请先填写模型名称、验证人员和材料目录。" in app_js
+    assert '$("modelVersion")' not in create_dialog_js
+    assert "请先填写模型名称、验证人员和材料目录。" in create_dialog_js
     assert "请先填写模型名称、版本" not in app_js
+    assert "请先填写模型名称、版本" not in create_dialog_js
 
 
 def test_task_display_does_not_require_model_version_separator():
@@ -897,24 +902,24 @@ def test_create_dialog_hides_v2_config_controls():
 
 
 def test_create_dialog_omits_legacy_model_training_description_autofill():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     # The legacy auto-filled "model_training_description" report value stays removed —
     # the modeling algorithm is now a real user choice (the create-dialog picker),
     # not an auto-derived training blurb.
-    defaults_start = app_js.index("function defaultCreateReportValues")
-    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
-    defaults = app_js[defaults_start:defaults_end]
+    defaults_start = create_dialog_js.index("function defaultCreateReportValues")
+    defaults_end = create_dialog_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = create_dialog_js[defaults_start:defaults_end]
     assert '"TEXT:model_training_description"' not in defaults
-    assert "MODEL_TRAINING_DESCRIPTIONS" not in app_js
+    assert "MODEL_TRAINING_DESCRIPTIONS" not in create_dialog_js
 
 
 def test_create_dialog_auto_fills_removed_report_values():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    defaults_start = app_js.index("function defaultCreateReportValues")
-    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
-    defaults = app_js[defaults_start:defaults_end]
+    defaults_start = create_dialog_js.index("function defaultCreateReportValues")
+    defaults_end = create_dialog_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = create_dialog_js[defaults_start:defaults_end]
 
     assert 'const today = formatDateInput();' in defaults
     assert '"TEXT:draft_date": today' in defaults
@@ -991,14 +996,14 @@ def test_create_dialog_uses_visual_run_mode_cards():
 
 def test_create_dialog_updates_run_mode_copy_by_task_type():
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
 
     assert 'data-run-mode-description="manual"' in index_html
     assert 'data-run-mode-description="agent"' in index_html
-    assert "function setRunModeDescription" in app_js
-    assert 'setRunModeDescription("manual", definition.manualModeDescription);' in app_js
-    assert 'setRunModeDescription("agent", definition.agentModeDescription);' in app_js
+    assert "function setRunModeDescription" in create_dialog_js
+    assert 'setRunModeDescription("manual", definition.manualModeDescription);' in create_dialog_js
+    assert 'setRunModeDescription("agent", definition.agentModeDescription);' in create_dialog_js
     assert "由验证人员逐步执行材料扫描、Notebook 验证与报告生成" not in index_html
     assert "智能解析材料、规划验证步骤并辅助生成验证报告" not in index_html
 
@@ -1042,8 +1047,8 @@ def test_create_dialog_updates_run_mode_copy_by_task_type():
 
 
 def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
-    app_js = _read_static("app.js")
     index_html = _read_static("index.html")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
 
     assert 'name="runMode" type="radio" value="manual" checked' not in index_html
@@ -1060,28 +1065,28 @@ def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
     assert 'defaultRunMode: "agent"' not in definitions
     assert definitions.count('defaultRunMode: ""') == 6
 
-    dialog_start = app_js.index("function openTaskDialog")
-    dialog_end = app_js.index("function openTaskDialogFromCard", dialog_start)
-    dialog_body = app_js[dialog_start:dialog_end]
+    dialog_start = create_dialog_js.index("function openTaskDialog")
+    dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
+    dialog_body = create_dialog_js[dialog_start:dialog_end]
     assert "input.checked = false;" in dialog_body
     assert "resetModelAlgorithmChoices();" in dialog_body
     assert "updateAlgorithmFieldVisibility();" in dialog_body
     assert "definition.defaultRunMode ===" not in dialog_body
 
-    assert "function resetModelAlgorithmChoices" in app_js
-    apply_start = app_js.index("function applyTaskTypeToDialog")
-    apply_end = app_js.index("function updateAlgorithmFieldVisibility", apply_start)
-    apply_body = app_js[apply_start:apply_end]
+    assert "function resetModelAlgorithmChoices" in create_dialog_js
+    apply_start = create_dialog_js.index("function applyTaskTypeToDialog")
+    apply_end = create_dialog_js.index("function updateAlgorithmFieldVisibility", apply_start)
+    apply_body = create_dialog_js[apply_start:apply_end]
     assert "checked: false" in apply_body
     assert "checked: definition.defaultRunMode" not in apply_body
 
 
 def test_create_task_requires_run_mode_and_allows_agent_mode():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_renderer = app_js[create_start:create_end]
+    create_start = create_dialog_js.index("async function createTask")
+    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
+    create_renderer = create_dialog_js[create_start:create_end]
 
     assert "const selectedRunMode" in create_renderer
     assert "请选择执行模式。" in create_renderer
@@ -1093,6 +1098,7 @@ def test_create_task_requires_run_mode_and_allows_agent_mode():
 def test_create_dialog_moves_material_source_to_bottom_segment():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     dialogs_js = _read_static("js/dialogs.js")
     styles_css = _read_static("styles.css")
 
@@ -1150,7 +1156,8 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert 'dropzone.classList.add("is-dragover")' in dialogs_js
     assert 'pathPanel.classList.toggle("hidden", !isPath)' in dialogs_js
     assert 'uploadPanel.classList.toggle("hidden", isPath)' in dialogs_js
-    assert "materialSourceController.bindDropzone();" in app_js
+    assert "createTaskDialog.bindMaterialSourceControls();" in app_js
+    assert "materialSourceController.bindDropzone();" in create_dialog_js
 
     assert ".material-source-section" in styles_css
     assert ".material-source-segment" in styles_css
@@ -1166,7 +1173,7 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
 
 
 def test_create_task_upload_mode_posts_materials_before_creating_task():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     api_js = _read_static("js/api.js")
 
     api_start = api_js.index("export async function api")
@@ -1175,17 +1182,17 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "body instanceof FormData" in api_body
     assert '"Content-Type": "application/json"' not in api_body
 
-    upload_start = app_js.index("async function uploadMaterialFiles")
-    upload_end = app_js.index("async function createTask", upload_start)
-    upload_body = app_js[upload_start:upload_end]
+    upload_start = create_dialog_js.index("async function uploadMaterialFiles")
+    upload_end = create_dialog_js.index("async function createTask", upload_start)
+    upload_body = create_dialog_js[upload_start:upload_end]
     assert "new FormData()" in upload_body
     assert 'formData.append("files"' in upload_body
     assert 'formData.append("relative_paths"' in upload_body
     assert 'api("api/material-uploads"' in upload_body
 
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_body = app_js[create_start:create_end]
+    create_start = create_dialog_js.index("async function createTask")
+    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
+    create_body = create_dialog_js[create_start:create_end]
     assert "await uploadMaterialFiles" in create_body
     assert "payload.source_dir = upload.source_dir" in create_body
     assert "文件上传暂未开放" not in create_body
@@ -1193,15 +1200,16 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    assert "function bindRunModeDeselectableCards" in app_js
-    assert "handleRunModeCardPointerDown" in app_js
-    assert "handleRunModeCardClick" in app_js
-    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in app_js
-    assert 'if (card.dataset.wasChecked !== "true") return;' in app_js
-    assert "event.preventDefault();" in app_js
-    assert "input.checked = false;" in app_js
-    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in app_js
+    assert "function bindRunModeDeselectableCards" in create_dialog_js
+    assert "handleRunModeCardPointerDown" in create_dialog_js
+    assert "handleRunModeCardClick" in create_dialog_js
+    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in create_dialog_js
+    assert 'if (card.dataset.wasChecked !== "true") return;' in create_dialog_js
+    assert "event.preventDefault();" in create_dialog_js
+    assert "input.checked = false;" in create_dialog_js
+    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in create_dialog_js
     assert "bindRunModeDeselectableCards();" in app_js
 
 
@@ -2916,6 +2924,7 @@ def test_modeling_create_dialog_has_algorithm_selector():
     posted as `payload.recipes` + `payload.target_type`."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskAlgorithmField"' in index_html
@@ -2934,16 +2943,16 @@ def test_modeling_create_dialog_has_algorithm_selector():
     assert 'id="modelSampleWeightPolicy"' in index_html
     assert 'value="none">不使用样本权重' in index_html
     assert 'value="explicit">指定权重列' in index_html
-    assert "updateSampleWeightCreateState" in app_js
+    assert "updateSampleWeightCreateState" in create_dialog_js
     assert "algorithmField: true" in task_types_js
-    assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in app_js
-    assert 'payload.target_type = [...families][0] || "binary";' in app_js
-    assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in app_js
-    assert "请填写样本权重列，或改选不使用样本权重。" in app_js
-    assert "payload.sample_weight_col = sampleWeightCol;" in app_js
-    assert "normalizeModelAlgorithmFamilies" in app_js
-    assert "二分类、回归与多分类算法不能混选。" in app_js
-    assert "请至少选择一个建模算法。" in app_js
+    assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in create_dialog_js
+    assert 'payload.target_type = [...families][0] || "binary";' in create_dialog_js
+    assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in create_dialog_js
+    assert "请填写样本权重列，或改选不使用样本权重。" in create_dialog_js
+    assert "payload.sample_weight_col = sampleWeightCol;" in create_dialog_js
+    assert "normalizeModelAlgorithmFamilies" in create_dialog_js
+    assert "二分类、回归与多分类算法不能混选。" in create_dialog_js
+    assert "请至少选择一个建模算法。" in create_dialog_js
     assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
 
 
@@ -2951,6 +2960,7 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     """风险分析(vintage) + 策略开发(strategy) are wired PlanDriver entries."""
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
     for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
         start = index_html.index(f'id="{card_id}"')
@@ -2968,11 +2978,11 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     assert 'const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in app_js
     # The toast path remains available for future explicitly unavailable task definitions.
     assert "card.dataset.comingSoon" not in app_js
-    assert "definition.available === false" in app_js
-    assert "unavailableMessage" in app_js
+    assert "definition.available === false" in create_dialog_js
+    assert "unavailableMessage" in create_dialog_js
     assert "function showComingSoonToast" in app_js
     assert 'setActionStatus(message, "info"' in app_js
-    assert "新功能开发中，敬请期待" in app_js
+    assert "新功能开发中，敬请期待" in create_dialog_js
 
 
 def test_acceptance_chip_relabels_auto_accept_per_task_type():
@@ -2990,7 +3000,7 @@ def test_feature_create_dialog_has_optional_metric_selector():
     multi-select (spec §2: 选了才算), gated via the metricField flag and posted as
     `payload.metrics`. VIF is the first wired optional metric; empty is valid."""
     index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
 
     assert 'id="createTaskMetricField"' in index_html
@@ -3003,7 +3013,7 @@ def test_feature_create_dialog_has_optional_metric_selector():
     assert 'name="featureMetric" value="head_tail_lift" checked' not in index_html
     assert 'name="featureMetric" value="importance" checked' not in index_html
     assert "metricField: true" in task_types_js
-    assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in app_js
+    assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in create_dialog_js
 
 
 def test_stage_failures_keep_completed_previous_steps_green():
@@ -3219,6 +3229,7 @@ def test_create_task_auto_scans_materials_after_creation():
 
 def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     index_html = _read_static("index.html")
 
     click_start = app_js.index('$("createTaskButton").onclick')
@@ -3233,9 +3244,9 @@ def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     assert 'runAction(createTaskAndScan);' in keydown_handler
     assert 'actionId: "scan"' not in keydown_handler
     assert 'id="statusMessage" class="status" role="status" aria-live="polite"' in index_html
-    assert 'setCreateStatus("请选择执行模式。", "error")' in app_js
-    assert 'setCreateStatus("请先选择要上传的材料文件。", "error")' in app_js
-    assert 'setCreateStatus(\n      definition.reportFields ? "请先填写模型名称、验证人员和材料目录。"' in app_js
+    assert 'setCreateStatus("请选择执行模式。", "error")' in create_dialog_js
+    assert 'setCreateStatus("请先选择要上传的材料文件。", "error")' in create_dialog_js
+    assert 'setCreateStatus(\n        definition.reportFields ? "请先填写模型名称、验证人员和材料目录。"' in create_dialog_js
 
 
 def test_dialogs_close_when_clicking_backdrop():
@@ -5029,12 +5040,14 @@ def test_validation_failure_writes_error_detail_to_global_action_status():
 
 def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     create_start = app_js.index("async function createTask")
     create_end = app_js.index("async function refreshTasks", create_start)
     create_body = app_js[create_start:create_end]
     assert "Agent 模式当前暂不支持创建任务" not in create_body
-    assert "run_mode: selectedRunMode" in create_body
+    assert "const task = await createTaskDialog.createTask();" in create_body
+    assert "run_mode: selectedRunMode" in create_dialog_js
 
     assert "function selectedTaskIsAgentMode" in app_js
     assert "if (selectedTaskIsAgentMode()) return \"\";" in app_js
@@ -5051,8 +5064,9 @@ def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_compose
     agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
     agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
 
-    assert 'const definition = taskTypeDefinition(task.task_type || activeTaskType);' in agent_branch
-    assert 'const isValidationTask = (task.task_type || activeTaskType || defaultTaskType) === "validation";' in agent_branch
+    assert "const activeDialogTaskType = createTaskDialog.activeTaskType();" in agent_branch
+    assert "const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);" in agent_branch
+    assert 'const isValidationTask = (task.task_type || activeDialogTaskType || defaultTaskType) === "validation";' in agent_branch
     # Non-validation agent tasks route to the inline conversation composer:
     # createTask() already seeded it via prefillAgentTaskInstruction, so the
     # branch only focuses the composer (the V2 plan dialog is retired).
@@ -5110,7 +5124,7 @@ def test_agent_task_creation_prefills_conversation_composer_with_goal():
     assert 'const input = $("agentComposerInput");' in helper_body
     # Only seed when the composer is empty, so a user's draft is never clobbered.
     assert "if (!input || input.value.trim()) return;" in helper_body
-    assert "const definition = taskTypeDefinition(task.task_type || activeTaskType);" in helper_body
+    assert "const definition = taskTypeDefinition(task.task_type || createTaskDialog.activeTaskType());" in helper_body
     assert "input.value = definition.initialGoal;" in helper_body
     assert "autoGrowComposerInput();" in helper_body
     assert "updateAgentSendDisabled();" in helper_body
