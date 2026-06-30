@@ -2124,39 +2124,18 @@ class PluginRepository:
         detail: dict | None = None,
     ) -> None:
         with connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO audit(
-                    id, kind, actor, target_ref, inputs_hash, outcome,
-                    detail_json, at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    uuid.uuid4().hex,
-                    kind,
-                    actor,
-                    target_ref,
-                    inputs_hash,
-                    outcome,
-                    json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
-                    _now(),
-                ),
+            _write_audit_row(
+                conn,
+                kind=kind,
+                target_ref=target_ref,
+                actor=actor,
+                inputs_hash=inputs_hash,
+                outcome=outcome,
+                detail=detail,
             )
 
     def list_audit(self, *, kind: str | None = None) -> list[dict]:
-        query = (
-            "SELECT id, kind, actor, target_ref, inputs_hash, outcome, detail_json, at "
-            "FROM audit"
-        )
-        params: tuple[str, ...] = ()
-        if kind is not None:
-            query += " WHERE kind = ?"
-            params = (kind,)
-        query += " ORDER BY at, id"
-        with connect(self.db_path) as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [_audit_row_to_dict(row) for row in rows]
+        return _list_audit_rows(self.db_path, kind=kind)
 
 
 def _row_to_agent_message(row: sqlite3.Row) -> dict:

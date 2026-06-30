@@ -48,6 +48,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_frontend_shell_static.py::test_unselected_workspace_shows_centered_welcome_only tests/test_frontend_screen_table.py tests/test_frontend_static_v2.py::test_frontend_uses_v2_task_actions_only`: `15 passed` after adding semantic visual tokens and extracting theme handling to `static/js/theme.js`.
   - `tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py`: `224 passed` after extracting create-dialog task type definitions and task-type display order into `static/js/task-types.js`.
   - `tests/test_db.py tests/test_orch_db.py tests/test_plugin_db.py tests/test_modeling_db.py tests/test_strategy_db.py tests/test_drafts_db.py`: `72 passed` after extracting schema/connection setup into `marvis/db_schema.py`.
+  - `tests/test_plugin_db.py tests/test_plugin_registry.py tests/test_plugin_hooks.py tests/test_db.py::test_update_report_values_with_audit_records_changed_keys tests/test_db.py::test_update_report_values_with_audit_rolls_back_when_audit_fails tests/test_db.py::test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails`: `31 passed` after making `PluginRepository.write_audit/list_audit` reuse the shared audit row helpers.
   - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py`: `35 passed` after enriching failure envelopes with editable input defaults and explicit downstream reset step ids.
   - `tests/test_plan_driver.py`: `38 passed` after propagating the latest failed step-run `error_kind` into `FailureEnvelope` so validation/postcheck/runtime failures are distinguishable in retry UX.
   - `tests/test_orch_executor.py tests/test_orch_db.py`: `44 passed` after adding tool version, manifest hash, source dataset refs, and artifact refs to persisted step evidence.
@@ -113,6 +114,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` controller extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `task-types.js` create-dialog config extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent Memory router/support extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `PluginRepository` audit helper de-duplication.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelDeliveryPanel` metadata/rendering update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the model-report readiness merge into delivery metadata.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the editable modeling setup controls update.
