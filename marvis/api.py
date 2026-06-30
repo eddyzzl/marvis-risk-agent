@@ -1020,12 +1020,28 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
 
 
 @router.get("/tasks/{task_id}/agent/messages")
-def get_agent_messages(task_id: str, request: Request, after_id: str | None = None) -> dict:
+def get_agent_messages(
+    task_id: str,
+    request: Request,
+    after_id: str | None = None,
+    limit: int | None = None,
+) -> dict:
     repo = _repo(request)
     _get_task_or_404(repo, task_id)
+    bounded_limit = None if limit is None else max(1, min(int(limit), 500))
     cursor_found = bool(after_id and repo.has_agent_message(task_id, after_id))
-    messages = repo.list_agent_messages(task_id, after_id=after_id)
-    return {"messages": messages, "incremental": cursor_found}
+    query_limit = bounded_limit + 1 if bounded_limit is not None else None
+    messages = repo.list_agent_messages(task_id, after_id=after_id, limit=query_limit)
+    has_more = False
+    if bounded_limit is not None and len(messages) > bounded_limit:
+        has_more = True
+        messages = messages[:bounded_limit]
+    return {
+        "messages": messages,
+        "incremental": cursor_found,
+        "has_more": has_more,
+        "limit": bounded_limit,
+    }
 
 
 @router.post("/tasks/{task_id}/agent/start", status_code=202)

@@ -422,6 +422,10 @@ def test_agent_messages_can_list_after_cursor(tmp_path):
     messages = repo.list_agent_messages(task.id, after_id=first["id"])
 
     assert [message["id"] for message in messages] == [second["id"], third["id"]]
+    limited_messages = repo.list_agent_messages(task.id, after_id=first["id"], limit=1)
+    assert [message["id"] for message in limited_messages] == [second["id"]]
+    first_page = repo.list_agent_messages(task.id, limit=2)
+    assert [message["id"] for message in first_page] == [first["id"], second["id"]]
     assert repo.has_agent_message(task.id, first["id"]) is True
     assert repo.has_agent_message(task.id, "missing-message") is False
 

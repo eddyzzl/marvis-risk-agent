@@ -168,6 +168,21 @@ def test_agent_messages_endpoint_supports_after_id_cursor(tmp_path):
     payload = response.json()
     assert payload["incremental"] is True
     assert [message["id"] for message in payload["messages"]] == [second["id"]]
+    assert payload["has_more"] is False
+    assert payload["limit"] is None
+
+    third = repo.add_agent_message(task_id, role="assistant", stage="scan", content="third")
+    limited_response = client.get(
+        f"/api/tasks/{task_id}/agent/messages",
+        params={"after_id": first["id"], "limit": 1},
+    )
+
+    assert limited_response.status_code == 200, limited_response.text
+    limited_payload = limited_response.json()
+    assert limited_payload["incremental"] is True
+    assert limited_payload["has_more"] is True
+    assert limited_payload["limit"] == 1
+    assert [message["id"] for message in limited_payload["messages"]] == [second["id"]]
 
     fallback_response = client.get(
         f"/api/tasks/{task_id}/agent/messages",
@@ -177,7 +192,14 @@ def test_agent_messages_endpoint_supports_after_id_cursor(tmp_path):
     assert fallback_response.status_code == 200, fallback_response.text
     fallback_payload = fallback_response.json()
     assert fallback_payload["incremental"] is False
-    assert [message["id"] for message in fallback_payload["messages"]] == [first["id"], second["id"]]
+    assert [message["id"] for message in fallback_payload["messages"]] == [first["id"], second["id"], third["id"]]
+
+    capped_response = client.get(
+        f"/api/tasks/{task_id}/agent/messages",
+        params={"limit": 9999},
+    )
+    assert capped_response.status_code == 200, capped_response.text
+    assert capped_response.json()["limit"] == 500
 
 
 def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):

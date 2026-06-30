@@ -143,6 +143,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver gate confirm extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_driver_report_download_frontend.py -q`: `1 passed` after making driver-report downloads use an absolute `/api/...` URL and updating the PlanRailController affordance test.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver-report download URL fix.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py::test_agent_messages_can_list_after_cursor tests/test_agent_api.py::test_agent_messages_endpoint_supports_after_id_cursor -q`: `2 passed` after adding optional bounded pagination and `has_more` metadata to Agent message listing.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `86 passed` after preserving the existing Agent API contract while adding optional message-list limits.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent message pagination update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent Memory router/support extraction.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `PluginRepository` audit helper de-duplication.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelDeliveryPanel` metadata/rendering update.
@@ -483,8 +486,9 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - First candidate: dataset/join, because it exercises file output plus DB registration and is easier than plugin install.
 
 4. Several list APIs are unbounded or weakly bounded.
-   - Fix: repository-level pagination/cursors for tasks, messages, audits, drafts, artifacts.
-   - Tests: default limit, max limit, stable ordering, cursor continuation.
+   - Current update: Agent message listing already supports `after_id`; the repository and GET endpoint now also accept an optional bounded `limit`, clamp API requests to 500, and return `has_more` plus the effective limit without changing the default full-list behavior used by existing callers.
+   - Remaining fix: extend repository-level pagination/cursors to tasks, audits, drafts, artifacts, and other high-volume message-style lists.
+   - Tests: Agent message default compatibility, max-limit clamp, stable ordering, cursor continuation, and `has_more`.
 
 ### P2: Frontend UX, Visual System, And Product Depth
 

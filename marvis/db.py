@@ -497,7 +497,14 @@ class TaskRepository:
             "metadata": metadata or {},
         }
 
-    def list_agent_messages(self, task_id: str, *, after_id: str | None = None) -> list[dict]:
+    def list_agent_messages(
+        self,
+        task_id: str,
+        *,
+        after_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        bounded_limit = None if limit is None else max(1, int(limit))
         with connect(self.db_path) as conn:
             task_row = conn.execute(
                 "SELECT 1 FROM tasks WHERE id = ?",
@@ -517,25 +524,40 @@ class TaskRepository:
                     (task_id, after_id),
                 ).fetchone()
             if after_id and after_row is not None:
+                limit_clause = " LIMIT ?" if bounded_limit is not None else ""
+                params: tuple = (
+                    task_id,
+                    after_row["created_at"],
+                    after_row["created_at"],
+                    after_row["id"],
+                )
+                if bounded_limit is not None:
+                    params = (*params, bounded_limit)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, task_id, role, stage, content, created_at, metadata_json
                       FROM agent_messages
                      WHERE task_id = ?
                        AND (created_at > ? OR (created_at = ? AND id > ?))
                      ORDER BY created_at ASC, id ASC
+                     {limit_clause}
                     """,
-                    (task_id, after_row["created_at"], after_row["created_at"], after_row["id"]),
+                    params,
                 ).fetchall()
                 return [_row_to_agent_message(row) for row in rows]
+            limit_clause = " LIMIT ?" if bounded_limit is not None else ""
+            params = (task_id,)
+            if bounded_limit is not None:
+                params = (*params, bounded_limit)
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, task_id, role, stage, content, created_at, metadata_json
                   FROM agent_messages
                  WHERE task_id = ?
                  ORDER BY created_at ASC, id ASC
+                 {limit_clause}
                 """,
-                (task_id,),
+                params,
             ).fetchall()
         return [_row_to_agent_message(row) for row in rows]
 
