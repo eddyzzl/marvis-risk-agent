@@ -201,10 +201,18 @@ def test_plugin_repository_rolls_back_delete_when_audit_write_fails(
     assert repo.list_tools()[0]["name"] == "echo"
 
 
-def test_plugin_repository_writes_audit_records(tmp_path):
+def test_plugin_repository_writes_audit_records(tmp_path, monkeypatch):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = PluginRepository(db_path)
+    timestamps = iter(
+        [
+            "2026-06-19T00:00:00Z",
+            "2026-06-19T00:01:00Z",
+            "2026-06-19T00:02:00Z",
+        ]
+    )
+    monkeypatch.setattr(db_module, "_now", lambda: next(timestamps))
 
     repo.write_audit(
         kind="tool.invoke",
@@ -214,12 +222,23 @@ def test_plugin_repository_writes_audit_records(tmp_path):
         outcome="succeeded",
         detail={"duration_ms": 4},
     )
+    repo.write_audit(kind="hook.dispatch", target_ref="_sample.hook", outcome="succeeded")
+    repo.write_audit(kind="tool.invoke", target_ref="_sample.second", outcome="failed")
 
     audits = repo.list_audit(kind="tool.invoke")
-    assert len(audits) == 1
+    assert len(audits) == 2
     assert audits[0]["target_ref"] == "_sample.echo"
     assert audits[0]["inputs_hash"] == "abc123"
     assert audits[0]["detail"] == {"duration_ms": 4}
+    assert audits[1]["target_ref"] == "_sample.second"
+    assert [audit["target_ref"] for audit in repo.list_audit(limit=2)] == [
+        "_sample.echo",
+        "_sample.hook",
+    ]
+    assert [audit["target_ref"] for audit in repo.list_audit(limit=1, offset=1)] == ["_sample.hook"]
+    assert [audit["target_ref"] for audit in repo.list_audit(kind="tool.invoke", limit=1, offset=1)] == [
+        "_sample.second"
+    ]
 
 
 def test_init_db_creates_plugin_tables_with_foreign_keys(tmp_path):

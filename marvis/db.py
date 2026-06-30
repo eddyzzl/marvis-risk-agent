@@ -1471,8 +1471,14 @@ class PlanRepository:
         with connect(self.db_path) as conn:
             _write_audit_row(conn, **kwargs)
 
-    def list_audit(self, *, kind: str | None = None) -> list[dict]:
-        return _list_audit_rows(self.db_path, kind=kind)
+    def list_audit(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        return _list_audit_rows(self.db_path, kind=kind, limit=limit, offset=offset)
 
     def _insert_step(self, conn: sqlite3.Connection, step: dict) -> None:
         conn.execute(
@@ -1791,6 +1797,33 @@ class ModelingRepository:
                 (artifact_id,),
             ).fetchone()
         return None if row is None else _model_artifact_from_row(row)
+
+    def list_model_artifacts(
+        self,
+        *,
+        experiment_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ModelArtifact]:
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        params: list[object] = []
+        query = """
+            SELECT id, experiment_id, algorithm, model_path, pmml_path,
+                   feature_list_json, feature_importance_json, params_json, woe_maps_json,
+                   scorecard_table_json, created_at
+              FROM model_artifacts
+        """
+        if experiment_id is not None:
+            query += " WHERE experiment_id = ?"
+            params.append(experiment_id)
+        query += " ORDER BY created_at, id"
+        if bounded_limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([bounded_limit, bounded_offset])
+        with connect(self.db_path) as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [_model_artifact_from_row(row) for row in rows]
 
 
 class StrategyRepository:
@@ -2206,8 +2239,14 @@ class PluginRepository:
                 detail=detail,
             )
 
-    def list_audit(self, *, kind: str | None = None) -> list[dict]:
-        return _list_audit_rows(self.db_path, kind=kind)
+    def list_audit(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        return _list_audit_rows(self.db_path, kind=kind, limit=limit, offset=offset)
 
 
 def _row_to_agent_message(row: sqlite3.Row) -> dict:
@@ -3405,18 +3444,29 @@ def _write_audit_row(
     )
 
 
-def _list_audit_rows(db_path: Path, *, kind: str | None = None) -> list[dict]:
+def _list_audit_rows(
+    db_path: Path,
+    *,
+    kind: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    bounded_limit = None if limit is None else max(1, int(limit))
+    bounded_offset = max(0, int(offset))
     query = (
         "SELECT id, kind, actor, target_ref, inputs_hash, outcome, detail_json, at "
         "FROM audit"
     )
-    params: tuple[str, ...] = ()
+    params: list[object] = []
     if kind is not None:
         query += " WHERE kind = ?"
-        params = (kind,)
+        params.append(kind)
     query += " ORDER BY at, id"
+    if bounded_limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        params.extend([bounded_limit, bounded_offset])
     with connect(db_path) as conn:
-        rows = conn.execute(query, params).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
     return [_audit_row_to_dict(row) for row in rows]
 
 

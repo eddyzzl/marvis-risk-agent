@@ -584,10 +584,16 @@ def init_db(db_path: Path) -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tools_plugin ON tools(plugin)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at_id ON audit(kind, at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_at_id ON audit(at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_model_artifacts_experiment ON model_artifacts(experiment_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_artifacts_experiment_created ON model_artifacts(experiment_id, created_at, id)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_model_artifacts_created ON model_artifacts(created_at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_task ON strategies(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_backtests_strategy ON backtests(strategy_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_tools_task ON draft_tools(task_id, status)")

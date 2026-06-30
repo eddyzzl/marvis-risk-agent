@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 import marvis.db as db_module
@@ -76,10 +78,21 @@ def test_modeling_repository_round_trips_experiment_and_artifact(tmp_path):
 
     repo.create_experiment(experiment)
     repo.create_model_artifact(artifact)
+    artifact2 = replace(
+        artifact,
+        id="artifact-2",
+        algorithm="xgb",
+        model_path="models/artifact-2/model.json",
+        created_at="2026-06-19T00:02:00Z",
+    )
+    repo.create_model_artifact(artifact2)
 
     assert repo.get_experiment(experiment.id) == experiment
     assert repo.get_model_artifact(artifact.id) == artifact
     assert repo.list_experiments("task-1") == [experiment]
+    assert repo.list_model_artifacts() == [artifact, artifact2]
+    assert repo.list_model_artifacts(experiment_id=experiment.id, limit=1) == [artifact]
+    assert repo.list_model_artifacts(limit=1, offset=1) == [artifact2]
 
 
 def test_modeling_repository_attaches_artifact_and_audit_atomically(tmp_path):
