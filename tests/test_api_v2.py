@@ -20,6 +20,7 @@ from marvis.domain import (
 from marvis.execution_environment import ExecutionEnvironmentOption
 from marvis.routers.branding import router as branding_router
 from marvis.routers.materials import router as materials_router
+from marvis.routers.reports import router as reports_router
 from marvis.routers.tasks import router as tasks_router
 
 
@@ -215,6 +216,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.reports.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
 
     app = FastAPI()
@@ -227,6 +229,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.state.settings.tasks_dir.mkdir()
     app.include_router(router)
     app.include_router(materials_router)
+    app.include_router(reports_router)
     app.include_router(tasks_router)
     return TestClient(app)
 
@@ -336,6 +339,26 @@ def test_material_upload_route_is_served_from_dedicated_router():
     }
 
     assert routes[("/api/material-uploads", ("POST",))] == "marvis.routers.materials"
+
+
+def test_report_download_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in reports_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/report/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/report/preview", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/analysis/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/driver-report/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
 
 
 def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):

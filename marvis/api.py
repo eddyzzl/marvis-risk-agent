@@ -12,7 +12,6 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from fastapi.responses import FileResponse, HTMLResponse
 
 from marvis.agent.orchestrator import (
     AgentValidationCancelled,
@@ -54,6 +53,9 @@ from marvis.api_task_helpers import (
     get_task_or_404 as _get_task_or_404,
     reject_if_task_has_active_job as _reject_if_task_has_active_job,
 )
+from marvis.api_report_helpers import (
+    require_confirmed_agent_conclusions as _require_confirmed_agent_conclusions,
+)
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TASK_TYPE_DATA_JOIN,
@@ -87,7 +89,6 @@ from marvis.api_settings import router as settings_router
 from marvis.api_task_payloads import (
     normalized_status_reason as _normalized_status_reason,
     task_payload as _task_payload,  # noqa: F401 - compatibility alias for structure tests/imports.
-    task_report_download_filename as _task_report_download_filename,
 )
 from marvis.notebook_contract import (
     NotebookContractError,
@@ -116,7 +117,6 @@ from marvis.report_fields import report_field_payload
 from marvis.report_texts import computed_report_text_values_from_payload
 from marvis.safe_paths import assert_within
 from marvis.state_machine import ConflictError, IllegalTransition
-from marvis.output.word_preview import docx_to_html_preview
 from marvis.validation.overfitting import overfitting_check_from_validation_results
 
 
@@ -1130,114 +1130,6 @@ def run_task_report(
         "status": "accepted",
         "message": "word report stage dispatched; poll GET /api/tasks/{task_id}",
     }
-
-
-@router.get("/tasks/{task_id}/report/download")
-def download_task_report(task_id: str, request: Request) -> FileResponse:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    _require_confirmed_agent_conclusions(repo, task)
-    if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(status_code=404, detail="report not generated")
-    report_path = (
-        request.app.state.settings.tasks_dir
-        / task_id
-        / "outputs"
-        / "validation_report.docx"
-    )
-    if not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
-    return FileResponse(
-        report_path,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=_task_report_download_filename(task, ".docx"),
-    )
-
-
-@router.get("/tasks/{task_id}/report/preview")
-def preview_task_report(task_id: str, request: Request) -> HTMLResponse:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    _require_confirmed_agent_conclusions(repo, task)
-    if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(status_code=404, detail="report not generated")
-    report_path = (
-        request.app.state.settings.tasks_dir
-        / task_id
-        / "outputs"
-        / "validation_report.docx"
-    )
-    if not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
-    return HTMLResponse(docx_to_html_preview(report_path))
-
-
-@router.get("/tasks/{task_id}/analysis/download")
-def download_task_analysis(task_id: str, request: Request) -> FileResponse:
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    if task.status not in {
-        TaskStatus.WRITING_ARTIFACTS,
-        TaskStatus.SUCCEEDED,
-        TaskStatus.REVIEW_REQUIRED,
-    } and not (
-        task.status == TaskStatus.FAILED
-        and task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
-    ):
-        raise HTTPException(status_code=404, detail="analysis not generated")
-    analysis_path = (
-        request.app.state.settings.tasks_dir
-        / task_id
-        / "outputs"
-        / "validation.xlsx"
-    )
-    if not analysis_path.exists():
-        raise HTTPException(status_code=404, detail="analysis not generated")
-    return FileResponse(
-        analysis_path,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=_task_report_download_filename(task, ".xlsx"),
-    )
-
-
-@router.get("/tasks/{task_id}/driver-report/download")
-def download_driver_report(task_id: str, request: Request) -> FileResponse:
-    """Download a driver task's generated Excel report (model development / feature
-    analysis). The file path comes from the plan step's ``report_path`` output and is
-    validated to live inside the task's outputs directory (no path traversal)."""
-    repo = _repo(request)
-    task = _get_task_or_404(repo, task_id)
-    report_path = _latest_driver_report_path(request.app.state, task_id)
-    if report_path is None or not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
-    return FileResponse(
-        report_path,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=_task_report_download_filename(task, ".xlsx"),
-    )
-
-
-def _latest_driver_report_path(state, task_id: str):
-    """The most recent ``report_path`` produced by a plan step for the task, validated
-    to be inside the task's outputs dir. None if no report has been generated."""
-    plan_repo = state.plan_repo
-    outputs_dir = (Path(state.settings.tasks_dir) / task_id / "outputs").resolve()
-    for plan in reversed(plan_repo.list_plans_for_task(task_id)):
-        for step in sorted(plan.steps, key=lambda s: -(int(getattr(s, "index", 0) or 0))):
-            try:
-                output = plan_repo.load_step_output(step.id)
-            except KeyError:
-                continue
-            raw = (output or {}).get("report_path")
-            if not raw:
-                continue
-            path = Path(str(raw)).resolve()
-            try:
-                path.relative_to(outputs_dir)
-            except ValueError:
-                continue  # reject anything outside the task outputs dir
-            return path
-    return None
 
 
 @router.post("/tasks/{task_id}/validate", status_code=202)
@@ -2621,18 +2513,6 @@ def _stream_agent_message(
             metadata=cancelled_metadata,
         )
         raise
-
-
-def _require_confirmed_agent_conclusions(repo: TaskRepository, task: TaskRecord) -> None:
-    if task.run_mode != "agent":
-        return
-    values, _ = repo.get_report_values(task.id)
-    if agent_conclusions_confirmed(values):
-        return
-    raise HTTPException(
-        status_code=409,
-        detail="请先确认三段报告结论，确认后将生成 Word 报告",
-    )
 
 
 def _format_conclusion_values(values: dict[str, str]) -> str:
