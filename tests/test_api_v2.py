@@ -122,8 +122,12 @@ class FakeTaskRepository:
         except KeyError as exc:
             raise KeyError(f"Task not found: {task_id}") from exc
 
-    def list_tasks(self):
-        return list(self.tasks.values())
+    def list_tasks(self, *, limit: int | None = None, offset: int = 0):
+        tasks = list(self.tasks.values())
+        start = max(0, int(offset))
+        if limit is None:
+            return tasks[start:]
+        return tasks[start:start + max(1, int(limit))]
 
     def delete_task(self, task_id: str):
         self.get_task(task_id)
@@ -1035,6 +1039,44 @@ def test_list_tasks_returns_array(tmp_path: Path, monkeypatch):
     response = client.get("/api/tasks")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_list_tasks_supports_limit_offset_headers(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    first = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    second = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "B卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+
+    first_page = client.get("/api/tasks", params={"limit": 1})
+    assert first_page.status_code == 200
+    assert [task["id"] for task in first_page.json()] == [first]
+    assert first_page.headers["x-result-limit"] == "1"
+    assert first_page.headers["x-result-offset"] == "0"
+    assert first_page.headers["x-result-has-more"] == "true"
+
+    second_page = client.get("/api/tasks", params={"limit": 1, "offset": 1})
+    assert second_page.status_code == 200
+    assert [task["id"] for task in second_page.json()] == [second]
+    assert second_page.headers["x-result-limit"] == "1"
+    assert second_page.headers["x-result-offset"] == "1"
+    assert second_page.headers["x-result-has-more"] == "false"
+
+    capped = client.get("/api/tasks", params={"limit": 9999})
+    assert capped.status_code == 200
+    assert capped.headers["x-result-limit"] == "500"
 
 
 def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypatch):

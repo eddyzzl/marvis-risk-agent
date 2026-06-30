@@ -18,6 +18,7 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi.responses import FileResponse, HTMLResponse
@@ -542,11 +543,28 @@ def get_branding(request: Request) -> dict[str, object]:
 
 
 @router.get("/tasks")
-def list_tasks(request: Request) -> list[dict]:
+def list_tasks(
+    request: Request,
+    response: Response,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
     repo = _repo(request)
+    bounded_limit = None if limit is None else max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
+    query_limit = bounded_limit + 1 if bounded_limit is not None else None
+    tasks = repo.list_tasks(limit=query_limit, offset=bounded_offset)
+    has_more = False
+    if bounded_limit is not None and len(tasks) > bounded_limit:
+        has_more = True
+        tasks = tasks[:bounded_limit]
+    if bounded_limit is not None or bounded_offset:
+        response.headers["X-Result-Limit"] = "" if bounded_limit is None else str(bounded_limit)
+        response.headers["X-Result-Offset"] = str(bounded_offset)
+        response.headers["X-Result-Has-More"] = "true" if has_more else "false"
     return [
         _task_payload(repo, task, request.app.state.settings.tasks_dir)
-        for task in repo.list_tasks()
+        for task in tasks
     ]
 
 

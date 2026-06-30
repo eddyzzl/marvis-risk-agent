@@ -166,6 +166,9 @@ def init_db(db_path: Path) -> None:
             definition="TEXT NOT NULL DEFAULT ''",
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at DESC, id DESC)"
+        )
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,

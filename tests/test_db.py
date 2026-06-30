@@ -183,6 +183,8 @@ def test_list_tasks_returns_created_tasks(tmp_path):
 
     assert {task.id for task in tasks} == {first.id, second.id}
     assert {task.model_name for task in tasks} == {"模型A", "模型B"}
+    assert repo.list_tasks(limit=1)[0].id == tasks[0].id
+    assert [task.id for task in repo.list_tasks(limit=1, offset=1)] == [tasks[1].id]
 
 
 def test_update_report_values_merges_and_increments_revision(tmp_path):

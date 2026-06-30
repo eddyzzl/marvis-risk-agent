@@ -141,9 +141,23 @@ class TaskRepository:
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_id}")
 
-    def list_tasks(self) -> list[TaskRecord]:
+    def list_tasks(self, *, limit: int | None = None, offset: int = 0) -> list[TaskRecord]:
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
         with connect(self.db_path) as conn:
-            rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+            if bounded_limit is not None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM tasks
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ? OFFSET ?
+                    """,
+                    (bounded_limit, bounded_offset),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tasks ORDER BY created_at DESC, id DESC"
+                ).fetchall()
         return [_row_to_task(row) for row in rows]
 
     def update_status(
