@@ -818,24 +818,147 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
 
 def test_dedup_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
+    module_js = _read("js/v2/join_gate_controller.js")
     assert "function agentMessageDedupPickerHtml(message)" in app_js
+    assert "return renderDedupPicker(message);" in app_js
     assert "if (meta.dedup)" in app_js
-    assert "message?.metadata?.dedup" in app_js
+    assert "export function renderDedupPicker(message)" in module_js
+    assert "message?.metadata?.dedup" in module_js
     # a first/last strategy <select> per conflicting feature
-    assert 'class="dedup-strategy"' in app_js
-    assert "data-dedup-feature" in app_js
+    assert 'class="dedup-strategy"' in module_js
+    assert "data-dedup-feature" in module_js
 
 
 def test_dedup_picker_posts_strategies():
     app_js = _read("app.js")
+    module_js = _read("js/v2/join_gate_controller.js")
     assert "function submitDedupStrategies(button)" in app_js
-    assert "data-dedup-confirm" in app_js
-    assert "dedup_strategies" in app_js
-    assert "data-dedup-gate-step-id" in app_js
-    assert "expected_step_id: expectedStepId" in app_js
+    assert "submitDedupStrategiesController(button, joinGateControllerContext())" in app_js
+    assert "export async function submitDedupStrategies(button, context = {})" in module_js
+    assert "data-dedup-confirm" in module_js
+    assert "dedup_strategies" in module_js
+    assert "data-dedup-gate-step-id" in module_js
+    assert "expected_step_id: expectedStepId" in module_js
     assert "handleDedupConfirmClick" in app_js
     css = _read("css/v2-workbench.css")
     assert ".dedup-picker" in css and ".dedup-table" in css
+
+
+def test_join_c1_form_renderer_and_submit_are_wired():
+    app_js = _read("app.js")
+    module_js = _read("js/v2/join_gate_controller.js")
+    assert "function agentMessageC1FormHtml(message)" in app_js
+    assert "return renderJoinC1Form(message);" in app_js
+    assert "if (meta.join_c1)" in app_js
+    assert "export function renderJoinC1Form(message)" in module_js
+    assert 'class="c1-role"' in module_js
+    assert "data-c1-dataset" in module_js
+    assert "function submitC1Assignment(button)" in app_js
+    assert "submitC1AssignmentController(button, joinGateControllerContext())" in app_js
+    assert "export async function submitC1Assignment(button, context = {})" in module_js
+    assert '"[C1]"' in module_js
+    assert "anchor_id" in module_js
+    assert "feature_ids" in module_js
+    assert "target_col" in module_js
+    assert "handleC1ConfirmClick" in app_js
+
+
+def test_join_gate_controller_posts_c1_and_dedup_payloads():
+    output = _run_node(
+        f"""
+        {""}
+        import assert from "node:assert/strict";
+        import {{
+          renderDedupPicker,
+          renderJoinC1Form,
+          submitC1Assignment,
+          submitDedupStrategies,
+        }} from "./marvis/static/js/v2/join_gate_controller.js";
+        let agentMessages = [];
+        let rendered = 0;
+        const statuses = [];
+        const calls = [];
+        const context = {{
+          selectedTaskId: "task-1",
+          agentAcceptanceModeValue: () => "manual",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: (messages) => {{ agentMessages = messages || agentMessages; }},
+          renderAgentConversation: () => {{ rendered += 1; }},
+          api: async (url, options) => {{
+            calls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [{{ id: "m2" }}] }};
+          }},
+        }};
+        const c1Html = renderJoinC1Form({{
+          id: "c1-msg",
+          metadata: {{
+            join_c1: {{
+              target_col: "bad",
+              files: [
+                {{ dataset_id: "main", name: "main.csv", row_count: 10, n_cols: 3, has_target: true, proposed_role: "anchor", columns: ["id", "bad"] }},
+                {{ dataset_id: "feat", name: "feat.csv", row_count: 10, n_cols: 2, has_target: false, proposed_role: "feature", columns: ["id", "score"] }},
+              ],
+            }},
+          }},
+        }});
+        assert.equal(c1Html.includes('data-c1-form="c1-msg"'), true);
+        assert.equal(c1Html.includes('data-c1-dataset="main"'), true);
+        assert.equal(c1Html.includes('value="bad" selected'), true);
+        const c1Form = {{
+          querySelectorAll: (selector) => selector === ".c1-role" ? [
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "feature" }},
+          ] : [],
+          querySelector: (selector) => selector === ".c1-target" ? {{ value: "bad" }} : null,
+        }};
+        const c1Button = {{ disabled: false, closest: () => c1Form }};
+        await submitC1Assignment(c1Button, context);
+        assert.equal(c1Button.disabled, true);
+        assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
+        assert.equal(calls[0][1].acceptance_mode, "manual");
+        assert.equal(calls[0][1].content.startsWith("[C1]"), true);
+        assert.deepEqual(JSON.parse(calls[0][1].content.slice(4)), {{
+          anchor_id: "main",
+          feature_ids: ["feat"],
+          target_col: "bad",
+        }});
+
+        const noAnchorForm = {{
+          querySelectorAll: () => [{{ getAttribute: () => "feat", value: "feature" }}],
+          querySelector: () => null,
+        }};
+        await submitC1Assignment({{ disabled: false, closest: () => noAnchorForm }}, context);
+        assert.deepEqual(statuses.at(-1), ["请先把一张表选为「样本主表」。", "error"]);
+
+        const dedupHtml = renderDedupPicker({{
+          id: "dedup-msg",
+          metadata: {{
+            step_id: "gate-dedup",
+            dedup: {{
+              strategies: ["first", "last"],
+              features: [{{ feature_id: "feat", conflict_keys: 3 }}],
+            }},
+          }},
+        }});
+        assert.equal(dedupHtml.includes('data-dedup-gate-step-id="gate-dedup"'), true);
+        assert.equal(dedupHtml.includes('data-dedup-feature="feat"'), true);
+        const dedupForm = {{
+          dataset: {{ dedupGateStepId: "gate-dedup" }},
+          querySelectorAll: (selector) => selector === ".dedup-strategy" ? [
+            {{ getAttribute: (name) => name === "data-dedup-feature" ? "feat" : null, value: "last" }},
+          ] : [],
+        }};
+        const dedupButton = {{ disabled: false, closest: () => dedupForm }};
+        await submitDedupStrategies(dedupButton, context);
+        assert.equal(dedupButton.disabled, true);
+        assert.deepEqual(calls[1][1].dedup_strategies, {{ feat: "last" }});
+        assert.equal(calls[1][1].expected_step_id, "gate-dedup");
+        assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
+        assert.equal(rendered, 2);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
 
 
 def test_capability_tier_picker_is_wired():

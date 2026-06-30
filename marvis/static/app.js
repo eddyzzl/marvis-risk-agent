@@ -27,6 +27,14 @@ import { createThemeController } from "./js/theme.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
 import {
+  handleC1ConfirmClick as handleC1ConfirmClickController,
+  handleDedupConfirmClick as handleDedupConfirmClickController,
+  renderDedupPicker,
+  renderJoinC1Form,
+  submitC1Assignment as submitC1AssignmentController,
+  submitDedupStrategies as submitDedupStrategiesController,
+} from "./js/v2/join_gate_controller.js";
+import {
   handleModelingWeightAdjustClick as handleModelingWeightAdjustClickController,
   renderModelingSetupPanel,
   submitModelingWeightAdjust as submitModelingWeightAdjustController,
@@ -6058,102 +6066,29 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);
 }
 
-// C1 file-role assignment form (data_join). Rendered from message.metadata.join_c1:
-// a role <select> per file (样本主表/特征表/忽略) + a target-column <select> + a
-// 确认角色 button that posts a structured "[C1]{...}" assignment the driver parses.
 function agentMessageC1FormHtml(message) {
-  const c1 = message?.metadata?.join_c1;
-  if (!c1 || !Array.isArray(c1.files) || !c1.files.length) return "";
-  const messageId = message?.id ? String(message.id) : "";
-  const roleSelect = (datasetId, selected) => {
-    const opt = (value, label) =>
-      `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
-    return (
-      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}">`
-      + opt("anchor", "样本主表")
-      + opt("feature", "特征表")
-      + opt("ignore", "忽略")
-      + "</select>"
-    );
-  };
-  const rows = c1.files
-    .map(
-      (file) => `<tr>
-      <td class="c1-file">${escapeHtml(file.name || "")}</td>
-      <td>${escapeHtml(String(file.row_count ?? ""))}</td>
-      <td>${escapeHtml(String(file.n_cols ?? ""))}</td>
-      <td>${file.has_target ? "✓" : ""}</td>
-      <td>${roleSelect(file.dataset_id || "", file.proposed_role || "feature")}</td>
-    </tr>`,
-    )
-    .join("");
-  const columns = [];
-  const seen = new Set();
-  for (const file of c1.files) {
-    for (const col of file.columns || []) {
-      if (!seen.has(col)) {
-        seen.add(col);
-        columns.push(col);
-      }
-    }
-  }
-  const targetOptions = ['<option value="">（不指定）</option>']
-    .concat(
-      columns.map(
-        (col) => `<option value="${escapeHtml(col)}"${col === c1.target_col ? " selected" : ""}>${escapeHtml(col)}</option>`,
-      ),
-    )
-    .join("");
-  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}">
-    <table class="c1-form-table">
-      <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="c1-form-foot">
-      <label class="c1-target-label">目标列 <select class="c1-target">${targetOptions}</select></label>
-      <button type="button" class="button compact primary c1-confirm" data-c1-confirm="${escapeHtml(messageId)}">确认角色</button>
-    </div>
-  </div>`;
+  return renderJoinC1Form(message);
 }
 
 async function submitC1Assignment(button) {
-  const form = button.closest(".c1-form");
-  const taskId = selectedTaskId;
-  if (!form || !taskId) return;
-  let anchorId = "";
-  const featureIds = [];
-  for (const select of form.querySelectorAll(".c1-role")) {
-    const datasetId = select.getAttribute("data-c1-dataset");
-    if (select.value === "anchor" && !anchorId) anchorId = datasetId;
-    else if (select.value === "feature") featureIds.push(datasetId);
-  }
-  if (!anchorId) {
-    setActionStatus("请先把一张表选为「样本主表」。", "error");
-    return;
-  }
-  const targetCol = form.querySelector(".c1-target")?.value || "";
-  button.disabled = true;
-  try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "[C1]" + JSON.stringify({ anchor_id: anchorId, feature_ids: featureIds, "target_col": targetCol }),
-        acceptance_mode: agentAcceptanceModeValue(),
-      }),
-    });
-    agentMessages = result.messages || agentMessages;
-    renderAgentConversation();
-  } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "确认角色失败", "error");
-  }
+  return submitC1AssignmentController(button, joinGateControllerContext());
 }
 
 function handleC1ConfirmClick(event) {
-  const button = event.target?.closest?.("[data-c1-confirm]");
-  if (!button) return;
-  event.preventDefault();
-  void submitC1Assignment(button);
+  return handleC1ConfirmClickController(event, joinGateControllerContext());
+}
+
+function joinGateControllerContext() {
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    agentAcceptanceModeValue,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+  };
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleC1ConfirmClick);
@@ -6196,82 +6131,16 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleScreenConfirmClick);
 }
 
-// §4 join dedup picker (manual mode). Rendered from message.metadata.dedup at the
-// execute-join gate when a feature table's join key is non-unique: a first/last
-// <select> per conflicting feature + an 应用去重并确认 button that posts
-// {content:"确认", dedup_strategies:{feature_id:strategy}} so confirm_join re-runs,
-// resolves the same-key conflicts, and the gate clears for the final execute confirm.
-const DEDUP_STRATEGY_LABELS = { first: "保留首条 (first)", last: "保留末条 (last)" };
 function agentMessageDedupPickerHtml(message) {
-  const dedup = message?.metadata?.dedup;
-  if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
-  const messageId = message?.id ? String(message.id) : "";
-  const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
-  const strategies = Array.isArray(dedup.strategies) && dedup.strategies.length ? dedup.strategies : ["first", "last"];
-  const rows = dedup.features
-    .map((feature) => {
-      const fid = String(feature.feature_id);
-      const conflicts = feature.conflict_keys ? `${feature.conflict_keys} 个同键冲突` : "拼接键不唯一";
-      const options = strategies
-        .map((s) => `<option value="${escapeHtml(String(s))}">${escapeHtml(DEDUP_STRATEGY_LABELS[s] || String(s))}</option>`)
-        .join("");
-      return `<tr>
-      <td class="dedup-feat">${escapeHtml(fid)}</td>
-      <td>${escapeHtml(conflicts)}</td>
-      <td><select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}">${options}</select></td>
-    </tr>`;
-    })
-    .join("");
-  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}">
-    <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
-    <table class="dedup-table">
-      <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="dedup-foot">
-      <button type="button" class="button compact primary dedup-confirm" data-dedup-confirm="${escapeHtml(messageId)}">应用去重并确认</button>
-    </div>
-  </div>`;
+  return renderDedupPicker(message);
 }
 
 async function submitDedupStrategies(button) {
-  const form = button.closest(".dedup-picker");
-  const taskId = selectedTaskId;
-  if (!form || !taskId) return;
-  const dedup_strategies = {};
-  for (const select of form.querySelectorAll(".dedup-strategy")) {
-    const fid = select.getAttribute("data-dedup-feature");
-    if (fid) dedup_strategies[fid] = select.value;
-  }
-  const expectedStepId = form.dataset.dedupGateStepId || "";
-  if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
-    return;
-  }
-  button.disabled = true;
-  try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "确认",
-        dedup_strategies,
-        expected_step_id: expectedStepId,
-        acceptance_mode: agentAcceptanceModeValue(),
-      }),
-    });
-    agentMessages = result.messages || agentMessages;
-    renderAgentConversation();
-  } catch (error) {
-    button.disabled = false;
-    setActionStatus(error?.message || "应用去重失败", "error");
-  }
+  return submitDedupStrategiesController(button, joinGateControllerContext());
 }
 
 function handleDedupConfirmClick(event) {
-  const button = event.target?.closest?.("[data-dedup-confirm]");
-  if (!button) return;
-  event.preventDefault();
-  void submitDedupStrategies(button);
+  return handleDedupConfirmClickController(event, joinGateControllerContext());
 }
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDedupConfirmClick);
