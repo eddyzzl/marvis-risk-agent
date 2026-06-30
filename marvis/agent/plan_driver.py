@@ -20,15 +20,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from marvis.agent.adjust_specs import (
-    adjust_param_error,
-    has_modeling_setup_adjust,
-    has_screen_adjust,
-    has_tuning_adjust,
-)
+from marvis.agent.adjust_specs import adjust_param_error
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_payloads import build_model_delivery_payload, screen_known_features
+from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
@@ -153,14 +149,17 @@ class PlanDriver:
             return self._handle_instruction(plan, None, user_text, run_seq)
         # Per-step needs_confirmation gate.
         gate = self._awaiting_step(plan)
-        self._validate_gate_control(
-            plan,
-            gate,
-            expected_step_id=expected_step_id,
-            selection=selection,
-            dedup_strategies=dedup_strategies,
-            adjust_params=adjust_params,
-        )
+        try:
+            validate_gate_control(
+                plan,
+                gate,
+                expected_step_id=expected_step_id,
+                selection=selection,
+                dedup_strategies=dedup_strategies,
+                adjust_params=adjust_params,
+            )
+        except GateControlValidationError as exc:
+            raise DriverError(str(exc)) from exc
         # Join dedup picker: re-confirm with the chosen strategies, then re-pause at the
         # (now conflict-free) gate — do NOT confirm-execute yet; the user confirms after.
         if dedup_strategies and gate is not None:
@@ -185,41 +184,6 @@ class PlanDriver:
                     self._apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
                     return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
-
-    def _validate_gate_control(
-        self,
-        plan: Plan,
-        gate: PlanStep | None,
-        *,
-        expected_step_id: str | None,
-        selection,
-        dedup_strategies,
-        adjust_params,
-    ) -> None:
-        if expected_step_id:
-            if gate is None or gate.id != str(expected_step_id):
-                raise DriverError("当前待确认步骤已变化,请刷新后使用最新步骤的控件。")
-        screen_adjust = has_screen_adjust(adjust_params)
-        modeling_setup_adjust = has_modeling_setup_adjust(adjust_params)
-        tuning_adjust = has_tuning_adjust(adjust_params)
-        dedup_adjust = bool(dedup_strategies)
-        if selection is None and not dedup_adjust and not screen_adjust and not modeling_setup_adjust and not tuning_adjust:
-            return
-        if gate is None:
-            raise DriverError("当前没有待确认步骤,无法应用该控件。")
-        if not expected_step_id:
-            raise DriverError("该控件缺少待确认步骤校验信息,请刷新后重试。")
-        if (selection is not None or screen_adjust) and not _gate_depends_on_tool(plan, gate, "screen_features"):
-            raise DriverError("该控件只适用于特征筛选确认步骤。")
-        if dedup_adjust and not _gate_depends_on_tool(plan, gate, "confirm_join"):
-            raise DriverError("该控件只适用于拼接去重确认步骤。")
-        if modeling_setup_adjust and not _gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
-            raise DriverError("该控件只适用于建模规格确认步骤。")
-        if tuning_adjust and not (
-            _gate_depends_on_tool(plan, gate, "choose_modeling_spec")
-            or _gate_depends_on_tool(plan, gate, "tune_hyperparameters")
-        ):
-            raise DriverError("该控件只适用于建模规格或调参确认步骤。")
 
     def _needs_dedup_features(self, plan, gate) -> list[str]:
         """Feature ids the gate's confirm_join dependency flagged as needing a dedup
@@ -611,14 +575,6 @@ def _find_step(plan: Plan, step_id: str) -> PlanStep | None:
         if step.id == step_id:
             return step
     return None
-
-
-def _gate_depends_on_tool(plan: Plan, gate: PlanStep, tool: str) -> bool:
-    for dep_id in gate.depends_on or []:
-        dep = _find_step(plan, dep_id)
-        if dep is not None and dep.tool_ref.tool == tool:
-            return True
-    return False
 
 
 def _downstream_step_ids(plan: Plan, root_ids: list[str]) -> set[str]:
