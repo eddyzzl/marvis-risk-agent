@@ -7,7 +7,11 @@ import nbformat
 import pandas as pd
 import pytest
 import xgboost as xgb
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
@@ -390,6 +394,69 @@ def test_post_training_action_skips_native_tree_booster_without_failing(tmp_path
     assert Path(output["approval_package_path"]).exists()
     assert Path(output["model_card_markdown_path"]).exists()
     assert "# 模型卡" in Path(output["model_card_markdown_path"]).read_text(encoding="utf-8")
+    assert [task.id for task in TaskRepository(settings.db_path).list_tasks()] == [source_task.id]
+    assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
+
+
+def test_post_training_action_skips_mlp_without_creating_validation_task(tmp_path):
+    settings, store, source_task, dataset, _lr_artifact = _seed_experiment(tmp_path)
+    frame = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9, 0.15, 0.85],
+        "x2": [0.3, 0.4, 0.7, 0.6, 0.35, 0.75],
+        "y": [0, 0, 1, 1, 0, 1],
+    })
+    model = Pipeline([
+        ("impute", SimpleImputer(strategy="median")),
+        ("scale", StandardScaler()),
+        ("mlp", MLPClassifier(hidden_layer_sizes=(3,), solver="lbfgs", max_iter=300, random_state=7)),
+    ])
+    model.fit(frame[["x1", "x2"]], frame["y"])
+    artifact = save_model(
+        model,
+        "mlp",
+        settings.tasks_dir / source_task.id / "modeling_artifacts",
+        feature_list=("x1", "x2"),
+        params={"hidden_layer_sizes": [3], "solver": "lbfgs"},
+    )
+    experiment_id = store.create(source_task.id, "mlp", _config(dataset.id))
+    store.attach_result(
+        experiment_id,
+        TrainResult(
+            artifact=artifact,
+            metrics=_metrics(),
+            feature_importance=(),
+            experiment_id="",
+        ),
+    )
+    ctx = SimpleNamespace(
+        task_id=source_task.id,
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=0,
+    )
+
+    output = modeling_tools.tool_post_training_action(
+        {
+            "experiment_id": experiment_id,
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
+        },
+        ctx,
+    )
+
+    assert output["pmml_path"] == ""
+    assert output["validation_task_id"] == ""
+    assert output["challenger_task_id"] == ""
+    assert output["capabilities"]["native_model_supported"] is True
+    assert output["capabilities"]["pmml_supported"] is False
+    assert output["capabilities"]["handoff_supported"] is False
+    assert "lr/lgb/xgb/scorecard" in output["capabilities"]["reason"]
+    assert "mlp 可保留原生模型文件和报告" in output["capabilities"]["reason"]
+    assert {item["status"] for item in output["actions"]} == {"skipped"}
+    assert output["model_card"]["delivery"]["export_pmml_status"] == "skipped"
+    assert any("mlp 可保留原生模型文件和报告" in item for item in output["model_card"]["limitations"])
+    assert Path(output["approval_package_path"]).exists()
+    assert Path(output["model_card_markdown_path"]).exists()
     assert [task.id for task in TaskRepository(settings.db_path).list_tasks()] == [source_task.id]
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
