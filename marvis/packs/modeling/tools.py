@@ -22,7 +22,13 @@ from marvis.feature.encode import woe_encode
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.output.model_report import ModelReportPayload, render_model_report
-from marvis.packs.modeling.artifact import export_pmml, load_model, persist_model_meta, write_artifact_file
+from marvis.packs.modeling.artifact import (
+    export_pmml,
+    load_model,
+    persist_model_meta,
+    validate_scorecard_pmml_payload,
+    write_artifact_file,
+)
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.experiment import ExperimentStore
@@ -1064,21 +1070,36 @@ def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
         })
     max_feature_count = policy.get("max_feature_count")
     feature_count = profile.get("feature_count")
-    if isinstance(max_feature_count, int) and isinstance(feature_count, int) and feature_count > max_feature_count:
-        violations.append({
-            "code": "max_feature_count",
-            "message": f"要求特征数不超过 {max_feature_count},但该候选有 {feature_count} 个特征。",
-        })
+    if isinstance(max_feature_count, int):
+        if not isinstance(feature_count, int):
+            violations.append({
+                "code": "max_feature_count_missing",
+                "message": f"要求特征数不超过 {max_feature_count},但该候选缺少特征数证据。",
+            })
+        elif feature_count > max_feature_count:
+            violations.append({
+                "code": "max_feature_count",
+                "message": f"要求特征数不超过 {max_feature_count},但该候选有 {feature_count} 个特征。",
+            })
     max_oot_psi = policy.get("max_oot_psi")
     oot_psi = profile.get("psi_oot_vs_train")
-    if isinstance(max_oot_psi, (int, float)) and isinstance(oot_psi, (int, float)) and oot_psi > float(max_oot_psi):
-        violations.append({
-            "code": "max_oot_psi",
-            "message": (
-                f"要求 OOT PSI 不超过 {_format_number_token(float(max_oot_psi))},"
-                f"但该候选为 {_format_number_token(float(oot_psi))}。"
-            ),
-        })
+    if isinstance(max_oot_psi, (int, float)):
+        if not isinstance(oot_psi, (int, float)):
+            violations.append({
+                "code": "max_oot_psi_missing",
+                "message": (
+                    f"要求 OOT PSI 不超过 {_format_number_token(float(max_oot_psi))},"
+                    "但该候选缺少 OOT PSI 证据。"
+                ),
+            })
+        elif oot_psi > float(max_oot_psi):
+            violations.append({
+                "code": "max_oot_psi",
+                "message": (
+                    f"要求 OOT PSI 不超过 {_format_number_token(float(max_oot_psi))},"
+                    f"但该候选为 {_format_number_token(float(oot_psi))}。"
+                ),
+            })
     return violations
 
 
@@ -3130,6 +3151,12 @@ def _pmml_payload_support(artifact: ModelArtifact, *, base_dir: Path | None) -> 
     except Exception as exc:
         return False, f"模型文件无法加载,不能导出 PMML:{exc}"
     if artifact.algorithm == "scorecard":
+        try:
+            validate_scorecard_pmml_payload(model, feature_list=list(artifact.feature_list))
+        except ModelingError as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, f"评分卡 PMML 预检失败:{exc}"
         if isinstance(model, dict) and "model" in model and "woe_maps" in model:
             return True, None
         return False, "评分卡 PMML 导出需要包含 model 与 woe_maps 的 scorecard payload。"

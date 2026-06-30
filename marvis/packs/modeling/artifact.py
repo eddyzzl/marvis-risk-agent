@@ -242,8 +242,7 @@ def _scorecard_pmml_pipeline(
     target_name: str,
     sample_frame: pd.DataFrame,
 ):
-    if not isinstance(model_payload, dict) or "model" not in model_payload or "woe_maps" not in model_payload:
-        raise ModelingError("scorecard PMML export requires a saved scorecard payload with model and woe_maps")
+    validate_scorecard_pmml_payload(model_payload, feature_list=feature_list)
     try:
         from sklearn.pipeline import FeatureUnion
         from sklearn2pmml.decoration import Alias
@@ -255,8 +254,6 @@ def _scorecard_pmml_pipeline(
     woe_maps = model_payload["woe_maps"]
     transforms = []
     for feature in feature_list:
-        if feature not in woe_maps:
-            raise ModelingError(f"scorecard WOE map missing feature: {feature}")
         name = _safe_transform_name(feature)
         transforms.append((
             name,
@@ -271,6 +268,37 @@ def _scorecard_pmml_pipeline(
     pipeline.active_fields = list(feature_list)
     pipeline.target_fields = [target_name]
     return pipeline
+
+
+def validate_scorecard_pmml_payload(model_payload, *, feature_list: list[str]) -> None:
+    if not isinstance(model_payload, dict) or "model" not in model_payload or "woe_maps" not in model_payload:
+        raise ModelingError("scorecard PMML export requires a saved scorecard payload with model and woe_maps")
+    woe_maps = model_payload["woe_maps"]
+    if not isinstance(woe_maps, dict):
+        raise ModelingError("scorecard PMML export requires woe_maps to be a mapping")
+    for feature in feature_list:
+        if feature not in woe_maps:
+            raise ModelingError(f"scorecard WOE map missing feature: {feature}")
+        _validate_woe_map(feature, woe_maps[feature])
+
+
+def _validate_woe_map(feature: str, woe) -> None:
+    edges = list(_woe_get(woe, "edges") or ())
+    values = list(_woe_get(woe, "woe_by_bin") or ())
+    if len(values) != max(0, len(edges) - 1):
+        raise ModelingError(f"scorecard WOE map invalid for feature: {feature}")
+    for edge in edges:
+        try:
+            float(edge)
+        except (TypeError, ValueError) as exc:
+            raise ModelingError(f"scorecard WOE map invalid for feature: {feature}") from exc
+    for value in [*values, _woe_get(woe, "na_woe")]:
+        if value is None:
+            continue
+        try:
+            float(value)
+        except (TypeError, ValueError) as exc:
+            raise ModelingError(f"scorecard WOE map invalid for feature: {feature}") from exc
 
 
 def _woe_expression(feature: str, woe) -> str:
@@ -353,4 +381,11 @@ def _pmml_ignored_fields(artifact: ModelArtifact) -> set[str]:
     return {item for item in ignored if item}
 
 
-__all__ = ["export_pmml", "load_model", "persist_model_meta", "save_model", "write_artifact_file"]
+__all__ = [
+    "export_pmml",
+    "load_model",
+    "persist_model_meta",
+    "save_model",
+    "validate_scorecard_pmml_payload",
+    "write_artifact_file",
+]

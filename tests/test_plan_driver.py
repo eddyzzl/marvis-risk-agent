@@ -1009,6 +1009,81 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
     assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 20
 
 
+def test_driver_n_trials_only_adjust_requires_fresh_modeling_gate_token(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {
+        "target_type": "binary",
+        "recipes": ["lgb"],
+        "n_trials": 12,
+        "sample_weight_col": "",
+        "feature_cols": ["x1", "x2"],
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "n_trials": 12,
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "n_trials": 24,
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1", "x2"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="缺少待确认步骤校验"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="调整调参轮数",
+            run_seq=1,
+            adjust_params={"n_trials": 24},
+        )
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="调整调参轮数",
+            run_seq=1,
+            adjust_params={"n_trials": 24},
+            expected_step_id="old-gate",
+        )
+    assert [call[0] for call in runner.calls] == ["choose_modeling_spec", "screen_features"]
+
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="调整调参轮数",
+        run_seq=1,
+        adjust_params={"n_trials": 24},
+        expected_step_id="tune",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == [
+        "choose_modeling_spec",
+        "screen_features",
+        "choose_modeling_spec",
+        "screen_features",
+    ]
+    assert runner.calls[2][1]["n_trials"] == 24
+    assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 24
+
+
 def test_driver_sample_weight_adjust_rejects_unknown_candidate_without_reset(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

@@ -520,6 +520,71 @@ def test_post_training_action_skips_mlp_without_creating_validation_task(tmp_pat
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
+def test_post_training_action_skips_malformed_scorecard_without_pmml_failure(tmp_path):
+    settings, store, source_task, dataset, _lr_artifact = _seed_experiment(tmp_path)
+    frame = pd.DataFrame({
+        "x1_woe": [-1.0, -1.0, 1.0, 1.0, -1.0, 1.0],
+        "y": [0, 0, 1, 1, 0, 1],
+    })
+    model = LogisticRegression().fit(frame[["x1_woe"]], frame["y"])
+    artifact = save_model(
+        model,
+        "scorecard",
+        settings.tasks_dir / source_task.id / "modeling_artifacts",
+        feature_list=("x1", "x2"),
+        params={"base_score": 600},
+        woe_maps={
+            "x1": {
+                "edges": [-float("inf"), 0.5, float("inf")],
+                "woe_by_bin": [-1.0, 1.0],
+                "na_woe": 0.0,
+            }
+        },
+        scorecard_table=[
+            {"feature": "x1", "bin_label": "low", "points": 20.0, "monotonic_direction": "increasing"},
+        ],
+    )
+    experiment_id = store.create(source_task.id, "scorecard", _config(dataset.id))
+    store.attach_result(
+        experiment_id,
+        TrainResult(
+            artifact=artifact,
+            metrics=_metrics(),
+            feature_importance=(("x1", 0.8), ("x2", 0.2)),
+            experiment_id="",
+        ),
+    )
+    ctx = SimpleNamespace(
+        task_id=source_task.id,
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=0,
+    )
+
+    output = modeling_tools.tool_post_training_action(
+        {
+            "experiment_id": experiment_id,
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
+        },
+        ctx,
+    )
+
+    assert output["pmml_path"] == ""
+    assert output["validation_task_id"] == ""
+    assert output["challenger_task_id"] == ""
+    assert output["capabilities"]["pmml_supported"] is False
+    assert output["capabilities"]["handoff_supported"] is False
+    assert "scorecard WOE map missing feature: x2" in output["capabilities"]["reason"]
+    assert {item["status"] for item in output["actions"]} == {"skipped"}
+    assert all("scorecard WOE map missing feature: x2" in item["reason"] for item in output["actions"])
+    assert any("scorecard WOE map missing feature: x2" in item for item in output["model_card"]["limitations"])
+    assert Path(output["approval_package_path"]).exists()
+    assert Path(output["model_card_markdown_path"]).exists()
+    assert [task.id for task in TaskRepository(settings.db_path).list_tasks()] == [source_task.id]
+    assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
+
+
 def test_mark_validated_from_validation_task_updates_completed_experiment(tmp_path):
     settings, store, _, dataset, artifact = _seed_experiment(tmp_path)
     validation_task_id = handoff_to_validation(

@@ -1247,6 +1247,49 @@ def test_selection_policy_rejects_zero_monotone_constraints():
     assert decision["violations"][0]["code"] == "require_monotonicity"
 
 
+def test_selection_policy_rejects_missing_feature_and_psi_evidence():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    policy = {
+        "max_feature_count": 30,
+        "max_oot_psi": 0.15,
+        "allow_policy_override": False,
+        "override_reason": "",
+    }
+    decision = _selection_policy_decision(
+        {
+            "id": "missing-policy-evidence",
+            "recipe": "lgb",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        policy,
+        explicit=False,
+    )
+
+    assert decision["status"] == "blocked"
+    assert {item["code"] for item in decision["violations"]} == {
+        "max_feature_count_missing",
+        "max_oot_psi_missing",
+    }
+
+    overridden = _selection_policy_decision(
+        {
+            "id": "missing-policy-evidence",
+            "recipe": "lgb",
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            **policy,
+            "allow_policy_override": True,
+            "override_reason": "历史候选缺少早期证据，本轮人工复核后临时放行。",
+        },
+        explicit=True,
+    )
+
+    assert overridden["status"] == "overridden"
+    assert overridden["override_reason"].startswith("历史候选缺少早期证据")
+
+
 def test_selection_policy_string_false_is_not_enabled():
     from marvis.packs.modeling.tools import _normalize_selection_policy
 
