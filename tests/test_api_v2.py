@@ -24,6 +24,7 @@ from marvis.routers.materials import router as materials_router
 from marvis.routers.report_fields import router as report_fields_router
 from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
+from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
 
 
@@ -223,6 +224,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.reports.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.scans.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.stage_controls.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
 
     app = FastAPI()
@@ -239,6 +241,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     app.include_router(report_fields_router)
     app.include_router(reports_router)
     app.include_router(scans_router)
+    app.include_router(stage_controls_router)
     app.include_router(tasks_router)
     return TestClient(app)
 
@@ -401,6 +404,23 @@ def test_report_field_routes_are_served_from_dedicated_router():
     )
     assert routes[("/api/tasks/{task_id}/report-fields", ("PUT",))] == (
         "marvis.routers.report_fields"
+    )
+
+
+def test_stage_cancel_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in stage_controls_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/notebook/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
+    )
+    assert routes[("/api/tasks/{task_id}/metrics/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
+    )
+    assert routes[("/api/tasks/{task_id}/report/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
     )
 
 
@@ -1529,7 +1549,7 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1555,7 +1575,7 @@ def test_cancel_notebook_endpoint_rejects_non_running_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1580,7 +1600,7 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1611,7 +1631,7 @@ def test_cancel_metrics_endpoint_rejects_non_running_metrics_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1636,7 +1656,7 @@ def test_cancel_report_endpoint_requests_report_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1671,7 +1691,7 @@ def test_cancel_report_endpoint_rejects_without_active_report_job(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )

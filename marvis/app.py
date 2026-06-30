@@ -56,6 +56,7 @@ from marvis.routers.report_fields import router as report_fields_router
 from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
 from marvis.routers.skills import router as skills_router
+from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
@@ -202,6 +203,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(report_fields_router)
     app.include_router(scans_router)
     app.include_router(skills_router)
+    app.include_router(stage_controls_router)
     app.include_router(reports_router)
     app.include_router(tasks_router)
 
