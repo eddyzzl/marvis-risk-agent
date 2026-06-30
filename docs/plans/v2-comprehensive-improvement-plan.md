@@ -123,6 +123,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_plan.py tests/test_frontend_v2_plan_confirm.py tests/test_frontend_static_v2.py::test_plan_rail_retry_step_posts_edited_inputs tests/test_frontend_v2_api_state.py -q`: `31 passed` after adding schema-driven retry fields to both the modular V2 plan view and main plan rail while preserving JSON textarea fallback.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the schema-driven retry fields update.
   - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the latest modeling/AUTO/retry updates, covering the current real-browser Chromium smoke suite.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_metric_overview_uses_semantic_visual_tokens tests/test_frontend_static_v2.py::test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable -q`: `2 passed` after centralizing metric/report/KPI/ROC chart tokens.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `211 passed` after the visual-token contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the metric/report/KPI/ROC visual-token update.
 
 ## Executive Summary
 
@@ -174,7 +177,7 @@ Items confirmed still not complete and therefore still part of the plan:
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths. A first reusable `ArtifactUnitOfWork` now binds promoted files/directories to a later DB/audit callback and join result registration uses it; a full SQLite-connection-owning cross-resource `UnitOfWork` is still not complete across all tool execution.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
 - The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, light/dark startup paths, and a real app-shell modeling task with task list, plan rail, and delivery metadata. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons. `post_training_action` writes JSON evidence, human-readable Markdown approval packages, JSON/Markdown model cards, versioned monitoring-policy JSON/Markdown artifacts, prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. Calibrated models now explicitly state when PMML does not include the calibration layer while validation handoff notebooks load `calibration.joblib`. Scorecard/monotonicity policy now rejects partial scorecard direction evidence and all-zero tree constraints, and native LightGBM Booster artifacts now have G5 skip/model-card coverage. The remaining gap is real business-material smoke plus remaining native/export edge-case and broader domain-policy coverage.
-- The visual token system is partial; semantic task/surface/status tokens exist, but chart/KPI/modeling/report palettes still need consolidation.
+- The visual token system is partial; semantic task/surface/status tokens and metric/report/KPI/ROC chart tokens now exist, but modeling status and action-state palettes still need consolidation.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff/manual-review/approval risk flags and wide downstream resets. More fixtures are still useful for future extracted modeling setup panels and additional business-domain controls.
 
 Current merge stance: this branch is not "V2 complete" yet. It can become an intermediate PR only after full `scripts/check`, real business-material smoke, and a PR description that explicitly lists the remaining items above. Direct merge to `main` as a finished V2 release is still too risky.
@@ -190,7 +193,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
 | 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; reporting and some other paths still read independently. | Expand adapter to report/scoring paths where useful. |
 | 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash, parent refs, source dataset refs, artifact refs, tool version, manifest hash, seed, and renderer hint; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. `ArtifactUnitOfWork` now gives artifact promotion plus DB/audit callback rollback semantics for the join result path. | Expand the DB+file `UnitOfWork` to own SQLite connections for more multi-write tools and keep expanding domain-specific lineage where tools expose richer refs. |
 | 7 | Sample-weight gate | Mostly done | Backend detects/validates candidates; create dialog now distinguishes no weight vs explicit column; the extracted modeling setup panel renders detected candidates, diagnostics, target/split/tuning context, risk guidance, and posts structured setup adjusts that rerun `choose_modeling_spec` and downstream screening. Structural setup edits now require an override reason. | Expand guidance into model-card approval policy and monitoring defaults. |
-| 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`; modeling setup renderer/controller live in `static/js/v2/modeling_setup_panel.js`; task/welcome tones use semantic tokens. `app.js` still owns create dialog, rail, transcript, and several driver gate controllers. | Extract `CreateTaskDialog`, `PlanRailController`, `DriverConversationView`, `TaskWorkspace`, and remaining gate controllers. |
+| 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`; modeling setup renderer/controller live in `static/js/v2/modeling_setup_panel.js`; task/welcome tones plus metric/report/KPI/ROC chart palettes use semantic tokens. `app.js` still owns create dialog, rail, transcript, and several driver gate controllers. | Extract `CreateTaskDialog`, `PlanRailController`, `DriverConversationView`, `TaskWorkspace`, and remaining gate controllers. |
 | 9 | PMML manifest contract | Done | Manifest now advertises `lr/lgb/xgb/scorecard`, matching current PMML-supported list. | Keep regression test. |
 | 10 | CI gate | Done | `.github/workflows/ci.yml` and `scripts/check` exist; `docs/versioning.md` references the local gate. | Keep full CI green after remaining refactors. |
 
@@ -422,12 +425,12 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Remaining: real business-material smoke plus remaining native/export and broader domain-policy edge-case coverage.
 
 3. Visual tokens are partial, not a system.
-   - Current state: semantic task tones, surface/border/status tokens, and welcome/task icon palettes are centralized. KPI/ROC/modeling report areas still contain local palette constants.
+   - Current state: semantic task tones, surface/border/status tokens, welcome/task icon palettes, metric cards, report section tones, KPI cards, PSI bands, and ROC chart palettes are centralized. Modeling status and action-state areas still contain local palette constants.
    - Fix:
      - Done for task types and core surface/status tokens.
-     - Create semantic tokens for metric cards, charts, model status, and action states.
-     - Replace hard-coded local hex colors in welcome/modeling/metric/chart surfaces.
-     - Add dark/light parity checks.
+     - Done for metric cards, report section tones, KPI cards, PSI bands, ROC chart lines/axis/grid/legend, and dark/light static parity checks.
+     - Create semantic tokens for model status and action states.
+     - Replace remaining hard-coded local hex colors in modeling/action surfaces.
 
 4. UX should communicate business readiness, not just execution progress.
    - Fix:
@@ -584,7 +587,7 @@ Tasks:
 - Extract `DriverConversationView`.
 - Add `TaskWorkspace`.
 - Add `ModelingSetupPanel` and model comparison/post-training panels.
-- Partial: implement semantic task/surface/status tokens and extract theme controller.
+- Mostly done: implement semantic task/surface/status plus metric/report/chart tokens and extract theme controller; model/action-state tokens remain.
 - Add screen selector controls for sliders, `top_k`, filters, reset, and override reasons.
 
 Acceptance:

@@ -4366,22 +4366,111 @@ def test_metric_tables_use_tabular_right_aligned_numeric_cells():
     assert 'return { cls: "cell-number"' in app_js
 
 
+def test_metric_overview_uses_semantic_visual_tokens():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    metric_section = styles_css[styles_css.index("/* ====== Metric overview redesign ====== */") :]
+
+    required_tokens = [
+        "--report-tone-cool-blue",
+        "--report-tone-cool-blue-soft",
+        "--report-tone-warm-orange",
+        "--report-tone-warm-orange-soft",
+        "--report-tone-deep-purple",
+        "--report-tone-deep-purple-soft",
+        "--report-tone-warning-red",
+        "--report-tone-warning-red-soft",
+        "--report-tone-heatmap",
+        "--report-tone-heatmap-soft",
+        "--metric-border",
+        "--metric-surface",
+        "--metric-surface-soft",
+        "--metric-control-surface",
+        "--metric-text",
+        "--metric-text-strong",
+        "--metric-text-muted",
+        "--metric-databar-accent",
+        "--metric-psi-stable",
+        "--metric-psi-warn",
+        "--metric-psi-critical",
+        "--chart-axis",
+        "--chart-grid",
+        "--chart-muted",
+        "--chart-roc-tpr",
+        "--chart-roc-baseline",
+        "--chart-roc-ks",
+    ]
+    for token in required_tokens:
+        assert token in root_vars
+        assert token in dark_vars
+
+    assert "--accent: var(--report-tone-cool-blue)" in _css_rule(styles_css, ".metric-table-section")
+    assert "--accent-soft: var(--report-tone-warm-orange-soft)" in _css_rule(
+        styles_css,
+        '.metric-table-section[data-theme="warm-orange"]',
+    )
+    assert "background: var(--metric-control-surface)" in metric_section
+    assert "stroke: var(--chart-roc-ks)" in metric_section
+    for legacy_color in [
+        "#3A6EA5",
+        "#E4ECF6",
+        "#0EA5E9",
+        "#16A34A",
+        "#DC2626",
+        "#3B82F6",
+        "#F3F4F6",
+        "#E5E7EB",
+        "#1F2937",
+        "#6B7280",
+    ]:
+        assert legacy_color not in metric_section
+    assert "#0EA5E9" not in app_js
+    assert 'var(--metric-databar-accent)' in app_js
+
+
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
-    for selector in [
-        'body[data-theme="dark"] .metric-table-section',
-        'body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="warning-red"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="heatmap"]',
+    for selector, accent_token, soft_token in [
+        (
+            'body[data-theme="dark"] .metric-table-section',
+            "--report-tone-cool-blue",
+            "--report-tone-cool-blue-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"]',
+            "--report-tone-cool-blue",
+            "--report-tone-cool-blue-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"]',
+            "--report-tone-warm-orange",
+            "--report-tone-warm-orange-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"]',
+            "--report-tone-deep-purple",
+            "--report-tone-deep-purple-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="warning-red"]',
+            "--report-tone-warning-red",
+            "--report-tone-warning-red-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="heatmap"]',
+            "--report-tone-heatmap",
+            "--report-tone-heatmap-soft",
+        ),
     ]:
         rule_vars = _css_vars(_css_rule(styles_css, selector))
-        assert "--accent-soft" in rule_vars
-        assert _contrast_ratio(rule_vars["--accent-soft"], dark_vars["--surface"]) >= 1.12
+        assert rule_vars["--accent"] == f"var({accent_token})"
+        assert rule_vars["--accent-soft"] == f"var({soft_token})"
+        assert _contrast_ratio(dark_vars[soft_token], dark_vars["--surface"]) >= 1.12
 
     hover_rule = _css_rule(
         styles_css,
