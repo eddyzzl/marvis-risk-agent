@@ -19,6 +19,7 @@ from marvis.domain import (
 )
 from marvis.execution_environment import ExecutionEnvironmentOption
 from marvis.routers.branding import router as branding_router
+from marvis.routers.materials import router as materials_router
 from marvis.routers.tasks import router as tasks_router
 
 
@@ -225,6 +226,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     )
     app.state.settings.tasks_dir.mkdir()
     app.include_router(router)
+    app.include_router(materials_router)
     app.include_router(tasks_router)
     return TestClient(app)
 
@@ -325,6 +327,15 @@ def test_material_upload_rejects_paths_outside_upload_directory(
 
     assert response.status_code == 422
     assert "invalid upload path" in response.json()["detail"]
+
+
+def test_material_upload_route_is_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in materials_router.routes
+    }
+
+    assert routes[("/api/material-uploads", ("POST",))] == "marvis.routers.materials"
 
 
 def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):
@@ -2307,7 +2318,7 @@ def test_delete_task_keeps_record_deleted_when_directory_cleanup_fails(
     def fail_rmtree(path):
         raise PermissionError(f"locked: {path}")
 
-    monkeypatch.setattr("marvis.api.shutil.rmtree", fail_rmtree)
+    monkeypatch.setattr("marvis.routers.tasks.shutil.rmtree", fail_rmtree)
 
     response = client.delete(f"/api/tasks/{task_id}")
 
