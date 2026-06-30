@@ -17,6 +17,7 @@
   --option-selected: #d4d4da;
   --option-selected-border: #d4d4da;
   --option-focus-ring: rgba(84, 84, 92, 0.28);
+  --focus-ring: rgba(0, 113, 227, 0.28);
   --success: #1f7a3f;
   --success-strong: #166534;
   --success-soft: #eaf7ee;
@@ -89,6 +90,8 @@
   --brand-primary-hover: #3b3b42;
   --brand-icon-color: color-mix(in srgb, var(--brand-primary) 42%, var(--text));
   --brand-icon-ring: color-mix(in srgb, var(--brand-primary) 18%, transparent);
+  --action-on-solid: #ffffff;
+  --button-disabled-bg: #ededf0;
   --button-primary-bg: var(--brand-primary);
   --button-primary-bg-hover: var(--brand-primary-hover);
   --button-primary-bg-active: color-mix(in srgb, var(--brand-primary) 82%, #000000);
@@ -101,6 +104,24 @@
   --button-outline-text: var(--brand-primary);
   --button-outline-text-hover: var(--brand-primary-hover);
   --button-outline-bg-hover: color-mix(in srgb, var(--brand-primary) 7%, transparent);
+  --download-word-bg: #2b579a;
+  --download-word-bg-hover: #244a85;
+  --download-word-border: var(--download-word-bg);
+  --download-word-border-hover: var(--download-word-bg-hover);
+  --download-excel-bg: #217346;
+  --download-excel-bg-hover: #185c37;
+  --download-excel-border: var(--download-excel-bg);
+  --download-excel-border-hover: var(--download-excel-bg-hover);
+  --action-danger-bg-hover: #9f1713;
+  --action-danger-border-hover: var(--action-danger-bg-hover);
+  --agent-composer-chip-bg-hover: color-mix(in srgb, var(--surface) 86%, var(--text) 14%);
+  --agent-send-stop-bg: #1d1f23;
+  --agent-send-stop-bg-hover: color-mix(in srgb, var(--danger) 82%, var(--text) 18%);
+  --agent-send-stop-shadow: 0 3px 10px rgba(29, 31, 35, 0.24);
+  --agent-user-message-bg: linear-gradient(180deg, #f2f3f5, #e9ebef);
+  --agent-user-message-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.52);
   --tone-feature-analysis: #3d6fd1;
   --tone-data-join: #1aa595;
   --tone-modeling: #745fd6;
@@ -172,6 +193,7 @@ body[data-theme="dark"] {
   --option-selected: #525258;
   --option-selected-border: #525258;
   --option-focus-ring: rgba(242, 242, 242, 0.18);
+  --focus-ring: rgba(10, 132, 255, 0.28);
   --success: #63d983;
   --success-strong: #8ee6a6;
   --success-soft: #1f3b2a;
@@ -209,6 +231,7 @@ body[data-theme="dark"] {
     0 1px 1px rgba(0, 0, 0, 0.20),
     0 3px 6px rgba(0, 0, 0, 0.16),
     0 6px 10px rgba(0, 0, 0, 0.10);
+  --button-disabled-bg: #2b2c31;
   --button-primary-bg: #525258;
   --button-primary-bg-hover: #5d5d64;
   --button-primary-bg-active: #47474d;
@@ -221,6 +244,14 @@ body[data-theme="dark"] {
   --button-outline-text: #96999f;
   --button-outline-text-hover: #a2a5ab;
   --button-outline-bg-hover: color-mix(in srgb, #96999f 12%, transparent);
+  --agent-composer-chip-bg-hover: color-mix(in srgb, #ffffff 8%, transparent);
+  --agent-send-stop-bg: #1d1f23;
+  --agent-send-stop-bg-hover: #111318;
+  --agent-send-stop-shadow: 0 3px 10px rgba(29, 31, 35, 0.30);
+  --agent-user-message-bg: linear-gradient(180deg, #3a3c40, #303236);
+  --agent-user-message-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --tone-feature-analysis: #6b93e6;
   --tone-data-join: #3fc7b4;
   --tone-modeling: #9c8bea;
@@ -463,13 +494,13 @@ body[data-theme="dark"] .validation-workspace {
 input:focus-visible,
 textarea:focus-visible,
 summary:focus-visible {
-  outline: 3px solid rgba(0, 113, 227, 0.28);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
 .material-source-tab:focus-visible,
 .material-upload-dropzone:focus-visible {
-  outline: 3px solid rgba(0, 113, 227, 0.28);
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -487,7 +518,7 @@ select.suppress-pointer-focus-ring:focus-visible {
 
 .button:disabled {
   color: var(--text-muted);
-  background: #ededf0;
+  background: var(--button-disabled-bg);
   border-color: var(--border);
   box-shadow: none;
   cursor: not-allowed;
@@ -542,10 +573,6 @@ body[data-theme="dark"] .button.secondary:focus-visible:not(:disabled) {
   padding: 6px 12px;
   font-size: 13px;
   font-weight: 600;
-}
-
-body[data-theme="dark"] .button:disabled {
-  background: #2b2c31;
 }
 
 .button.compact {
@@ -4003,7 +4030,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  color: #fff;
+  color: var(--action-on-solid);
 }
 
 .check-icon.pending {
@@ -4123,46 +4150,46 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 }
 
 .step-action-button.word {
-  background: #2b579a;
-  border-color: #2b579a;
-  color: #fff;
+  background: var(--download-word-bg);
+  border-color: var(--download-word-border);
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow);
 }
 
 .step-action-button.word:hover:not(:disabled),
 .step-action-button.word:focus-visible:not(:disabled) {
-  background: #244a85;
-  border-color: #244a85;
-  color: #fff;
+  background: var(--download-word-bg-hover);
+  border-color: var(--download-word-border-hover);
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow-hover);
 }
 
 .step-action-button.excel {
-  background: #217346;
-  border-color: #217346;
-  color: #fff;
+  background: var(--download-excel-bg);
+  border-color: var(--download-excel-border);
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow);
 }
 
 .step-action-button.excel:hover:not(:disabled),
 .step-action-button.excel:focus-visible:not(:disabled) {
-  background: #185c37;
-  border-color: #185c37;
-  color: #fff;
+  background: var(--download-excel-bg-hover);
+  border-color: var(--download-excel-border-hover);
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow-hover);
 }
 
 .step-action-button.danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow);
 }
 
 .step-action-button.danger:hover {
-  background: #9f1713;
-  border-color: #9f1713;
-  color: #fff;
+  background: var(--action-danger-bg-hover);
+  border-color: var(--action-danger-border-hover);
+  color: var(--action-on-solid);
   box-shadow: var(--button-solid-shadow-hover);
 }
 
@@ -5572,10 +5599,8 @@ dialog.draft-tools-dialog,
   padding: 11px 15px;
   border-radius: var(--radius);
   color: var(--text);
-  background: linear-gradient(180deg, #f2f3f5, #e9ebef);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.52);
+  background: var(--agent-user-message-bg);
+  box-shadow: var(--agent-user-message-shadow);
   font-size: 14px;
   line-height: 1.58;
 }
@@ -6206,8 +6231,8 @@ body[data-theme="dark"] .agent-composer-effort:hover select {
 }
 
 .agent-send[data-agent-send-state="stop"] {
-  background: #1d1f23;
-  box-shadow: 0 3px 10px rgba(29, 31, 35, 0.24);
+  background: var(--agent-send-stop-bg);
+  box-shadow: var(--agent-send-stop-shadow);
 }
 
 .agent-send[data-agent-send-state="stop"] .agent-send-icon-send {
@@ -6229,7 +6254,7 @@ body[data-theme="dark"] .agent-composer-effort:hover select {
 }
 
 .agent-send[data-agent-send-state="stop"]:hover:not(:disabled) {
-  background: #111318;
+  background: var(--agent-send-stop-bg-hover);
 }
 
 .agent-send:active:not(:disabled) {
@@ -6261,24 +6286,22 @@ body[data-theme="dark"] .agent-send:active:not(:disabled) {
 }
 
 body[data-theme="dark"] .agent-send[data-agent-send-state="stop"] {
-  background: #1d1f23;
-  box-shadow: 0 3px 10px rgba(29, 31, 35, 0.30);
+  background: var(--agent-send-stop-bg);
+  box-shadow: var(--agent-send-stop-shadow);
 }
 
 body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]:hover:not(:disabled) {
-  background: #111318;
+  background: var(--agent-send-stop-bg-hover);
 }
 
 body[data-theme="dark"] .agent-composer-chip:hover {
-  background: color-mix(in srgb, #ffffff 8%, transparent);
+  background: var(--agent-composer-chip-bg-hover);
 }
 
 body[data-theme="dark"] .agent-message.user .agent-message-content {
   color: var(--text);
-  background: linear-gradient(180deg, #3a3c40, #303236);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: var(--agent-user-message-bg);
+  box-shadow: var(--agent-user-message-shadow);
 }
 
 @media (max-width: 1180px) {

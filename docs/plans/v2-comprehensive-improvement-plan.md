@@ -128,6 +128,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_metric_overview_uses_semantic_visual_tokens tests/test_frontend_static_v2.py::test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable -q`: `2 passed` after centralizing metric/report/KPI/ROC chart tokens.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `211 passed` after the visual-token contract update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the metric/report/KPI/ROC visual-token update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `212 passed` after tokenizing generic download actions, send-stop composer controls, disabled/focus states, and user-message composer bubbles.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_modeling_panels_use_semantic_model_visual_tokens tests/test_frontend_screen_table.py::test_modeling_setup_weight_picker_renderer_and_branch_are_wired tests/test_frontend_screen_table.py::test_model_delivery_panel_renderer_and_branch_are_wired -q`: `3 passed` after centralizing modeling setup/delivery panel state tokens.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py::test_artifact_unit_of_work_commits_artifacts_after_db_context_succeeds tests/test_artifacts_transactional.py::test_artifact_unit_of_work_rolls_back_artifact_when_db_context_fails tests/test_data_repository_registry.py::test_dataset_repository_connection_scoped_join_result_rolls_back_with_transaction tests/test_data_repository_registry.py::test_join_engine_uses_connection_scoped_artifact_unit_of_work tests/test_data_repository_registry.py::test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fails -q`: `5 passed` after making join-result registration use a SQLite connection-scoped artifact unit of work.
 
@@ -181,7 +182,7 @@ Items confirmed still not complete and therefore still part of the plan:
 - DB plus filesystem writes are staged and recoverable for many high-risk artifact paths. `ArtifactUnitOfWork` now supports SQLite connection-scoped finalization and join result registration uses that boundary; a full repository-wide `UnitOfWork` is still not complete across all tool execution.
 - `api.py`, `db.py`, and `app.js` remain large after the first splits. `turn_handlers.py`, `db_schema.py`, `theme.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
 - The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, light/dark startup paths, and a real app-shell modeling task with task list, plan rail, and delivery metadata. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, and override reasons. `post_training_action` writes JSON evidence, human-readable Markdown approval packages, JSON/Markdown model cards, versioned monitoring-policy JSON/Markdown artifacts, prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. Calibrated models now explicitly state when PMML does not include the calibration layer while validation handoff notebooks load `calibration.joblib`. Scorecard/monotonicity policy now rejects partial scorecard direction evidence and all-zero tree constraints, and native LightGBM Booster artifacts now have G5 skip/model-card coverage. The remaining gap is real business-material smoke plus remaining native/export edge-case and broader domain-policy coverage.
-- The visual token system is partial; semantic task/surface/status tokens, metric/report/KPI/ROC chart tokens, and modeling setup/delivery state tokens now exist. Remaining local palettes are mostly older generic action/composer/download and non-modeling utility surfaces.
+- The visual token system is mostly complete for the primary workspace surfaces: semantic task/surface/status tokens, metric/report/KPI/ROC chart tokens, modeling setup/delivery state tokens, generic download action tokens, send-stop composer tokens, disabled/focus tokens, and user-message bubble tokens now exist. Remaining local palettes are mostly older non-modeling utility/settings surfaces.
 - Broader AUTO safety fixtures now cover declared destructive/export/handoff/manual-review/approval risk flags and wide downstream resets. More fixtures are still useful for future extracted modeling setup panels and additional business-domain controls.
 
 Current merge stance: this branch is not "V2 complete" yet. It can become an intermediate PR only after full `scripts/check`, real business-material smoke, and a PR description that explicitly lists the remaining items above. Direct merge to `main` as a finished V2 release is still too risky.
@@ -429,12 +430,13 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Remaining: real business-material smoke plus remaining native/export and broader domain-policy edge-case coverage.
 
 3. Visual tokens are partial, not a system.
-   - Current state: semantic task tones, surface/border/status tokens, welcome/task icon palettes, metric cards, report section tones, KPI cards, PSI bands, ROC chart palettes, and modeling setup/delivery status tokens are centralized. Older generic action/composer/download and non-modeling utility areas still contain local palette constants.
+   - Current state: semantic task tones, surface/border/status tokens, welcome/task icon palettes, metric cards, report section tones, KPI cards, PSI bands, ROC chart palettes, modeling setup/delivery status tokens, generic download action tokens, send-stop composer tokens, disabled/focus tokens, and user-message bubble tokens are centralized. Older non-modeling utility/settings areas still contain local palette constants.
    - Fix:
      - Done for task types and core surface/status tokens.
      - Done for metric cards, report section tones, KPI cards, PSI bands, ROC chart lines/axis/grid/legend, and dark/light static parity checks.
      - Done for modeling setup/delivery panel surface, text, signal, readiness, warning, and error tokens.
-     - Replace remaining hard-coded local hex colors in generic action/composer/download and non-modeling utility surfaces.
+     - Done for generic download actions, send-stop composer controls, disabled/focus states, and user-message composer bubbles.
+     - Replace remaining hard-coded local hex colors in older non-modeling utility/settings surfaces.
 
 4. UX should communicate business readiness, not just execution progress.
    - Fix:
@@ -591,7 +593,7 @@ Tasks:
 - Extract `DriverConversationView`.
 - Add `TaskWorkspace`.
 - Add `ModelingSetupPanel` and model comparison/post-training panels.
-- Mostly done: implement semantic task/surface/status, metric/report/chart, and modeling setup/delivery state tokens, and extract theme controller; generic action/composer/download tokens remain.
+- Mostly done: implement semantic task/surface/status, metric/report/chart, modeling setup/delivery state tokens, generic download/composer action tokens, and extract theme controller; older non-modeling utility/settings tokens remain.
 - Add screen selector controls for sliders, `top_k`, filters, reset, and override reasons.
 
 Acceptance:

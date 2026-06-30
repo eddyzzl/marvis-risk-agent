@@ -559,33 +559,33 @@ def test_completed_report_actions_render_below_step_copy_with_office_colors():
     word_start = styles_css.index(".step-action-button.word")
     word_end = styles_css.index("}", word_start)
     word_rule = styles_css[word_start:word_end]
-    assert "background: #2b579a;" in word_rule
-    assert "border-color: #2b579a;" in word_rule
-    assert "color: #fff;" in word_rule
+    assert "background: var(--download-word-bg);" in word_rule
+    assert "border-color: var(--download-word-border);" in word_rule
+    assert "color: var(--action-on-solid);" in word_rule
     assert "box-shadow: var(--button-solid-shadow)" in word_rule
     assert "var(--brand-primary)" not in word_rule
 
     word_hover_start = styles_css.index(".step-action-button.word:hover")
     word_hover_end = styles_css.index("}", word_hover_start)
     word_hover_rule = styles_css[word_hover_start:word_hover_end]
-    assert "background: #244a85;" in word_hover_rule
-    assert "border-color: #244a85;" in word_hover_rule
+    assert "background: var(--download-word-bg-hover);" in word_hover_rule
+    assert "border-color: var(--download-word-border-hover);" in word_hover_rule
     assert "box-shadow: var(--button-solid-shadow-hover)" in word_hover_rule
 
     excel_start = styles_css.index(".step-action-button.excel")
     excel_end = styles_css.index("}", excel_start)
     excel_rule = styles_css[excel_start:excel_end]
-    assert "background: #217346;" in excel_rule
-    assert "border-color: #217346;" in excel_rule
-    assert "color: #fff;" in excel_rule
+    assert "background: var(--download-excel-bg);" in excel_rule
+    assert "border-color: var(--download-excel-border);" in excel_rule
+    assert "color: var(--action-on-solid);" in excel_rule
     assert "box-shadow: var(--button-solid-shadow)" in excel_rule
     assert "var(--brand-primary)" not in excel_rule
 
     excel_hover_start = styles_css.index(".step-action-button.excel:hover")
     excel_hover_end = styles_css.index("}", excel_hover_start)
     excel_hover_rule = styles_css[excel_hover_start:excel_hover_end]
-    assert "background: #185c37;" in excel_hover_rule
-    assert "border-color: #185c37;" in excel_hover_rule
+    assert "background: var(--download-excel-bg-hover);" in excel_hover_rule
+    assert "border-color: var(--download-excel-border-hover);" in excel_hover_rule
     assert "box-shadow: var(--button-solid-shadow-hover)" in excel_hover_rule
 
 
@@ -625,6 +625,48 @@ def test_report_download_readiness_requires_generated_report_flag():
         "busyReport": False,
         "readyReport": True,
     }
+
+
+def test_generic_actions_and_composer_use_semantic_visual_tokens():
+    styles_css = _read_static("styles.css")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    for token in [
+        "--focus-ring",
+        "--button-disabled-bg",
+        "--action-on-solid",
+        "--download-word-bg",
+        "--download-word-bg-hover",
+        "--download-excel-bg",
+        "--download-excel-bg-hover",
+        "--agent-send-stop-bg",
+        "--agent-send-stop-bg-hover",
+        "--agent-send-stop-shadow",
+        "--agent-user-message-bg",
+        "--agent-user-message-shadow",
+    ]:
+        assert token in root_vars
+
+    for token in [
+        "--focus-ring",
+        "--button-disabled-bg",
+        "--agent-composer-chip-bg-hover",
+        "--agent-send-stop-bg",
+        "--agent-send-stop-bg-hover",
+        "--agent-send-stop-shadow",
+        "--agent-user-message-bg",
+        "--agent-user-message-shadow",
+    ]:
+        assert token in dark_vars
+
+    disabled_rule = _css_rule(styles_css, ".button:disabled")
+    assert "background: var(--button-disabled-bg);" in disabled_rule
+
+    focus_start = styles_css.index(".button:focus-visible,")
+    focus_end = styles_css.index("}", focus_start)
+    focus_rule = styles_css[focus_start:focus_end]
+    assert "outline: 3px solid var(--focus-ring);" in focus_rule
 
 
 def test_stage_actions_capture_task_id_before_polling():
@@ -5797,9 +5839,8 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     user_end = styles_css.index("}", user_start)
     user_rule = styles_css[user_start:user_end]
     assert "max-width: min(300px, 86%)" in user_rule
-    assert "background: linear-gradient(180deg, #f2f3f5, #e9ebef)" in user_rule
-    assert "0 1px 2px rgba(0, 0, 0, 0.05)" in user_rule
-    assert "inset 0 1px 0 rgba(255, 255, 255, 0.52)" in user_rule
+    assert "background: var(--agent-user-message-bg)" in user_rule
+    assert "box-shadow: var(--agent-user-message-shadow)" in user_rule
     assert "font-size: 14px" in user_rule
     assert "line-height: 1.58" in user_rule
     assert "border:" not in user_rule
@@ -5812,9 +5853,8 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     dark_user_start = styles_css.index('body[data-theme="dark"] .agent-message.user .agent-message-content')
     dark_user_end = styles_css.index("}", dark_user_start)
     dark_user_rule = styles_css[dark_user_start:dark_user_end]
-    assert "background: linear-gradient(180deg, #3a3c40, #303236)" in dark_user_rule
-    assert "0 1px 2px rgba(0, 0, 0, 0.22)" in dark_user_rule
-    assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_user_rule
+    assert "background: var(--agent-user-message-bg)" in dark_user_rule
+    assert "box-shadow: var(--agent-user-message-shadow)" in dark_user_rule
     assert "border" not in dark_user_rule
     assert "backdrop-filter" not in dark_user_rule
     assert "rgba(255, 255, 255, 0.12)" not in dark_user_rule
@@ -6632,13 +6672,15 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     assert ".agent-send-icon-stop" in styles_css
     assert ".agent-send[data-agent-send-state=\"stop\"] svg" in styles_css
     stop_rule = _css_rule(styles_css, '.agent-send[data-agent-send-state="stop"]')
-    assert "background: #1d1f23" in stop_rule
+    assert "background: var(--agent-send-stop-bg)" in stop_rule
+    assert "box-shadow: var(--agent-send-stop-shadow)" in stop_rule
     dark_stop_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]')
-    assert "background: #1d1f23" in dark_stop_rule
+    assert "background: var(--agent-send-stop-bg)" in dark_stop_rule
+    assert "box-shadow: var(--agent-send-stop-shadow)" in dark_stop_rule
     dark_stop_hover_rule = _css_rule(
         styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]:hover:not(:disabled)'
     )
-    assert "background: #111318" in dark_stop_hover_rule
+    assert "background: var(--agent-send-stop-bg-hover)" in dark_stop_hover_rule
 
 
 def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
