@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from dataclasses import asdict
 import json
 import logging
 from pathlib import Path
@@ -288,33 +287,6 @@ def get_report_fields(task_id: str, request: Request) -> dict:
         metric_values=_metric_values_from_payload(payload),
         metric_table_sections=_metric_table_sections_from_payload(payload),
     )
-
-
-@router.get("/tasks/{task_id}/evidence")
-def get_task_evidence(task_id: str, request: Request) -> dict:
-    repo = _repo(request)
-    _get_task_or_404(repo, task_id)
-    settings = request.app.state.settings
-    task_dir = settings.tasks_dir / task_id
-    notebook_steps = _read_json(task_dir / "execution" / "notebook_steps.json")
-    scan_result = _read_json(task_dir / "execution" / "scan_result.json")
-    contract = _read_json(task_dir / "execution" / "runtime_contract.json")
-    notebook_reproducibility = _read_json(task_dir / "outputs" / "reproducibility_result.json")
-    results = _read_json(task_dir / "outputs" / "validation_results.json")
-    environment = load_execution_environment(settings.workspace)
-    if scan_result and notebook_steps:
-        scan_result = {
-            **scan_result,
-            "notebook_steps": notebook_steps.get("steps", []),
-        }
-    return {
-        "scan": scan_result,
-        "notebook_steps": (notebook_steps or {}).get("steps", []),
-        "notebook_cells": (notebook_steps or {}).get("cells", []),
-        "contract": contract or {},
-        "reproducibility": (results or {}).get("reproducibility", {}) or notebook_reproducibility or {},
-        "execution_environment": asdict(environment),
-    }
 
 
 @router.get("/tasks/{task_id}/agent/messages")
