@@ -108,8 +108,26 @@ marvis update
 ```text
 git fetch origin
 git pull --ff-only origin main
-python -m pip install -e .
+python -m pip install -e . --no-deps
 ```
+
+默认升级只刷新 MARVIS 自身的 editable 安装，不重新解析整个 Python 环境依赖，避免 Windows/Anaconda `base` 中的 Spyder、Streamlit、conda-repo 等包被 pip 连带升级或降级。
+
+如果从 Anaconda/conda `base` 中运行 `marvis update`，命令会自动创建或复用专用 `marvis` 环境，并把安装写到该环境：
+
+```text
+conda create -y -n marvis python=3.12 pip
+conda run -n marvis python -m pip install -e .
+```
+
+更新完成后使用：
+
+```bash
+conda activate marvis
+marvis
+```
+
+可用 `marvis update --env-name <name>` 指定其他专用环境名。如果新版本确实新增运行时依赖，请在专用 MARVIS 环境中运行 `marvis update --with-deps`，不要在 `base` 里刷新依赖树。
 
 如果已跟踪文件有未提交改动，升级会被拒绝。先 commit、stash 或备份这些 tracked 改动后再重新运行。未跟踪的本地文件允许保留，除非 Git 判断本次 pull 会覆盖它们。
 
@@ -117,7 +135,16 @@ python -m pip install -e .
 
 ```bash
 git pull --ff-only origin main
-python -m pip install -e .
+python -m pip install -e . --no-deps
+```
+
+如果旧版本安装在 Anaconda `base`，第一次手动升级也应直接建专用环境：
+
+```bash
+git pull --ff-only origin main
+conda create -y -n marvis python=3.12 pip
+conda run -n marvis python -m pip install -e .
+conda activate marvis
 ```
 
 完成后，后续升级可使用 `marvis update`。

@@ -160,11 +160,20 @@ marvis serve --profile v1-1 --port 8017 --workspace ./custom-workspace
 marvis update
 ```
 
-该命令会执行 `git fetch origin`、`git pull --ff-only origin main`，然后刷新 editable 安装：
+该命令会执行 `git fetch origin`、`git pull --ff-only origin main`，然后刷新 MARVIS 的 editable 安装，但不重新解析整个 Python 环境依赖：
 
 ```bash
-python -m pip install -e .
+python -m pip install -e . --no-deps
 ```
+
+如果在 Anaconda/conda `base` 里运行 `marvis update`，MARVIS 会自动创建或复用专用的 `marvis` 环境，并把安装写入该环境，不修改 `base`。更新完成后先激活专用环境再启动：
+
+```bash
+conda activate marvis
+marvis
+```
+
+这个默认行为是为了兼容 Anaconda 和 Windows 机器上同一环境内其他包的严格依赖约束。可以用 `--env-name <name>` 指定其他专用 conda 环境。如果未来版本新增运行时依赖，请在专门的 MARVIS 环境里运行 `marvis update --with-deps`，不要在 Anaconda `base` 环境里刷新依赖树。
 
 如果已跟踪文件有未提交改动，`marvis update` 会拒绝继续。请先 `git commit`、`git stash` 或备份这些 tracked 改动后再升级。未跟踪的本地文件允许保留，除非 Git 判断本次 pull 会覆盖它们。
 
@@ -172,7 +181,16 @@ python -m pip install -e .
 
 ```bash
 git pull --ff-only origin main
-python -m pip install -e .
+python -m pip install -e . --no-deps
+```
+
+如果当前在 Anaconda `base`，第一次手动升级也应直接建专用环境：
+
+```bash
+git pull --ff-only origin main
+conda create -y -n marvis python=3.12 pip
+conda run -n marvis python -m pip install -e .
+conda activate marvis
 ```
 
 完成后，后续升级就可以使用 `marvis update`。
