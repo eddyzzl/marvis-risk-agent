@@ -15,6 +15,16 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
+def test_agent_memory_routes_live_outside_api_module():
+    from marvis.routers import agent_memory
+
+    assert any(route.path == "/api/agent-memory" for route in agent_memory.router.routes)
+    assert all(
+        route.endpoint.__module__ == "marvis.routers.agent_memory"
+        for route in agent_memory.router.routes
+    )
+
+
 def _model_payload(**overrides):
     payload = {
         "ks": 30,

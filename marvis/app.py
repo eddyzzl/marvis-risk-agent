@@ -43,6 +43,7 @@ from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
 from marvis.recovery import reclaim_stale_running_tasks
+from marvis.routers.agent_memory import router as agent_memory_router
 from marvis.routers.drafts import router as drafts_router
 from marvis.routers.plans import router as plans_router
 from marvis.routers.plugins import router as plugins_router
@@ -180,6 +181,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         return await call_next(request)
 
     app.include_router(api_router)
+    app.include_router(agent_memory_router)
     app.include_router(plugins_router)
     app.include_router(drafts_router)
     app.include_router(plans_router)
