@@ -1440,6 +1440,9 @@ class DatasetRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
+    def transaction(self):
+        return connect(self.db_path)
+
     def create_dataset(self, dataset: Dataset) -> None:
         with connect(self.db_path) as conn:
             _insert_dataset_row(conn, dataset)
@@ -1559,9 +1562,24 @@ class DatasetRepository:
         audit: dict,
     ) -> None:
         with connect(self.db_path) as conn:
-            _insert_dataset_row(conn, dataset)
-            _set_join_plan_executed_row(conn, plan_id, dataset.id)
-            _write_audit_row(conn, **audit)
+            self.record_join_result_with_audit_on_connection(
+                conn,
+                plan_id,
+                dataset,
+                audit=audit,
+            )
+
+    def record_join_result_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        plan_id: str,
+        dataset: Dataset,
+        *,
+        audit: dict,
+    ) -> None:
+        _insert_dataset_row(conn, dataset)
+        _set_join_plan_executed_row(conn, plan_id, dataset.id)
+        _write_audit_row(conn, **audit)
 
     def write_audit(self, **kwargs) -> None:
         with connect(self.db_path) as conn:

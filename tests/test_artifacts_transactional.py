@@ -1,3 +1,5 @@
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -162,6 +164,67 @@ def test_artifact_unit_of_work_commits_after_callback_succeeds(tmp_path: Path):
     assert (tmp_path / "artifacts" / "joined.parquet").read_bytes() == b"joined"
     artifact.rollback()
     assert (tmp_path / "artifacts" / "joined.parquet").exists()
+
+
+def test_artifact_unit_of_work_commits_artifacts_after_db_context_succeeds(tmp_path: Path):
+    db_path = tmp_path / "app.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY)")
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(tmp_path / "artifacts", "joined.parquet")
+    artifact.path.write_bytes(b"joined")
+
+    def insert_event(conn):
+        conn.execute("INSERT INTO events(id) VALUES ('evt-1')")
+        return "ok"
+
+    result = uow.finalize_with_connection(
+        lambda: sqlite3.connect(db_path),
+        insert_event,
+    )
+
+    assert result == "ok"
+    assert (tmp_path / "artifacts" / "joined.parquet").read_bytes() == b"joined"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT id FROM events").fetchall() == [("evt-1",)]
+    artifact.rollback()
+    assert (tmp_path / "artifacts" / "joined.parquet").exists()
+
+
+def test_artifact_unit_of_work_rolls_back_artifact_when_db_context_fails(tmp_path: Path):
+    db_path = tmp_path / "app.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE events(id TEXT PRIMARY KEY)")
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    existing = root / "joined.parquet"
+    existing.write_bytes(b"old")
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(root, "joined.parquet")
+    artifact.path.write_bytes(b"new")
+
+    @contextmanager
+    def failing_commit():
+        conn = sqlite3.connect(db_path)
+        try:
+            yield conn
+            conn.rollback()
+            raise RuntimeError("commit failed")
+        finally:
+            conn.close()
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        uow.finalize_with_connection(
+            failing_commit,
+            lambda conn: conn.execute("INSERT INTO events(id) VALUES ('evt-1')"),
+        )
+
+    assert existing.read_bytes() == b"old"
+    assert not artifact.path.exists()
+    assert not artifact.backup_path.exists()
+    assert not (root / ".staging").exists()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT id FROM events").fetchall() == []
 
 
 def test_artifact_unit_of_work_rolls_back_promoted_file_when_callback_fails(tmp_path: Path):

@@ -404,10 +404,58 @@ class JoinEngine:
                 self._write_audit(**audit)
             return result
 
-        result = uow.finalize(register_result)
+        result = self._connection_scoped_join_result(
+            uow=uow,
+            final_artifact=final_artifact,
+            join_plan_id=join_plan_id,
+            audit_for=audit_for,
+            plan=plan,
+        )
+        if result is None:
+            result = uow.finalize(register_result)
         plan.status = "executed"
         plan.result_dataset_id = result.id
         return result
+
+    def _connection_scoped_join_result(
+        self,
+        *,
+        uow: ArtifactUnitOfWork,
+        final_artifact,
+        join_plan_id: str,
+        audit_for,
+        plan: JoinPlan,
+    ) -> Dataset | None:
+        transaction = getattr(self._repo, "transaction", None)
+        register_on_connection = getattr(
+            self._registry,
+            "register_join_result_with_audit_on_connection",
+            None,
+        )
+        record_on_connection = getattr(
+            self._repo,
+            "record_join_result_with_audit_on_connection",
+            None,
+        )
+        if not (
+            callable(transaction)
+            and callable(register_on_connection)
+            and callable(record_on_connection)
+        ):
+            return None
+
+        return uow.finalize_with_connection(
+            transaction,
+            lambda conn: register_on_connection(
+                conn,
+                final_artifact.final_path,
+                join_plan_id=join_plan_id,
+                audit_factory=audit_for,
+                task_id=plan.task_id,
+                role="derived",
+                anchor_target=plan.anchor_dataset_id,
+            ),
+        )
 
     @staticmethod
     def _rollback_artifacts(staged_artifacts) -> None:

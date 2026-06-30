@@ -1,9 +1,10 @@
 """Transactional file staging for artifact-producing tools.
 
-The database transaction remains owned by repositories. This helper narrows the
-file-side crash window: tools write into a hidden staging directory, then atomically
-promote the final artifact only after computation succeeds. Callers can roll back
-both staged and promoted files if the later DB/audit write fails.
+Tools write into a hidden staging directory, then atomically promote the final
+artifact only after computation succeeds. Callers can roll back both staged and
+promoted files if a later DB/audit write fails. When a repository exposes a
+connection factory, ``ArtifactUnitOfWork`` can also own that DB transaction so
+artifact promotion and DB commit share one boundary.
 """
 
 from __future__ import annotations
@@ -204,10 +205,11 @@ class TransactionalDirectoryStore:
 class ArtifactUnitOfWork:
     """Coordinate promoted artifact files/directories with a later DB/audit write.
 
-    This does not replace repository-owned SQLite transactions. It gives callers a
-    single boundary for the common tool pattern: write staged artifact(s), promote
-    them, run the DB/audit write, then either commit artifact backups or roll the
-    promoted artifacts back when the DB/audit write raises.
+    The plain ``finalize`` method supports older repository methods that own their
+    own transaction. ``finalize_with_connection`` is the preferred path for new
+    multi-resource writes: promote artifacts, run DB writes on a caller-provided
+    connection context, let that context commit, then commit artifact backups. If
+    the callback or DB commit raises, promoted artifacts are rolled back.
     """
 
     def __init__(self) -> None:
@@ -251,6 +253,17 @@ class ArtifactUnitOfWork:
         self.promote_all()
         try:
             result = callback()
+        except Exception:
+            self.rollback()
+            raise
+        self.commit()
+        return result
+
+    def finalize_with_connection(self, connection_factory, callback):
+        self.promote_all()
+        try:
+            with connection_factory() as conn:
+                result = callback(conn)
         except Exception:
             self.rollback()
             raise

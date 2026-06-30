@@ -346,6 +346,42 @@ def test_dataset_repository_rolls_back_join_result_dataset_when_audit_fails(
     assert repo.get_dataset(result.id) is None
 
 
+def test_dataset_repository_connection_scoped_join_result_rolls_back_with_transaction(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    plan = JoinPlan(
+        id="join-1",
+        task_id="task-1",
+        anchor_dataset_id="anchor-1",
+        joins=[_join_spec(confirmed=True)],
+        status="draft",
+    )
+    result = _dataset("derived-1", role="derived")
+    repo.create_join_plan(plan)
+
+    with pytest.raises(RuntimeError, match="later write failed"):
+        with repo.transaction() as conn:
+            repo.record_join_result_with_audit_on_connection(
+                conn,
+                plan.id,
+                result,
+                audit={
+                    "kind": "join.executed",
+                    "target_ref": plan.id,
+                    "actor": "system",
+                    "outcome": "succeeded",
+                    "detail": {"task_id": plan.task_id, "result_dataset_id": result.id},
+                },
+            )
+            raise RuntimeError("later write failed")
+
+    loaded = repo.load_join_plan(plan.id)
+    assert loaded.status == "draft"
+    assert loaded.result_dataset_id is None
+    assert repo.get_dataset(result.id) is None
+
+
 def test_dataset_registry_registers_csv_and_feather_as_profiled_parquet(tmp_path):
     db_path = tmp_path / "app.sqlite"
     datasets_root = tmp_path / "datasets"
@@ -416,6 +452,40 @@ def test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fail
     assert [dataset.id for dataset in registry.list_for_task("task-1")] == [anchor.id, feature.id]
     assert not list((datasets_root / "task-1" / "joins").glob("*.parquet"))
     assert not (datasets_root / "task-1" / "joins" / ".staging").exists()
+
+
+def test_join_engine_uses_connection_scoped_artifact_unit_of_work(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+    engine = JoinEngine(backend, ColumnAligner(backend), registry, repo)
+    anchor_csv = tmp_path / "anchor.csv"
+    feature_csv = tmp_path / "feature.csv"
+    anchor_csv.write_text("customer_id,bad_flag\nA,0\nB,1\n", encoding="utf-8")
+    feature_csv.write_text("customer_id,score\nA,10\nB,20\n", encoding="utf-8")
+    anchor = registry.register_from_upload("task-1", anchor_csv, role="sample")
+    feature = registry.register_from_upload("task-1", feature_csv, role="feature")
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+
+    def fail_old_registration_path(*args, **kwargs):
+        raise AssertionError("old join registration path used")
+
+    monkeypatch.setattr(repo, "record_join_result_with_audit", fail_old_registration_path)
+
+    result = engine.execute_join_plan(plan.id, out_dir=datasets_root / "task-1" / "joins")
+
+    loaded = repo.load_join_plan(plan.id)
+    assert loaded.status == "executed"
+    assert loaded.result_dataset_id == result.id
+    assert repo.get_dataset(result.id) == result
+    assert registry.resolve_path(result.id).exists()
 
 
 def test_dataset_registry_register_existing_copies_and_inherits_anchor_target(tmp_path):

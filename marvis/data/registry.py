@@ -131,6 +131,42 @@ class DatasetRegistry:
             raise
         return dataset
 
+    def register_join_result_with_audit_on_connection(
+        self,
+        conn,
+        parquet_path: Path,
+        *,
+        join_plan_id: str,
+        audit_factory: Callable[[Dataset], dict],
+        task_id: str,
+        role: str,
+        anchor_target: str | None = None,
+        seed: int = 0,
+    ) -> Dataset:
+        parquet_path = self._ensure_under_root(Path(parquet_path), task_id)
+        dataset = self._dataset_from_existing(
+            parquet_path,
+            task_id=task_id,
+            role=role,
+            anchor_target=anchor_target,
+            seed=seed,
+        )
+        audit = audit_factory(dataset)
+        record_on_connection = getattr(
+            self._repo,
+            "record_join_result_with_audit_on_connection",
+            None,
+        )
+        if not callable(record_on_connection):
+            raise DataBackendError("dataset repository does not support connection-scoped join result writes")
+        record_on_connection(
+            conn,
+            join_plan_id,
+            dataset,
+            audit=audit,
+        )
+        return dataset
+
     def get(self, dataset_id: str) -> Dataset:
         dataset = self._repo.get_dataset(dataset_id)
         if dataset is None:
