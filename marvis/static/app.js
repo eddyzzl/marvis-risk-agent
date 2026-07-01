@@ -26,6 +26,7 @@ import {
   renderMaterialUploadSelection,
 } from "./js/dialogs.js";
 import { installFormControlFocusRingGuard } from "./js/focus-ring.js";
+import { createLayoutResizeController } from "./js/layout-resize.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
@@ -253,10 +254,17 @@ const AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX = 2;
 const AGENT_USER_SCROLL_INPUT_WINDOW_MS = 250;
 let agentAutoScrollFollows = true;
 let lastUserScrollInputAt = 0;
-const SIDEBAR_WIDTH_MIN = 314;
-const SIDEBAR_WIDTH_MAX = 520;
-const PROGRESS_WIDTH_MIN = 314;
-const PROGRESS_WIDTH_MAX = 560;
+const layoutResizeController = createLayoutResizeController({
+  body: document.body,
+  clamp,
+  getComputedStyleFn: getComputedStyle,
+  root: document.documentElement,
+  storage: localStorage,
+  windowObj: window,
+});
+const startResizeDrag = layoutResizeController.startResizeDrag;
+const handleResizeKey = layoutResizeController.handleResizeKey;
+const restoreLayoutWidths = layoutResizeController.restoreLayoutWidths;
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
 const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
@@ -725,39 +733,6 @@ function closeWordPreviewDialog() {
   $("wordPreviewFrame").src = "about:blank";
 }
 
-function setCssNumber(name, value) {
-  document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
-}
-
-function saveLayoutWidths() {
-  try {
-    localStorage.setItem(
-      "marvis_layout",
-      JSON.stringify({
-        sidebar: parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"), 10),
-        progress: parseInt(getComputedStyle(document.documentElement).getPropertyValue("--progress-width"), 10),
-      })
-    );
-  } catch (_) {
-    // Layout persistence is optional in restricted notebook browsers.
-  }
-}
-
-function restoreLayoutWidths() {
-  try {
-    const stored = JSON.parse(localStorage.getItem("marvis_layout") || "{}");
-    if (stored.sidebar) {
-      setCssNumber(
-        "--sidebar-width",
-        clamp(stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
-      );
-    }
-    if (stored.progress) setCssNumber("--progress-width", clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-  } catch (_) {
-    // Keep CSS defaults when storage is unavailable or invalid.
-  }
-}
-
 function applySidebarCollapsed(collapsed) {
   const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();
   sidebarCollapsed = Boolean(collapsed);
@@ -832,50 +807,6 @@ function expandSidebarFromBrand(event) {
 function handleSidebarBrandKeydown(event) {
   if (!sidebarCollapsed || !["Enter", " "].includes(event.key)) return;
   expandSidebarFromBrand(event);
-}
-
-function startResizeDrag(side, event) {
-  event.preventDefault();
-  const rootStyle = getComputedStyle(document.documentElement);
-  const startX = event.clientX;
-  const startSidebar = parseInt(rootStyle.getPropertyValue("--sidebar-width"), 10);
-  const startProgress = parseInt(rootStyle.getPropertyValue("--progress-width"), 10);
-
-  function onPointerMove(moveEvent) {
-    const deltaX = moveEvent.clientX - startX;
-    if (side === "left") {
-      setCssNumber("--sidebar-width", clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX));
-    } else {
-      setCssNumber("--progress-width", clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-    }
-  }
-
-  function onPointerUp() {
-    document.body.classList.remove("is-resizing");
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
-    saveLayoutWidths();
-  }
-
-  document.body.classList.add("is-resizing");
-  window.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", onPointerUp);
-}
-
-function handleResizeKey(side, event) {
-  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
-  event.preventDefault();
-  const rootStyle = getComputedStyle(document.documentElement);
-  const step = event.shiftKey ? 32 : 12;
-  const direction = event.key === "ArrowRight" ? 1 : -1;
-  if (side === "left") {
-    const current = parseInt(rootStyle.getPropertyValue("--sidebar-width"), 10);
-    setCssNumber("--sidebar-width", clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX));
-  } else {
-    const current = parseInt(rootStyle.getPropertyValue("--progress-width"), 10);
-    setCssNumber("--progress-width", clamp(current - direction * step, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-  }
-  saveLayoutWidths();
 }
 
 function openTaskSearch() {

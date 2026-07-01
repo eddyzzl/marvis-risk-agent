@@ -404,6 +404,7 @@ def test_word_report_preview_dialog_uses_task_dialog_backdrop():
 def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    layout_resize_js = _read_static("js/layout-resize.js")
 
     title_start = styles_css.index(".step-title {")
     title_end = styles_css.index("}", title_start)
@@ -430,9 +431,10 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
     assert '<span class="step-copy">' in renderer
     assert '<div class="step-sub">' not in renderer
 
-    assert "const PROGRESS_WIDTH_MIN = 314;" in app_js
-    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
-    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
+    assert "export const PROGRESS_WIDTH_MIN = 314;" in layout_resize_js
+    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
+    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
+    assert 'from "./js/layout-resize.js"' in app_js
 
 
 def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
@@ -488,6 +490,118 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
 
     assert ".plan-rail-phase" not in v2_css
     assert ".plan-rail-major-number" not in v2_css
+
+
+def test_layout_resize_controller_restores_drags_and_persists_widths():
+    script = """
+import assert from "node:assert/strict";
+import {
+  createLayoutResizeController,
+  PROGRESS_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+} from "./marvis/static/js/layout-resize.js";
+
+const styleValues = new Map([
+  ["--sidebar-width", "400px"],
+  ["--progress-width", "400px"],
+]);
+const root = {
+  style: {
+    setProperty(name, value) {
+      styleValues.set(name, value);
+    },
+  },
+};
+const bodyClasses = new Set();
+const body = {
+  classList: {
+    add(value) {
+      bodyClasses.add(value);
+    },
+    remove(value) {
+      bodyClasses.delete(value);
+    },
+    contains(value) {
+      return bodyClasses.has(value);
+    },
+  },
+};
+const storageData = {
+  marvis_layout: JSON.stringify({ sidebar: 320, progress: 999 }),
+};
+const storage = {
+  getItem(key) {
+    return storageData[key] || null;
+  },
+  setItem(key, value) {
+    storageData[key] = value;
+  },
+};
+const listeners = {};
+const removed = [];
+const controller = createLayoutResizeController({
+  body,
+  clamp: (value, min, max) => Math.min(Math.max(value, min), max),
+  getComputedStyleFn: () => ({
+    getPropertyValue(name) {
+      return styleValues.get(name) || "";
+    },
+  }),
+  root,
+  storage,
+  windowObj: {
+    addEventListener(name, fn) {
+      listeners[name] = fn;
+    },
+    removeEventListener(name, fn) {
+      removed.push([name, fn]);
+      if (listeners[name] === fn) delete listeners[name];
+    },
+  },
+});
+
+controller.restoreLayoutWidths();
+assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_MIN}px`);
+assert.equal(styleValues.get("--progress-width"), `${PROGRESS_WIDTH_MAX}px`);
+
+let prevented = false;
+controller.startResizeDrag("left", {
+  clientX: 100,
+  preventDefault() {
+    prevented = true;
+  },
+});
+assert.equal(prevented, true);
+assert.equal(bodyClasses.has("is-resizing"), true);
+listeners.pointermove({ clientX: 400 });
+assert.equal(styleValues.get("--sidebar-width"), "520px");
+listeners.pointerup();
+assert.equal(bodyClasses.has("is-resizing"), false);
+assert.equal(removed.length, 2);
+assert.equal(JSON.parse(storageData.marvis_layout).sidebar, 520);
+
+styleValues.set("--progress-width", "400px");
+let keyPrevented = false;
+controller.handleResizeKey("right", {
+  key: "ArrowRight",
+  shiftKey: false,
+  preventDefault() {
+    keyPrevented = true;
+  },
+});
+assert.equal(keyPrevented, true);
+assert.equal(styleValues.get("--progress-width"), "388px");
+assert.equal(JSON.parse(storageData.marvis_layout).progress, 388);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_plan_rail_retry_step_posts_edited_inputs():
@@ -1882,11 +1996,13 @@ def test_sidebar_brand_title_stays_on_one_line():
     assert "text-overflow" not in brand_rule
     assert "letter-spacing: 0" in brand_rule
 
-    assert "const SIDEBAR_WIDTH_MIN = 314;" in app_js
-    assert "const SIDEBAR_WIDTH_MAX = 520;" in app_js
-    assert "clamp(stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
-    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
-    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
+    layout_resize_js = _read_static("js/layout-resize.js")
+    assert "export const SIDEBAR_WIDTH_MIN = 314;" in layout_resize_js
+    assert "export const SIDEBAR_WIDTH_MAX = 520;" in layout_resize_js
+    assert "stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar" in layout_resize_js
+    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
+    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
+    assert 'from "./js/layout-resize.js"' in app_js
     assert "grid-template-columns: min(var(--sidebar-width), 314px) minmax(0, 1fr)" in styles_css
 
 
