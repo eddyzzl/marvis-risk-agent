@@ -186,7 +186,14 @@ def _fuzzy_augment_rejected(
     good[output_weight_col] = float(weight) * (1.0 - bad_rate)
     bad[SOURCE_COL] = "rejected_inferred_bad"
     good[SOURCE_COL] = "rejected_inferred_good"
-    return pd.concat([bad, good], ignore_index=True, sort=False)
+    parts = []
+    if float(weight) * bad_rate > 0:
+        parts.append(bad)
+    if float(weight) * (1.0 - bad_rate) > 0:
+        parts.append(good)
+    if not parts:
+        raise ModelingError("fuzzy reject inference produced no positive-weight rows")
+    return pd.concat(parts, ignore_index=True, sort=False)
 
 
 def _risk_order(frame: pd.DataFrame, score_col: str | None) -> np.ndarray:

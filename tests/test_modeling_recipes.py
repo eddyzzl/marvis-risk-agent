@@ -169,8 +169,8 @@ def test_weighted_binary_metrics_have_formula_level_values_and_weight_validation
     assert metrics.weighted_oot_auc is None
 
     bad_weights = train.copy()
-    bad_weights.loc[bad_weights.index[0], "weight"] = -1
-    with pytest.raises(ModelingError, match="negative"):
+    bad_weights.loc[bad_weights.index[0], "weight"] = 0
+    with pytest.raises(ModelingError, match="non-positive"):
         sample_weight_values(bad_weights, config)
 
 
@@ -788,6 +788,27 @@ def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature
     assert slots["sample_weight_diagnostics"][0]["column"] == "sample_weight"
     assert slots["passthrough_cols"] == ["sample_weight"]
     assert any("检测到样本权重候选列" in note for note in proposal.notes)
+
+
+def test_build_modeling_proposal_rejects_zero_weight_candidate(tmp_path):
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "sample_weight": [0.0 if i == 0 else 1.0 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "zero_weight_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-zero-weight", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-zero-weight", tmp_path, recipes=["lgb"])
+
+    assert proposal.sample_weight_candidates == []
+    assert proposal.sample_weight_diagnostics[0]["column"] == "sample_weight"
+    assert proposal.sample_weight_diagnostics[0]["valid"] is False
+    assert proposal.sample_weight_diagnostics[0]["reason"] == "存在非正权重"
 
 
 def test_build_modeling_proposal_continuous_target_skips_meta_columns(tmp_path):

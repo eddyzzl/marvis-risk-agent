@@ -443,9 +443,9 @@ def _sample_weight_diagnostics(
         elif missing_count:
             valid = False
             reason = "存在空值或非数值"
-        elif (non_missing < 0).any():
+        elif (non_missing <= 0).any():
             valid = False
-            reason = "存在负权重"
+            reason = "存在非正权重"
         elif float(non_missing.sum()) <= 0:
             valid = False
             reason = "总权重不为正"

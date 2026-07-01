@@ -55,5 +55,26 @@ def test_reject_inference_fuzzy_augmentation_splits_reject_weight():
     assert result.diagnostics["output_rows"] == 4
 
 
+def test_reject_inference_fuzzy_augmentation_omits_zero_weight_side():
+    frame = pd.DataFrame({
+        "bad": [0, 1, None],
+        "approved": [1, 1, 0],
+    })
+
+    result = reject_inference(
+        frame,
+        target_col="bad",
+        decision_col="approved",
+        method="fuzzy_augmentation",
+        reject_bad_rate=1.0,
+        reject_weight=2.0,
+    )
+
+    inferred = result.frame[result.frame[SOURCE_COL].str.startswith("rejected_inferred")]
+    assert inferred[result.target_col].tolist() == [1]
+    assert inferred[SAMPLE_WEIGHT_COL].tolist() == pytest.approx([2.0])
+    assert result.diagnostics["output_rows"] == 3
+
+
 def test_reject_inference_is_registered_as_modeling_capability():
     assert "reject_inference" in modeling.__all__

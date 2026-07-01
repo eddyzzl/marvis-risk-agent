@@ -140,8 +140,8 @@ def sample_weight_values(frame: pd.DataFrame, config: TrainConfig) -> np.ndarray
     weights = pd.to_numeric(frame[column], errors="coerce")
     if weights.isna().any():
         raise ModelingError(f"sample weight column `{column}` contains null or non-numeric values")
-    if (weights < 0).any():
-        raise ModelingError(f"sample weight column `{column}` contains negative values")
+    if (weights <= 0).any():
+        raise ModelingError(f"sample weight column `{column}` contains non-positive values")
     if float(weights.sum()) <= 0:
         raise ModelingError(f"sample weight column `{column}` must have a positive total weight")
     return weights.to_numpy(dtype=float)
