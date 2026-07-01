@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import tempfile
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
@@ -10,6 +12,7 @@ from marvis.api_data_payloads import (
     join_plan_payload,
     masked_preview_records,
 )
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.api_task_helpers import dispatch_platform_hook
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
@@ -113,21 +116,39 @@ async def upload_task_dataset(
             datasets = []
             reports = []
             out_dir = request.app.state.settings.datasets_dir / task_id / "excel"
-            for sheet_name in sheets:
-                parquet_path, report = ingest_sheet(upload_path, sheet_name, out_dir)
-                dataset = registry.register_existing(
-                    parquet_path,
-                    task_id=task_id,
-                    role=role,
+            out_dir.mkdir(parents=True, exist_ok=True)
+            uow = ArtifactUnitOfWork()
+            staged_sheets = []
+            try:
+                with tempfile.TemporaryDirectory(prefix=".excel_ingest_", dir=out_dir) as scratch:
+                    scratch_dir = Path(scratch)
+                    for sheet_name in sheets:
+                        parquet_path, report = ingest_sheet(upload_path, sheet_name, scratch_dir)
+                        artifact = uow.stage_file(out_dir, parquet_path.name)
+                        shutil.move(parquet_path, artifact.path)
+                        staged_sheets.append((artifact.final_path, report))
+                        reports.append({
+                            "sheet": report.sheet,
+                            "header_rows": report.header_rows,
+                            "data_start_row": report.data_start_row,
+                            "flattened_columns": report.flattened_columns,
+                            "warnings": [],
+                        })
+                datasets = uow.finalize_with_connection(
+                    registry.transaction,
+                    lambda conn: [
+                        registry.register_existing_on_connection(
+                            conn,
+                            parquet_path,
+                            task_id=task_id,
+                            role=role,
+                        )
+                        for parquet_path, _report in staged_sheets
+                    ],
                 )
-                datasets.append(dataset)
-                reports.append({
-                    "sheet": report.sheet,
-                    "header_rows": report.header_rows,
-                    "data_start_row": report.data_start_row,
-                    "flattened_columns": report.flattened_columns,
-                    "warnings": [],
-                })
+            except Exception:
+                uow.rollback()
+                raise
         else:
             datasets = [registry.register_from_upload(task_id, upload_path, role=role)]
             reports = []

@@ -23,14 +23,14 @@ class FakeHookDispatcher:
         return []
 
 
-def _client(tmp_path):
+def _client(tmp_path, *, raise_server_exceptions: bool = True):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     app = FastAPI()
     app.state.settings = settings
     app.include_router(router)
     app.include_router(data_router)
-    return TestClient(app), settings
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions), settings
 
 
 def _create_task(settings):
@@ -217,6 +217,59 @@ def test_dataset_upload_rejects_invalid_excel_sheet(tmp_path):
     )
 
     assert response.status_code == 422
+
+
+def test_dataset_upload_excel_multi_sheet_rolls_back_when_registration_fails(
+    tmp_path,
+    monkeypatch,
+):
+    client, settings = _client(tmp_path, raise_server_exceptions=False)
+    task = _create_task(settings)
+    workbook_path = tmp_path / "book.xlsx"
+    with pd.ExcelWriter(workbook_path) as writer:
+        pd.DataFrame({"id": [1], "bad_flag": [0]}).to_excel(
+            writer,
+            sheet_name="Sample",
+            index=False,
+        )
+        pd.DataFrame({"id": [2], "bad_flag": [1]}).to_excel(
+            writer,
+            sheet_name="Feature",
+            index=False,
+        )
+    original_create = DatasetRepository.create_dataset_on_connection
+    call_count = {"value": 0}
+
+    def fail_second_dataset_insert(self, conn, dataset):
+        call_count["value"] += 1
+        if call_count["value"] == 2:
+            raise RuntimeError("db unavailable")
+        return original_create(self, conn, dataset)
+
+    monkeypatch.setattr(
+        DatasetRepository,
+        "create_dataset_on_connection",
+        fail_second_dataset_insert,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "feature"},
+        files={
+            "file": (
+                "book.xlsx",
+                workbook_path.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 500
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    excel_dir = settings.datasets_dir / task.id / "excel"
+    assert not list(excel_dir.glob("*.parquet"))
+    assert not (excel_dir / ".staging").exists()
+    assert not list(excel_dir.glob(".excel_ingest_*"))
 
 
 def test_join_api_propose_confirm_execute_flow(tmp_path):
