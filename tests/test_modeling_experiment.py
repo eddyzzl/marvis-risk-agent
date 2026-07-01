@@ -2,6 +2,7 @@ import pytest
 
 import marvis.db as db_module
 from marvis.db import ModelingRepository, init_db
+import marvis.repositories.modeling as modeling_repo_module
 from marvis.packs.modeling import ModelArtifact, ModelMetrics, TrainConfig, TrainResult
 from marvis.packs.modeling.experiment import ExperimentStore
 
@@ -89,7 +90,7 @@ def test_experiment_store_rolls_back_create_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         store.create("task-1", "lr", _config())
@@ -128,14 +129,14 @@ def test_experiment_store_rolls_back_attach_result_when_audit_fails(
     store = ExperimentStore(db_path)
     experiment_id = store.create("task-1", "lr", _config())
 
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = modeling_repo_module._write_audit_row
 
     def fail_trained_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.experiment.trained":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_trained_audit)
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_trained_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         store.attach_result(experiment_id, _result("artifact-1", _metrics(0.37)))

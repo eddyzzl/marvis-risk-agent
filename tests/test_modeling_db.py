@@ -4,6 +4,7 @@ import pytest
 
 import marvis.db as db_module
 from marvis.db import ModelingRepository, connect, init_db
+import marvis.repositories.modeling as modeling_repo_module
 from marvis.packs.modeling import (
     Experiment,
     ModelArtifact,
@@ -95,6 +96,33 @@ def test_modeling_repository_round_trips_experiment_and_artifact(tmp_path):
     assert repo.list_model_artifacts(limit=1, offset=1) == [artifact2]
 
 
+def test_modeling_repository_is_reexported_from_db():
+    assert ModelingRepository is modeling_repo_module.ModelingRepository
+
+
+def test_modeling_repository_round_trips_drop_nan_label_config(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = ModelingRepository(db_path)
+    config = replace(_config(), drop_nan_labels=True)
+    experiment = Experiment(
+        id="experiment-1",
+        task_id="task-1",
+        recipe_id="lgb",
+        config=config,
+        metrics=None,
+        artifact_id=None,
+        status="created",
+        created_at="2026-06-19T00:00:00Z",
+    )
+
+    repo.create_experiment(experiment)
+
+    loaded = repo.get_experiment(experiment.id)
+    assert loaded is not None
+    assert loaded.config.drop_nan_labels is True
+
+
 def test_modeling_repository_attaches_artifact_and_audit_atomically(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -176,7 +204,7 @@ def test_modeling_repository_rolls_back_artifact_attach_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.attach_experiment_result_with_artifact_and_audit(
@@ -231,7 +259,7 @@ def test_modeling_repository_rolls_back_artifact_params_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.set_model_artifact_params_with_audit(
