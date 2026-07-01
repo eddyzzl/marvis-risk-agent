@@ -16,6 +16,9 @@ from marvis.db import TaskRepository
 
 
 router = APIRouter(prefix="/api", tags=["agent-memory"])
+DEFAULT_AGENT_MEMORY_LIMIT = 500
+MAX_AGENT_MEMORY_LIMIT = 500
+AGENT_MEMORY_SCAN_PAGE_SIZE = 500
 
 
 @router.get("/agent-memory")
@@ -27,25 +30,44 @@ def list_agent_memory(
     model_name: str | None = None,
     channel: str | None = None,
     month: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> dict:
     store = AgentMemoryStore(request.app.state.settings.db_path)
+    bounded_limit = _bounded_limit(limit)
+    bounded_offset = _bounded_offset(offset)
     try:
-        entries = store.list_entries(status=status, memory_type=memory_type, limit=500)
+        if any(value not in (None, "") for value in (model_name, channel, month)):
+            entries, has_more = _list_payload_filtered_entries(
+                store,
+                status=status,
+                memory_type=memory_type,
+                source_task_id=source_task_id,
+                model_name=model_name,
+                channel=channel,
+                month=month,
+                limit=bounded_limit,
+                offset=bounded_offset,
+            )
+        else:
+            entries = store.list_entries(
+                status=status,
+                memory_type=memory_type,
+                source_task_id=source_task_id,
+                limit=bounded_limit + 1,
+                offset=bounded_offset,
+            )
+            has_more = len(entries) > bounded_limit
+            entries = entries[:bounded_limit]
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"invalid memory filter: {exc}") from exc
     items = [memory_entry_payload(entry) for entry in entries]
-    items = [
-        item
-        for item in items
-        if memory_api_filter_match(
-            item,
-            source_task_id=source_task_id,
-            model_name=model_name,
-            channel=channel,
-            month=month,
-        )
-    ]
-    return {"items": items}
+    return {
+        "items": items,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "has_more": has_more,
+    }
 
 
 @router.get("/agent-memory/distillations")
@@ -53,17 +75,28 @@ def list_agent_memory_distillations(
     request: Request,
     category: str | None = None,
     include_superseded: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> dict:
     store = AgentMemoryStore(request.app.state.settings.db_path)
+    bounded_limit = _bounded_limit(limit)
+    bounded_offset = _bounded_offset(offset)
     try:
         distillations = store.list_distillations(
             category=category,
             include_superseded=include_superseded,
-            limit=500,
+            limit=bounded_limit + 1,
+            offset=bounded_offset,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"invalid distillation filter: {exc}") from exc
-    return {"items": [memory_distillation_payload(item) for item in distillations]}
+    has_more = len(distillations) > bounded_limit
+    return {
+        "items": [memory_distillation_payload(item) for item in distillations[:bounded_limit]],
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "has_more": has_more,
+    }
 
 
 @router.post("/agent-memory/consolidate")
@@ -179,3 +212,55 @@ def _set_agent_memory_status(request: Request, memory_id: str, status: str) -> d
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"memory": memory_entry_payload(entry), "events": store.list_events(memory_id)}
+
+
+def _bounded_limit(limit: int | None) -> int:
+    if limit is None:
+        return DEFAULT_AGENT_MEMORY_LIMIT
+    return max(1, min(int(limit), MAX_AGENT_MEMORY_LIMIT))
+
+
+def _bounded_offset(offset: int) -> int:
+    return max(0, int(offset))
+
+
+def _list_payload_filtered_entries(
+    store: AgentMemoryStore,
+    *,
+    status: str | None,
+    memory_type: str | None,
+    source_task_id: str | None,
+    model_name: str | None,
+    channel: str | None,
+    month: str | None,
+    limit: int,
+    offset: int,
+):
+    matched = []
+    scan_offset = 0
+    required_count = offset + limit + 1
+    while len(matched) < required_count:
+        page = store.list_entries(
+            status=status,
+            memory_type=memory_type,
+            source_task_id=source_task_id,
+            limit=AGENT_MEMORY_SCAN_PAGE_SIZE,
+            offset=scan_offset,
+        )
+        if not page:
+            break
+        for entry in page:
+            item = memory_entry_payload(entry)
+            if memory_api_filter_match(
+                item,
+                source_task_id=source_task_id,
+                model_name=model_name,
+                channel=channel,
+                month=month,
+            ):
+                matched.append(entry)
+        if len(page) < AGENT_MEMORY_SCAN_PAGE_SIZE:
+            break
+        scan_offset += AGENT_MEMORY_SCAN_PAGE_SIZE
+    window = matched[offset : offset + limit + 1]
+    return window[:limit], len(window) > limit

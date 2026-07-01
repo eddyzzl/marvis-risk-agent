@@ -6130,6 +6130,11 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'data-agent-memory-action="enable"' in memory_panel_js
     assert 'data-agent-memory-action="delete"' in memory_panel_js
     assert 'data-agent-memory-action="rollback"' in memory_panel_js
+    assert 'data-agent-memory-action="load_more"' in memory_panel_js
+    assert 'params.set("limit", String(pageLimit));' in memory_panel_js
+    assert 'params.set("offset", String(offset));' in memory_panel_js
+    assert "hasMoreItems = Boolean(payload?.has_more)" in memory_panel_js
+    assert ".agent-memory-load-more" in styles_css
     assert 'memoryStatus === "active" && !memory.superseded_by' in memory_panel_js
 
     assert '"api/agent-memory"' in memory_panel_js

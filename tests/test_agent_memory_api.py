@@ -81,6 +81,55 @@ def test_memory_api_lists_memories_with_type_status_and_payload_filters(tmp_path
     items = response.json()["items"]
     assert [item["id"] for item in items] == [matched.id]
     assert items[0]["payload"]["ks"] == 30
+    assert response.json()["has_more"] is False
+
+
+def test_memory_api_payload_filter_scans_past_first_storage_page(tmp_path):
+    client = _client(tmp_path)
+    matched = _create_model_memory(tmp_path, model_name="深页模型")
+    for index in range(501):
+        _create_model_memory(
+            tmp_path,
+            model_name=f"非匹配模型{index}",
+            source_task_id=f"task-noise-{index}",
+        )
+
+    response = client.get(
+        "/api/agent-memory",
+        params={
+            "memory_type": "model_experience",
+            "model_name": "深页模型",
+            "limit": 1,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [item["id"] for item in payload["items"]] == [matched.id]
+    assert payload["limit"] == 1
+    assert payload["offset"] == 0
+    assert payload["has_more"] is False
+
+
+def test_memory_api_supports_limit_offset_pagination(tmp_path):
+    client = _client(tmp_path)
+    for index in range(3):
+        _create_model_memory(tmp_path, model_name=f"A卡模型{index}")
+
+    first_page = client.get("/api/agent-memory", params={"limit": 1})
+    second_page = client.get("/api/agent-memory", params={"limit": 1, "offset": 1})
+
+    assert first_page.status_code == 200, first_page.text
+    assert second_page.status_code == 200, second_page.text
+    first_payload = first_page.json()
+    second_payload = second_page.json()
+    assert len(first_payload["items"]) == 1
+    assert len(second_payload["items"]) == 1
+    assert first_payload["items"][0]["id"] != second_payload["items"][0]["id"]
+    assert first_payload["has_more"] is True
+    assert first_payload["limit"] == 1
+    assert first_payload["offset"] == 0
+    assert second_payload["offset"] == 1
 
 
 def test_memory_api_rejects_invalid_filters_with_422(tmp_path):
@@ -211,6 +260,49 @@ def test_memory_api_manages_distillations_and_rolls_back_superseding_version(tmp
     statuses = {item["id"]: item["status"] for item in history.json()["items"]}
     assert statuses[new.id] == "rolled_back"
     assert statuses[old.id] == "active"
+
+
+def test_memory_distillation_api_supports_limit_offset_pagination(tmp_path):
+    client = _client(tmp_path)
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
+    source = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="A卡验证里目标字段常用 bad_flag。",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-history",
+            confidence="high",
+        )
+    )
+    for index in range(3):
+        store.create_distillation(
+            new_distillation(
+                category="field_convention",
+                scope_key=f"field_convention:target_col:{index}",
+                distilled_summary=f"目标字段常见取值 {index}。",
+                structured={"fields": {"target_col": ["bad_flag"]}},
+                source_memory_ids=(source.id,),
+                support_count=2,
+            )
+        )
+
+    first_page = client.get("/api/agent-memory/distillations", params={"limit": 1})
+    second_page = client.get(
+        "/api/agent-memory/distillations",
+        params={"limit": 1, "offset": 1},
+    )
+
+    assert first_page.status_code == 200, first_page.text
+    assert second_page.status_code == 200, second_page.text
+    first_payload = first_page.json()
+    second_payload = second_page.json()
+    assert len(first_payload["items"]) == 1
+    assert len(second_payload["items"]) == 1
+    assert first_payload["items"][0]["id"] != second_payload["items"][0]["id"]
+    assert first_payload["has_more"] is True
+    assert first_payload["limit"] == 1
+    assert first_payload["offset"] == 0
+    assert second_payload["offset"] == 1
 
 
 def test_memory_distillation_references_are_use_audited(tmp_path):

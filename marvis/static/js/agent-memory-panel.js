@@ -39,6 +39,9 @@ export function createAgentMemoryPanelController({
   let items = [];
   let viewMode = "raw";
   let selectedMemoryId = "";
+  const pageLimit = 100;
+  let nextOffset = 0;
+  let hasMoreItems = false;
 
   function setStatus(message = "", kind = "") {
     const status = $("agentMemoryStatus");
@@ -72,8 +75,10 @@ export function createAgentMemoryPanelController({
     $("agentMemoryModelFilterRow")?.classList.toggle("agent-memory-filter-hidden", isDistillation);
   }
 
-  function filterParams() {
+  function filterParams({ offset = 0 } = {}) {
     const params = new URLSearchParams();
+    params.set("limit", String(pageLimit));
+    params.set("offset", String(offset));
     if (viewMode === "distillation") {
       const category = String($("agentMemoryTypeFilter")?.value || "").trim();
       const status = String($("agentMemoryStatusFilter")?.value || "").trim();
@@ -101,7 +106,7 @@ export function createAgentMemoryPanelController({
       list.innerHTML = '<div class="agent-memory-empty">暂无匹配记忆。</div>';
       return;
     }
-    list.innerHTML = items.map((memory) => {
+    const itemHtml = items.map((memory) => {
       const memoryId = String(memory.id || memory.memory_id || "");
       const memoryStatus = String(memory.status || "").toLowerCase();
       const isDistillation = viewMode === "distillation" || memory.kind === "distillation";
@@ -135,6 +140,14 @@ export function createAgentMemoryPanelController({
         "</article>",
       ].join("");
     }).join("");
+    const loadMoreHtml = hasMoreItems
+      ? [
+          '<div class="agent-memory-load-more">',
+          '<button class="button compact secondary" type="button" data-agent-memory-action="load_more">加载更多</button>',
+          "</div>",
+        ].join("")
+      : "";
+    list.innerHTML = itemHtml + loadMoreHtml;
   }
 
   function renderDetail(memory = null, events = [], detailOptions = {}) {
@@ -173,22 +186,36 @@ export function createAgentMemoryPanelController({
     ].join("");
   }
 
-  async function loadItems() {
-    const query = filterParams();
+  async function loadItems({ append = false } = {}) {
+    const currentOffset = append ? nextOffset : 0;
+    const query = filterParams({ offset: currentOffset });
     const isDistillation = viewMode === "distillation";
     setStatus(isDistillation ? "正在读取记忆沉淀..." : "正在读取记忆...");
     const endpoint = isDistillation ? "api/agent-memory/distillations" : "api/agent-memory";
     const payload = await api(endpoint + (query ? `?${query}` : ""));
-    items = Array.isArray(payload?.items) ? payload.items : [];
+    const incoming = Array.isArray(payload?.items) ? payload.items : [];
+    items = append ? items.concat(incoming) : incoming;
+    nextOffset = Number(payload?.offset ?? currentOffset) + incoming.length;
+    hasMoreItems = Boolean(payload?.has_more);
     renderItems();
-    renderDetail(null);
-    setStatus(`已读取 ${items.length} 条${isDistillation ? "沉淀" : "记忆"}。`, "success");
+    if (!append) renderDetail(null);
+    setStatus(
+      `已读取 ${items.length} 条${isDistillation ? "沉淀" : "记忆"}${hasMoreItems ? "，可继续加载。" : "。"}`,
+      "success"
+    );
+  }
+
+  async function loadMoreItems() {
+    if (!hasMoreItems) return;
+    await loadItems({ append: true });
   }
 
   function setViewMode(mode, { reload = true } = {}) {
     viewMode = mode === "distillation" ? "distillation" : "raw";
     selectedMemoryId = "";
     items = [];
+    nextOffset = 0;
+    hasMoreItems = false;
     syncViewControls();
     renderItems();
     renderDetail(null);
@@ -243,6 +270,7 @@ export function createAgentMemoryPanelController({
     if (!confirmed) return;
     const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
     items = items.filter((memory) => String(memory.id || memory.memory_id || "") !== memoryId);
+    nextOffset = items.length;
     renderItems();
     renderDetail(payload?.memory || null, payload?.events || []);
   }
@@ -273,6 +301,7 @@ export function createAgentMemoryPanelController({
       disable,
       enable,
       delete: remove,
+      load_more: loadMoreItems,
       rollback: rollbackDistillation,
     };
     const handler = actions[action];
@@ -302,6 +331,7 @@ export function createAgentMemoryPanelController({
     handleListClick,
     inspect,
     loadItems,
+    loadMoreItems,
     renderDetail,
     renderItems,
     remove,

@@ -220,7 +220,9 @@ class AgentMemoryStore:
         *,
         status: str | None = None,
         memory_type: str | None = None,
+        source_task_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryEntry]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -232,7 +234,11 @@ class AgentMemoryStore:
         if memory_type is not None:
             clauses.append("memory_type = ?")
             params.append(normalize_memory_type(memory_type))
+        if source_task_id not in (None, ""):
+            clauses.append("source_task_id = ?")
+            params.append(str(source_task_id))
         params.append(max(1, int(limit)))
+        params.append(max(0, int(offset)))
         where_sql = " AND ".join(clauses)
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -241,7 +247,7 @@ class AgentMemoryStore:
                   FROM agent_memory_entries
                  WHERE {where_sql}
                  ORDER BY updated_at DESC, id DESC
-                 LIMIT ?
+                 LIMIT ? OFFSET ?
                 """,
                 params,
             ).fetchall()
@@ -347,6 +353,7 @@ class AgentMemoryStore:
         category: str | None = None,
         include_superseded: bool = False,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[MemoryDistillation]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -357,6 +364,7 @@ class AgentMemoryStore:
             clauses.append("category = ?")
             params.append(normalize_memory_type(category))
         params.append(max(1, int(limit)))
+        params.append(max(0, int(offset)))
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -365,7 +373,7 @@ class AgentMemoryStore:
                   FROM memory_distillations
                   {where_sql}
                  ORDER BY updated_at DESC, id DESC
-                 LIMIT ?
+                 LIMIT ? OFFSET ?
                 """,
                 params,
             ).fetchall()

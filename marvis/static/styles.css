@@ -3021,6 +3021,12 @@ dialog.agent-memory-dialog,
   gap: 6px;
 }
 
+.agent-memory-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
 .button.danger {
   color: var(--danger);
 }

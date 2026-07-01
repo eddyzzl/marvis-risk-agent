@@ -674,6 +674,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
      - Large parquet feature screening smoke.
      - Multi-recipe modeling read-count and runtime smoke.
      - Join match-rate performance smoke.
+     - Done: Agent Memory raw/distillation API routes now support bounded `limit`/`offset`/`has_more`, source-task indexed filtering, payload-filter scans that do not miss matches beyond the first storage page, and frontend "load more" pagination.
 
 ### P3: Practical Business Problem Solving
 
@@ -783,7 +784,7 @@ Tasks:
 - Partial: validation-agent stop/rerun/cancellation helpers and job-loop orchestration now live outside `api.py`; continue extracting stage implementations once compatibility-sensitive tests move to service-level seams.
 - Done: split `db.py` schema/connection setup into `marvis/db_schema.py`; `StrategyRepository`, `DraftRepository`, `PluginRepository`, `DatasetRepository`, `ModelingRepository`, `TaskRepository`, `PlanRepository`, and shared audit helpers now live in `marvis/repositories/strategy.py`, `marvis/repositories/drafts.py`, `marvis/repositories/plugins.py`, `marvis/repositories/datasets.py`, `marvis/repositories/modeling.py`, `marvis/repositories/tasks.py`, `marvis/repositories/plans.py`, and `marvis/repositories/audit.py`; `marvis/db.py` remains a compatibility export layer.
 - Continue introducing `UnitOfWork` semantics and migrate one domain at a time.
-- Add pagination to high-volume list endpoints.
+- Partial: add pagination to high-volume list endpoints. Task, draft, Agent message, and Agent Memory raw/distillation lists now expose bounded pagination/continuation metadata; continue auditing remaining admin/auxiliary lists as data volume grows.
 
 Acceptance:
 - `api.py` becomes app compatibility and route registration, not domain orchestration.
