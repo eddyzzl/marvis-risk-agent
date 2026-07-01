@@ -485,6 +485,30 @@ def test_decide_gate_blocks_adjust_when_gate_has_high_risk_flag():
     assert "Gate 风险标记" in fake.calls[0]["user_prompt"]
 
 
+def test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag():
+    fake = _FakeLLM(action="confirm", reason="上线发布可以继续")
+    fake._payload = json.dumps({
+        "action": "confirm",
+        "reason": "上线发布可以继续",
+    })
+    gate = {
+        "content": "请选择最终 champion 模型并发布",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "post_training_action",
+                "target_step_id": "select-final-model",
+                "allowed_actions": ["confirm", "halt"],
+                "risk_flags": ["production_deploy_champion_model"],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "风险标记:production_deploy_champion_model" in decision["reason"]
+
+
 def test_decide_gate_blocks_strategy_manual_review_risk_flag():
     fake = _FakeLLM(action="adjust", reason="自动放宽切分阈值")
     fake._payload = json.dumps({
@@ -562,6 +586,30 @@ def test_decide_gate_blocks_replan_when_gate_declares_wide_reset_scope():
     assert decision["action"] == "halt"
     assert "大范围下游重置策略:all" in decision["reason"]
     assert "下游重置策略" in fake.calls[0]["user_prompt"]
+
+
+def test_decide_gate_blocks_confirm_when_gate_declares_wide_reset_scope():
+    fake = _FakeLLM(action="confirm", reason="确认重新执行全流程")
+    fake._payload = json.dumps({
+        "action": "confirm",
+        "reason": "确认重新执行全流程",
+    })
+    gate = {
+        "content": "确认后将重置并重跑全流程",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "plan_overview",
+                "target_step_id": "plan",
+                "allowed_actions": ["confirm", "halt"],
+                "downstream_reset_policy": {"scope": "full_plan"},
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "大范围下游重置策略:full_plan" in decision["reason"]
 
 
 def test_decide_gate_blocks_safe_control_when_reset_step_count_is_large():

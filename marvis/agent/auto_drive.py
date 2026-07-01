@@ -37,8 +37,17 @@ AUTO_HIGH_RISK_FLAG_TOKENS = frozenset({
     "high_risk",
     "irreversible",
     "approval",
+    "champion",
+    "delete",
+    "deploy",
+    "drop",
     "manual-review",
     "manual_review",
+    "overwrite",
+    "production",
+    "promote",
+    "publish",
+    "release",
     "requires-human",
     "requires_human",
     "side-effect",
@@ -328,10 +337,11 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
     The LLM may only operate controls explicitly declared by the current
     GateEnvelope. This keeps AUTO bounded to low-risk, typed controls and turns
     unlisted actions such as expensive tuning, algorithm swaps, export/handoff, or
-    arbitrary downstream resets into a halt for human review.
+    arbitrary downstream resets into a halt for human review. Gates that explicitly
+    declare human-review risk cannot be auto-confirmed either.
     """
     action = decision.get("action")
-    if action in {"adjust", "replan"}:
+    if action in {"confirm", "adjust", "replan"}:
         gate_risk = _gate_risk_reason(envelope)
         if gate_risk:
             return _policy_halt(gate_risk)
