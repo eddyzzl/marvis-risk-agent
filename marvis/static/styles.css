@@ -22,6 +22,7 @@
   --success-strong: #166534;
   --success-soft: #eaf7ee;
   --success-subtle: rgba(31, 122, 63, 0.12);
+  --success-border: #b7d9c4;
   --warning: #8a5400;
   --warning-strong: #8a5a00;
   --warning-soft: #fff4df;
@@ -72,6 +73,8 @@
   --sidebar-control-icon-size: 17px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-floating: 0 2px 8px rgba(0, 0, 0, 0.035);
+  --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
+  --progress-rail-shadow: 0 3px 12px rgba(0, 0, 0, 0.045);
   --sidebar-width: 314px;
   --collapsed-entry-size: 44px;
   --collapsed-entry-gutter: 16px;
@@ -206,6 +209,7 @@ body[data-theme="dark"] {
   --success-strong: #8ee6a6;
   --success-soft: #1f3b2a;
   --success-subtle: rgba(99, 217, 131, 0.14);
+  --success-border: #b7d9c4;
   --warning: #ffd166;
   --warning-strong: #f4c75f;
   --warning-soft: #44361e;
@@ -229,6 +233,8 @@ body[data-theme="dark"] {
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.32);
   --shadow-floating: 0 3px 12px rgba(0, 0, 0, 0.18);
   --shadow-lift: 0 1px 3px rgba(0, 0, 0, 0.45);
+  --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
+  --progress-rail-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
   --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --switch-on: #30d158;
   --button-secondary-shadow:
@@ -1412,7 +1418,7 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
+  box-shadow: var(--settings-menu-shadow);
   z-index: 5;
 }
 
@@ -3787,7 +3793,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
 
 .delete-task-button:hover,
 .delete-task-button:focus-visible {
-  border-color: #efb8b3;
+  border-color: var(--danger-border);
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -4348,13 +4354,12 @@ body[data-theme="dark"] .task-hero {
   overflow: hidden;
   margin: 14px 14px 14px 0;
   padding: 12px 12px 8px;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.045);
+  box-shadow: var(--progress-rail-shadow);
 }
 
 body[data-theme="dark"] .progress-rail {
   background: var(--surface);
   border-color: var(--border);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
 }
 
 .step-rail-head {
@@ -4629,7 +4634,7 @@ body[data-theme="dark"] .progress-rail {
 
 .result-summary.error {
   color: var(--danger);
-  border-color: #efb8b3;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
@@ -4919,7 +4924,7 @@ body[data-theme="dark"] .progress-rail {
 }
 
 .score-compare-row.mismatched {
-  border-color: #efb8b3;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
@@ -4975,17 +4980,17 @@ body[data-theme="dark"] .progress-rail {
 }
 
 .preflight-check-item.danger {
-  border-color: #efb8b3;
+  border-color: var(--danger-border);
   background: var(--danger-soft);
 }
 
 .preflight-check-item.warning {
-  border-color: #efcf88;
+  border-color: var(--warning-border);
   background: var(--warning-soft);
 }
 
 .preflight-check-item.success {
-  border-color: #b7d9c4;
+  border-color: var(--success-border);
   background: var(--success-soft);
 }
 

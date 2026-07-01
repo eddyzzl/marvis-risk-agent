@@ -2023,15 +2023,15 @@ def test_middle_result_sections_are_unframed():
 def test_right_step_rail_uses_subtle_shadow():
     styles_css = _read_static("styles.css")
 
-    rail_start = styles_css.index(".progress-rail {")
-    rail_end = styles_css.index("}", rail_start)
-    rail_rule = styles_css[rail_start:rail_end]
-    assert "box-shadow: 0 3px 12px rgba(0, 0, 0, 0.045)" in rail_rule
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    assert root_vars["--progress-rail-shadow"] == "0 3px 12px rgba(0, 0, 0, 0.045)"
+    assert dark_vars["--progress-rail-shadow"] == "0 4px 16px rgba(0, 0, 0, 0.22)"
+    rail_rule = _css_rule(styles_css, ".progress-rail")
+    assert "box-shadow: var(--progress-rail-shadow)" in rail_rule
 
-    dark_start = styles_css.index('body[data-theme="dark"] .progress-rail')
-    dark_end = styles_css.index("}", dark_start)
-    dark_rule = styles_css[dark_start:dark_end]
-    assert "box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22)" in dark_rule
+    dark_rule = _css_rule(styles_css, 'body[data-theme="dark"] .progress-rail')
+    assert "box-shadow:" not in dark_rule
 
 
 def test_dark_theme_tokens_keep_panels_and_muted_text_readable():
@@ -2412,6 +2412,10 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     assert "delete-task-button" in append_renderer
     assert "formatDate(task.updated_at)" in append_renderer
     assert 'const validatorName = escapeHtml(task.validator || "-");' in append_renderer
+    delete_hover_rule = _css_rule(
+        styles_css, ".delete-task-button:hover,\n.delete-task-button:focus-visible"
+    )
+    assert "border-color: var(--danger-border)" in delete_hover_rule
 
     tone_start = app_js.index("function statusTone")
     tone_end = app_js.index("function notebookReproducibilityComplete", tone_start)
@@ -3542,7 +3546,12 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "width: auto" in menu_rule
     assert "max-width: 100%" in menu_rule
     assert "padding: 14px 16px 16px" in menu_rule
+    assert "box-shadow: var(--settings-menu-shadow)" in menu_rule
     assert "width: min(520px" not in menu_rule
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    assert root_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
+    assert dark_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
     section_rule = _css_rule(styles_css, ".settings-menu-section")
     assert "padding: 0" in section_rule
     assert "border: 0" in section_rule
@@ -4293,6 +4302,12 @@ def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
     assert '"<strong>分数一致性</strong>"' not in renderer
     assert ".score-compare-list" in styles_css
     assert ".score-diff-bar" in styles_css
+    assert "border-color: var(--danger-border)" in _css_rule(
+        styles_css, ".result-summary.error"
+    )
+    assert "border-color: var(--danger-border)" in _css_rule(
+        styles_css, ".score-compare-row.mismatched"
+    )
 
 
 def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_tone():
@@ -4591,6 +4606,7 @@ def test_evidence_restore_renders_persisted_scan_result():
 
 def test_scan_result_renders_structured_preflight_checks():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
     renderer_start = app_js.index("function renderScanResult")
     renderer_end = app_js.index("function renderValidationResult", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
@@ -4600,6 +4616,12 @@ def test_scan_result_renders_structured_preflight_checks():
     assert "notebook_contract" in app_js
     assert "file-list" not in renderer
     assert "ambiguity-list" not in renderer
+    for selector, token in [
+        (".preflight-check-item.danger", "--danger-border"),
+        (".preflight-check-item.warning", "--warning-border"),
+        (".preflight-check-item.success", "--success-border"),
+    ]:
+        assert f"border-color: var({token})" in _css_rule(styles_css, selector)
 
 
 def test_validate_action_polls_task_status_and_evidence_until_terminal():
