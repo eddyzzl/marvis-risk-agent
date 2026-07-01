@@ -20,6 +20,9 @@ class GateControlValidationError(Exception):
     pass
 
 
+_STRUCTURED_DEDUP_STRATEGIES = frozenset({"first", "last"})
+
+
 def validate_gate_control(
     plan: Plan,
     gate: PlanStep | None,
@@ -46,6 +49,16 @@ def validate_gate_control(
         raise GateControlValidationError("该控件只适用于特征筛选确认步骤。")
     if dedup_adjust and not gate_depends_on_tool(plan, gate, "confirm_join"):
         raise GateControlValidationError("该控件只适用于拼接去重确认步骤。")
+    if dedup_adjust:
+        invalid = sorted({
+            str(value)
+            for value in (dedup_strategies or {}).values()
+            if str(value).strip() not in _STRUCTURED_DEDUP_STRATEGIES
+        })
+        if invalid:
+            raise GateControlValidationError(
+                f"不支持的去重策略: {', '.join(invalid)};请使用 first 或 last。"
+            )
     if modeling_setup_adjust and not gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
         raise GateControlValidationError("该控件只适用于建模规格确认步骤。")
     if tuning_adjust and not (

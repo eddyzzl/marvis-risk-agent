@@ -6,7 +6,7 @@ import pytest
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset, KeyPair
-from marvis.data.errors import DedupRequiredError, FanOutError, JoinNotConfirmedError
+from marvis.data.errors import DataBackendError, DedupRequiredError, FanOutError, JoinNotConfirmedError
 from marvis.data.join_engine import JoinEngine
 from marvis.data.schema_infer import infer_dataset_schema
 
@@ -295,6 +295,9 @@ def test_join_engine_blocks_unconfirmed_and_requires_dedup_for_duplicate_keys(tm
         engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
     with pytest.raises(DedupRequiredError):
         engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+    with pytest.raises(DataBackendError, match="unsupported dedup_strategy"):
+        engine.confirm_join_spec(plan.id, feature.id, dedup_strategy="drop_all")
+    assert spec.confirmed is False
 
     engine.confirm_join_spec(plan.id, feature.id, dedup_strategy="first")
     result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")

@@ -1255,6 +1255,15 @@ def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
             dedup_strategies={"feat-1": "first"},
             expected_step_id="old-gate",
         )
+    with pytest.raises(DriverError, match="不支持的去重策略"):
+        driver.resume(
+            plan_id="plan-join",
+            user_text="确认",
+            run_seq=1,
+            dedup_strategies={"feat-1": "drop_all"},
+            expected_step_id="execute",
+        )
+    assert [call[0] for call in runner.calls] == ["propose_join", "confirm_join"]
 
     turn = driver.resume(
         plan_id="plan-join",

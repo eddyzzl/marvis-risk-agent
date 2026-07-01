@@ -27,6 +27,9 @@ from marvis.data.errors import (
 )
 
 
+_ALLOWED_DEDUP_STRATEGIES = frozenset({"abort", "first", "last", "agg_mean", "agg_max"})
+
+
 class JoinEngine:
     def __init__(
         self,
@@ -259,6 +262,10 @@ class JoinEngine:
         *,
         dedup_strategy: str | None,
     ) -> None:
+        if dedup_strategy is not None:
+            dedup_strategy = str(dedup_strategy).strip() or None
+        if dedup_strategy is not None and dedup_strategy not in _ALLOWED_DEDUP_STRATEGIES:
+            raise DataBackendError(f"unsupported dedup_strategy: {dedup_strategy}")
         plan = self._repo.load_join_plan(join_plan_id)
         spec = _find_spec(plan, feature_dataset_id)
         if not spec.diagnostics.feature_key_unique and dedup_strategy in (None, "abort"):
