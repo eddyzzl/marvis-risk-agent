@@ -1254,6 +1254,11 @@ def test_metrics_stage_status_failure_rolls_back_outputs_report_and_images(
         ),
         encoding="utf-8",
     )
+    old_model_meta = {"algorithm": "old", "feature_importance": []}
+    (execution_dir / "model_meta.json").write_text(
+        json.dumps(old_model_meta),
+        encoding="utf-8",
+    )
     (outputs_dir / REPRODUCIBILITY_RESULT_JSON).write_text(
         json.dumps({"summary": {"status": "pass"}, "rows": []}),
         encoding="utf-8",
@@ -1300,6 +1305,8 @@ def test_metrics_stage_status_failure_rolls_back_outputs_report_and_images(
     assert (outputs_dir / "validation.xlsx").read_bytes() == b"old-xlsx"
     assert (outputs_dir / "validation_report.docx").read_bytes() == b"old-report"
     assert (images_dir / "old.png").read_bytes() == b"old-image"
+    assert json.loads((execution_dir / "model_meta.json").read_text(encoding="utf-8")) == old_model_meta
+    assert not (execution_dir / ".staging").exists()
     assert not (outputs_dir / ".metrics-stage-work").exists()
     assert not (outputs_dir / ".staging").exists()
     assert not (task_dir / ".staging").exists()
@@ -1909,10 +1916,13 @@ def test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs(
 
     task_dir = workspace / "tasks" / task.id
     outputs_dir = task_dir / "outputs"
+    execution_dir = task_dir / "execution"
     assert not (outputs_dir / "validation_results.json").exists()
     assert not (outputs_dir / "validation.xlsx").exists()
     assert not (outputs_dir / ".metrics-stage-work").exists()
     assert not (outputs_dir / ".staging").exists()
+    assert not (execution_dir / "model_meta.json").exists()
+    assert not (execution_dir / ".staging").exists()
 
 
 def test_pipeline_marks_missing_required_input_failed(tmp_path: Path):

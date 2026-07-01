@@ -348,8 +348,12 @@ def run_metrics_stage(
             metrics_work_dir.mkdir(parents=True, exist_ok=True)
             contract = load_runtime_contract(execution_dir / "runtime_contract.json")
             task = _sync_task_algorithm(repo, task, contract.algorithm)
-            model_meta_path = execution_dir / "model_meta.json"
-            _write_model_meta_from_contract(contract, model_meta_path)
+            metrics_uow = ArtifactUnitOfWork()
+            model_meta_path = _stage_model_meta_from_contract(
+                metrics_uow,
+                contract,
+                execution_dir,
+            )
             if live_session is None:
                 notebook_path = _required_path(
                     task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
@@ -392,6 +396,7 @@ def run_metrics_stage(
                     ),
                 )
                 if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
+                    _rollback_artifact_uow(metrics_uow)
                     return
                 _require_metrics_outputs(metrics_work_dir)
             else:
@@ -422,6 +427,7 @@ def run_metrics_stage(
             task_dir=task_dir,
             outputs_dir=outputs_dir,
             metrics_work_dir=metrics_work_dir,
+            uow=metrics_uow,
         )
         metrics_uow.finalize_with_connection(
             repo.transaction,
@@ -603,8 +609,10 @@ def _stage_metrics_outputs_for_commit(
     task_dir: Path,
     outputs_dir: Path,
     metrics_work_dir: Path,
+    uow: ArtifactUnitOfWork | None = None,
 ) -> ArtifactUnitOfWork:
-    uow = ArtifactUnitOfWork()
+    if uow is None:
+        uow = ArtifactUnitOfWork()
     for name in METRICS_OUTPUT_FILENAMES:
         source = metrics_work_dir / name
         destination = outputs_dir / name
@@ -620,6 +628,15 @@ def _stage_metrics_outputs_for_commit(
     if images_dir.exists() or images_dir.is_symlink():
         uow.remove_path(images_dir)
     return uow
+
+
+def _stage_model_meta_from_contract(
+    uow: ArtifactUnitOfWork,
+    contract: RuntimeContract,
+    execution_dir: Path,
+) -> Path:
+    artifact = uow.stage_file(execution_dir, "model_meta.json")
+    return _write_model_meta_from_contract(contract, artifact.path)
 
 
 def _write_reproducibility_result_in_session(
@@ -1341,8 +1358,12 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             contract_meta_path=contract_meta_path,
             output_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
         )
-        model_meta_path = execution_dir / "model_meta.json"
-        _write_model_meta_from_contract(contract, model_meta_path)
+        metrics_uow = ArtifactUnitOfWork()
+        model_meta_path = _stage_model_meta_from_contract(
+            metrics_uow,
+            contract,
+            execution_dir,
+        )
 
         repo.update_status(
             task_id,
@@ -1372,6 +1393,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             task_dir=task_dir,
             outputs_dir=outputs_dir,
             metrics_work_dir=metrics_work_dir,
+            uow=metrics_uow,
         )
         metrics_uow.finalize_with_connection(
             repo.transaction,
