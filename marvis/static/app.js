@@ -41,6 +41,7 @@ import {
   renderTaskSnapshot as renderTaskSnapshotView,
   updateWorkspaceGreeting as updateWorkspaceGreetingView,
 } from "./js/task-workspace-view.js";
+import { createTaskSearchController } from "./js/task-search.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
@@ -171,7 +172,6 @@ let pendingTaskContentLoadTaskId = null;
 let taskContentSettleTimer = null;
 let latestNotebookSteps = [];
 let sidebarCollapsed = false;
-let taskSearchActive = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
 let petPreference = defaultPetPreference;
@@ -233,6 +233,18 @@ const planRailController = createPlanRailController({
   loadAgentMessages,
   renderAll,
 });
+const taskSearchController = createTaskSearchController({
+  getElementById: $,
+  getQuery: () => taskSearchQuery,
+  setQuery: (value) => {
+    taskSearchQuery = value;
+  },
+  renderTaskList: () => renderTaskList(),
+});
+const openTaskSearch = taskSearchController.openTaskSearch;
+const closeTaskSearch = taskSearchController.closeTaskSearch;
+const toggleTaskSearch = taskSearchController.toggleTaskSearch;
+const taskSearchIsActive = taskSearchController.isActive;
 
 const PET_REACTION_DURATION_MS = 6500;
 const AGENT_STREAM_POLL_INTERVAL_MS = 180;
@@ -807,40 +819,6 @@ function expandSidebarFromBrand(event) {
 function handleSidebarBrandKeydown(event) {
   if (!sidebarCollapsed || !["Enter", " "].includes(event.key)) return;
   expandSidebarFromBrand(event);
-}
-
-function openTaskSearch() {
-  if (taskSearchActive) return;
-  taskSearchActive = true;
-  document.body.classList.add("search-active");
-  $("taskSearchToggle").setAttribute("aria-expanded", "true");
-  const input = $("taskSearchInput");
-  window.requestAnimationFrame(() => {
-    input.focus();
-    input.select();
-  });
-}
-
-function closeTaskSearch({ focusToggle = false } = {}) {
-  if (!taskSearchActive) return;
-  taskSearchActive = false;
-  document.body.classList.remove("search-active");
-  $("taskSearchToggle").setAttribute("aria-expanded", "false");
-  const input = $("taskSearchInput");
-  if (input.value) {
-    input.value = "";
-    taskSearchQuery = "";
-    renderTaskList();
-  }
-  if (focusToggle) $("taskSearchToggle").focus();
-}
-
-function toggleTaskSearch() {
-  if (taskSearchActive) {
-    closeTaskSearch({ focusToggle: true });
-  } else {
-    openTaskSearch();
-  }
 }
 
 function basePetMoodFromTask() {
@@ -6361,7 +6339,7 @@ window.addEventListener("resize", syncTaskHeroGlassLayout);
 $("taskList").onkeydown = handleTaskListKeydown;
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && taskSearchActive) {
+  if (event.key === "Escape" && taskSearchIsActive()) {
     closeTaskSearch({ focusToggle: true });
     return;
   }

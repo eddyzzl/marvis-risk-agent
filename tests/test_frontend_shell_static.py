@@ -91,6 +91,7 @@ def test_app_entry_is_split_into_frontend_modules():
         "render-agent.js",
         "render-metrics.js",
         "state.js",
+        "task-search.js",
         "theme.js",
         "toast.js",
         "ui-utils.js",
@@ -109,6 +110,7 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/render-agent.js"' in app_js
     assert 'from "./js/render-metrics.js"' in app_js
     assert 'from "./js/state.js"' in app_js
+    assert 'from "./js/task-search.js"' in app_js
     assert 'from "./js/theme.js"' in app_js
     assert 'from "./js/toast.js"' in app_js
     assert 'from "./js/ui-utils.js"' in app_js

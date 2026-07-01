@@ -37,6 +37,7 @@ def test_static_es_module_files_exist_for_declared_imports():
         "render-agent.js",
         "render-metrics.js",
         "state.js",
+        "task-search.js",
         "toast.js",
         "ui-utils.js",
     ):

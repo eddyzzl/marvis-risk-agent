@@ -4402,6 +4402,79 @@ def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     assert 'applyPetPreference(target.value, { explicit: true });' in settings_renderer
 
 
+def test_task_search_controller_toggles_search_state_and_resets_query():
+    module_url = (STATIC_DIR / "js" / "task-search.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ createTaskSearchController }} from {json.dumps(module_url)};
+
+const bodyClasses = new Set();
+const elements = {{
+  taskSearchToggle: {{
+    attrs: {{}},
+    focused: false,
+    setAttribute(name, value) {{ this.attrs[name] = value; }},
+    focus() {{ this.focused = true; }},
+  }},
+  taskSearchInput: {{
+    value: "risk",
+    focused: false,
+    selected: false,
+    focus() {{ this.focused = true; }},
+    select() {{ this.selected = true; }},
+  }},
+}};
+let query = "risk";
+let renderCount = 0;
+let frameCount = 0;
+const controller = createTaskSearchController({{
+  getElementById: (id) => elements[id],
+  documentRef: {{
+    body: {{
+      classList: {{
+        add: (name) => bodyClasses.add(name),
+        remove: (name) => bodyClasses.delete(name),
+        contains: (name) => bodyClasses.has(name),
+      }},
+    }},
+  }},
+  windowRef: {{
+    requestAnimationFrame(callback) {{
+      frameCount += 1;
+      callback();
+    }},
+  }},
+  getQuery: () => query,
+  setQuery: (value) => {{ query = value; }},
+  renderTaskList: () => {{ renderCount += 1; }},
+}});
+
+assert.equal(controller.isActive(), false);
+controller.openTaskSearch();
+assert.equal(controller.isActive(), true);
+assert.equal(bodyClasses.has("search-active"), true);
+assert.equal(elements.taskSearchToggle.attrs["aria-expanded"], "true");
+assert.equal(elements.taskSearchInput.focused, true);
+assert.equal(elements.taskSearchInput.selected, true);
+assert.equal(frameCount, 1);
+
+controller.closeTaskSearch({{ focusToggle: true }});
+assert.equal(controller.isActive(), false);
+assert.equal(bodyClasses.has("search-active"), false);
+assert.equal(elements.taskSearchToggle.attrs["aria-expanded"], "false");
+assert.equal(elements.taskSearchToggle.focused, true);
+assert.equal(elements.taskSearchInput.value, "");
+assert.equal(query, "");
+assert.equal(renderCount, 1);
+
+controller.toggleTaskSearch();
+assert.equal(controller.isActive(), true);
+controller.toggleTaskSearch();
+assert.equal(controller.isActive(), false);
+"""
+    subprocess.run(["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True)
+
+
 def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
     app_js = _read_static("app.js")
 
