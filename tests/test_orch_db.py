@@ -3,7 +3,7 @@ import json
 import pytest
 
 from marvis.db import PlanRepository, connect, init_db
-import marvis.db as db_module
+import marvis.repositories.plans as plan_repo_module
 from marvis.orchestrator.contracts import (
     AgentStatus,
     Plan,
@@ -17,6 +17,10 @@ from marvis.orchestrator.contracts import (
 from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
 from marvis.plugins.manifest import ToolRef
 from marvis.state_machine import ConflictError
+
+
+def test_plan_repository_is_reexported_from_db_for_compatibility():
+    assert PlanRepository is plan_repo_module.PlanRepository
 
 
 def _plan(*, success_criteria=None) -> Plan:
@@ -449,7 +453,7 @@ def test_plan_repository_upsert_sub_agent_with_audit_rolls_back_when_audit_fails
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plan_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.upsert_sub_agent_with_audit(
@@ -485,7 +489,7 @@ def test_plan_repository_set_sub_agent_status_with_audit_rolls_back_when_audit_f
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plan_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.set_sub_agent_status_with_audit(

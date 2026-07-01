@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from marvis.db import PlanRepository, PluginRepository, connect, init_db
-import marvis.db as db_module
+import marvis.repositories.plans as plan_repo_module
 from marvis.orchestrator.contracts import AgentStatus, Plan, PlanStatus, PlanStep
 from marvis.orchestrator.subagent import SubAgentDispatcher
 from marvis.orchestrator.templates import load_builtin_templates
@@ -114,7 +114,7 @@ def test_subagent_spawn_rolls_back_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plan_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         dispatcher.spawn(_step(), parent_task_id="task-1")
@@ -190,7 +190,7 @@ def test_subagent_run_does_not_return_when_final_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(plan_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         dispatcher.run(sub, goal_inputs={"message": "hi"})
