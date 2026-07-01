@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Callable
 
 import pandas as pd
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset
 from marvis.data.errors import DataBackendError
@@ -34,31 +36,38 @@ class DatasetRegistry:
         source_path = Path(source_path)
         dataset_dir = self._dataset_dir(task_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path: Path | None = None
+        uow = ArtifactUnitOfWork()
+        final_name = f"{source_path.stem}_{uuid.uuid4().hex[:8]}.parquet"
+        artifact = uow.stage_file(dataset_dir, final_name)
         try:
-            parquet_path, sheet = self._normalize_to_parquet(source_path, dataset_dir)
-            profiles = profile_dataset(self._backend, parquet_path, seed=seed)
-            sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
+            sheet = self._write_upload_as_parquet(source_path, artifact.path)
+            profiles = profile_dataset(self._backend, artifact.path, seed=seed)
+            sample = self._backend.sample_rows(artifact.path, 1000, seed=seed)
             target = detect_target_column(profiles, sample)
             dataset = Dataset(
                 id=_new_dataset_id(),
                 task_id=task_id,
                 role=role,
-                source_path=self._relative_path(parquet_path),
+                source_path=self._relative_path(artifact.final_path),
                 format="parquet",
                 sheet=sheet,
-                row_count=self._backend.row_count(parquet_path),
+                row_count=self._backend.row_count(artifact.path),
                 columns=tuple(profiles),
                 has_target=target is not None,
                 target_col=target,
                 created_at=_now_iso(),
             )
-            self._repo.create_dataset(dataset)
+            create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
+            transaction = getattr(self._repo, "transaction", None)
+            if callable(create_on_connection) and callable(transaction):
+                return uow.finalize_with_connection(
+                    transaction,
+                    lambda conn: _create_dataset_on_connection(create_on_connection, conn, dataset),
+                )
+            return uow.finalize(lambda: _create_dataset(self._repo.create_dataset, dataset))
         except Exception:
-            if parquet_path is not None:
-                parquet_path.unlink(missing_ok=True)
+            uow.rollback()
             raise
-        return dataset
 
     def register_existing(
         self,
@@ -246,27 +255,34 @@ class DatasetRegistry:
         self._repo.set_dataset_role(dataset_id, role)
 
     def _normalize_to_parquet(self, source_path: Path, dataset_dir: Path) -> tuple[Path, str | None]:
-        suffix = source_path.suffix.lower()
         out_path = dataset_dir / f"{source_path.stem}_{uuid.uuid4().hex[:8]}.parquet"
+        sheet = self._write_upload_as_parquet(source_path, out_path)
+        return out_path, sheet
+
+    def _write_upload_as_parquet(self, source_path: Path, out_path: Path) -> str | None:
+        suffix = source_path.suffix.lower()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".parquet":
             if source_path.resolve() == out_path.resolve():
-                return out_path, None
+                return None
             shutil.copy2(source_path, out_path)
-            return out_path, None
+            return None
         if suffix == ".csv":
             frame = pd.read_csv(source_path, encoding="utf-8-sig")
             frame.to_parquet(out_path, index=False)
-            return out_path, None
+            return None
         if suffix == ".feather":
             frame = pd.read_feather(source_path)
             frame.to_parquet(out_path, index=False)
-            return out_path, None
+            return None
         if suffix in {".xlsx", ".xlsm"}:
             sheets = list_sheets(source_path)
             if not sheets:
                 raise DataBackendError(f"workbook has no sheets: {source_path}")
-            parquet_path, report = ingest_sheet(source_path, sheets[0], dataset_dir)
-            return parquet_path, report.sheet
+            with tempfile.TemporaryDirectory(prefix=".xlsx_ingest_", dir=out_path.parent) as temp_name:
+                parquet_path, report = ingest_sheet(source_path, sheets[0], Path(temp_name))
+                shutil.move(parquet_path, out_path)
+            return report.sheet
         raise DataBackendError(f"unsupported dataset upload format: {suffix}")
 
     def _ensure_under_root(self, parquet_path: Path, task_id: str) -> Path:
@@ -322,6 +338,16 @@ class DatasetRegistry:
 
 def _new_dataset_id() -> str:
     return f"ds_{uuid.uuid4().hex}"
+
+
+def _create_dataset(create_dataset, dataset: Dataset) -> Dataset:
+    create_dataset(dataset)
+    return dataset
+
+
+def _create_dataset_on_connection(create_dataset_on_connection, conn, dataset: Dataset) -> Dataset:
+    create_dataset_on_connection(conn, dataset)
+    return dataset
 
 
 def _now_iso() -> str:

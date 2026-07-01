@@ -433,15 +433,16 @@ def test_dataset_registry_register_from_upload_removes_parquet_when_db_write_fai
     csv_path = tmp_path / "sample.csv"
     pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [1]}).to_csv(csv_path, index=False)
 
-    def fail_create_dataset(*_args, **_kwargs):
+    def fail_create_dataset_on_connection(*_args, **_kwargs):
         raise RuntimeError("db unavailable")
 
-    monkeypatch.setattr(repo, "create_dataset", fail_create_dataset)
+    monkeypatch.setattr(repo, "create_dataset_on_connection", fail_create_dataset_on_connection)
 
     with pytest.raises(RuntimeError, match="db unavailable"):
         registry.register_from_upload("task-1", csv_path, role="sample")
 
     assert not list((datasets_root / "task-1").glob("sample_*.parquet"))
+    assert not ((datasets_root / "task-1") / ".staging").exists()
 
 
 def test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fails(
