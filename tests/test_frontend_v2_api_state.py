@@ -106,6 +106,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           executeJoin,
           fetchDraftUrl,
           getJoinPlan,
+          getTask,
           getMemoryDistillation,
           getPlan,
           listCapabilityTiers,
@@ -145,6 +146,8 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.equal(calls.at(-1).url, "/api/tasks/task%20id/plans");
         assert.equal(calls.at(-1).options.method, "POST");
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), { goal: "build plan" });
+        await getTask("task id");
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id");
 
         await getPlan("plan/1");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1");
@@ -207,6 +210,9 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.equal(calls.at(-1).url, "/api/joins/join%2F1/confirm");
         await executeJoin("join/1");
         assert.equal(calls.at(-1).url, "/api/joins/join%2F1/execute");
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { async_execute: true });
+        await executeJoin("join/1", { async_execute: false });
+        assert.deepEqual(JSON.parse(calls.at(-1).options.body), { async_execute: false });
 
         await listCapabilityTiers();
         assert.equal(calls.at(-1).url, "/api/capability-tiers");

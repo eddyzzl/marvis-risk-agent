@@ -9,6 +9,7 @@ function queryPart(value) {
 }
 
 export const createPlan = (taskId, body) => apiPost(`/api/tasks/${pathPart(taskId)}/plans`, body);
+export const getTask = (taskId) => apiGet(`/api/tasks/${pathPart(taskId)}`);
 export const getPlan = (planId) => apiGet(`/api/plans/${pathPart(planId)}`);
 export const confirmPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/confirm`, {});
 export const runPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/run`, {});
@@ -61,7 +62,9 @@ export const proposeJoin = (taskId, body) => (
 );
 export const getJoinPlan = (joinId) => apiGet(`/api/joins/${pathPart(joinId)}`);
 export const confirmJoinSpec = (joinId, body) => apiPost(`/api/joins/${pathPart(joinId)}/confirm`, body);
-export const executeJoin = (joinId) => apiPost(`/api/joins/${pathPart(joinId)}/execute`, {});
+export const executeJoin = (joinId, body = { async_execute: true }) => (
+  apiPost(`/api/joins/${pathPart(joinId)}/execute`, body || {})
+);
 
 export const listCapabilityTiers = () => apiGet("/api/capability-tiers");
 

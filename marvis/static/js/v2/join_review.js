@@ -1,7 +1,9 @@
+import { sleep } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import {
   confirmJoinSpec as confirmJoinSpecApi,
   executeJoin as executeJoinApi,
+  getTask as getTaskApi,
   getJoinPlan,
   listDatasets as listDatasetsApi,
   proposeJoin as proposeJoinApi,
@@ -273,6 +275,15 @@ function isFanOutError(error) {
   return error?.status === 409 || text.includes("fan-out") || text.includes("fanout");
 }
 
+function joinExecutionAccepted(result) {
+  return Boolean(result?.job_id || result?.status === "accepted");
+}
+
+function joinExecutionComplete(result) {
+  const joinPlan = result?.join_plan || result?.join || result;
+  return Boolean(result?.result_dataset_id || joinPlan?.result_dataset_id || joinPlan?.status === "executed");
+}
+
 async function defaultRefreshJoin(joinId) {
   const payload = await getJoinPlan(joinId);
   const joinPlan = payload?.join_plan || payload?.join || payload;
@@ -280,6 +291,39 @@ async function defaultRefreshJoin(joinId) {
     setCurrentJoin(joinPlan);
   }
   return joinPlan;
+}
+
+async function defaultPollJoinExecution({
+  joinId,
+  taskId = "",
+  refreshJoin = defaultRefreshJoin,
+  getTask = getTaskApi,
+  intervalMs = 1000,
+  maxAttempts = 120,
+  sleepFn = sleep,
+} = {}) {
+  if (!joinId) {
+    return null;
+  }
+  const attempts = Math.max(1, Number(maxAttempts) || 1);
+  const resolvedTaskId = String(taskId || "").trim();
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const joinPlan = await refreshJoin(joinId);
+    if (joinExecutionComplete(joinPlan)) {
+      return { status: "executed", join_plan: joinPlan, result_dataset_id: joinPlan?.result_dataset_id };
+    }
+    if (!resolvedTaskId) {
+      return joinPlan;
+    }
+    const task = await getTask(resolvedTaskId);
+    if (task?.active_job_kind !== "join") {
+      break;
+    }
+    if (attempt < attempts - 1) {
+      await sleepFn(intervalMs);
+    }
+  }
+  throw new Error("后台拼接任务已结束，但拼接计划未生成结果，请刷新后重试。");
 }
 
 export function attachJoinHandlers(root, taskId = "", deps = {}) {
@@ -293,6 +337,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
     listDatasets: listDatasetsApi,
     proposeJoin: proposeJoinApi,
     getCurrentJoin,
+    pollJoinExecution: defaultPollJoinExecution,
     refreshJoin: defaultRefreshJoin,
     setCurrentJoin,
     setDatasets,
@@ -385,7 +430,21 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
     if (executeButton?.dataset?.execJoin) {
       event.preventDefault?.();
       try {
-        const result = await actions.executeJoin(executeButton.dataset.execJoin);
+        const joinId = executeButton.dataset.execJoin;
+        const result = await actions.executeJoin(joinId);
+        if (joinExecutionAccepted(result)) {
+          actions.showResult(result);
+          const finalResult = await actions.pollJoinExecution({
+            accepted: result,
+            joinId,
+            taskId: resolveTaskId(normalized.taskId),
+            refreshJoin: actions.refreshJoin,
+          });
+          if (finalResult) {
+            actions.showResult(finalResult);
+          }
+          return;
+        }
         if (result?.fan_out) {
           actions.showError("检测到 fan-out 风险，已停止执行拼接。");
           return;

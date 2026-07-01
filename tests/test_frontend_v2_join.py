@@ -403,6 +403,60 @@ def test_join_handlers_require_dedup_before_confirming_and_surface_execute_error
     )
 
 
+def test_join_handlers_poll_after_async_execute_acceptance():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const listeners = {};
+        const calls = [];
+        const results = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachJoinHandlers(root, "task-1", {
+          executeJoin: async (joinId) => {
+            calls.push(["executeJoin", joinId]);
+            return { status: "accepted", job_id: "job-1", join_plan_id: joinId };
+          },
+          pollJoinExecution: async ({ joinId, taskId, accepted, refreshJoin }) => {
+            calls.push([
+              "pollJoinExecution",
+              joinId,
+              taskId,
+              accepted.job_id,
+              typeof refreshJoin,
+            ]);
+            return { status: "executed", result_dataset_id: "joined-1" };
+          },
+          showResult: (payload) => results.push(payload),
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-exec-join]"
+                ? { dataset: { execJoin: "join-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(calls, [
+          ["executeJoin", "join-1"],
+          ["pollJoinExecution", "join-1", "task-1", "job-1", "function"],
+        ]);
+        assert.deepEqual(results, [
+          { status: "accepted", job_id: "job-1", join_plan_id: "join-1" },
+          { status: "executed", result_dataset_id: "joined-1" },
+        ]);
+        """
+    )
+
+
 def test_join_handlers_surface_execute_api_errors_without_bubbling():
     run_node(
         """
