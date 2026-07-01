@@ -21,6 +21,7 @@ import {
 import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
+import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
 import {
@@ -176,7 +177,9 @@ let petReactionTimer = null;
 let taskHeroGlassFrame = null;
 let taskHeroGlassActive = null;
 let taskHeroCanScroll = false;
-let platformConfirmResolver = null;
+const platformConfirm = createPlatformConfirmController({ getElementById: $ });
+const showPlatformConfirm = platformConfirm.showPlatformConfirm;
+const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;
 const materialSourceController = createMaterialSourceController({
   $,
   onFilesChanged: renderMaterialUploadSelection,
@@ -513,53 +516,6 @@ function closeDialogOnBackdropClick(event) {
 function bindDialogBackdropDismissal() {
   document.querySelectorAll("dialog").forEach((dialog) => {
     dialog.addEventListener("click", closeDialogOnBackdropClick);
-  });
-}
-
-function closePlatformConfirmDialog(confirmed = false) {
-  const resolver = platformConfirmResolver;
-  platformConfirmResolver = null;
-  if ($("platformConfirmDialog")?.open) {
-    $("platformConfirmDialog").close(confirmed ? "confirm" : "cancel");
-  }
-  if (resolver) resolver(confirmed);
-}
-
-function showPlatformConfirm({
-  title = "确认操作",
-  message = "此操作不能撤销。",
-  confirmText = "确认",
-  cancelText = "取消",
-  tone = "default",
-} = {}) {
-  const dialog = $("platformConfirmDialog");
-  if (!dialog) return Promise.resolve(false);
-  if (platformConfirmResolver) closePlatformConfirmDialog(false);
-
-  $("platformConfirmTitle").textContent = title;
-  $("platformConfirmMessage").textContent = message;
-  $("platformConfirmConfirmButton").textContent = confirmText;
-  $("platformConfirmCancelButton").textContent = cancelText;
-  dialog.dataset.tone = tone;
-
-  return new Promise((resolve) => {
-    platformConfirmResolver = resolve;
-    dialog.showModal();
-    $("platformConfirmCancelButton").focus({ preventScroll: true });
-  });
-}
-
-function bindPlatformConfirmDialog() {
-  const dialog = $("platformConfirmDialog");
-  if (!dialog) return;
-  $("platformConfirmCancelButton").onclick = () => closePlatformConfirmDialog(false);
-  $("platformConfirmConfirmButton").onclick = () => closePlatformConfirmDialog(true);
-  dialog.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    closePlatformConfirmDialog(false);
-  });
-  dialog.addEventListener("close", () => {
-    if (platformConfirmResolver) closePlatformConfirmDialog(false);
   });
 }
 

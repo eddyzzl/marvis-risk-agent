@@ -5226,6 +5226,7 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    platform_confirm_js = _read_static("js/platform-confirm.js")
 
     assert 'id="platformConfirmDialog"' in index_html
     assert 'id="platformConfirmTitle"' in index_html
@@ -5266,8 +5267,13 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
     assert "color: var(--danger)" in confirm_icon_danger_rule
     assert "background:" not in confirm_icon_danger_rule
     assert "box-shadow:" not in confirm_icon_danger_rule
-    assert "function showPlatformConfirm" in app_js
-    assert "function bindPlatformConfirmDialog" in app_js
+    assert "export function createPlatformConfirmController" in platform_confirm_js
+    assert 'from "./js/platform-confirm.js"' in app_js
+    assert "const platformConfirm = createPlatformConfirmController({ getElementById: $ });" in app_js
+    assert "const showPlatformConfirm = platformConfirm.showPlatformConfirm;" in app_js
+    assert "const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;" in app_js
+    assert "function showPlatformConfirm" not in app_js
+    assert "function bindPlatformConfirmDialog" not in app_js
     assert "bindPlatformConfirmDialog();" in app_js
     assert "window.confirm" not in app_js
 
@@ -5295,6 +5301,92 @@ def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
         '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative:focus-visible:not(:disabled)',
     )
     assert "box-shadow: var(--button-solid-shadow-hover)" in confirm_action_hover_rule
+
+
+def test_platform_confirm_controller_resolves_confirm_and_cancel():
+    script = """
+import assert from "node:assert/strict";
+import { createPlatformConfirmController } from "./marvis/static/js/platform-confirm.js";
+
+const elements = {};
+function button() {
+  return {
+    textContent: "",
+    onclick: null,
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
+}
+const dialog = {
+  open: false,
+  dataset: {},
+  listeners: {},
+  closeValue: "",
+  showModal() {
+    this.open = true;
+  },
+  close(value) {
+    this.open = false;
+    this.closeValue = value;
+    this.listeners.close?.({ type: "close" });
+  },
+  addEventListener(name, fn) {
+    this.listeners[name] = fn;
+  },
+};
+elements.platformConfirmDialog = dialog;
+elements.platformConfirmTitle = { textContent: "" };
+elements.platformConfirmMessage = { textContent: "" };
+elements.platformConfirmConfirmButton = button();
+elements.platformConfirmCancelButton = button();
+
+const controller = createPlatformConfirmController({ getElementById: (id) => elements[id] });
+controller.bindPlatformConfirmDialog();
+
+const confirmedPromise = controller.showPlatformConfirm({
+  title: "删除任务",
+  message: "确认删除?",
+  confirmText: "删除",
+  cancelText: "取消",
+  tone: "danger",
+});
+assert.equal(dialog.open, true);
+assert.equal(elements.platformConfirmTitle.textContent, "删除任务");
+assert.equal(elements.platformConfirmMessage.textContent, "确认删除?");
+assert.equal(elements.platformConfirmConfirmButton.textContent, "删除");
+assert.equal(elements.platformConfirmCancelButton.textContent, "取消");
+assert.equal(elements.platformConfirmCancelButton.focusCalls, 1);
+assert.equal(dialog.dataset.tone, "danger");
+elements.platformConfirmConfirmButton.onclick();
+assert.equal(await confirmedPromise, true);
+assert.equal(dialog.closeValue, "confirm");
+
+const cancelledPromise = controller.showPlatformConfirm({ title: "二次确认" });
+elements.platformConfirmCancelButton.onclick();
+assert.equal(await cancelledPromise, false);
+assert.equal(dialog.closeValue, "cancel");
+
+const escapePromise = controller.showPlatformConfirm({ title: "ESC" });
+let prevented = false;
+dialog.listeners.cancel({
+  preventDefault() {
+    prevented = true;
+  },
+});
+assert.equal(prevented, true);
+assert.equal(await escapePromise, false);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_agent_stop_response_polls_until_active_agent_job_finishes():
