@@ -457,6 +457,43 @@ def test_join_handlers_poll_after_async_execute_acceptance():
     )
 
 
+def test_join_handlers_surface_async_job_poll_errors():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { attachJoinHandlers } from "./marvis/static/js/v2/join_review.js";
+
+        const listeners = {};
+        const messages = [];
+        const root = {
+          addEventListener(type, fn) { listeners[type] = fn; },
+          removeEventListener() {},
+        };
+        attachJoinHandlers(root, "task-1", {
+          executeJoin: async () => ({ status: "accepted", job_id: "job-1" }),
+          pollJoinExecution: async () => {
+            throw new Error("join produced 12 > anchor 10 rows");
+          },
+          showError: (message) => messages.push(message),
+          showResult: () => {},
+        });
+
+        await listeners.click({
+          target: {
+            closest(selector) {
+              return selector === "[data-exec-join]"
+                ? { dataset: { execJoin: "join-1" } }
+                : null;
+            },
+          },
+          preventDefault() {},
+        });
+
+        assert.deepEqual(messages, ["join produced 12 > anchor 10 rows"]);
+        """
+    )
+
+
 def test_join_handlers_surface_execute_api_errors_without_bubbling():
     run_node(
         """

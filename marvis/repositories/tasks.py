@@ -403,6 +403,30 @@ class TaskRepository:
             ).fetchone()
         return None if row is None else str(row["kind"])
 
+    def get_latest_job(self, task_id: str, *, kind: str | None = None) -> dict | None:
+        params: list[str] = [task_id]
+        kind_clause = ""
+        if kind:
+            kind_clause = " AND kind = ?"
+            params.append(kind)
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                f"""
+                SELECT id, task_id, kind, status, progress_message,
+                       error_name, error_value, created_at, started_at,
+                       finished_at, log_path
+                  FROM jobs
+                 WHERE task_id = ?
+                       {kind_clause}
+                 ORDER BY COALESCE(finished_at, started_at, created_at) DESC,
+                          created_at DESC,
+                          id DESC
+                 LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def get_report_values(self, task_id: str) -> tuple[dict[str, str], int]:
         with connect(self.db_path) as conn:
             row = conn.execute(

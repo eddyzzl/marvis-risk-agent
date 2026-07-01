@@ -10,6 +10,10 @@ function queryPart(value) {
 
 export const createPlan = (taskId, body) => apiPost(`/api/tasks/${pathPart(taskId)}/plans`, body);
 export const getTask = (taskId) => apiGet(`/api/tasks/${pathPart(taskId)}`);
+export const getLatestTaskJob = (taskId, kind = "") => {
+  const query = kind ? `?kind=${queryPart(kind)}` : "";
+  return apiGet(`/api/tasks/${pathPart(taskId)}/jobs/latest${query}`);
+};
 export const getPlan = (planId) => apiGet(`/api/plans/${pathPart(planId)}`);
 export const confirmPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/confirm`, {});
 export const runPlan = (planId) => apiPost(`/api/plans/${pathPart(planId)}/run`, {});

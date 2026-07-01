@@ -3,7 +3,7 @@ import { escapeHtml } from "../ui-utils.js";
 import {
   confirmJoinSpec as confirmJoinSpecApi,
   executeJoin as executeJoinApi,
-  getTask as getTaskApi,
+  getLatestTaskJob as getLatestTaskJobApi,
   getJoinPlan,
   listDatasets as listDatasetsApi,
   proposeJoin as proposeJoinApi,
@@ -297,7 +297,7 @@ async function defaultPollJoinExecution({
   joinId,
   taskId = "",
   refreshJoin = defaultRefreshJoin,
-  getTask = getTaskApi,
+  getLatestTaskJob = getLatestTaskJobApi,
   intervalMs = 1000,
   maxAttempts = 120,
   sleepFn = sleep,
@@ -315,8 +315,12 @@ async function defaultPollJoinExecution({
     if (!resolvedTaskId) {
       return joinPlan;
     }
-    const task = await getTask(resolvedTaskId);
-    if (task?.active_job_kind !== "join") {
+    const payload = await getLatestTaskJob(resolvedTaskId, "join");
+    const job = payload?.job || null;
+    if (job?.status === "failed") {
+      throw new Error(job.error_value || job.error_name || "后台拼接失败。");
+    }
+    if (!job || !["queued", "running"].includes(String(job.status || ""))) {
       break;
     }
     if (attempt < attempts - 1) {

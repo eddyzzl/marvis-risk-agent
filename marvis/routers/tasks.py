@@ -30,6 +30,25 @@ def _repo(request: Request) -> TaskRepository:
     return TaskRepository(request.app.state.settings.db_path)
 
 
+def _job_payload(job: dict | None) -> dict | None:
+    if job is None:
+        return None
+    keys = (
+        "id",
+        "task_id",
+        "kind",
+        "status",
+        "progress_message",
+        "error_name",
+        "error_value",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "log_path",
+    )
+    return {key: job.get(key) for key in keys if key in job}
+
+
 @router.get("/tasks")
 def list_tasks(
     request: Request,
@@ -114,6 +133,14 @@ def get_task(task_id: str, request: Request) -> dict:
         get_task_or_404(repo, task_id),
         request.app.state.settings.tasks_dir,
     )
+
+
+@router.get("/tasks/{task_id}/jobs/latest")
+def get_latest_task_job(task_id: str, request: Request, kind: str | None = None) -> dict:
+    repo = _repo(request)
+    get_task_or_404(repo, task_id)
+    normalized_kind = str(kind or "").strip() or None
+    return {"job": _job_payload(repo.get_latest_job(task_id, kind=normalized_kind))}
 
 
 @router.delete("/tasks/{task_id}", status_code=204)

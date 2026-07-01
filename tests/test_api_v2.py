@@ -127,6 +127,16 @@ class FakeTaskRepository:
                 return job["kind"]
         return None
 
+    def get_latest_job(self, task_id: str, *, kind: str | None = None) -> dict | None:
+        self.get_task(task_id)
+        for job in reversed(list(self.jobs.values())):
+            if job["task_id"] != task_id:
+                continue
+            if kind and job["kind"] != kind:
+                continue
+            return dict(job)
+        return None
+
     def get_task(self, task_id: str):
         try:
             return self.tasks[task_id]
@@ -581,6 +591,44 @@ def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
     assert got.json()["active_job_kind"] == "report"
     assert listed.status_code == 200
     assert listed.json()[0]["active_job_kind"] == "report"
+
+
+def test_latest_task_job_endpoint_exposes_job_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    FakeTaskRepository.jobs["job-join"] = {
+        "id": "job-join",
+        "task_id": task_id,
+        "kind": "join",
+        "status": "failed",
+        "error_name": "FanOutError",
+        "error_value": "join produced 12 > anchor 10 rows",
+        "traceback": "hidden traceback",
+    }
+
+    response = client.get(f"/api/tasks/{task_id}/jobs/latest?kind=join")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job": {
+            "id": "job-join",
+            "task_id": task_id,
+            "kind": "join",
+            "status": "failed",
+            "error_name": "FanOutError",
+            "error_value": "join produced 12 > anchor 10 rows",
+        }
+    }
 
 
 def test_task_payload_exposes_structured_failure_stage_for_reloaded_ui(

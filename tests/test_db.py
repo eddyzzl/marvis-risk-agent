@@ -177,6 +177,44 @@ def test_start_job_allows_only_one_active_job_per_task(tmp_path):
     assert repo.get_active_job_kind(task.id) == "metrics"
 
 
+def test_get_latest_job_returns_filtered_status_and_error(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create())
+
+    first_job_id = repo.start_job(task.id, "join")
+    repo.mark_job_running(first_job_id)
+    repo.finish_job(
+        first_job_id,
+        status="failed",
+        error_name="FanOutError",
+        error_value="join produced 12 > anchor 10 rows",
+        traceback="hidden traceback",
+    )
+    second_job_id = repo.start_job(task.id, "metrics")
+
+    latest_metrics = repo.get_latest_job(task.id, kind="metrics")
+    latest_join = repo.get_latest_job(task.id, kind="join")
+
+    assert latest_metrics["id"] == second_job_id
+    assert latest_metrics["kind"] == "metrics"
+    assert latest_join == {
+        "id": first_job_id,
+        "task_id": task.id,
+        "kind": "join",
+        "status": "failed",
+        "progress_message": "",
+        "error_name": "FanOutError",
+        "error_value": "join produced 12 > anchor 10 rows",
+        "created_at": latest_join["created_at"],
+        "started_at": latest_join["started_at"],
+        "finished_at": latest_join["finished_at"],
+        "log_path": None,
+    }
+    assert "traceback" not in latest_join
+
+
 def test_list_tasks_returns_created_tasks(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

@@ -106,6 +106,7 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
           executeJoin,
           fetchDraftUrl,
           getJoinPlan,
+          getLatestTaskJob,
           getTask,
           getMemoryDistillation,
           getPlan,
@@ -148,6 +149,10 @@ def test_v2_api_routes_and_multipart_helpers_match_backend_contracts():
         assert.deepEqual(JSON.parse(calls.at(-1).options.body), { goal: "build plan" });
         await getTask("task id");
         assert.equal(calls.at(-1).url, "/api/tasks/task%20id");
+        await getLatestTaskJob("task id", "join");
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/jobs/latest?kind=join");
+        await getLatestTaskJob("task id");
+        assert.equal(calls.at(-1).url, "/api/tasks/task%20id/jobs/latest");
 
         await getPlan("plan/1");
         assert.equal(calls.at(-1).url, "/api/plans/plan%2F1");
