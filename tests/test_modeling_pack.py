@@ -257,6 +257,67 @@ def test_reject_inference_audit_failure_rolls_back_dataset_and_file(tmp_path, mo
     assert not (output_dir / ".staging").exists()
 
 
+@pytest.mark.parametrize("entrypoint", ["train_model", "train_models"])
+def test_training_attach_failure_rolls_back_unattached_artifact_files(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+):
+    _runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    train_inputs = {
+        "dataset_id": dataset.id,
+        "recipe": "lr",
+        "features": ["x1", "x2"],
+        "target_col": "y",
+        "split_col": "split",
+        "split_values": {"train": "train", "test": "test", "oot": "oot"},
+        "params": {"max_iter": 200},
+        "seed": 23,
+    }
+    baseline = modeling_tools.tool_train_model(train_inputs, ctx)
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    baseline_files = sorted(path.name for path in base_dir.iterdir() if path.is_file())
+    baseline_latest_meta = (base_dir / "model_meta.json").read_bytes()
+    baseline_artifact_id = baseline["artifact_id"]
+
+    original_write_audit = modeling_repo_module._write_audit_row
+
+    def fail_trained_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.experiment.trained":
+            raise RuntimeError("trained audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_trained_audit)
+
+    failing_inputs = dict(train_inputs)
+    if entrypoint == "train_models":
+        failing_inputs.pop("recipe")
+        failing_inputs["recipes"] = ["lr"]
+    with pytest.raises(RuntimeError, match="trained audit down"):
+        getattr(modeling_tools, f"tool_{entrypoint}")(failing_inputs, ctx)
+
+    assert sorted(path.name for path in base_dir.iterdir() if path.is_file()) == baseline_files
+    assert (base_dir / "model_meta.json").read_bytes() == baseline_latest_meta
+    assert not (base_dir / ".staging").exists()
+
+    store = ExperimentStore(settings.db_path)
+    experiments = store.list_for_task(task.id)
+    assert len(experiments) == 2
+    failed = next(experiment for experiment in experiments if experiment.status == "failed")
+    assert failed.artifact_id is None
+    assert failed.metrics is None
+
+    artifacts = ModelingRepository(settings.db_path).list_model_artifacts()
+    assert [artifact.id for artifact in artifacts] == [baseline_artifact_id]
+
+
 def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
     runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
