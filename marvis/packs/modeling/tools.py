@@ -2120,6 +2120,15 @@ def _model_card_payload(
     config = experiment.config
     metrics = _json_safe(experiment.metrics) or {}
     sample_weight_policy = _sample_weight_policy_payload(experiment=experiment, artifact=artifact)
+    selection_policy = (
+        selection_policy_decision.get("policy")
+        if isinstance(selection_policy_decision.get("policy"), dict)
+        else {}
+    )
+    selection_policy_requirements = [
+        {"requirement": label, "configured": value}
+        for label, value in _selection_policy_requirement_markdown_rows(selection_policy)
+    ]
     limitations = _model_card_limitations(
         capabilities=capabilities,
         selection_policy_decision=selection_policy_decision,
@@ -2151,6 +2160,10 @@ def _model_card_payload(
         "key_metrics": _model_card_key_metrics(metrics),
         "governance": {
             "selection_policy_status": str(selection_policy_decision.get("status") or "not_requested"),
+            "selection_policy": _json_safe(selection_policy),
+            "selection_policy_requirements": selection_policy_requirements,
+            "selection_policy_violations": _json_safe(selection_policy_decision.get("violations") or []),
+            "selection_policy_override_reason": str(selection_policy_decision.get("override_reason") or ""),
             "monitoring_status": str(monitoring_policy.get("status") or "not_configured"),
             "monitoring_recommendation": str(monitoring_policy.get("recommendation") or ""),
             "champion_comparison_status": str(challenger_comparison.get("status") or "not_configured"),
@@ -2712,6 +2725,14 @@ def _model_card_markdown(card: dict) -> str:
         if isinstance(item, dict)
     ]
     governance = card.get("governance") if isinstance(card.get("governance"), dict) else {}
+    selection_requirements = [
+        item for item in (governance.get("selection_policy_requirements") or [])
+        if isinstance(item, dict)
+    ]
+    selection_violations = [
+        item for item in (governance.get("selection_policy_violations") or [])
+        if isinstance(item, dict)
+    ]
     delivery = card.get("delivery") if isinstance(card.get("delivery"), dict) else {}
     calibration = delivery.get("calibration") if isinstance(delivery.get("calibration"), dict) else {}
     training = card.get("training") if isinstance(card.get("training"), dict) else {}
@@ -2761,8 +2782,37 @@ def _model_card_markdown(card: dict) -> str:
         f"- 选择策略: `{_md_inline(governance.get('selection_policy_status') or 'not_requested')}`",
         f"- 监控策略: `{_md_inline(governance.get('monitoring_status') or 'not_configured')}`",
         f"- Champion对比: `{_md_inline(governance.get('champion_comparison_status') or 'not_configured')}`",
+        f"- Override原因: {_md_inline(governance.get('selection_policy_override_reason') or '-')}",
         f"- 监控建议: {_md_inline(governance.get('monitoring_recommendation') or '-')}",
         f"- 对比建议: {_md_inline(governance.get('champion_comparison_recommendation') or '-')}",
+    ])
+    if selection_requirements:
+        lines.extend([
+            "",
+            "### 选择策略要求",
+            "",
+            "| 策略要求 | 配置 |",
+            "| --- | --- |",
+        ])
+        for item in selection_requirements:
+            lines.append(
+                f"| {_md_cell(item.get('requirement') or '-')} | "
+                f"{_md_cell(item.get('configured') or '-')} |"
+            )
+    if selection_violations:
+        lines.extend([
+            "",
+            "### 选择策略违规项",
+            "",
+            "| 违规项 | 说明 |",
+            "| --- | --- |",
+        ])
+        for item in selection_violations:
+            lines.append(
+                f"| {_md_cell(item.get('code') or '-')} | "
+                f"{_md_cell(item.get('message') or '-')} |"
+            )
+    lines.extend([
         "",
         "## 交付状态",
         "",

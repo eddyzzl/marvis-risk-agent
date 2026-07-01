@@ -1164,6 +1164,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "selection_policy": {
                 "require_pmml": True,
                 "require_handoff": True,
+                "min_oot_ks": 0.0,
                 "allow_policy_override": True,
                 "override_reason": "业务方本轮只验收原生 CatBoost pkl,不做 V1 验证移交。",
             },
@@ -1229,7 +1230,18 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     model_card_payload = json.loads(model_card_path.read_text(encoding="utf-8"))
     assert model_card_payload["card_version"] == "model_card_v1"
     assert model_card_payload["governance"]["monitoring_status"] == post_training.output["monitoring_policy"]["status"]
-    assert "# 模型卡" in model_card_markdown.read_text(encoding="utf-8")
+    assert model_card_payload["governance"]["selection_policy"]["metric_thresholds"] == {
+        "oot_ks": {"min": 0.0}
+    }
+    assert {
+        item["requirement"]
+        for item in model_card_payload["governance"]["selection_policy_requirements"]
+    } >= {"要求 PMML", "要求验证移交", "指标 oot_ks"}
+    model_card_markdown_text = model_card_markdown.read_text(encoding="utf-8")
+    assert "# 模型卡" in model_card_markdown_text
+    assert "### 选择策略要求" in model_card_markdown_text
+    assert "指标 oot_ks" in model_card_markdown_text
+    assert ">= 0" in model_card_markdown_text
     comparison_path = Path(post_training.output["challenger_comparison_path"])
     comparison_markdown = Path(post_training.output["challenger_comparison_markdown_path"])
     assert comparison_path.exists()
