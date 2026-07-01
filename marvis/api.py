@@ -2,7 +2,6 @@ from collections.abc import Callable
 import json
 import logging
 from pathlib import Path
-import traceback
 
 from fastapi import (
     APIRouter,
@@ -43,6 +42,10 @@ from marvis.agent.turn_handlers import (
     DRIVER_AGENT_TASK_TYPES,
     DriverTurnRuntime,
     dispatch_driver_turn as dispatch_plan_driver_turn,
+)
+from marvis.agent.validation_runner import (
+    ValidationJobCallbacks,
+    run_agent_validation_job as _run_agent_validation_job_impl,
 )
 from marvis.api_task_helpers import (
     get_task_or_404 as _get_task_or_404,
@@ -236,6 +239,30 @@ def _confirm_agent_report_conclusions(
     }
 
 
+def _add_agent_job_exception_summary(
+    repo: TaskRepository,
+    *,
+    task_id: str,
+    task: TaskRecord,
+    model_profile: dict,
+    error: Exception,
+) -> None:
+    error_detail = f"{error.__class__.__name__}: {error}"
+    _add_and_stream_agent_message(
+        repo,
+        task_id,
+        stage="failure",
+        model_profile=model_profile,
+        producer=lambda on_delta: failure_summary(
+            task=task,
+            stage="Agent 执行",
+            error=error_detail,
+            model_profile=model_profile,
+            on_delta=on_delta,
+        ),
+    )
+
+
 def _run_agent_validation_job(
     job_id: str,
     settings,
@@ -247,124 +274,33 @@ def _run_agent_validation_job(
     acceptance_mode: str | None = None,
     stage_instruction: str | None = None,
 ) -> None:
-    repo = TaskRepository(settings.db_path)
-    repo.mark_job_running(job_id)
-    auto_accept = _agent_auto_accept(acceptance_mode)
-    try:
-        current_stage = stage
-        current_opening_message_id = opening_message_id
-        current_stage_message_id = stage_message_id
-        current_stage_instruction = stage_instruction
-        while True:
-            task = repo.get_task(task_id)
-            current_stage = current_stage or _agent_next_stage(repo, task)
-            if current_stage is None:
-                if current_opening_message_id or not auto_accept:
-                    _finalize_agent_opening_message(
-                        repo,
-                        task_id=task_id,
-                        message_id=current_opening_message_id,
-                        model_profile=model_profile,
-                        content=(
-                            "当前没有可继续执行的下一步。你可以继续询问已生成的验证结果，"
-                            "或确认报告结论后生成 Word。"
-                        ),
-                    )
-                repo.finish_job(job_id, status="succeeded")
-                return
-            _raise_if_agent_cancelled(task_id)
-            _open_agent_stage(
-                repo,
-                task=task,
-                task_id=task_id,
-                stage=current_stage,
-                model_profile=model_profile,
-                opening_message_id=current_opening_message_id,
-                auto_accept=auto_accept,
-            )
-            _raise_if_agent_cancelled(task_id)
-            if current_stage == "scan":
-                stage_succeeded = _run_agent_scan_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
-                )
-            elif current_stage == "reproducibility":
-                stage_succeeded = _run_agent_reproducibility_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
-                )
-            elif current_stage == "metrics":
-                stage_succeeded = _run_agent_metrics_stage(
-                    repo, settings, task_id, model_profile, auto_accept=auto_accept
-                )
-            elif current_stage == "word_conclusion_draft":
-                stage_succeeded = _run_agent_word_conclusion_stage(
-                    repo,
-                    settings,
-                    task_id,
-                    model_profile,
-                    draft_message_id=current_stage_message_id,
-                    auto_accept=auto_accept,
-                    rewrite_instruction=current_stage_instruction,
-                )
-            else:
-                raise RuntimeError(f"unknown agent stage: {current_stage}")
-            if not stage_succeeded:
-                repo.finish_job(job_id, status="failed")
-                return
-            if not auto_accept:
-                repo.finish_job(job_id, status="succeeded")
-                return
-            current_stage = _agent_next_stage(repo, repo.get_task(task_id))
-            current_opening_message_id = None
-            current_stage_message_id = None
-            current_stage_instruction = None
-            if current_stage is None:
-                repo.finish_job(job_id, status="succeeded")
-                return
-    except AgentValidationCancelled as exc:
-        _mark_agent_cancelled(repo, task_id)
-        if not _agent_has_stop_ack_message(repo, task_id):
-            repo.add_agent_message(
-                task_id,
-                role="assistant",
-                stage="chat",
-                content=AGENT_STOP_ACK_CONTENT,
-                metadata={"cancelled": True, "intent": "stop", "cancel_requested": True},
-            )
-        repo.finish_job(
-            job_id,
-            status="cancelled",
-            error_name=exc.__class__.__name__,
-            error_value=str(exc),
-            traceback="",
-        )
-    except Exception as exc:
-        try:
-            task = repo.get_task(task_id)
-            error_detail = f"{exc.__class__.__name__}: {exc}"
-            _add_and_stream_agent_message(
-                repo,
-                task_id,
-                stage="failure",
-                model_profile=model_profile,
-                producer=lambda on_delta: failure_summary(
-                    task=task,
-                    stage="Agent 执行",
-                    error=error_detail,
-                    model_profile=model_profile,
-                    on_delta=on_delta,
-                ),
-            )
-        finally:
-            repo.finish_job(
-                job_id,
-                status="failed",
-                error_name=exc.__class__.__name__,
-                error_value=str(exc),
-                traceback=traceback.format_exc(),
-            )
-        raise
-    finally:
-        _clear_agent_cancellation(task_id)
+    _run_agent_validation_job_impl(
+        job_id,
+        settings,
+        task_id,
+        model_profile,
+        opening_message_id=opening_message_id,
+        stage=stage,
+        stage_message_id=stage_message_id,
+        acceptance_mode=acceptance_mode,
+        stage_instruction=stage_instruction,
+        callbacks=ValidationJobCallbacks(
+            agent_auto_accept=_agent_auto_accept,
+            agent_next_stage=_agent_next_stage,
+            raise_if_agent_cancelled=_raise_if_agent_cancelled,
+            open_agent_stage=_open_agent_stage,
+            run_scan_stage=_run_agent_scan_stage,
+            run_reproducibility_stage=_run_agent_reproducibility_stage,
+            run_metrics_stage=_run_agent_metrics_stage,
+            run_word_conclusion_stage=_run_agent_word_conclusion_stage,
+            finalize_agent_opening_message=_finalize_agent_opening_message,
+            mark_agent_cancelled=_mark_agent_cancelled,
+            agent_has_stop_ack_message=_agent_has_stop_ack_message,
+            add_exception_summary=_add_agent_job_exception_summary,
+            clear_agent_cancellation=_clear_agent_cancellation,
+            stop_ack_content=AGENT_STOP_ACK_CONTENT,
+        ),
+    )
 
 
 def _agent_next_stage(repo: TaskRepository, task: TaskRecord) -> str | None:

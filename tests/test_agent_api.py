@@ -41,6 +41,14 @@ def test_normalize_effort_falls_back_to_high():
     assert _normalize_effort("") == "high"
 
 
+def test_validation_agent_job_loop_lives_outside_api_module():
+    from marvis import api
+    from marvis.agent import validation_runner
+
+    assert validation_runner.run_agent_validation_job.__module__ == "marvis.agent.validation_runner"
+    assert api._run_agent_validation_job_impl is validation_runner.run_agent_validation_job
+
+
 def _create_task(client: TestClient, tmp_path: Path, *, run_mode: str = "agent") -> str:
     response = client.post(
         "/api/tasks",
