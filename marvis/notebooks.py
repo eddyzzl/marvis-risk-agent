@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 from nbclient import NotebookClient
@@ -915,7 +916,7 @@ def run_notebook(
     resource_poll_interval_seconds: float = 0.5,
     isolated: bool = False,
 ) -> NotebookRunResult:
-    if isolated and cancellation_token is None:
+    if isolated:
         return _run_notebook_in_subprocess(
             notebook_path=notebook_path,
             executed_path=executed_path,
@@ -924,6 +925,7 @@ def run_notebook(
             kernel_name=kernel_name,
             progress_path=progress_path,
             execution_cwd=execution_cwd,
+            cancellation_token=cancellation_token,
             memory_limit_mb=memory_limit_mb,
             resource_poll_interval_seconds=resource_poll_interval_seconds,
         )
@@ -954,6 +956,7 @@ def _run_notebook_in_subprocess(
     kernel_name: str,
     progress_path: Path | None,
     execution_cwd: Path | None,
+    cancellation_token: NotebookCancellationToken | None,
     memory_limit_mb: int | None,
     resource_poll_interval_seconds: float,
 ) -> NotebookRunResult:
@@ -981,7 +984,35 @@ def _run_notebook_in_subprocess(
         start_new_session=(os.name != "nt"),
     )
     try:
-        stdout, stderr = process.communicate(json.dumps(job, ensure_ascii=False), timeout=int(timeout) + 5)
+        stdout, stderr = _communicate_notebook_worker(
+            process,
+            json.dumps(job, ensure_ascii=False),
+            timeout_seconds=int(timeout) + 5,
+            cancellation_token=cancellation_token,
+        )
+    except NotebookCancelled:
+        _kill_process_tree(process)
+        stdout, stderr = process.communicate()
+        _write_subprocess_cancel_artifacts(
+            notebook_path=Path(notebook_path),
+            executed_path=Path(executed_path),
+            log_path=Path(log_path),
+        )
+        return NotebookRunResult(
+            succeeded=False,
+            failed_cell_index=None,
+            error_name=NotebookCancelled.__name__,
+            error_value="notebook execution cancelled",
+            cancelled=True,
+            resource_usage={
+                "subprocess_isolated": True,
+                "worker_pid": process.pid,
+                "worker_started_at": started,
+                "worker_returncode": process.returncode,
+                "stdout_tail": _tail_text(stdout),
+                "stderr_tail": _tail_text(stderr),
+            },
+        )
     except subprocess.TimeoutExpired:
         _kill_process_tree(process)
         stdout, stderr = process.communicate()
@@ -1077,6 +1108,35 @@ def _run_notebook_in_subprocess(
     )
 
 
+def _communicate_notebook_worker(
+    process: subprocess.Popen,
+    input_payload: str,
+    *,
+    timeout_seconds: int,
+    cancellation_token: NotebookCancellationToken | None,
+) -> tuple[str, str]:
+    if cancellation_token is None:
+        return process.communicate(input_payload, timeout=timeout_seconds)
+
+    deadline = time.monotonic() + timeout_seconds
+    pending_input: str | None = input_payload
+    while True:
+        cancellation_token.raise_if_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                getattr(process, "args", ["marvis.notebook_worker"]),
+                timeout_seconds,
+            )
+        try:
+            return process.communicate(
+                pending_input,
+                timeout=min(0.25, remaining),
+            )
+        except subprocess.TimeoutExpired:
+            pending_input = None
+
+
 def notebook_run_result_to_dict(result: NotebookRunResult) -> dict:
     return asdict(result)
 
@@ -1122,6 +1182,20 @@ def _write_subprocess_timeout_artifacts(
         NotebookSubprocessTimeout.__name__,
         f"isolated notebook worker timed out after {timeout}s",
     )
+
+
+def _write_subprocess_cancel_artifacts(
+    *,
+    notebook_path: Path,
+    executed_path: Path,
+    log_path: Path,
+) -> None:
+    executed_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not executed_path.exists():
+        notebook = nbformat.read(notebook_path, as_version=4)
+        nbformat.write(notebook, executed_path)
+    _write_cancel_log(log_path)
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:

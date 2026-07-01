@@ -62,6 +62,7 @@ class PipelineSettings:
     feature_columns: list[str] = field(default_factory=list)
     notebook_kernel_name: str = "python3"
     notebook_memory_limit_mb: int | None = 4096
+    notebook_isolated_execution: bool = True
     bin_count: int = 10
     random_sample_size: int = 1000
     random_seed: int = 42
@@ -138,6 +139,51 @@ def run_notebook_stage(
         live_session: NotebookExecutionSession | None = None
         try:
             close_live_notebook_session(task_id)
+            if settings.notebook_isolated_execution:
+                _notebook_step_v3(
+                    repo=repo,
+                    task=task,
+                    source_notebook=notebook_path,
+                    sample_path=sample_path,
+                    execution_dir=execution_dir,
+                    contract_meta_path=execution_dir / "runtime_contract.json",
+                    code_scores_path=execution_dir / "code_model_scores.csv",
+                    feature_importance_path=execution_dir / "feature_importance.csv",
+                    model_params_path=execution_dir / "model_params.json",
+                    notebook_steps_path=execution_dir / "notebook_steps.json",
+                    kernel_name=kernel_name,
+                    notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                    stage_claimed=stage_claimed,
+                    cancellation_token=cancellation_token,
+                    keep_alive=False,
+                    isolated=True,
+                    mark_executed=False,
+                    extra_code_cells=_build_reproducibility_cell_sources(
+                        package_root=_package_root_for_notebook(),
+                        task=task,
+                        settings=settings,
+                        input_pmml_path=input_pmml_path,
+                        contract_meta_path=execution_dir / "runtime_contract.json",
+                        output_path=task_dir / "outputs" / REPRODUCIBILITY_RESULT_JSON,
+                    ),
+                )
+                if repo.get_task(task_id).status != TaskStatus.RUNNING:
+                    return
+                contract = load_runtime_contract(execution_dir / "runtime_contract.json")
+                _sync_task_algorithm(repo, task, contract.algorithm)
+                output_path = task_dir / "outputs" / REPRODUCIBILITY_RESULT_JSON
+                if not output_path.exists():
+                    raise PipelineError(
+                        "notebook reproducibility evidence did not produce output"
+                    )
+                repo.update_status(
+                    task_id,
+                    TaskStatus.EXECUTED,
+                    message="notebook executed",
+                    expected=TaskStatus.RUNNING,
+                )
+                return
+
             live_session = _notebook_step_v3(
                 repo=repo,
                 task=task,
@@ -251,7 +297,7 @@ def run_metrics_stage(
         cancellation_token = register_notebook_cancellation(task_id)
         try:
             live_session = get_live_notebook_session(task_id)
-            if live_session is None:
+            if live_session is None and not settings.notebook_isolated_execution:
                 raise PipelineError(
                     "live notebook kernel is not available; rerun notebook stage before metrics"
                 )
@@ -260,24 +306,69 @@ def run_metrics_stage(
             task = _sync_task_algorithm(repo, task, contract.algorithm)
             model_meta_path = execution_dir / "model_meta.json"
             _write_model_meta_from_contract(contract, model_meta_path)
-            previous_token = getattr(live_session, "cancellation_token", None)
-            setattr(live_session, "cancellation_token", cancellation_token)
-            live_client = getattr(live_session, "client", None)
-            if live_client is not None:
-                cancellation_token.bind_client(live_client)
-            try:
-                _write_metrics_results_in_session(
-                    session=live_session,
-                    task=task,
-                    settings=settings,
-                    dictionary_path=dictionary_path,
-                    input_pmml_path=input_pmml_path,
-                    contract=contract,
-                    model_meta_path=model_meta_path,
-                    outputs_dir=outputs_dir,
+            if live_session is None:
+                notebook_path = _required_path(
+                    task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
                 )
-            finally:
-                setattr(live_session, "cancellation_token", previous_token)
+                sample_path = _required_path(
+                    task, artifacts, FileRole.SAMPLE, "sample", "sample_path"
+                )
+                _notebook_step_v3(
+                    repo=repo,
+                    task=task,
+                    source_notebook=notebook_path,
+                    sample_path=sample_path,
+                    execution_dir=execution_dir,
+                    contract_meta_path=execution_dir / "runtime_contract.json",
+                    code_scores_path=execution_dir / "code_model_scores.csv",
+                    feature_importance_path=execution_dir / "feature_importance.csv",
+                    model_params_path=execution_dir / "model_params.json",
+                    notebook_steps_path=execution_dir / "notebook_steps.json",
+                    kernel_name=_execution_kernel_name(settings),
+                    notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                    stage_claimed=True,
+                    cancellation_token=cancellation_token,
+                    keep_alive=False,
+                    isolated=True,
+                    mark_executed=False,
+                    cancel_message="metrics cancelled",
+                    cancel_resume_status=TaskStatus.EXECUTED,
+                    extra_code_cells=_build_metrics_cell_sources(
+                        package_root=_package_root_for_notebook(),
+                        task=task,
+                        settings=settings,
+                        dictionary_path=dictionary_path,
+                        input_pmml_path=input_pmml_path,
+                        contract=contract,
+                        model_meta_path=model_meta_path,
+                        reproducibility_json_path=outputs_dir
+                        / REPRODUCIBILITY_RESULT_JSON,
+                        results_json_path=outputs_dir / "validation_results.json",
+                        excel_path=outputs_dir / "validation.xlsx",
+                    ),
+                )
+                if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
+                    return
+                _require_metrics_outputs(outputs_dir)
+            else:
+                previous_token = getattr(live_session, "cancellation_token", None)
+                setattr(live_session, "cancellation_token", cancellation_token)
+                live_client = getattr(live_session, "client", None)
+                if live_client is not None:
+                    cancellation_token.bind_client(live_client)
+                try:
+                    _write_metrics_results_in_session(
+                        session=live_session,
+                        task=task,
+                        settings=settings,
+                        dictionary_path=dictionary_path,
+                        input_pmml_path=input_pmml_path,
+                        contract=contract,
+                        model_meta_path=model_meta_path,
+                        outputs_dir=outputs_dir,
+                    )
+                finally:
+                    setattr(live_session, "cancellation_token", previous_token)
         finally:
             unregister_notebook_cancellation(task_id, cancellation_token)
         close_live_notebook_session(task_id)
@@ -489,6 +580,16 @@ def _write_metrics_results_in_session(
             cancel_message="metrics cancelled",
             cancel_resume_status=TaskStatus.EXECUTED,
         )
+    required = [
+        outputs_dir / "validation_results.json",
+        outputs_dir / "validation.xlsx",
+    ]
+    missing = [path.name for path in required if not path.exists()]
+    if missing:
+        raise PipelineError("notebook metrics did not produce: " + ", ".join(missing))
+
+
+def _require_metrics_outputs(outputs_dir: Path) -> None:
     required = [
         outputs_dir / "validation_results.json",
         outputs_dir / "validation.xlsx",
@@ -1047,6 +1148,10 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
 
 
 def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
+    if settings.notebook_isolated_execution:
+        run_staged_pipeline(task_id=task_id, settings=settings)
+        return
+
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
     if task.status in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
@@ -1679,7 +1784,9 @@ def _notebook_step_v3(
     stage_claimed: bool = False,
     cancellation_token: NotebookCancellationToken | None = None,
     keep_alive: bool = False,
+    isolated: bool = False,
     mark_executed: bool = True,
+    extra_code_cells: list[tuple[str, str]] | None = None,
     cancel_message: str = "notebook cancelled",
     cancel_resume_status: TaskStatus = TaskStatus.SCANNED,
 ) -> NotebookExecutionSession | None:
@@ -1706,6 +1813,7 @@ def _notebook_step_v3(
         code_scores_path=code_scores_path,
         feature_importance_path=feature_importance_path,
         model_params_path=model_params_path,
+        extra_code_cells=extra_code_cells,
     )
     live_session: NotebookExecutionSession | None = None
     if keep_alive:
@@ -1732,6 +1840,7 @@ def _notebook_step_v3(
             execution_cwd=source_notebook.parent,
             cancellation_token=cancellation_token,
             memory_limit_mb=notebook_memory_limit_mb,
+            isolated=isolated,
         )
     if result.step_events is not None:
         notebook_steps_path.parent.mkdir(parents=True, exist_ok=True)

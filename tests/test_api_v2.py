@@ -28,6 +28,7 @@ from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
 from marvis.routers.validation_stages import router as validation_stages_router
+from marvis.pipeline import PipelineSettings
 
 
 class FakeTaskRepository:
@@ -1872,7 +1873,46 @@ def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     assert calls[0]["stage_claimed"] is True
 
 
-def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
+def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.get_live_notebook_session",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.pipeline_settings_from_request",
+        lambda request, task, feature_columns: PipelineSettings(
+            workspace=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+            report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/metrics")
+
+    assert response.status_code == 409
+    assert "live notebook kernel is not available" in response.json()["detail"]
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SUCCEEDED
+    assert calls == []
+
+
+def test_metrics_endpoint_allows_terminal_rerun_without_live_kernel_when_isolated_enabled(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1896,10 +1936,9 @@ def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
 
     response = client.post(f"/api/tasks/{task_id}/metrics")
 
-    assert response.status_code == 409
-    assert "live notebook kernel is not available" in response.json()["detail"]
-    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SUCCEEDED
-    assert calls == []
+    assert response.status_code == 202
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.COMPUTING_METRICS
+    assert calls[0]["settings"].notebook_isolated_execution is True
 
 
 def test_metrics_endpoint_allows_retry_after_metrics_stage_failure(

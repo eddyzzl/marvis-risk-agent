@@ -113,10 +113,12 @@ def run_task_metrics(
     task = get_task_or_404(repo, task_id)
     job_id = start_task_job(repo, task_id, "metrics")
     metrics_retry = is_metrics_failure(task)
+    pipeline_settings = pipeline_settings_from_request(request, task, None)
     if (
         task.status
         in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
         and get_live_notebook_session(task_id) is None
+        and not pipeline_settings.notebook_isolated_execution
     ):
         repo.finish_job(job_id, status="failed")
         raise HTTPException(
@@ -173,7 +175,7 @@ def run_task_metrics(
         run_metrics_stage,
         {
             "task_id": task_id,
-            "settings": pipeline_settings_from_request(request, task, None),
+            "settings": pipeline_settings,
             "stage_claimed": True,
         },
         hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),

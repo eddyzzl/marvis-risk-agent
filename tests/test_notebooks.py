@@ -797,6 +797,54 @@ def test_run_notebook_returns_cancelled_when_token_is_cancelled(tmp_path: Path):
     assert log_path.read_text(encoding="utf-8") == "cancelled\n"
 
 
+def test_run_notebook_isolated_returns_cancelled_when_token_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(
+        nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell("x = 1")]),
+        notebook_path,
+    )
+    killed = {"value": False}
+
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+        args = ["python", "-m", "marvis.notebook_worker"]
+
+        def communicate(self, input=None, timeout=None):
+            return "", ""
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("marvis.notebooks.subprocess.Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        "marvis.notebooks._kill_process_tree",
+        lambda process: killed.update(value=True),
+    )
+    cancellation_token = NotebookCancellationToken(task_id="task-1")
+    cancellation_token.cancel()
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        cancellation_token=cancellation_token,
+        isolated=True,
+    )
+
+    assert result.succeeded is False
+    assert result.cancelled is True
+    assert result.error_name == "NotebookCancelled"
+    assert killed["value"] is True
+    assert executed_path.exists()
+    assert log_path.read_text(encoding="utf-8") == "cancelled\n"
+
+
 def test_run_notebook_stops_kernel_when_rss_exceeds_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
