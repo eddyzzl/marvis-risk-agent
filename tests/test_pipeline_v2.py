@@ -2066,7 +2066,11 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
         "\n".join(
             [
                 f"#!{sys.executable}",
+                "import os",
                 "import sys",
+                "assert 'OPENAI_API_KEY' not in os.environ",
+                "assert 'ANTHROPIC_API_KEY' not in os.environ",
+                "assert os.environ.get('PYTHONUNBUFFERED') == '1'",
                 "import pandas as pd",
                 "pd.DataFrame({",
                 "    'x1': [9007199254740993, 9007199254740995],",
@@ -2079,6 +2083,8 @@ def test_load_sample_falls_back_to_selected_python_for_arrow_files(
         encoding="utf-8",
     )
     fallback_python.chmod(0o755)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
 
     def fake_read_feather(path):
         raise ImportError("pyarrow is unavailable in platform env")

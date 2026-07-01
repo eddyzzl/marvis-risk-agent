@@ -41,6 +41,7 @@ from marvis.notebook_contract import RuntimeContract, load_runtime_contract
 from marvis.notebooks import (
     AppendedCellExecutionPolicy,
     NotebookExecutionSession,
+    _notebook_worker_env,
     close_live_notebook_session,
     get_live_notebook_session,
     prepare_execution_notebook_v3,
@@ -1602,6 +1603,7 @@ def _load_arrow_sample_with_python(
             [str(python_executable), "-c", code, str(sample_path), str(pickle_path), suffix],
             check=False,
             capture_output=True,
+            env=_notebook_worker_env(),
             text=True,
             encoding="utf-8",
             timeout=600,

@@ -353,6 +353,10 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py::test_notebook_worker_env_strips_host_secrets tests/test_plugin_runner.py::test_tool_runner_starts_worker_with_explicit_utf8_encoding -q`: `2 passed` after checking plugin and notebook worker envs strip host API keys.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py tests/test_plugin_runner.py -q`: `59 passed` after confirming Notebook/plugin worker behavior still passes with the secret-stripping fixture.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Notebook worker secret-stripping regression fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/pipeline.py tests/test_pipeline_v2.py tests/test_notebooks.py`: passes after making the Arrow sample fallback subprocess use the restricted Notebook worker env.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_load_sample_falls_back_to_selected_python_for_arrow_files tests/test_notebooks.py::test_notebook_worker_env_strips_host_secrets -q`: `2 passed` after asserting the selected-Python sample fallback does not inherit host API keys.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py tests/test_notebooks.py -q`: `60 passed` after confirming pipeline fallback and Notebook worker behavior still pass with the restricted env.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the selected-Python sample fallback restricted-env update.
 
 ## Executive Summary
 
