@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 import threading
 
@@ -18,15 +19,19 @@ class ConsolidationScheduler:
         *,
         throttle_seconds: int = 300,
         async_mode: bool = True,
+        auto_enabled: Callable[[], bool] | None = None,
     ):
         self._distill = distillation_engine
         self._evolve = evolution_manager
         self._store = store
         self._throttle_seconds = int(throttle_seconds)
         self._async_mode = async_mode
+        self._auto_enabled = auto_enabled or (lambda: True)
 
     def on_event(self, event: str, payload: dict) -> None:
         if event not in CONSOLIDATION_TRIGGERS:
+            return
+        if not self._auto_enabled():
             return
         categories = _categories_for_event(event, payload)
         for category in categories:

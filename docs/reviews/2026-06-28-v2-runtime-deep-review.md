@@ -167,6 +167,7 @@
 - **问题**：`pipeline.py`/`api.py` 两条自动捕获都按 `load_memory_policy(...).auto_distill` 门控。但 `app.py` 把 `ConsolidationScheduler.on_event` 注册为 `validation.completed`/`report.after_generate`/`memory.after_save` 监听器，`on_event→_consolidate→DistillationEngine.distill_category + EvolutionManager.upsert_with_evolution` **会自动新建 memory_distillations 行，且全程不查 `auto_distill`**。用户即使关了 `auto_distill`，每次验证完成/报告生成仍静默跑蒸馏/进化写记忆 —— 一条用户以为已禁用的自动写记忆面。（与既有记忆"双面门控"记录相关：现在是**三面**。）
 - **验证**：对抗验证 confirmed/medium。
 - **修复**：把 `on_event` 自动路径按 `auto_distill` 门控（手动 `POST /agent-memory/consolidate` 保持不门控），在 `ConsolidationScheduler.on_event` 注入 policy 检查或在 `app.py` 注册处包一层门控回调。
+- **当前状态**：已修复。`ConsolidationScheduler` 支持 `auto_enabled` 回调，`app.py` 绑定 `load_memory_policy(settings.workspace).auto_distill`；手动 `consolidate_all()` 仍不受门控。验证：`CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_memory_consolidation.py tests/test_memory_policy.py -q`，`16 passed`。
 
 ### M9. 蒸馏检索排序在分数相等时不确定（无 ORDER BY / 无 tie-breaker）
 - **位置**：[`marvis/agent_memory/store.py:502-516`](marvis/agent_memory/store.py:502)

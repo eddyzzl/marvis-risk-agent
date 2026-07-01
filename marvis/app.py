@@ -29,6 +29,7 @@ from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
+from marvis.memory_policy import load_memory_policy
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
 from marvis.orchestrator.intent import IntentRouter
@@ -277,6 +278,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
         DistillationEngine(memory_store),
         EvolutionManager(memory_store),
         memory_store,
+        auto_enabled=lambda: load_memory_policy(settings.workspace).auto_distill,
     )
     for event in CONSOLIDATION_TRIGGERS:
         hook_dispatcher.register_listener(event, memory_consolidation_scheduler.on_event)
