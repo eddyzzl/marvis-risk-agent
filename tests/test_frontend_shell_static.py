@@ -431,3 +431,42 @@ def test_task_workspace_view_shell_logic_runs_under_node():
     assert payload["selected"]["latestStatus"] == ["就绪", "success"]
     assert payload["selected"]["snapshots"] == 2
     assert payload["selected"]["syncs"] == 2
+
+
+def test_task_workspace_snapshot_renderer_runs_under_node():
+    module_url = (STATIC_DIR / "js" / "task-workspace-view.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderTaskSnapshot }} from {module_url!r};",
+            "const snapshot = { className: '', textContent: '', innerHTML: '' };",
+            "const getElementById = (id) => id === 'taskSnapshot' ? snapshot : null;",
+            "renderTaskSnapshot({ getElementById });",
+            "const empty = { className: snapshot.className, textContent: snapshot.textContent, innerHTML: snapshot.innerHTML };",
+            "renderTaskSnapshot({",
+            "  getElementById,",
+            "  selectedTask: { run_mode: 'agent', source_dir: '/tmp/a&b', task_type: 'modeling' },",
+            "  taskTypeLabel: () => '模型<开发>',",
+            "  taskKindIconHtml: () => '<svg class=\"kind\"></svg>',",
+            "  runModeLabel: () => 'Agent 模式',",
+            "});",
+            "const selected = { className: snapshot.className, textContent: snapshot.textContent, innerHTML: snapshot.innerHTML };",
+            "process.stdout.write(JSON.stringify({ empty, selected }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["empty"] == {
+        "className": "workspace-task-meta empty",
+        "textContent": "核心任务信息",
+        "innerHTML": "",
+    }
+    assert payload["selected"]["className"] == "workspace-task-meta"
+    assert "模型&lt;开发&gt;" in payload["selected"]["innerHTML"]
+    assert "Agent 模式" in payload["selected"]["innerHTML"]
+    assert 'class="task-snapshot-copy"' in payload["selected"]["innerHTML"]
+    assert 'data-copy="/tmp/a&amp;b"' in payload["selected"]["innerHTML"]

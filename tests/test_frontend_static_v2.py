@@ -1798,6 +1798,7 @@ def test_sidebar_footer_and_create_action_match_brand_treatment():
 def test_empty_workspace_copy_is_shorter_and_direct():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "验证任务" in index_html
     assert "选择或创建验证任务" not in index_html
@@ -1806,8 +1807,9 @@ def test_empty_workspace_copy_is_shorter_and_direct():
     assert "先创建任务或从左侧选择已有任务" not in index_html
     assert "核心任务信息" in index_html
     assert "选择任务后显示核心任务信息" not in index_html
-    assert "核心任务信息" in app_js
+    assert "核心任务信息" in workspace_view_js
     assert "选择任务后显示核心任务信息" not in app_js
+    assert "选择任务后显示核心任务信息" not in workspace_view_js
     assert '选择任务后点击\\"扫描材料\\"开始' in app_js
     assert '还没扫描材料。选择任务后点击\\"扫描材料\\"开始。' not in app_js
 
@@ -2515,6 +2517,7 @@ def test_task_list_selected_card_has_no_visible_border_or_outline():
 def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_static("styles.css")
 
     head_start = index_html.index('<header class="workspace-head"')
@@ -2524,9 +2527,9 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     result_workspace_end = index_html.index('id="scanSection"', result_workspace_start)
     result_workspace_markup = index_html[result_workspace_start:result_workspace_end]
 
-    snapshot_start = app_js.index("function renderTaskSnapshot")
-    snapshot_end = app_js.index("function renderTaskList", snapshot_start)
-    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+    snapshot_start = workspace_view_js.index("function snapshotItem")
+    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
+    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
 
     # status lives in the header hero, in order: name+pill, description, meta
     assert head_markup.index('id="actionStatus"') < head_markup.index('id="actionErrorDetail"')
@@ -2557,7 +2560,8 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     assert "验证人员" not in snapshot_renderer
     assert "执行模式" in snapshot_renderer
     assert "材料目录" in snapshot_renderer
-    assert 'snapshotItem("folder", "材料目录", selectedTask.source_dir, null, { copy: selectedTask.source_dir })' in snapshot_renderer
+    assert 'snapshotItem("folder", "材料目录", selectedTask.source_dir, null, {' in snapshot_renderer
+    assert "copy: selectedTask.source_dir" in snapshot_renderer
     assert 'class="task-snapshot-copy"' in snapshot_renderer
     assert 'data-copy="${escapeHtml(options.copy)}"' in snapshot_renderer
     assert 'aria-label="复制${escapeHtml(label)}路径"' in snapshot_renderer
@@ -4700,15 +4704,16 @@ def test_notebook_step_renderer_uses_latest_retried_system_cell_status():
 
 def test_failed_task_error_detail_moves_to_current_status_only():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     append_start = app_js.index("function appendTaskRow")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
     append_renderer = app_js[append_start:append_end]
     assert "task.status_message" not in append_renderer
 
-    snapshot_start = app_js.index("function renderTaskSnapshot")
-    snapshot_end = app_js.index("function snapshotItem", snapshot_start)
-    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+    snapshot_start = workspace_view_js.index("export function renderTaskSnapshot")
+    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
+    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
     assert "selectedTask.status_message" not in snapshot_renderer
 
     step_start = app_js.index("function renderWorkflowStepper")
