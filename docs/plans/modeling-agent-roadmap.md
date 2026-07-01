@@ -41,17 +41,16 @@
 - ⏭ Phase 1 剩余(较低优先,agent 现可传 tuned params):1c 强化 train_lgb 默认、1d 放宽 select_features、1e 样本摄入修复。
 - ⏭ **Phase 2(核心剩余):造交互式对话建模 agent** —— 见下,需配 LLM。
 
-## Phase 2 已完成（对话式建模 agent 已接入）
-- ✅ **建模会话控制器** `marvis/packs/modeling/session.py`：确定性编排 `读样本→(确认切分)→screen(确认特征)→tune→train→report`，每步返回 `SessionStep(message, awaiting, data)`，可离线端到端验证。参考数据验证：端到端产出优于参考的模型。
-- ✅ **对话驱动器** `marvis/agent/modeling_agent.py`：把控制器包成跨轮、状态从消息元数据重建（HTTP 处理器无状态）、意图解析两道确认门（切分/特征）、消息组织。**LLM 可选**——每步都有完整中文 canned 消息，`polish` 回调仅做润色且有兜底，故**无 LLM 也能跑**。自动探测 target/split 用随机抽样+整列分类（样本常按 split 排序，头部抽样会漏 oot——已修）。
-- ✅ **API 接线** `marvis/api.py`：`task_type=='modeling'` 在 `/agent/start` 与 `/agent/messages` 顶部分流到 `_dispatch_modeling_agent_job` → 后台 job `_run_modeling_agent_job`（镜像验证 agent 的 job/状态/落消息机制）。样本发现 `_modeling_dataset`（已注册样本优先，否则 scan source_dir→register_from_upload 归一化为 parquet）。`_resolve_agent_model_optional` 让建模路径**不因缺 LLM 而 409**。
-- ✅ **前端** `app.js`：建模任务发送时**放行 LLM 可用性门**（建模 agent 不需 LLM）；更新建模 `initialGoal` 为交互式开场文案。
-- ✅ **测试**：`test_modeling_session.py`、`test_modeling_agent.py`（逐轮+状态重建）、`test_modeling_agent_api.py`（真实 HTTP `/agent/start`+`/agent/messages` 端到端，无 LLM 配置场景下走 canned 消息成功产出 OOT KS）；manifest 工具集断言已加 screen/tune。共 103 项相关测试全绿。
-- ⏭ 剩余（增强项，非阻塞）：LLM `polish` 接线（有 LLM 时润色对话措辞）；基准 KS 经 `report_values.baseline_oot_ks` 传入以在报告里做对比；1c/1d/1e（train_lgb 默认、select_features 地板、样本摄入）。
-- ⚠️ 预存测试债（本会话早期 IA 重构遗留，与本阶段无关）：`test_frontend_static_v2.py` 中 6 项断言旧 UI 结构（`data-agent-memory-mode="raw"`、`openV2WorkspaceWithGoal`、执行环境面板、品牌色按钮等）需按 IA 重构后的新结构更新。
+## Phase 2 当前完成形态（PlanDriver 对话式建模）
+- ✅ **统一对话驱动**：模型开发现在走通用 `PlanDriver`，由 `marvis/agent/turn_handlers.py` 的 modeling 分支接收 `/agent/messages`，再驱动 `marvis/orchestrator/templates/sample.py` 中的 modeling 模板；旧的 `marvis/agent/modeling_agent.py` / `marvis/packs/modeling/session.py` 原型已退役，不再作为当前架构依据。
+- ✅ **人在环门控**：当前流程覆盖建模文件角色/目标列、建模规格、特征筛选、调参配置、模型选择、报告和 G5 交付动作等确认门；结构化 gate metadata、stale token、sample weight、target type、算法族和 tuning trials 调整都在 PlanDriver/gate adapter 路径内处理。
+- ✅ **工具闭环**：`screen_features`、`tune_hyperparameters`、`train_models`、`compare_models`、`select_experiment`、`post_training_action` 组成当前建模链路，支持 LR/LGB/XGB/scorecard/CatBoost/MLP 等路径，PMML/原生交付、model card、approval package、monitoring policy、验证移交与 challenger/backtest 包已接入。
+- ✅ **API/前端接线**：`marvis/agent/turn_handlers.py` 负责建模 turn orchestration；前端建模创建、setup gate、delivery panel、screen/dedup controls 等走拆分后的 V2 modules，而不是旧单独 modeling session controller。
+- ✅ **当前测试锚点**：以 `tests/test_modeling_api.py`、`tests/test_plan_driver.py`、`tests/test_modeling_pack.py`、`tests/test_modeling_handoff.py`、`tests/test_orch_templates.py` 和前端 `tests/test_frontend_screen_table.py` / `tests/test_frontend_v2_api_state.py` 为准。旧的 `test_modeling_session.py`、`test_modeling_agent.py`、`test_modeling_agent_api.py` 不再代表当前完成路径。
+- ⏭ 剩余（增强项，非阻塞）：继续补 native/export 边界、更多业务政策/报告语言 fixture、OS 级 sandbox 设计、以及更深层的前端 workspace controller 拆分。
 
-## Phase 2 原设计（对话式建模 agent）〔历史/已被上方 as-built 取代〕
-> ⚠️ 本节是**实现前的原设计**，仅作历史记录。其中"**硬依赖** LLM"已被上方 as-built（[本文件 Phase 2 已完成](#phase-2-已完成对话式建模-agent-已接入)）推翻——实际 `modeling_agent.py` 是 **LLM 可选**（每步有 canned 中文兜底，无 LLM 也能跑）。如有冲突，**以上方 as-built 为准**。
+## Phase 2 原设计（对话式建模 agent）〔历史/已被当前 PlanDriver 形态取代〕
+> ⚠️ 本节是**实现前的原设计**，仅作历史记录。其中独立 `modeling_agent.py`/`session.py` 阶段机已被当前 `PlanDriver` + modeling template + `turn_handlers.py` 形态取代。如有冲突，以上方当前完成形态为准。
 现状:点"模型开发"→对话进的是 V1 验证 agent(agent/service.py 的 scan/metrics/word 阶段机)。要造一个**建模阶段机**镜像它,但阶段为:
 `read_sample`(读样本+profile,提议 target/split/候选)→ **await 用户确认切分** → `propose_features`(screen_features,带泄漏告警)→ **await 用户确认特征集** → `select`(可选)→ `tune` → `train` → `report`(KS,对比基准)。
 - 阶段逻辑 + 工具调用**确定性**,可离线测;LLM 只负责把每阶段结果组织成对话回复(像验证 agent 一样有 canned fallback)。

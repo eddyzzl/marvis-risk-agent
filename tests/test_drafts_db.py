@@ -6,6 +6,7 @@ import marvis.db as db_module
 import marvis.repositories.drafts as draft_repo_module
 from marvis.db import DraftRepository, connect, init_db
 from marvis.drafts import DraftRun, DraftStateError, DraftTool, LearningNote
+from marvis.state_machine import ConflictError
 
 
 def _note() -> LearningNote:
@@ -194,6 +195,39 @@ def test_draft_repository_status_transition_guard(tmp_path):
     assert repo.get_draft(draft.id).status == "tested"
     repo.set_status(draft.id, "promoted")
     assert repo.get_draft(draft.id).status == "promoted"
+
+
+def test_draft_repository_rejects_stale_status_update(tmp_path, monkeypatch):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = DraftRepository(db_path)
+    draft = _draft()
+    repo.save_draft(draft)
+    repo.set_status(draft.id, "tested")
+    original_transition = draft_repo_module.assert_draft_status_transition
+    raced = False
+
+    def race_after_transition(current: str, target: str) -> None:
+        nonlocal raced
+        original_transition(current, target)
+        if not raced:
+            raced = True
+            with connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE draft_tools SET status = ? WHERE id = ?",
+                    ("rejected", draft.id),
+                )
+
+    monkeypatch.setattr(
+        draft_repo_module,
+        "assert_draft_status_transition",
+        race_after_transition,
+    )
+
+    with pytest.raises(ConflictError, match="changed while updating status"):
+        repo.set_status(draft.id, "promoted")
+
+    assert repo.get_draft(draft.id).status == "rejected"
 
 
 def test_draft_repository_saves_run_status_and_audit_atomically(tmp_path):

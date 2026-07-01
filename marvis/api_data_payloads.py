@@ -8,6 +8,13 @@ import re
 import pandas as pd
 
 
+SYNTHETIC_DEDUP_STRATEGIES = {"agg_mean", "agg_max"}
+SYNTHETIC_DEDUP_WARNING = (
+    "aggregate dedup strategies synthesize a derived feature row from same-key "
+    "conflicts; the joined row may not correspond to a single source record"
+)
+
+
 def dataset_payload(dataset) -> dict:
     return {
         "id": dataset.id,
@@ -54,6 +61,11 @@ def join_plan_payload(plan) -> dict:
                 ],
                 "diagnostics": asdict(spec.diagnostics),
                 "dedup_strategy": spec.dedup_strategy,
+                "dedup_strategy_warning": (
+                    SYNTHETIC_DEDUP_WARNING
+                    if spec.dedup_strategy in SYNTHETIC_DEDUP_STRATEGIES
+                    else None
+                ),
                 "confirmed": spec.confirmed,
             }
             for spec in plan.joins

@@ -154,6 +154,9 @@ function warningHtml(spec) {
   if (d.shrink_detected) {
     warnings.push(`<div class="join-warning shrink">匹配率偏低：${pct(d.match_rate)}</div>`);
   }
+  if (spec?.dedup_strategy_warning) {
+    warnings.push(`<div class="join-warning synthetic-dedup">${escapeHtml(spec.dedup_strategy_warning)}</div>`);
+  }
   return warnings.join("");
 }
 
@@ -167,10 +170,11 @@ function dedupHtml(spec) {
     <option value="">需要选择去重策略</option>
     <option value="first">保留首条</option>
     <option value="last">保留末条</option>
-    <option value="agg_mean">数值取均值</option>
-    <option value="agg_max">数值取最大</option>
+    <option value="agg_mean">数值取均值（合成聚合行）</option>
+    <option value="agg_max">数值取最大（合成聚合行）</option>
     <option value="abort">终止拼接</option>
-  </select>`;
+  </select>
+  <div class="join-warning synthetic-dedup">聚合去重会基于同键冲突生成合成特征行，结果可能不对应任何一条原始特征记录。</div>`;
 }
 
 export function joinSpecCardHtml(spec) {

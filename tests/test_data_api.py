@@ -341,6 +341,50 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert executed_audit["detail"]["result_dataset_id"] == execute.json()["result_dataset_id"]
 
 
+def test_join_api_marks_aggregate_dedup_as_synthetic(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "anchor",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "feature",
+        pd.DataFrame({
+            "customer_id": [1, 1, 2],
+            "balance": [10, 20, 30],
+            "segment": ["old", "new", "steady"],
+        }),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+
+    confirm = client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_id": feature.id, "confirmed": True, "dedup_strategy": "agg_mean"},
+    )
+
+    assert confirm.status_code == 200
+    join = confirm.json()["joins"][0]
+    assert join["dedup_strategy"] == "agg_mean"
+    assert "synthesize" in join["dedup_strategy_warning"]
+    fetched = client.get(f"/api/joins/{plan['join_plan_id']}")
+    assert fetched.json()["joins"][0]["dedup_strategy_warning"] == join["dedup_strategy_warning"]
+
+
 def test_join_confirm_dispatches_join_confirmed_hook(tmp_path):
     client, settings = _client(tmp_path)
     dispatcher = FakeHookDispatcher()

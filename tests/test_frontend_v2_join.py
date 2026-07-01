@@ -68,6 +68,8 @@ def test_join_review_renders_diagnostics_warnings_and_forces_dedup():
         assert.ok(html.includes("hash:md5"));
         assert.ok(html.includes("98.0%"));
         assert.ok(html.includes('data-dedup="feature&lt;bad&gt;"'));
+        assert.ok(html.includes("合成聚合行"));
+        assert.ok(html.includes("聚合去重会基于同键冲突生成合成特征行"));
         assert.ok(html.includes('data-confirm-join="feature&lt;bad&gt;"'));
         assert.ok(html.includes('data-exec-join="join-1" disabled'));
         """

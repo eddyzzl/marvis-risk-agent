@@ -11,6 +11,7 @@ from marvis.drafts.contracts import (
     LearningNote,
     assert_draft_status_transition,
 )
+from marvis.state_machine import ConflictError
 
 
 def _now() -> str:
@@ -317,13 +318,14 @@ def _set_draft_status_row(
     ).fetchone()
     if row is None:
         raise KeyError(draft_id)
-    assert_draft_status_transition(str(row["status"]), status)
+    current_status = str(row["status"])
+    assert_draft_status_transition(current_status, status)
     cursor = conn.execute(
-        "UPDATE draft_tools SET status = ? WHERE id = ?",
-        (status, draft_id),
+        "UPDATE draft_tools SET status = ? WHERE id = ? AND status = ?",
+        (status, draft_id, current_status),
     )
     if cursor.rowcount == 0:
-        raise KeyError(draft_id)
+        raise ConflictError(f"draft {draft_id} changed while updating status")
 
 
 def _draft_run_insert_values(run: DraftRun) -> tuple:
