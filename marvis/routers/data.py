@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import tempfile
+from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
@@ -34,6 +35,13 @@ router = APIRouter(prefix="/api", tags=["data"])
 DATASET_ROLES = {"sample", "feature", "derived", "unknown"}
 DATASET_PREVIEW_MAX_ROWS = 500
 DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
+
+
+def _upload_artifact_name(filename: str | None) -> str:
+    source_name = Path(filename or "upload").name
+    source_path = Path(source_name)
+    stem = source_path.stem or "upload"
+    return f"{stem}_{uuid4().hex[:8]}{source_path.suffix.lower()}"
 
 
 def _data_runtime(request: Request):
@@ -102,11 +110,13 @@ async def upload_task_dataset(
     _repo_data, _backend, registry, _join_engine = _data_runtime(request)
     upload_dir = request.app.state.settings.datasets_dir / task_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
-    filename = Path(file.filename or "upload").name
-    upload_path = upload_dir / filename
-    upload_path.write_bytes(await file.read())
-    suffix = upload_path.suffix.lower()
+    upload_uow = ArtifactUnitOfWork()
+    upload_artifact = upload_uow.stage_file(upload_dir, _upload_artifact_name(file.filename))
+    upload_artifact.path.write_bytes(await file.read())
+    upload_path = upload_artifact.final_path
     try:
+        upload_uow.promote_all()
+        suffix = upload_path.suffix.lower()
         if suffix in {".xlsx", ".xlsm"}:
             sheets = list_sheets(upload_path)
             if sheet:
@@ -153,9 +163,15 @@ async def upload_task_dataset(
             datasets = [registry.register_from_upload(task_id, upload_path, role=role)]
             reports = []
     except HTTPException:
+        upload_uow.rollback()
         raise
     except (DataBackendError, DataIngestError, ValueError) as exc:
+        upload_uow.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        upload_uow.rollback()
+        raise
+    upload_uow.commit()
     for dataset in datasets:
         dispatch_platform_hook(
             getattr(request.app.state, "hook_dispatcher", None),

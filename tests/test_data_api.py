@@ -217,6 +217,39 @@ def test_dataset_upload_rejects_invalid_excel_sheet(tmp_path):
     )
 
     assert response.status_code == 422
+    upload_dir = settings.datasets_dir / task.id / "uploads"
+    assert not any(upload_dir.rglob("*"))
+
+
+def test_dataset_upload_raw_file_rolls_back_when_registration_fails(
+    tmp_path,
+    monkeypatch,
+):
+    client, settings = _client(tmp_path, raise_server_exceptions=False)
+    task = _create_task(settings)
+
+    def fail_dataset_insert(self, conn, dataset):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(
+        DatasetRepository,
+        "create_dataset_on_connection",
+        fail_dataset_insert,
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", b"mobile,bad_flag\n13800138000,0\n", "text/csv")},
+    )
+
+    assert response.status_code == 500
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    task_dataset_dir = settings.datasets_dir / task.id
+    assert not list((task_dataset_dir / "uploads").glob("*.csv"))
+    assert not ((task_dataset_dir / "uploads") / ".staging").exists()
+    assert not list(task_dataset_dir.glob("sample_*.parquet"))
+    assert not (task_dataset_dir / ".staging").exists()
 
 
 def test_dataset_upload_excel_multi_sheet_rolls_back_when_registration_fails(
@@ -266,6 +299,9 @@ def test_dataset_upload_excel_multi_sheet_rolls_back_when_registration_fails(
 
     assert response.status_code == 500
     assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+    upload_dir = settings.datasets_dir / task.id / "uploads"
+    assert not list(upload_dir.glob("*.xlsx"))
+    assert not (upload_dir / ".staging").exists()
     excel_dir = settings.datasets_dir / task.id / "excel"
     assert not list(excel_dir.glob("*.parquet"))
     assert not (excel_dir / ".staging").exists()
