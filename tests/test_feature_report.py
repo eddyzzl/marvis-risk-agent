@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+from openpyxl import Workbook
 from openpyxl import load_workbook
 
 from marvis.output.feature_report import render_feature_report
@@ -54,3 +56,22 @@ def test_render_feature_report_appends_optional_columns_only_when_present(tmp_pa
     render_feature_report([{"feature": "x1", "iv": 0.4}], base_out)
     base_header = [cell.value for cell in load_workbook(base_out)["特征指标"][1]]
     assert "重要性" not in base_header and "头部lift5%" not in base_header
+
+
+def test_render_feature_report_rolls_back_existing_file_when_save_fails(tmp_path, monkeypatch):
+    out = tmp_path / "feature_report.xlsx"
+    render_feature_report([{"feature": "old", "iv": 0.1}], out)
+    original_bytes = out.read_bytes()
+    original_save = Workbook.save
+
+    def failing_save(self, filename):
+        original_save(self, filename)
+        raise RuntimeError("xlsx save failed")
+
+    monkeypatch.setattr(Workbook, "save", failing_save)
+
+    with pytest.raises(RuntimeError, match="xlsx save failed"):
+        render_feature_report([{"feature": "new", "iv": 0.9}], out)
+
+    assert out.read_bytes() == original_bytes
+    assert not (tmp_path / ".staging").exists()

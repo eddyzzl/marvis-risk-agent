@@ -12,6 +12,8 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
+from marvis.artifacts import TransactionalArtifactStore
+
 
 # (metric key, column header). Order is the sheet column order.
 _COLUMNS: list[tuple[str, str]] = [
@@ -37,7 +39,7 @@ _IMPORTANCE_COLUMN: tuple[str, str] = ("importance", "重要性")
 
 def render_feature_report(metrics: list[dict], out_path: Path, *, collinear: dict | None = None) -> Path:
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact = TransactionalArtifactStore(out_path.parent).stage(out_path.name)
     rows = [item for item in (metrics or []) if isinstance(item, dict)]
     columns = list(_COLUMNS)
     if any("lift_head_5" in item for item in rows):
@@ -55,8 +57,14 @@ def render_feature_report(metrics: list[dict], out_path: Path, *, collinear: dic
     # Optional collinear / VIF sheet — written only when the VIF metric was selected.
     if isinstance(collinear, dict):
         _append_collinear_sheet(workbook, collinear)
-    workbook.save(out_path)
-    return out_path
+    try:
+        workbook.save(artifact.path)
+        artifact.promote()
+        artifact.commit()
+    except Exception:
+        artifact.rollback()
+        raise
+    return artifact.final_path
 
 
 def _append_collinear_sheet(workbook: Workbook, collinear: dict) -> None:
