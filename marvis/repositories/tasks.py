@@ -542,6 +542,27 @@ class TaskRepository:
             ).fetchone()
         return row is not None
 
+    def get_agent_message(self, task_id: str, message_id: str) -> dict:
+        with connect(self.db_path) as conn:
+            task_row = conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            row = conn.execute(
+                """
+                SELECT id, task_id, role, stage, content, created_at, metadata_json
+                  FROM agent_messages
+                 WHERE task_id = ?
+                   AND id = ?
+                """,
+                (task_id, message_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Agent message not found: {message_id}")
+        return _row_to_agent_message(row)
+
     def update_agent_message(
         self,
         message_id: str,

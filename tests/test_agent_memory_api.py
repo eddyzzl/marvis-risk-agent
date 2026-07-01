@@ -356,6 +356,53 @@ def test_memory_distillation_references_are_use_audited(tmp_path):
     assert events[-1]["details"] == {"use_reason": "chat"}
 
 
+def test_agent_message_memory_reference_route_uses_direct_lookup(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    db_path = tmp_path / "marvis.sqlite"
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    message = repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content="历史字段口径显示 bad_flag 常作为坏样本字段。",
+        metadata={
+            "memory_references": [
+                {
+                    "kind": "raw",
+                    "id": "mem-a",
+                    "memory_type": "field_convention",
+                    "confidence": "high",
+                    "use_reason": "chat",
+                }
+            ]
+        },
+    )
+
+    def fail_list_messages(*_args, **_kwargs):
+        raise AssertionError("memory-reference route should not scan all Agent messages")
+
+    monkeypatch.setattr(TaskRepository, "list_agent_messages", fail_list_messages)
+
+    response = client.get(
+        f"/api/tasks/{task.id}/agent/messages/{message['id']}/memory-references"
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["task_id"] == task.id
+    assert payload["message_id"] == message["id"]
+    assert payload["memory_references"][0]["id"] == "mem-a"
+
+
 def test_memory_api_can_trigger_manual_consolidation(tmp_path):
     client = _client(tmp_path)
     store = AgentMemoryStore(tmp_path / "marvis.sqlite")

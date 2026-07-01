@@ -192,15 +192,16 @@ def get_agent_message_memory_references(
     repo = TaskRepository(request.app.state.settings.db_path)
     if repo.get_task(task_id) is None:
         raise HTTPException(status_code=404, detail="task not found")
-    for message in repo.list_agent_messages(task_id):
-        if message.get("id") == message_id:
-            references = (message.get("metadata") or {}).get("memory_references")
-            return {
-                "task_id": task_id,
-                "message_id": message_id,
-                "memory_references": references if isinstance(references, list) else [],
-            }
-    raise HTTPException(status_code=404, detail="Agent message not found")
+    try:
+        message = repo.get_agent_message(task_id, message_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent message not found") from exc
+    references = (message.get("metadata") or {}).get("memory_references")
+    return {
+        "task_id": task_id,
+        "message_id": message_id,
+        "memory_references": references if isinstance(references, list) else [],
+    }
 
 
 def _set_agent_memory_status(request: Request, memory_id: str, status: str) -> dict:
