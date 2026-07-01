@@ -1,3 +1,22 @@
+function isDialogLike(value) {
+  if (!value) return false;
+  if (typeof HTMLDialogElement !== "undefined") return value instanceof HTMLDialogElement;
+  return typeof value.close === "function";
+}
+
+export function closeDialogOnBackdropClick(event) {
+  const dialog = event.currentTarget;
+  if (!isDialogLike(dialog)) return;
+  if (event.target !== dialog || !dialog.open) return;
+  dialog.close();
+}
+
+export function bindDialogBackdropDismissal({ root = document } = {}) {
+  root.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("click", closeDialogOnBackdropClick);
+  });
+}
+
 export function createMaterialSourceController({ $, onFilesChanged }) {
   let mode = "path";
   let files = [];

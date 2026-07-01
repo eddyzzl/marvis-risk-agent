@@ -3272,6 +3272,7 @@ def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
 
 def test_dialogs_close_when_clicking_backdrop():
     app_js = _read_static("app.js")
+    dialogs_js = _read_static("js/dialogs.js")
     index_html = _read_static("index.html")
 
     for dialog_id in [
@@ -3282,12 +3283,75 @@ def test_dialogs_close_when_clicking_backdrop():
     ]:
         assert f'<dialog id="{dialog_id}"' in index_html
 
-    assert "function closeDialogOnBackdropClick" in app_js
-    assert "function bindDialogBackdropDismissal" in app_js
-    assert 'document.querySelectorAll("dialog").forEach((dialog) =>' in app_js
-    assert 'dialog.addEventListener("click", closeDialogOnBackdropClick);' in app_js
-    assert "event.target !== dialog || !dialog.open" in app_js
+    assert "export function closeDialogOnBackdropClick" in dialogs_js
+    assert "export function bindDialogBackdropDismissal" in dialogs_js
+    assert 'root.querySelectorAll("dialog").forEach((dialog) =>' in dialogs_js
+    assert 'dialog.addEventListener("click", closeDialogOnBackdropClick);' in dialogs_js
+    assert "event.target !== dialog || !dialog.open" in dialogs_js
+    assert 'from "./js/dialogs.js"' in app_js
+    assert "function closeDialogOnBackdropClick" not in app_js
+    assert "function bindDialogBackdropDismissal" not in app_js
     assert "bindDialogBackdropDismissal();" in app_js
+
+
+def test_dialog_backdrop_dismissal_closes_only_open_backdrop_clicks():
+    script = """
+import assert from "node:assert/strict";
+import {
+  bindDialogBackdropDismissal,
+  closeDialogOnBackdropClick,
+} from "./marvis/static/js/dialogs.js";
+
+function makeDialog(open = true) {
+  return {
+    open,
+    closeCalls: 0,
+    listeners: {},
+    close() {
+      this.closeCalls += 1;
+      this.open = false;
+    },
+    addEventListener(name, fn) {
+      this.listeners[name] = fn;
+    },
+  };
+}
+
+const dialog = makeDialog(true);
+closeDialogOnBackdropClick({ currentTarget: dialog, target: dialog });
+assert.equal(dialog.closeCalls, 1);
+assert.equal(dialog.open, false);
+
+const innerClickDialog = makeDialog(true);
+closeDialogOnBackdropClick({ currentTarget: innerClickDialog, target: { role: "button" } });
+assert.equal(innerClickDialog.closeCalls, 0);
+assert.equal(innerClickDialog.open, true);
+
+const closedDialog = makeDialog(false);
+closeDialogOnBackdropClick({ currentTarget: closedDialog, target: closedDialog });
+assert.equal(closedDialog.closeCalls, 0);
+
+const boundDialog = makeDialog(true);
+bindDialogBackdropDismissal({
+  root: {
+    querySelectorAll(selector) {
+      assert.equal(selector, "dialog");
+      return [boundDialog];
+    },
+  },
+});
+boundDialog.listeners.click({ currentTarget: boundDialog, target: boundDialog });
+assert.equal(boundDialog.closeCalls, 1);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_dialog_close_buttons_render_as_x_controls():

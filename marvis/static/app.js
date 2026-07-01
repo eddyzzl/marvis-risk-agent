@@ -20,7 +20,10 @@ import {
 } from "./js/agent-conversation-mount.js";
 import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
-import { createMaterialSourceController } from "./js/dialogs.js";
+import {
+  bindDialogBackdropDismissal,
+  createMaterialSourceController,
+} from "./js/dialogs.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
@@ -504,19 +507,6 @@ function openTaskTypeWelcome() {
 
 function closeTaskDialog() {
   createTaskDialog.closeTaskDialog();
-}
-
-function closeDialogOnBackdropClick(event) {
-  const dialog = event.currentTarget;
-  if (!(dialog instanceof HTMLDialogElement)) return;
-  if (event.target !== dialog || !dialog.open) return;
-  dialog.close();
-}
-
-function bindDialogBackdropDismissal() {
-  document.querySelectorAll("dialog").forEach((dialog) => {
-    dialog.addEventListener("click", closeDialogOnBackdropClick);
-  });
 }
 
 function renderMaterialUploadSelection(files = materialSourceController.selectedFiles()) {
