@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 import shutil
 import tempfile
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, Response, UploadFile
 
 from marvis.api_data_payloads import (
     dataset_payload,
@@ -14,6 +15,7 @@ from marvis.api_data_payloads import (
     masked_preview_records,
 )
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.api_stage_helpers import start_task_job
 from marvis.api_task_helpers import dispatch_platform_hook
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
@@ -60,6 +62,21 @@ def _require_task(request: Request, task_id: str) -> None:
         TaskRepository(request.app.state.settings.db_path).get_task(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
+
+
+async def _request_json_or_empty(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _join_async_requested(payload: dict) -> bool:
+    return any(
+        bool(payload.get(key))
+        for key in ("async", "async_execute", "background")
+    )
 
 
 def _coerce_key_pairs(raw_pairs: list, *, anchor, feature) -> list[KeyPair]:
@@ -308,7 +325,13 @@ async def confirm_join_plan(join_plan_id: str, request: Request) -> dict:
 
 
 @router.post("/joins/{join_plan_id}/execute")
-def execute_join_plan(join_plan_id: str, request: Request) -> dict:
+async def execute_join_plan(
+    join_plan_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    response: Response,
+) -> dict:
+    payload = await _request_json_or_empty(request)
     repo_data, _backend, registry, join_engine = _data_runtime(request)
     try:
         plan = repo_data.load_join_plan(join_plan_id)
@@ -317,6 +340,25 @@ def execute_join_plan(join_plan_id: str, request: Request) -> dict:
     if plan.status == "executed":
         raise HTTPException(status_code=409, detail="join plan already executed")
     anchor = registry.get(plan.anchor_dataset_id)
+    if _join_async_requested(payload):
+        task_repo = TaskRepository(request.app.state.settings.db_path)
+        job_id = start_task_job(task_repo, plan.task_id, "join")
+        background_tasks.add_task(
+            _run_join_execute_job,
+            job_id,
+            request.app.state.settings.db_path,
+            request.app.state.settings.datasets_dir,
+            join_plan_id,
+        )
+        response.status_code = 202
+        return {
+            "status": "accepted",
+            "job_id": job_id,
+            "task_id": plan.task_id,
+            "join_plan_id": join_plan_id,
+            "anchor_rows": anchor.row_count,
+            "message": "join execution dispatched; poll GET /api/tasks/{task_id}",
+        }
     try:
         result = join_engine.execute_join_plan(
             join_plan_id,
@@ -333,3 +375,33 @@ def execute_join_plan(join_plan_id: str, request: Request) -> dict:
         "fan_out": False,
         "warnings": [],
     }
+
+
+def _run_join_execute_job(
+    job_id: str,
+    db_path: Path,
+    datasets_dir: Path,
+    join_plan_id: str,
+) -> None:
+    task_repo = TaskRepository(db_path)
+    task_repo.mark_job_running(job_id)
+    repo_data = DatasetRepository(db_path)
+    backend = DataBackend(datasets_dir)
+    registry = DatasetRegistry(repo_data, backend, datasets_dir)
+    join_engine = JoinEngine(backend, ColumnAligner(backend), registry, repo_data)
+    try:
+        plan = repo_data.load_join_plan(join_plan_id)
+        join_engine.execute_join_plan(
+            join_plan_id,
+            out_dir=Path(datasets_dir) / plan.task_id / "joins",
+        )
+    except Exception as exc:
+        task_repo.finish_job(
+            job_id,
+            status="failed",
+            error_name=exc.__class__.__name__,
+            error_value=str(exc),
+            traceback=traceback.format_exc(),
+        )
+    else:
+        task_repo.finish_job(job_id, status="succeeded")

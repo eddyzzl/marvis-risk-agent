@@ -377,6 +377,88 @@ def test_join_api_propose_confirm_execute_flow(tmp_path):
     assert executed_audit["detail"]["result_dataset_id"] == execute.json()["result_dataset_id"]
 
 
+def test_join_api_execute_supports_explicit_async_job(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "anchor",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "feature",
+        pd.DataFrame({"customer_id": [1, 2], "balance": [10, 20]}),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+    client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_id": feature.id, "confirmed": True},
+    )
+
+    execute = client.post(f"/api/joins/{plan['join_plan_id']}/execute", json={"async": True})
+
+    assert execute.status_code == 202
+    payload = execute.json()
+    assert payload["status"] == "accepted"
+    assert payload["job_id"]
+    assert payload["task_id"] == task.id
+    loaded = DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"])
+    assert loaded.status == "executed"
+    assert loaded.result_dataset_id
+    assert TaskRepository(settings.db_path).get_active_job_kind(task.id) is None
+
+
+def test_join_api_execute_async_rejects_active_task_job(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "anchor",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        "feature",
+        pd.DataFrame({"customer_id": [1, 2], "balance": [10, 20]}),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+    client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_id": feature.id, "confirmed": True},
+    )
+    TaskRepository(settings.db_path).start_job(task.id, "metrics")
+
+    execute = client.post(f"/api/joins/{plan['join_plan_id']}/execute", json={"async": True})
+
+    assert execute.status_code == 409
+    assert DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status != "executed"
+
+
 def test_join_api_marks_aggregate_dedup_as_synthetic(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)

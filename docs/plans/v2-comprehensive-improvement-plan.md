@@ -41,6 +41,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/output/test_excel.py tests/output/test_e2e_results_to_outputs.py -q`: `13 passed` after moving validation Excel and `excel_images` writes behind staged promotion.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_metrics_stage_status_failure_rolls_back_outputs_report_and_images tests/test_pipeline_v2.py::test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs tests/output/test_word.py -q`: `5 passed` after confirming staged validation Excel writes still fit the V1 metrics/report rollback path.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_files.py tests/test_memory_policy.py tests/test_notebooks.py tests/test_api_scan_helpers.py tests/test_api_v2.py::test_cancel_metrics_endpoint_requests_running_metrics_stop tests/test_api_v2.py::test_scan_endpoint_returns_v2_artifacts_and_updates_status tests/test_pipeline_v2.py::test_notebook_stage_writes_reproducibility_evidence_before_metrics tests/test_pipeline_v2.py::test_metrics_stage_cancel_returns_to_executed_status -q`: `55 passed` after centralizing atomic text/JSON writes for runtime control and notebook evidence files.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py -q`: `15 passed` after adding an explicit opt-in async job path for join execution while preserving the default synchronous response contract.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_api_state.py tests/test_frontend_v2_join.py -q`: `21 passed` after confirming the existing frontend join execution API contract still posts the synchronous route by default.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_join_api.py tests/test_data_ops_pack.py tests/test_join_engine.py -q`: `22 passed` after confirming join/data_ops engine behavior still passes with the optional async route migration path.
   - `tests/test_artifacts_transactional.py tests/test_data_ops_pack.py tests/test_join_engine.py tests/test_data_repository_registry.py`: `32 passed` after migrating `clean_format` / `dedup_rows` derived outputs to staging and tightening artifact path traversal checks.
   - `tests/test_data_join_api.py tests/test_data_ops_pack.py`: `13 passed` after the data_ops clean/dedup staging migration.
   - `tests/test_modeling_prepare.py tests/test_modeling_pack.py::test_reject_inference_tool_registers_augmented_dataset tests/test_modeling_reject_inference.py`: `15 passed` after migrating modeling derived parquet outputs to staging.
@@ -774,6 +777,8 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Fix:
      - Define job policy: quick synchronous route vs background job vs subprocess sandbox.
      - Apply to join, validation stages, modeling train/tune/report, notebook/plugin execution.
+   - Current update: `/api/joins/{join_plan_id}/execute` now preserves the existing synchronous contract by default, but supports explicit opt-in background execution via request JSON (`async`, `async_execute`, or `background`). The async path creates a task job with `kind="join"`, rejects existing active jobs, and records succeeded/failed job state from a fresh data runtime.
+   - Remaining: move the frontend/agent join flow to the job path with polling and user-visible progress before treating join execution as fully productized background work.
 
 3. Add performance regression tests.
    - Tests:
