@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -644,6 +645,51 @@ def test_tool_runner_denies_adhoc_process_spawn_without_side_effect(tmp_path):
     assert result.ok is False
     assert result.error_kind == "execution"
     assert "process spawn access requires process:spawn" in result.error
+
+
+def test_tool_runner_denies_adhoc_os_symlink_without_write_side_effect(tmp_path):
+    if not hasattr(os, "symlink"):
+        pytest.skip("os.symlink is not available on this platform")
+    runner = _runner(tmp_path)
+    module_path = tmp_path / "symlink_tool.py"
+    module_path.write_text(
+        "import os\n"
+        "def run(inputs, ctx):\n"
+        "    os.symlink(inputs['source'], inputs['target'])\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "workspace" / "tasks" / "task-1" / "blocked-link"
+
+    result = runner.invoke_adhoc(
+        module=module_path,
+        entrypoint="run",
+        inputs={"source": sys.executable, "target": str(target)},
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source": {"type": "string"},
+                "target": {"type": "string"},
+            },
+            "required": ["source", "target"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+        timeout_seconds=10,
+        task_id="task-1",
+        mode="draft",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "execution"
+    assert "file write access denied" in result.error
+    assert not target.exists()
+    assert not target.is_symlink()
 
 
 def test_tool_runner_allows_external_plugin_process_spawn_with_side_effect(tmp_path):

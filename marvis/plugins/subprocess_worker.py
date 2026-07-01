@@ -150,6 +150,10 @@ def _install_file_guard(
     original_rmdir = os.rmdir
     original_mkdir = os.mkdir
     original_makedirs = os.makedirs
+    original_rename = os.rename
+    original_replace = os.replace
+    original_link = os.link if hasattr(os, "link") else None
+    original_symlink = os.symlink if hasattr(os, "symlink") else None
     original_path_open = Path.open
     original_path_read_text = Path.read_text
     original_path_read_bytes = Path.read_bytes
@@ -202,6 +206,26 @@ def _install_file_guard(
     def guarded_makedirs(name, *args, **kwargs):
         _assert_file_access(name, "write", read_roots, write_roots)
         return original_makedirs(name, *args, **kwargs)
+
+    def guarded_rename(src, dst, *args, **kwargs):
+        _assert_file_access(src, "write", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_rename(src, dst, *args, **kwargs)
+
+    def guarded_replace(src, dst, *args, **kwargs):
+        _assert_file_access(src, "write", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_replace(src, dst, *args, **kwargs)
+
+    def guarded_link(src, dst, *args, **kwargs):
+        _assert_file_access(src, "read", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_link(src, dst, *args, **kwargs)
+
+    def guarded_symlink(src, dst, *args, **kwargs):
+        _assert_file_access(src, "read", read_roots, write_roots)
+        _assert_file_access(dst, "write", read_roots, write_roots)
+        return original_symlink(src, dst, *args, **kwargs)
 
     def guarded_path_open(self, mode="r", *args, **kwargs):
         _assert_file_access(self, _access_from_mode(str(mode)), read_roots, write_roots)
@@ -289,6 +313,12 @@ def _install_file_guard(
     os.rmdir = guarded_rmdir
     os.mkdir = guarded_mkdir
     os.makedirs = guarded_makedirs
+    os.rename = guarded_rename
+    os.replace = guarded_replace
+    if original_link is not None:
+        os.link = guarded_link
+    if original_symlink is not None:
+        os.symlink = guarded_symlink
     Path.open = guarded_path_open
     Path.read_text = guarded_path_read_text
     Path.read_bytes = guarded_path_read_bytes
