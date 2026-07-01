@@ -760,6 +760,7 @@ Tasks:
 - Done for first slice: add `TransactionalArtifactStore`.
 - Done for join execution: migrate join output persistence to staged write, final promote, and rollback on audit/DB failure.
 - Done for data_ops derived outputs: migrate `clean_format` and `dedup_rows` parquet outputs to staged write/final promote/rollback.
+- Done for feature pack derived outputs: migrate shared feature-frame registration helper to staged parquet write/final promote/rollback.
 - Done for modeling derived parquet outputs: migrate `prepare_modeling_frame` / `make_split` and `reject_inference` output datasets to staged write/final promote/rollback.
 - Done for report outputs: migrate `model_report_scored.parquet` and final xlsx reports to staged write/final promote.
 - Done for modeling model artifacts: migrate native binaries, meta files, PMML exports, and calibration payloads to staged write/final promote/rollback.

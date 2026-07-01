@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, init_db
 from marvis.feature.metrics import feature_metrics
+from marvis.packs.feature import tools as feature_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -49,6 +51,32 @@ def _register_sample(registry, tmp_path):
     path = tmp_path / "sample.csv"
     frame.to_csv(path, index=False)
     return registry.register_from_upload("task-feature", path, role="sample")
+
+
+def test_feature_register_frame_rolls_back_parquet_when_registration_fails(tmp_path):
+    class FailingRegistry:
+        def register_existing(self, *_args, **_kwargs):
+            raise RuntimeError("db unavailable")
+
+    runtime = SimpleNamespace(
+        datasets_root=tmp_path / "datasets",
+        registry=FailingRegistry(),
+    )
+    source_dataset = SimpleNamespace(id="source-dataset")
+    ctx = SimpleNamespace(task_id="task-feature", seed=13)
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        feature_tools._register_frame(
+            runtime,
+            pd.DataFrame({"x": [1, 2, 3]}),
+            source_dataset,
+            ctx,
+            "rollback",
+        )
+
+    feature_dir = runtime.datasets_root / ctx.task_id / "feature"
+    if feature_dir.exists():
+        assert not list(feature_dir.rglob("*.parquet"))
 
 
 def test_bin_feature_can_enforce_monotonic_bad_rates(tmp_path):

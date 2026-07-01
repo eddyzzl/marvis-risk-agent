@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.labels import require_labels_confirmed
 from marvis.data.registry import DatasetRegistry
@@ -479,15 +480,29 @@ def _read_frame(
 
 def _register_frame(runtime: _Runtime, frame: pd.DataFrame, source_dataset, ctx, suffix: str):
     out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(out_path, index=False)
-    return runtime.registry.register_existing(
-        out_path,
-        task_id=ctx.task_id,
-        role="derived",
-        anchor_target=source_dataset.id,
-        seed=int(ctx.seed or 0),
-    )
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(out_path.parent, out_path.name)
+    try:
+        frame.to_parquet(artifact.path, index=False)
+        register_kwargs = {
+            "task_id": ctx.task_id,
+            "role": "derived",
+            "anchor_target": source_dataset.id,
+            "seed": int(ctx.seed or 0),
+        }
+        register_on_connection = getattr(runtime.registry, "register_existing_on_connection", None)
+        transaction = getattr(runtime.registry, "transaction", None)
+        if callable(register_on_connection) and callable(transaction):
+            return uow.finalize_with_connection(
+                transaction,
+                lambda conn: register_on_connection(conn, artifact.final_path, **register_kwargs),
+            )
+        return uow.finalize(
+            lambda: runtime.registry.register_existing(artifact.final_path, **register_kwargs)
+        )
+    except Exception:
+        uow.rollback()
+        raise
 
 
 def _edges_for(frame: pd.DataFrame, inputs: dict, ctx) -> np.ndarray:
