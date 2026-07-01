@@ -49,6 +49,17 @@ def test_validation_agent_job_loop_lives_outside_api_module():
     assert api._run_agent_validation_job_impl is validation_runner.run_agent_validation_job
 
 
+def test_validation_agent_evidence_helper_lives_outside_api_module():
+    from marvis import api
+    from marvis.agent import validation_evidence
+
+    assert (
+        validation_evidence.agent_evidence_from_settings.__module__
+        == "marvis.agent.validation_evidence"
+    )
+    assert api._agent_evidence_from_settings is validation_evidence.agent_evidence_from_settings
+
+
 def _create_task(client: TestClient, tmp_path: Path, *, run_mode: str = "agent") -> str:
     response = client.post(
         "/api/tasks",
