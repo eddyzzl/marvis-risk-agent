@@ -749,6 +749,7 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    focus_ring_js = _read_static("js/focus-ring.js")
 
     assert "static/app.js?v=__MARVIS_STATIC_VERSION__" in index_html
     assert '<script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>' in index_html
@@ -762,32 +763,35 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "static/app.js?v=20260603-field-focus-ring" not in index_html
     assert "static/app.js?v=20260603-dark-masks" not in index_html
 
-    assert "function formControlFocusTarget(target)" in app_js
-    assert "function installFormControlFocusRingGuard" in app_js
-    assert 'target?.closest?.("input, textarea, select")' in app_js
-    assert "let lastPointerDownControl = null;" in app_js
-    assert "let lastPointerDownAt = 0;" in app_js
-    assert 'document.addEventListener("pointerdown", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("mousedown", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("touchstart", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("click", handleFormControlLabelClick, true);' in app_js
-    assert 'document.addEventListener("focusin", handleFormControlFocusIn, true);' in app_js
-    assert 'document.addEventListener("focusout", handleFormControlFocusOut, true);' in app_js
-    assert "const pointerFocusPending = performance.now() - lastPointerDownAt < 750;" in app_js
-    focus_in_start = app_js.index("function handleFormControlFocusIn")
-    focus_in_end = app_js.index("function handleFormControlFocusOut", focus_in_start)
-    focus_in_body = app_js[focus_in_start:focus_in_end]
+    assert "export function formControlFocusTarget(target)" in focus_ring_js
+    assert "export function installFormControlFocusRingGuard" in focus_ring_js
+    assert 'target?.closest?.("input, textarea, select")' in focus_ring_js
+    assert "let lastPointerDownControl = null;" in focus_ring_js
+    assert "let lastPointerDownAt = 0;" in focus_ring_js
+    assert 'root.addEventListener("pointerdown", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("mousedown", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("touchstart", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("click", handleFormControlLabelClick, true);' in focus_ring_js
+    assert 'root.addEventListener("focusin", handleFormControlFocusIn, true);' in focus_ring_js
+    assert 'root.addEventListener("focusout", handleFormControlFocusOut, true);' in focus_ring_js
+    assert "const pointerFocusPending = now() - lastPointerDownAt < suppressionWindowMs;" in focus_ring_js
+    focus_in_start = focus_ring_js.index("function handleFormControlFocusIn")
+    focus_in_end = focus_ring_js.index("function handleFormControlFocusOut", focus_in_start)
+    focus_in_body = focus_ring_js[focus_in_start:focus_in_end]
     assert 'control.classList.toggle(' in focus_in_body
     assert '"suppress-pointer-focus-ring"' in focus_in_body
     assert "pointerFocusPending && lastPointerDownControl !== control" in focus_in_body
-    label_click_start = app_js.index("function handleFormControlLabelClick")
-    label_click_end = app_js.index("document.addEventListener", label_click_start)
-    label_click_body = app_js[label_click_start:label_click_end]
+    label_click_start = focus_ring_js.index("function handleFormControlLabelClick")
+    label_click_end = focus_ring_js.index("root.addEventListener", label_click_start)
+    label_click_body = focus_ring_js[label_click_start:label_click_end]
     assert 'event.target.closest?.("label")' in label_click_body
     assert "label.contains(focused)" in label_click_body
     assert "focused.id === label.htmlFor" in label_click_body
     assert 'focused.classList.add("suppress-pointer-focus-ring")' in label_click_body
-    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in app_js
+    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in focus_ring_js
+    assert 'from "./js/focus-ring.js"' in app_js
+    assert "function formControlFocusTarget(target)" not in app_js
+    assert "function installFormControlFocusRingGuard" not in app_js
     assert "installFormControlFocusRingGuard();" in app_js
 
     suppress_start = styles_css.index("input.suppress-pointer-focus-ring:focus-visible,")
@@ -797,6 +801,102 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "select.suppress-pointer-focus-ring:focus-visible" in suppress_rule
     assert "outline: none" in suppress_rule
     assert "box-shadow: none" in suppress_rule
+
+
+def test_form_control_focus_ring_guard_handles_pointer_and_label_focus():
+    script = """
+import assert from "node:assert/strict";
+import { installFormControlFocusRingGuard } from "./marvis/static/js/focus-ring.js";
+
+function classList() {
+  return {
+    values: new Set(),
+    add(value) {
+      this.values.add(value);
+    },
+    remove(value) {
+      this.values.delete(value);
+    },
+    toggle(value, enabled) {
+      if (enabled) this.add(value);
+      else this.remove(value);
+    },
+    contains(value) {
+      return this.values.has(value);
+    },
+  };
+}
+
+function control(id) {
+  const item = {
+    id,
+    classList: classList(),
+    closest(selector) {
+      return selector === "input, textarea, select" ? item : null;
+    },
+  };
+  return item;
+}
+
+const listeners = {};
+let time = 1000;
+let active = null;
+const timeouts = [];
+installFormControlFocusRingGuard({
+  activeElement: () => active,
+  now: () => time,
+  root: {
+    addEventListener(name, fn, capture) {
+      listeners[name] = { fn, capture };
+    },
+  },
+  setTimeoutFn: (fn, delay) => {
+    timeouts.push({ fn, delay });
+  },
+});
+
+for (const name of ["pointerdown", "mousedown", "touchstart", "click", "focusin", "focusout"]) {
+  assert.equal(listeners[name].capture, true);
+}
+
+const first = control("first");
+const second = control("second");
+listeners.pointerdown.fn({ target: first });
+time += 100;
+listeners.focusin.fn({ target: second });
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), true);
+listeners.focusout.fn({ target: second });
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), false);
+
+listeners.pointerdown.fn({ target: first });
+time += 100;
+listeners.focusin.fn({ target: first });
+assert.equal(first.classList.contains("suppress-pointer-focus-ring"), false);
+
+const label = {
+  htmlFor: "",
+  contains(node) {
+    return node === second;
+  },
+  closest(selector) {
+    return selector === "label" ? label : null;
+  },
+};
+active = second;
+listeners.click.fn({ target: label });
+assert.equal(timeouts[0].delay, 0);
+timeouts[0].fn();
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), true);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_initialization_failure_shows_service_connection_error():

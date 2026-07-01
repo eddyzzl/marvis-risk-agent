@@ -25,6 +25,7 @@ import {
   createMaterialSourceController,
   renderMaterialUploadSelection,
 } from "./js/dialogs.js";
+import { installFormControlFocusRingGuard } from "./js/focus-ring.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
@@ -133,8 +134,6 @@ const themeController = createThemeController({
 let taskSearchQuery = "";
 let taskSortMode = "created_desc";
 let taskGroupMode = "none";
-let lastPointerDownControl = null;
-let lastPointerDownAt = 0;
 let executionEnvironmentOptions = [];
 let executionEnvironmentSettings = null;
 let llmSettings = { default_model_id: "", models: [], enabled_models: [] };
@@ -728,60 +727,6 @@ function closeWordPreviewDialog() {
 
 function setCssNumber(name, value) {
   document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
-}
-
-function formControlFocusTarget(target) {
-  return target?.closest?.("input, textarea, select") || null;
-}
-
-function installFormControlFocusRingGuard() {
-  function handleFormControlPointerDown(event) {
-    const control = formControlFocusTarget(event.target);
-    lastPointerDownControl = control;
-    lastPointerDownAt = performance.now();
-    if (control) control.classList.remove("suppress-pointer-focus-ring");
-  }
-
-  function handleFormControlFocusIn(event) {
-    const control = formControlFocusTarget(event.target);
-    if (!control) return;
-    const pointerFocusPending = performance.now() - lastPointerDownAt < 750;
-    control.classList.toggle(
-      "suppress-pointer-focus-ring",
-      pointerFocusPending && lastPointerDownControl !== control
-    );
-    lastPointerDownControl = null;
-    lastPointerDownAt = 0;
-  }
-
-  function handleFormControlFocusOut(event) {
-    const control = formControlFocusTarget(event.target);
-    if (control) control.classList.remove("suppress-pointer-focus-ring");
-  }
-
-  function handleFormControlLabelClick(event) {
-    const clickedControl = formControlFocusTarget(event.target);
-    if (clickedControl) {
-      clickedControl.classList.remove("suppress-pointer-focus-ring");
-      return;
-    }
-    const label = event.target.closest?.("label");
-    if (!label) return;
-    setTimeout(() => {
-      const focused = formControlFocusTarget(document.activeElement);
-      if (!focused) return;
-      const labelTargetsFocusedControl =
-        label.contains(focused) || Boolean(label.htmlFor && focused.id === label.htmlFor);
-      if (labelTargetsFocusedControl) focused.classList.add("suppress-pointer-focus-ring");
-    }, 0);
-  }
-
-  document.addEventListener("pointerdown", handleFormControlPointerDown, true);
-  document.addEventListener("mousedown", handleFormControlPointerDown, true);
-  document.addEventListener("touchstart", handleFormControlPointerDown, true);
-  document.addEventListener("click", handleFormControlLabelClick, true);
-  document.addEventListener("focusin", handleFormControlFocusIn, true);
-  document.addEventListener("focusout", handleFormControlFocusOut, true);
 }
 
 function saveLayoutWidths() {

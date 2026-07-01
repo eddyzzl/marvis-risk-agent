@@ -30,6 +30,7 @@ def test_static_es_module_files_exist_for_declared_imports():
         "branding.js",
         "dialogs.js",
         "draft-tools-panel.js",
+        "focus-ring.js",
         "platform-confirm.js",
         "polling.js",
         "render-agent.js",

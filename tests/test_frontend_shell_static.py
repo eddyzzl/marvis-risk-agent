@@ -84,6 +84,7 @@ def test_app_entry_is_split_into_frontend_modules():
         "branding.js",
         "dialogs.js",
         "draft-tools-panel.js",
+        "focus-ring.js",
         "platform-confirm.js",
         "polling.js",
         "render-agent.js",
@@ -100,6 +101,7 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/branding.js"' in app_js
     assert 'from "./js/dialogs.js"' in app_js
     assert 'from "./js/draft-tools-panel.js"' in app_js
+    assert 'from "./js/focus-ring.js"' in app_js
     assert 'from "./js/platform-confirm.js"' in app_js
     assert 'from "./js/polling.js"' in app_js
     assert 'from "./js/render-agent.js"' in app_js
