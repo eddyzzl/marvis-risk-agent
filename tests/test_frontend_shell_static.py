@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -108,6 +109,7 @@ def test_app_entry_is_split_into_frontend_modules():
 def test_unselected_workspace_shows_centered_welcome_only():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_static("styles.css")
     welcome_css = _read_static("css/welcome.css")
 
@@ -194,8 +196,8 @@ def test_unselected_workspace_shows_centered_welcome_only():
         assert 'aria-describedby="welcomeComingSoonHint"' not in card_markup
     assert "该任务暂未开放,点击后会显示敬请期待提示。" not in welcome_markup
     assert "validationWorkspace" in app_js
-    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in app_js
-    assert 'classList.toggle("is-empty", !hasTaskContext)' in app_js
+    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in workspace_view_js
+    assert 'classList.toggle("is-empty", !hasTaskContext)' in workspace_view_js
     assert "function openTaskTypeWelcome" in app_js
     welcome_entry_start = app_js.index("function openTaskTypeWelcome")
     welcome_entry_end = app_js.index("function closeTaskDialog", welcome_entry_start)
@@ -308,11 +310,15 @@ def test_empty_workspace_greeting_changes_by_local_time():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     workspace_state_js = _read_static("js/task-workspace-state.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "export function workspaceGreetingForHour(hour)" in workspace_state_js
+    assert 'from "./task-workspace-state.js"' in workspace_view_js
+    assert "export function updateWorkspaceGreeting" in workspace_view_js
     assert "function updateWorkspaceGreeting(now = new Date())" in app_js
-    assert "workspaceGreetingForHour(now.getHours())" in app_js
-    assert "$(\"workspaceGreetingText\").textContent = greeting" in app_js
+    assert "updateWorkspaceGreetingView({ now, getElementById: $ });" in app_js
+    assert "workspaceGreetingForHour(now.getHours())" in workspace_view_js
+    assert 'get("workspaceGreetingText")' in workspace_view_js
     assert "${greeting}，我来帮您完成信贷风控工作" not in app_js
     assert "我来帮您完成模型验证工作" not in app_js
     assert "updateWorkspaceGreeting();" in app_js
@@ -354,3 +360,74 @@ def test_workspace_greeting_logic_runs_under_node():
         text=True,
     )
     assert result.stdout.strip() == "早上好|上午好|下午好|晚上好"
+
+
+def test_task_workspace_view_shell_logic_runs_under_node():
+    module_url = (STATIC_DIR / "js" / "task-workspace-view.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderCurrentTaskWorkspace }} from {module_url!r};",
+            "function node() {",
+            "  return {",
+            "    textContent: '',",
+            "    classList: {",
+            "      values: new Set(),",
+            "      toggle(cls, on) { if (on) this.values.add(cls); else this.values.delete(cls); },",
+            "      contains(cls) { return this.values.has(cls); },",
+            "    },",
+            "  };",
+            "}",
+            "const nodes = {",
+            "  validationWorkspace: node(),",
+            "  currentTaskTitle: node(),",
+            "  currentTaskSubtitle: node(),",
+            "  workspaceGreetingText: node(),",
+            "};",
+            "let snapshots = 0;",
+            "const statuses = [];",
+            "let syncs = 0;",
+            "const common = {",
+            "  getElementById: (id) => nodes[id],",
+            "  renderTaskSnapshot: () => { snapshots += 1; },",
+            "  setActionStatus: (...args) => statuses.push(args),",
+            "  syncTaskHeroGlassLayout: () => { syncs += 1; },",
+            "  requestFrame: (cb) => cb(),",
+            "};",
+            "renderCurrentTaskWorkspace({ ...common, selectedTask: null, selectedTaskId: '', updateGreeting: ({ getElementById }) => { getElementById('workspaceGreetingText').textContent = '上午好'; } });",
+            "const empty = {",
+            "  title: nodes.currentTaskTitle.textContent,",
+            "  subtitle: nodes.currentTaskSubtitle.textContent,",
+            "  greeting: nodes.workspaceGreetingText.textContent,",
+            "  isEmpty: nodes.validationWorkspace.classList.contains('is-empty'),",
+            "};",
+            "renderCurrentTaskWorkspace({ ...common, selectedTask: { id: 'task-1', model_name: 'Demo' }, selectedTaskId: 'task-1', taskDisplayName: (task) => task.model_name, taskActionStatusSnapshot: () => ({ message: '就绪', kind: 'success' }) });",
+            "const selected = {",
+            "  title: nodes.currentTaskTitle.textContent,",
+            "  subtitle: nodes.currentTaskSubtitle.textContent,",
+            "  isEmpty: nodes.validationWorkspace.classList.contains('is-empty'),",
+            "  latestStatus: statuses.at(-1),",
+            "  snapshots,",
+            "  syncs,",
+            "};",
+            "process.stdout.write(JSON.stringify({ empty, selected }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["empty"] == {
+        "title": "验证任务",
+        "subtitle": "创建任务或从左侧选择已有任务",
+        "greeting": "上午好",
+        "isEmpty": True,
+    }
+    assert payload["selected"]["title"] == "Demo"
+    assert payload["selected"]["subtitle"] == ""
+    assert payload["selected"]["isEmpty"] is False
+    assert payload["selected"]["latestStatus"] == ["就绪", "success"]
+    assert payload["selected"]["snapshots"] == 2
+    assert payload["selected"]["syncs"] == 2

@@ -28,8 +28,11 @@ import {
   persistResultScrollPositions as persistStoredResultScrollPositions,
   rememberSelectedTaskId as rememberStoredSelectedTaskId,
   storedSelectedTaskId as readStoredSelectedTaskId,
-  workspaceGreetingForHour,
 } from "./js/task-workspace-state.js";
+import {
+  renderCurrentTaskWorkspace,
+  updateWorkspaceGreeting as updateWorkspaceGreetingView,
+} from "./js/task-workspace-view.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
@@ -2612,8 +2615,7 @@ function selectedTaskIsAgentMode(task = selectedTask) {
 }
 
 function updateWorkspaceGreeting(now = new Date()) {
-  const greeting = workspaceGreetingForHour(now.getHours());
-  $("workspaceGreetingText").textContent = greeting;
+  updateWorkspaceGreetingView({ now, getElementById: $ });
 }
 
 function setTaskHeroGlassActive(hero, workspace, glassActive) {
@@ -2845,38 +2847,19 @@ function renderCurrentTask({ force = false } = {}) {
   if (!force && renderSignatures.currentTask === nextSignature) return;
   renderSignatures.currentTask = nextSignature;
 
-  const hasTaskContext = Boolean(selectedTask || selectedTaskId);
-  $("validationWorkspace").classList.toggle("is-empty", !hasTaskContext);
-  const title = $("currentTaskTitle");
-  const subtitle = $("currentTaskSubtitle");
-  if (!selectedTask) {
-    if (selectedTaskId) {
-      title.textContent = "正在恢复任务";
-      subtitle.textContent = "正在加载任务内容";
-      renderTaskSnapshot();
-      setActionStatus("");
-      requestAnimationFrame(syncTaskHeroGlassLayout);
-      return;
-    }
-    updateWorkspaceGreeting();
-    title.textContent = "验证任务";
-    subtitle.textContent = "创建任务或从左侧选择已有任务";
-    renderTaskSnapshot();
-    setActionStatus("");
-    requestAnimationFrame(syncTaskHeroGlassLayout);
-    return;
-  }
-  title.textContent = taskDisplayName(selectedTask);
-  subtitle.textContent = "";
-  renderTaskSnapshot();
-  const statusOverride = actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null;
-  if (statusOverride) {
-    setActionStatus(statusOverride.message, statusOverride.kind, statusOverride.detail);
-  } else if (!setTaskFailureActionStatus(selectedTask)) {
-    const snapshot = taskActionStatusSnapshot(selectedTask);
-    setActionStatus(snapshot.message, snapshot.kind);
-  }
-  requestAnimationFrame(syncTaskHeroGlassLayout);
+  renderCurrentTaskWorkspace({
+    selectedTask,
+    selectedTaskId,
+    getElementById: $,
+    taskDisplayName,
+    renderTaskSnapshot,
+    setActionStatus,
+    updateGreeting: updateWorkspaceGreetingView,
+    statusOverride: actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null,
+    setTaskFailureActionStatus,
+    taskActionStatusSnapshot,
+    syncTaskHeroGlassLayout,
+  });
 }
 
 function workflowStepStatus(index, activeIndex) {

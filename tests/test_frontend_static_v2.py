@@ -851,9 +851,11 @@ def test_create_task_uses_single_model_name_field():
 
 def test_task_display_does_not_require_model_version_separator():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "function taskDisplayName" in app_js
-    assert "taskDisplayName(selectedTask)" in app_js
+    assert "taskDisplayName," in app_js
+    assert "taskDisplayName?.(selectedTask)" in workspace_view_js
     assert "${selectedTask.model_name} · ${selectedTask.model_version}" not in app_js
     assert "${task.model_name} · ${task.model_version}" not in app_js
 
@@ -1812,15 +1814,16 @@ def test_empty_workspace_copy_is_shorter_and_direct():
 
 def test_selected_task_header_omits_local_validation_subtitle():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_static("styles.css")
 
     current_start = app_js.index("function renderCurrentTask")
     current_end = app_js.index("function workflowStepStatus", current_start)
     current_renderer = app_js[current_start:current_end]
-    selected_branch = current_renderer[current_renderer.index("title.textContent = taskDisplayName") :]
 
     assert "本地验证任务" not in current_renderer
-    assert 'subtitle.textContent = "";' in selected_branch
+    assert "renderCurrentTaskWorkspace({" in current_renderer
+    assert 'if (subtitle) subtitle.textContent = "";' in workspace_view_js
     assert ".workspace-subtitle:empty" in styles_css
     assert "display: none" in styles_css[
         styles_css.index(".workspace-subtitle:empty") : styles_css.index("}", styles_css.index(".workspace-subtitle:empty"))
@@ -1885,9 +1888,11 @@ def test_refresh_restores_selected_task_before_async_detail_loads():
     assert "selectedTask = null;" in restore_body
 
     current_body = _slice_function(app_js, "function renderCurrentTask")
-    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in current_body
-    assert 'classList.toggle("is-empty", !hasTaskContext)' in current_body
-    assert "正在恢复任务" in current_body
+    workspace_view_js = _read_static("js/task-workspace-view.js")
+    assert "renderCurrentTaskWorkspace({" in current_body
+    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in workspace_view_js
+    assert 'classList.toggle("is-empty", !hasTaskContext)' in workspace_view_js
+    assert "正在恢复任务" in workspace_view_js
 
     load_scroll_call = app_js.index("loadResultScrollPositions();")
     restore_call = app_js.index("restoreSelectedTaskPlaceholder();")
