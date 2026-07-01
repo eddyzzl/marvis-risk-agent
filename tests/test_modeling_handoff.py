@@ -183,6 +183,29 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert audit["detail"]["artifact_id"] == artifact.id
 
 
+def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monkeypatch):
+    settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
+
+    def fail_legacy_write(self, *args, **kwargs):
+        raise AssertionError("legacy task write called")
+
+    monkeypatch.setattr(
+        task_repo_module.TaskRepository,
+        "create_validation_handoff_with_audit",
+        fail_legacy_write,
+    )
+
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    assert TaskRepository(settings.db_path).get_task(validation_task_id).model_version == artifact.id
+    assert store.get(artifact.experiment_id).status == "handed_off"
+
+
 def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_fails(
     tmp_path,
     monkeypatch,
@@ -276,6 +299,31 @@ def test_create_challenger_backtest_task_writes_materials_task_and_audit(tmp_pat
     assert audit["target_ref"] == result["task_id"]
     assert audit["detail"]["artifact_id"] == artifact.id
     assert store.get(artifact.experiment_id).status == "trained"
+
+
+def test_create_challenger_backtest_uses_connection_scoped_task_write(tmp_path, monkeypatch):
+    settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
+
+    def fail_legacy_write(self, *args, **kwargs):
+        raise AssertionError("legacy task write called")
+
+    monkeypatch.setattr(
+        task_repo_module.TaskRepository,
+        "create_task_with_audit",
+        fail_legacy_write,
+    )
+
+    result = create_challenger_backtest_task(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    assert TaskRepository(settings.db_path).get_task(result["task_id"]).model_version == (
+        f"{artifact.id}-challenger-backtest"
+    )
+    assert Path(result["package_path"]).exists()
 
 
 def test_create_challenger_backtest_task_rolls_back_materials_when_audit_fails(

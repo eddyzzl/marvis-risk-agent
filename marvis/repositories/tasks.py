@@ -37,6 +37,9 @@ class TaskRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
+    def transaction(self):
+        return connect(self.db_path)
+
     def create_task(self, payload: TaskCreate) -> TaskRecord:
         record = _task_record_from_create(payload)
         with connect(self.db_path) as conn:
@@ -44,11 +47,24 @@ class TaskRepository:
         return record
 
     def create_task_with_audit(self, payload: TaskCreate, *, audit_factory) -> TaskRecord:
+        with connect(self.db_path) as conn:
+            return self.create_task_with_audit_on_connection(
+                conn,
+                payload,
+                audit_factory=audit_factory,
+            )
+
+    def create_task_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskCreate,
+        *,
+        audit_factory,
+    ) -> TaskRecord:
         record = _task_record_from_create(payload)
         audit = audit_factory(record)
-        with connect(self.db_path) as conn:
-            _insert_task_record_row(conn, record, report_values=payload.report_values)
-            _write_audit_row(conn, **audit)
+        _insert_task_record_row(conn, record, report_values=payload.report_values)
+        _write_audit_row(conn, **audit)
         return record
 
     def create_validation_handoff_with_audit(
@@ -59,12 +75,29 @@ class TaskRepository:
         experiment_status: str,
         audit_factory,
     ) -> TaskRecord:
+        with connect(self.db_path) as conn:
+            return self.create_validation_handoff_with_audit_on_connection(
+                conn,
+                payload,
+                experiment_id=experiment_id,
+                experiment_status=experiment_status,
+                audit_factory=audit_factory,
+            )
+
+    def create_validation_handoff_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        payload: TaskCreate,
+        *,
+        experiment_id: str,
+        experiment_status: str,
+        audit_factory,
+    ) -> TaskRecord:
         record = _task_record_from_create(payload)
         audit = audit_factory(record)
-        with connect(self.db_path) as conn:
-            _insert_task_record_row(conn, record, report_values=payload.report_values)
-            _set_experiment_status_row(conn, experiment_id, experiment_status)
-            _write_audit_row(conn, **audit)
+        _insert_task_record_row(conn, record, report_values=payload.report_values)
+        _set_experiment_status_row(conn, experiment_id, experiment_status)
+        _write_audit_row(conn, **audit)
         return record
 
     def get_task(self, task_id: str) -> TaskRecord:

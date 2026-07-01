@@ -98,8 +98,11 @@ def handoff_to_validation(
         report_values={},
     )
 
-    def create_handoff_task():
-        return TaskRepository(settings.db_path).create_validation_handoff_with_audit(
+    task_repo = TaskRepository(settings.db_path)
+
+    def create_handoff_task(conn):
+        return task_repo.create_validation_handoff_with_audit_on_connection(
+            conn,
             payload,
             experiment_id=artifact.experiment_id,
             experiment_status="handed_off",
@@ -116,7 +119,7 @@ def handoff_to_validation(
             },
         )
 
-    validation_task = uow.finalize(create_handoff_task)
+    validation_task = uow.finalize_with_connection(task_repo.transaction, create_handoff_task)
     return validation_task.id
 
 
@@ -232,8 +235,11 @@ def create_challenger_backtest_task(
         },
     )
 
-    def create_backtest_task():
-        return TaskRepository(settings.db_path).create_task_with_audit(
+    task_repo = TaskRepository(settings.db_path)
+
+    def create_backtest_task(conn):
+        return task_repo.create_task_with_audit_on_connection(
+            conn,
             payload,
             audit_factory=lambda record: {
                 "kind": "modeling.challenger_backtest.create",
@@ -249,7 +255,7 @@ def create_challenger_backtest_task(
             },
         )
 
-    task = uow.finalize(create_backtest_task)
+    task = uow.finalize_with_connection(task_repo.transaction, create_backtest_task)
     return {
         "task_id": task.id,
         "package_path": str((material_dir / CHALLENGER_BACKTEST_PLAN_JSON).resolve()),
