@@ -9,6 +9,7 @@ import pytest
 from marvis.notebook_cancellation import NotebookCancellationToken
 from marvis.notebooks import (
     _build_step_events,
+    _notebook_worker_env,
     _record_cell_complete,
     _record_cell_start,
     AppendedCellExecutionPolicy,
@@ -69,6 +70,22 @@ def test_run_notebook_isolated_executes_in_worker_process(tmp_path: Path):
     assert (notebook_dir / output_name).read_text(encoding="utf-8") == "ok"
     assert executed_path.exists()
     assert log_path.read_text(encoding="utf-8") == "succeeded\n"
+
+
+def test_notebook_worker_env_strips_host_secrets(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/marvis")
+
+    env = _notebook_worker_env()
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["PYTHONPATH"] == "/tmp/marvis"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
