@@ -9,7 +9,7 @@ from fastapi import (
 )
 
 from marvis.agent.orchestrator import (
-    AgentValidationCancelled,
+    AgentValidationCancelled,  # noqa: F401 - compatibility export for tests/imports.
     agent_next_stage,
     is_metrics_failure,
     request_agent_cancellation,
@@ -49,9 +49,13 @@ from marvis.agent.validation_evidence import (
     agent_evidence_from_settings as _agent_evidence_from_settings,
 )
 from marvis.agent.validation_messages import (
+    add_and_stream_agent_message as _add_and_stream_agent_message_impl,
+    add_streaming_agent_message as _add_streaming_agent_message_impl,
     agent_stage_label as _agent_stage_label,
     agent_stage_opening_text as _agent_stage_opening_text,
     format_conclusion_values as _format_conclusion_values,
+    model_metadata as _model_metadata_impl,
+    stream_agent_message as _stream_agent_message_impl,
 )
 from marvis.api_task_helpers import (
     get_task_or_404 as _get_task_or_404,
@@ -1145,11 +1149,7 @@ def _resolve_agent_model(
 
 
 def _model_metadata(model_profile: dict) -> dict:
-    return {
-        "model_id": model_profile.get("model_id"),
-        "display_name": model_profile.get("display_name"),
-        "model_name": model_profile.get("model_name"),
-    }
+    return _model_metadata_impl(model_profile)
 
 
 def _add_streaming_agent_message(
@@ -1159,12 +1159,11 @@ def _add_streaming_agent_message(
     stage: str,
     model_profile: dict,
 ) -> dict:
-    return repo.add_agent_message(
+    return _add_streaming_agent_message_impl(
+        repo,
         task_id,
-        role="assistant",
         stage=stage,
-        content="",
-        metadata={**_model_metadata(model_profile), "streaming": True},
+        model_profile=model_profile,
     )
 
 
@@ -1176,18 +1175,13 @@ def _add_and_stream_agent_message(
     model_profile: dict,
     producer: Callable[[Callable[[str], None]], tuple[str, dict]],
 ) -> dict:
-    message = _add_streaming_agent_message(
+    return _add_and_stream_agent_message_impl(
         repo,
         task_id,
         stage=stage,
         model_profile=model_profile,
-    )
-    return _stream_agent_message(
-        repo,
-        message["id"],
-        task_id=task_id,
-        model_profile=model_profile,
         producer=producer,
+        raise_if_cancelled=_raise_if_agent_cancelled,
     )
 
 
@@ -1199,48 +1193,11 @@ def _stream_agent_message(
     model_profile: dict,
     producer: Callable[[Callable[[str], None]], tuple[str, dict]],
 ) -> dict:
-    parts: list[str] = []
-    streaming_metadata = {**_model_metadata(model_profile), "streaming": True}
-
-    def on_delta(delta: str) -> None:
-        if not delta:
-            return
-        _raise_if_agent_cancelled(task_id)
-        parts.append(delta)
-        repo.update_agent_message(
-            message_id,
-            content="".join(parts),
-            metadata=streaming_metadata,
-        )
-
-    try:
-        _raise_if_agent_cancelled(task_id)
-        content, metadata = producer(on_delta)
-        _raise_if_agent_cancelled(task_id)
-        final_metadata = {
-            **metadata,
-            **_model_metadata(model_profile),
-            "streaming": False,
-        }
-        if parts:
-            final_metadata["streamed"] = True
-        _raise_if_agent_cancelled(task_id)
-        return repo.update_agent_message(
-            message_id,
-            content=content,
-            metadata=final_metadata,
-        )
-    except AgentValidationCancelled:
-        cancelled_metadata = {
-            **_model_metadata(model_profile),
-            "streaming": False,
-            "cancelled": True,
-        }
-        if parts:
-            cancelled_metadata["streamed"] = True
-        repo.update_agent_message(
-            message_id,
-            content="".join(parts),
-            metadata=cancelled_metadata,
-        )
-        raise
+    return _stream_agent_message_impl(
+        repo,
+        message_id,
+        task_id=task_id,
+        model_profile=model_profile,
+        producer=producer,
+        raise_if_cancelled=_raise_if_agent_cancelled,
+    )

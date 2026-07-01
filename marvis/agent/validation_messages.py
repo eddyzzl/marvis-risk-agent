@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from marvis.agent.orchestrator import AgentValidationCancelled
+
 
 def agent_stage_opening_text(stage: str) -> str:
     if stage == "reproducibility":
@@ -40,3 +44,108 @@ def format_conclusion_values(values: dict[str, str]) -> str:
         for key in ordered_keys
         if (value := values.get(key))
     )
+
+
+def model_metadata(model_profile: dict) -> dict:
+    return {
+        "model_id": model_profile.get("model_id"),
+        "display_name": model_profile.get("display_name"),
+        "model_name": model_profile.get("model_name"),
+    }
+
+
+def add_streaming_agent_message(
+    repo,
+    task_id: str,
+    *,
+    stage: str,
+    model_profile: dict,
+) -> dict:
+    return repo.add_agent_message(
+        task_id,
+        role="assistant",
+        stage=stage,
+        content="",
+        metadata={**model_metadata(model_profile), "streaming": True},
+    )
+
+
+def add_and_stream_agent_message(
+    repo,
+    task_id: str,
+    *,
+    stage: str,
+    model_profile: dict,
+    producer: Callable[[Callable[[str], None]], tuple[str, dict]],
+    raise_if_cancelled: Callable[[str], None],
+) -> dict:
+    message = add_streaming_agent_message(
+        repo,
+        task_id,
+        stage=stage,
+        model_profile=model_profile,
+    )
+    return stream_agent_message(
+        repo,
+        message["id"],
+        task_id=task_id,
+        model_profile=model_profile,
+        producer=producer,
+        raise_if_cancelled=raise_if_cancelled,
+    )
+
+
+def stream_agent_message(
+    repo,
+    message_id: str,
+    *,
+    task_id: str,
+    model_profile: dict,
+    producer: Callable[[Callable[[str], None]], tuple[str, dict]],
+    raise_if_cancelled: Callable[[str], None],
+) -> dict:
+    parts: list[str] = []
+    streaming_metadata = {**model_metadata(model_profile), "streaming": True}
+
+    def on_delta(delta: str) -> None:
+        if not delta:
+            return
+        raise_if_cancelled(task_id)
+        parts.append(delta)
+        repo.update_agent_message(
+            message_id,
+            content="".join(parts),
+            metadata=streaming_metadata,
+        )
+
+    try:
+        raise_if_cancelled(task_id)
+        content, metadata = producer(on_delta)
+        raise_if_cancelled(task_id)
+        final_metadata = {
+            **metadata,
+            **model_metadata(model_profile),
+            "streaming": False,
+        }
+        if parts:
+            final_metadata["streamed"] = True
+        raise_if_cancelled(task_id)
+        return repo.update_agent_message(
+            message_id,
+            content=content,
+            metadata=final_metadata,
+        )
+    except AgentValidationCancelled:
+        cancelled_metadata = {
+            **model_metadata(model_profile),
+            "streaming": False,
+            "cancelled": True,
+        }
+        if parts:
+            cancelled_metadata["streamed"] = True
+        repo.update_agent_message(
+            message_id,
+            content="".join(parts),
+            metadata=cancelled_metadata,
+        )
+        raise
