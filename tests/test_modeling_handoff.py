@@ -569,6 +569,64 @@ def test_post_training_action_skips_mlp_without_creating_validation_task(tmp_pat
     assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
 
 
+def test_post_training_action_skips_catboost_with_specific_pmml_guidance(tmp_path):
+    settings, store, source_task, dataset, _lr_artifact = _seed_experiment(tmp_path)
+    frame = pd.DataFrame({
+        "x1": [0.1, 0.2, 0.8, 0.9, 0.15, 0.85],
+        "x2": [0.3, 0.4, 0.7, 0.6, 0.35, 0.75],
+        "y": [0, 0, 1, 1, 0, 1],
+    })
+    model = LogisticRegression().fit(frame[["x1", "x2"]], frame["y"])
+    artifact = save_model(
+        model,
+        "catboost",
+        settings.tasks_dir / source_task.id / "modeling_artifacts",
+        feature_list=("x1", "x2"),
+        params={"iterations": 20, "depth": 3},
+    )
+    experiment_id = store.create(source_task.id, "catboost", _config(dataset.id))
+    store.attach_result(
+        experiment_id,
+        TrainResult(
+            artifact=artifact,
+            metrics=_metrics(),
+            feature_importance=(),
+            experiment_id="",
+        ),
+    )
+    ctx = SimpleNamespace(
+        task_id=source_task.id,
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        seed=0,
+    )
+
+    output = modeling_tools.tool_post_training_action(
+        {
+            "experiment_id": experiment_id,
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml", "handoff_to_validation", "create_challenger_backtest"],
+        },
+        ctx,
+    )
+
+    reason = output["capabilities"]["reason"]
+    assert output["pmml_path"] == ""
+    assert output["validation_task_id"] == ""
+    assert output["challenger_task_id"] == ""
+    assert output["capabilities"]["pmml_supported"] is False
+    assert output["capabilities"]["native_model_supported"] is True
+    assert "CatBoost 可保留原生 .pkl 模型和报告" in reason
+    assert "sklearn2pmml/JPMML" in reason
+    assert {item["status"] for item in output["actions"]} == {"skipped"}
+    assert all("CatBoost" in item["reason"] for item in output["actions"])
+    assert any("CatBoost" in item for item in output["model_card"]["limitations"])
+    assert "CatBoost" in Path(output["approval_package_markdown_path"]).read_text(encoding="utf-8")
+    assert Path(output["model_card_markdown_path"]).exists()
+    assert [task.id for task in TaskRepository(settings.db_path).list_tasks()] == [source_task.id]
+    assert not list((settings.tasks_dir / source_task.id / "modeling_artifacts").glob("*.pmml"))
+
+
 def test_post_training_action_skips_malformed_scorecard_without_pmml_failure(tmp_path):
     settings, store, source_task, dataset, _lr_artifact = _seed_experiment(tmp_path)
     frame = pd.DataFrame({
