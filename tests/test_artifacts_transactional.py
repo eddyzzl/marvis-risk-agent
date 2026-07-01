@@ -248,6 +248,50 @@ def test_artifact_unit_of_work_rolls_back_promoted_file_when_callback_fails(tmp_
     assert not (root / ".staging").exists()
 
 
+def test_artifact_unit_of_work_rolls_back_removed_file_when_callback_fails(tmp_path: Path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    existing = root / "validation_report.docx"
+    existing.write_bytes(b"old-report")
+    uow = ArtifactUnitOfWork()
+    removal = uow.remove_path(existing)
+
+    with pytest.raises(RuntimeError, match="status failed"):
+        uow.finalize(lambda: (_ for _ in ()).throw(RuntimeError("status failed")))
+
+    assert existing.read_bytes() == b"old-report"
+    assert not removal.backup_path.exists()
+
+
+def test_artifact_unit_of_work_commits_removed_directory(tmp_path: Path):
+    root = tmp_path / "task"
+    images = root / "images"
+    images.mkdir(parents=True)
+    (images / "old.png").write_bytes(b"old-image")
+    uow = ArtifactUnitOfWork()
+    removal = uow.remove_path(images)
+
+    uow.finalize(lambda: None)
+
+    assert not images.exists()
+    assert not removal.backup_path.exists()
+
+
+def test_artifact_unit_of_work_rolls_back_removed_directory_when_callback_fails(tmp_path: Path):
+    root = tmp_path / "task"
+    images = root / "images"
+    images.mkdir(parents=True)
+    (images / "old.png").write_bytes(b"old-image")
+    uow = ArtifactUnitOfWork()
+    removal = uow.remove_path(images)
+
+    with pytest.raises(RuntimeError, match="status failed"):
+        uow.finalize(lambda: (_ for _ in ()).throw(RuntimeError("status failed")))
+
+    assert (images / "old.png").read_bytes() == b"old-image"
+    assert not removal.backup_path.exists()
+
+
 def test_artifact_unit_of_work_rollback_is_idempotent_after_finalize_failure(tmp_path: Path):
     root = tmp_path / "artifacts"
     root.mkdir()

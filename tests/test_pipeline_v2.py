@@ -916,8 +916,9 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
             "metrics-stress",
             "metrics-output",
         ]
-        (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
-        (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
+        metrics_work_dir = outputs_dir / ".metrics-stage-work"
+        (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
+        (metrics_work_dir / "validation.xlsx").write_bytes(b"xlsx")
 
     monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
 
@@ -1066,8 +1067,12 @@ def test_metrics_stage_success_captures_model_experience_memory(
     repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
     execution_dir = workspace / "tasks" / task.id / "execution"
     outputs_dir = workspace / "tasks" / task.id / "outputs"
+    images_dir = workspace / "tasks" / task.id / "images"
     execution_dir.mkdir(parents=True)
     outputs_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    (outputs_dir / "validation_report.docx").write_bytes(b"old-report")
+    (images_dir / "old.png").write_bytes(b"old-image")
     code_scores_path = execution_dir / "code_model_scores.csv"
     code_scores_path.write_text("row_index,code_model_score\n0,0.1\n", encoding="utf-8")
     (execution_dir / "runtime_contract.json").write_text(
@@ -1148,6 +1153,125 @@ def test_metrics_stage_success_captures_model_experience_memory(
     assert memories[0].payload["channel"] == "自营"
     assert memories[0].payload["scope"] == "贷前A卡"
     assert memories[0].payload["important_feature_sources"] == ["征信"]
+    assert not (outputs_dir / "validation_report.docx").exists()
+    assert not images_dir.exists()
+    assert not (outputs_dir / ".metrics-stage-work").exists()
+    assert not (outputs_dir / ".staging").exists()
+
+
+def test_metrics_stage_status_failure_rolls_back_outputs_report_and_images(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    sample_path = project / "sample.csv"
+    pmml_path = project / "model.pmml"
+    dictionary_path = project / "dictionary.csv"
+    sample_path.write_text("y,score,split,apply_month\n0,0.1,train,202601\n", encoding="utf-8")
+    pmml_path.write_text("<PMML/>", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,征信\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "marvis.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(project),
+            sample_path=str(sample_path),
+            pmml_path=str(pmml_path),
+            dictionary_path=str(dictionary_path),
+            algorithm="lgb",
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    task_dir = workspace / "tasks" / task.id
+    execution_dir = task_dir / "execution"
+    outputs_dir = task_dir / "outputs"
+    images_dir = task_dir / "images"
+    execution_dir.mkdir(parents=True)
+    outputs_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    old_results = {"old": True}
+    (outputs_dir / "validation_results.json").write_text(json.dumps(old_results), encoding="utf-8")
+    (outputs_dir / "validation.xlsx").write_bytes(b"old-xlsx")
+    (outputs_dir / "validation_report.docx").write_bytes(b"old-report")
+    (images_dir / "old.png").write_bytes(b"old-image")
+    code_scores_path = execution_dir / "code_model_scores.csv"
+    code_scores_path.write_text("row_index,code_model_score\n0,0.1\n", encoding="utf-8")
+    (execution_dir / "runtime_contract.json").write_text(
+        json.dumps(
+            {
+                "target_col": "y",
+                "split_col": "split",
+                "time_col": "apply_month",
+                "pmml_output_field": "probability_1",
+                "score_decimal_places": 6,
+                "code_model_scores_path": str(code_scores_path),
+                "feature_importance_path": None,
+                "model_params_path": None,
+                "algorithm": "lgb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (outputs_dir / REPRODUCIBILITY_RESULT_JSON).write_text(
+        json.dumps({"summary": {"status": "pass"}, "rows": []}),
+        encoding="utf-8",
+    )
+
+    def fake_write_metrics_results_in_session(*, outputs_dir, **_kwargs):
+        (outputs_dir / "validation_results.json").write_text(
+            json.dumps({"new": True}),
+            encoding="utf-8",
+        )
+        (outputs_dir / "validation.xlsx").write_bytes(b"new-xlsx")
+
+    monkeypatch.setattr(
+        "marvis.pipeline._write_metrics_results_in_session",
+        fake_write_metrics_results_in_session,
+    )
+    register_live_notebook_session(
+        task.id,
+        SimpleNamespace(closed=False, close=lambda: None),
+    )
+    original_update = TaskRepository.update_status_on_connection
+
+    def failing_status_update(self, conn, task_id, status, *args, **kwargs):
+        original_update(self, conn, task_id, status, *args, **kwargs)
+        if status is TaskStatus.WRITING_ARTIFACTS:
+            raise RuntimeError("simulated metrics status failure")
+
+    monkeypatch.setattr(TaskRepository, "update_status_on_connection", failing_status_update)
+
+    with pytest.raises(RuntimeError, match="simulated metrics status failure"):
+        run_metrics_stage(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+                notebook_isolated_execution=False,
+                allow_legacy_live_notebook_execution=True,
+            ),
+            stage_claimed=True,
+        )
+
+    assert json.loads((outputs_dir / "validation_results.json").read_text(encoding="utf-8")) == old_results
+    assert (outputs_dir / "validation.xlsx").read_bytes() == b"old-xlsx"
+    assert (outputs_dir / "validation_report.docx").read_bytes() == b"old-report"
+    assert (images_dir / "old.png").read_bytes() == b"old-image"
+    assert not (outputs_dir / ".metrics-stage-work").exists()
+    assert not (outputs_dir / ".staging").exists()
+    assert not (task_dir / ".staging").exists()
 
 
 def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):

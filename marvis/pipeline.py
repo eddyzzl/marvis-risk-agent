@@ -86,6 +86,12 @@ RMC_PMML_SCORE_COL = "__rmc_submitted_pmml_score__"
 VALIDATION_RESULTS_PICKLE = "validation_results.pkl"
 REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
 METRICS_CANCEL_MARKER = "metrics_cancel.requested"
+METRICS_OUTPUT_FILENAMES = (
+    "validation_results.json",
+    VALIDATION_RESULTS_PICKLE,
+    "validation.xlsx",
+    "metrics_notebook.log",
+)
 SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 NOTEBOOK_STAGE_FAILURE_PREFIX = "模型可复现性验证失败："
 METRICS_STAGE_FAILURE_PREFIX = "模型效果&稳定性验证失败："
@@ -282,7 +288,9 @@ def run_metrics_stage(
     task_dir = settings.workspace / "tasks" / task_id
     execution_dir = task_dir / "execution"
     outputs_dir = task_dir / "outputs"
+    metrics_work_dir = outputs_dir / ".metrics-stage-work"
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_uow: ArtifactUnitOfWork | None = None
     try:
         if not stage_claimed and task.status != TaskStatus.EXECUTED:
             raise PipelineError(
@@ -321,7 +329,9 @@ def run_metrics_stage(
                 raise PipelineError(
                     "live notebook kernel is not available; rerun notebook stage before metrics"
                 )
-            _clear_generated_artifacts(task_dir, stage="metrics")
+            _unlink_if_exists(_metrics_cancel_marker_path(task_dir))
+            _remove_dir_if_exists(metrics_work_dir)
+            metrics_work_dir.mkdir(parents=True, exist_ok=True)
             contract = load_runtime_contract(execution_dir / "runtime_contract.json")
             task = _sync_task_algorithm(repo, task, contract.algorithm)
             model_meta_path = execution_dir / "model_meta.json"
@@ -363,13 +373,13 @@ def run_metrics_stage(
                         model_meta_path=model_meta_path,
                         reproducibility_json_path=outputs_dir
                         / REPRODUCIBILITY_RESULT_JSON,
-                        results_json_path=outputs_dir / "validation_results.json",
-                        excel_path=outputs_dir / "validation.xlsx",
+                        results_json_path=metrics_work_dir / "validation_results.json",
+                        excel_path=metrics_work_dir / "validation.xlsx",
                     ),
                 )
                 if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
                     return
-                _require_metrics_outputs(outputs_dir)
+                _require_metrics_outputs(metrics_work_dir)
             else:
                 previous_token = getattr(live_session, "cancellation_token", None)
                 setattr(live_session, "cancellation_token", cancellation_token)
@@ -385,18 +395,30 @@ def run_metrics_stage(
                         input_pmml_path=input_pmml_path,
                         contract=contract,
                         model_meta_path=model_meta_path,
-                        outputs_dir=outputs_dir,
+                        outputs_dir=metrics_work_dir,
+                        reproducibility_json_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
                     )
                 finally:
                     setattr(live_session, "cancellation_token", previous_token)
         finally:
             unregister_notebook_cancellation(task_id, cancellation_token)
         close_live_notebook_session(task_id)
-        repo.update_status(
-            task_id,
-            TaskStatus.WRITING_ARTIFACTS,
-            message="metrics and excel generated",
-            expected=TaskStatus.COMPUTING_METRICS,
+        _require_metrics_outputs(metrics_work_dir)
+        metrics_uow = _stage_metrics_outputs_for_commit(
+            task_dir=task_dir,
+            outputs_dir=outputs_dir,
+            metrics_work_dir=metrics_work_dir,
+        )
+        metrics_uow.finalize_with_connection(
+            repo.transaction,
+            lambda conn: repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.WRITING_ARTIFACTS,
+                message="metrics and excel generated",
+                expected=TaskStatus.COMPUTING_METRICS,
+                begin_immediate=True,
+            ),
         )
         _capture_agent_memory_for_metrics_success(
             repo=repo,
@@ -404,9 +426,11 @@ def run_metrics_stage(
             outputs_dir=outputs_dir,
         )
     except PipelineCancelled as exc:
+        _rollback_artifact_uow(metrics_uow)
         _mark_cancelled(repo, task_id, exc.resume_status, str(exc))
         return
     except PipelineError as exc:
+        _rollback_artifact_uow(metrics_uow)
         message = _stage_failure_message(METRICS_STAGE_FAILURE_PREFIX, str(exc))
         _mark_failed(repo, task_id, message)
         _capture_agent_memory_for_failure(
@@ -417,6 +441,7 @@ def run_metrics_stage(
         )
         raise
     except Exception as exc:
+        _rollback_artifact_uow(metrics_uow)
         message = _stage_failure_message(
             METRICS_STAGE_FAILURE_PREFIX,
             f"{exc.__class__.__name__}: {exc}",
@@ -429,6 +454,8 @@ def run_metrics_stage(
             message=message,
         )
         raise
+    finally:
+        _remove_dir_if_exists(metrics_work_dir)
 
 
 def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
@@ -545,12 +572,40 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
 
 
 def _rollback_report_uow(uow: ArtifactUnitOfWork | None) -> None:
+    _rollback_artifact_uow(uow)
+
+
+def _rollback_artifact_uow(uow: ArtifactUnitOfWork | None) -> None:
     if uow is None:
         return
     try:
         uow.rollback()
     except Exception:
         pass
+
+
+def _stage_metrics_outputs_for_commit(
+    *,
+    task_dir: Path,
+    outputs_dir: Path,
+    metrics_work_dir: Path,
+) -> ArtifactUnitOfWork:
+    uow = ArtifactUnitOfWork()
+    for name in METRICS_OUTPUT_FILENAMES:
+        source = metrics_work_dir / name
+        destination = outputs_dir / name
+        if source.exists() or source.is_symlink():
+            staged = uow.stage_file(outputs_dir, name)
+            shutil.move(str(source), staged.path)
+        elif destination.exists() or destination.is_symlink():
+            uow.remove_path(destination)
+    report_path = outputs_dir / "validation_report.docx"
+    if report_path.exists() or report_path.is_symlink():
+        uow.remove_path(report_path)
+    images_dir = task_dir / "images"
+    if images_dir.exists() or images_dir.is_symlink():
+        uow.remove_path(images_dir)
+    return uow
 
 
 def _write_reproducibility_result_in_session(

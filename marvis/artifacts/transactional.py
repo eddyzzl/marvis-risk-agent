@@ -127,6 +127,42 @@ class StagedDirectory:
         _remove_empty_parents(self.stage_path.parent)
 
 
+@dataclass
+class RemovedPath:
+    """One existing file or directory that should disappear only after commit."""
+
+    final_path: Path
+    backup_path: Path
+    _committed: bool = False
+    _removed: bool = False
+    _had_backup: bool = False
+
+    def remove(self) -> Path:
+        if self._removed:
+            return self.final_path
+        if self.final_path.exists() or self.final_path.is_symlink():
+            if self.backup_path.exists() or self.backup_path.is_symlink():
+                _remove_path(self.backup_path)
+            self.final_path.rename(self.backup_path)
+            self._had_backup = True
+        self._removed = True
+        return self.final_path
+
+    def commit(self) -> Path:
+        if self.backup_path.exists() or self.backup_path.is_symlink():
+            _remove_path(self.backup_path)
+        self._committed = True
+        return self.final_path
+
+    def rollback(self) -> None:
+        if self._committed:
+            return
+        if self._removed and self._had_backup and self.backup_path.exists():
+            if self.final_path.exists() or self.final_path.is_symlink():
+                _remove_path(self.final_path)
+            self.backup_path.rename(self.final_path)
+
+
 class TransactionalArtifactStore:
     """Stage files next to their destination and promote them atomically."""
 
@@ -213,7 +249,7 @@ class ArtifactUnitOfWork:
     """
 
     def __init__(self) -> None:
-        self._items: list[StagedArtifact | StagedDirectory] = []
+        self._items: list[StagedArtifact | StagedDirectory | RemovedPath] = []
         self._closed = False
 
     def stage_file(self, root: Path, final_name: str | Path) -> StagedArtifact:
@@ -226,7 +262,14 @@ class ArtifactUnitOfWork:
         self.track(directory)
         return directory
 
-    def track(self, item: StagedArtifact | StagedDirectory):
+    def remove_path(self, path: Path) -> RemovedPath:
+        target = Path(path)
+        backup_path = target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
+        removal = RemovedPath(final_path=target, backup_path=backup_path)
+        self.track(removal)
+        return removal
+
+    def track(self, item: StagedArtifact | StagedDirectory | RemovedPath):
         if self._closed:
             raise ArtifactTransactionError("artifact unit of work is already closed")
         self._items.append(item)
@@ -236,6 +279,8 @@ class ArtifactUnitOfWork:
         for item in self._items:
             if isinstance(item, StagedDirectory):
                 item.activate()
+            elif isinstance(item, RemovedPath):
+                item.remove()
             else:
                 item.promote()
 
@@ -293,6 +338,7 @@ def _remove_path(path: Path) -> None:
 __all__ = [
     "ArtifactTransactionError",
     "ArtifactUnitOfWork",
+    "RemovedPath",
     "StagedArtifact",
     "StagedDirectory",
     "TransactionalArtifactStore",
