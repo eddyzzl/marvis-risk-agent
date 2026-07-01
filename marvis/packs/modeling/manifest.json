@@ -1334,6 +1334,51 @@
                 "type": "number",
                 "minimum": 0
               },
+              "min_oot_ks": {
+                "type": "number"
+              },
+              "min_test_ks": {
+                "type": "number"
+              },
+              "min_oot_auc": {
+                "type": "number"
+              },
+              "min_test_auc": {
+                "type": "number"
+              },
+              "min_oot_macro_auc": {
+                "type": "number"
+              },
+              "min_test_macro_auc": {
+                "type": "number"
+              },
+              "max_oot_rmse": {
+                "type": "number"
+              },
+              "max_test_rmse": {
+                "type": "number"
+              },
+              "max_oot_logloss": {
+                "type": "number"
+              },
+              "max_test_logloss": {
+                "type": "number"
+              },
+              "metric_thresholds": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number"
+                    },
+                    "max": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
               "allow_policy_override": {
                 "type": "boolean"
               },

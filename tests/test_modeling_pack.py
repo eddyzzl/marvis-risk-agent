@@ -1448,6 +1448,73 @@ def test_selection_policy_uses_weighted_oot_psi_when_raw_missing():
     assert decision["violations"] == []
 
 
+def test_selection_policy_metric_thresholds_pick_compliant_business_candidate():
+    from marvis.packs.modeling.tools import _pick_best_comparison_row_with_policy
+
+    rows = [
+        {
+            "id": "high-test-low-oot",
+            "recipe": "lgb",
+            "test_ks": 0.45,
+            "oot_ks": 0.29,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "business-compliant",
+            "recipe": "lgb",
+            "test_ks": 0.39,
+            "oot_ks": 0.33,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+    ]
+
+    best, metric, decision = _pick_best_comparison_row_with_policy(
+        rows,
+        target_type="binary",
+        policy={"min_oot_ks": 0.30},
+    )
+
+    assert best["id"] == "business-compliant"
+    assert metric == "oot_ks"
+    assert decision["status"] == "accepted"
+    assert decision["policy"]["metric_thresholds"] == {"oot_ks": {"min": 0.30}}
+    assert decision["policy_candidate_count"] == 1
+
+
+def test_selection_policy_metric_thresholds_block_missing_or_weak_metrics():
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    weak_regression = _selection_policy_decision(
+        {
+            "id": "weak-regressor",
+            "recipe": "lgb_regressor",
+            "oot_rmse": 2.1,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+        {"metric_thresholds": {"oot_rmse": {"max": 1.8}}},
+        explicit=False,
+    )
+
+    assert weak_regression["status"] == "blocked"
+    assert weak_regression["violations"][0]["code"] == "metric_max_threshold"
+    assert weak_regression["violations"][0]["metric"] == "oot_rmse"
+
+    missing_metric = _selection_policy_decision(
+        {
+            "id": "missing-oot-ks",
+            "recipe": "lgb",
+            "test_ks": 0.42,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {"min_oot_ks": 0.30},
+        explicit=False,
+    )
+
+    assert missing_metric["status"] == "blocked"
+    assert missing_metric["violations"][0]["code"] == "metric_threshold_missing"
+    assert missing_metric["violations"][0]["metric"] == "oot_ks"
+
+
 def test_selection_policy_string_false_is_not_enabled():
     from marvis.packs.modeling.tools import _normalize_selection_policy
 
@@ -1472,14 +1539,37 @@ def test_selection_policy_normalizes_string_thresholds_and_rejects_nonfinite():
 
     assert policy["max_feature_count"] == 30
     assert policy["max_oot_psi"] == 0.15
+    assert "metric_thresholds" not in policy
 
     ignored = _normalize_selection_policy({
         "max_feature_count": "0",
         "max_oot_psi": "inf",
+        "min_oot_ks": "nan",
+        "metric_thresholds": {
+            "oot_rmse": {"max": "bad"},
+            "unsafe metric": {"min": 0.2},
+        },
     })
 
     assert "max_feature_count" not in ignored
     assert "max_oot_psi" not in ignored
+    assert "metric_thresholds" not in ignored
+
+    thresholds = _normalize_selection_policy({
+        "min_oot_ks": "0.31",
+        "max_oot_rmse": "1.8",
+        "metric_thresholds": {
+            "oot_auc": {"min": "0.72"},
+            "oot_logloss": {"max": 0.45},
+        },
+    })
+
+    assert thresholds["metric_thresholds"] == {
+        "oot_auc": {"min": 0.72},
+        "oot_ks": {"min": 0.31},
+        "oot_logloss": {"max": 0.45},
+        "oot_rmse": {"max": 1.8},
+    }
 
 
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):

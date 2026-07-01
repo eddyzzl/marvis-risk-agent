@@ -86,6 +86,19 @@ BINARY_MODELING_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard"
 CONTINUOUS_MODELING_RECIPES = frozenset({"lgb_regressor"})
 MULTICLASS_MODELING_RECIPES = frozenset({"lgb_multiclass"})
 MONITORING_POLICY_VERSION = "model_monitoring_v1"
+_POLICY_METRIC_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_POLICY_METRIC_THRESHOLD_SHORTCUTS = {
+    "min_oot_ks": ("oot_ks", "min"),
+    "min_test_ks": ("test_ks", "min"),
+    "min_oot_auc": ("oot_auc", "min"),
+    "min_test_auc": ("test_auc", "min"),
+    "min_oot_macro_auc": ("oot_macro_auc", "min"),
+    "min_test_macro_auc": ("test_macro_auc", "min"),
+    "max_oot_rmse": ("oot_rmse", "max"),
+    "max_test_rmse": ("test_rmse", "max"),
+    "max_oot_logloss": ("oot_logloss", "max"),
+    "max_test_logloss": ("test_logloss", "max"),
+}
 DEFAULT_MONITORING_THRESHOLDS = {
     "psi_test_vs_train": {
         "label": "Test PSI vs Train",
@@ -866,6 +879,7 @@ def _pick_best_comparison_row_with_policy(
     target_type: str,
     policy: dict,
 ) -> tuple[dict, str, dict]:
+    policy = _normalize_selection_policy(policy)
     if not _selection_policy_requested(policy):
         selected, metric = _pick_best_comparison_row(rows, target_type=target_type)
         return selected, metric, _selection_policy_decision(selected, policy, explicit=False)
@@ -969,6 +983,9 @@ def _normalize_selection_policy(raw) -> dict:
     max_oot_psi = _nonnegative_float_or_none(source.get("max_oot_psi"))
     if max_oot_psi is not None:
         policy["max_oot_psi"] = max_oot_psi
+    metric_thresholds = _normalize_selection_policy_metric_thresholds(source)
+    if metric_thresholds:
+        policy["metric_thresholds"] = metric_thresholds
     return policy
 
 
@@ -990,7 +1007,7 @@ def _selection_policy_requested(policy: dict) -> bool:
             "require_monotonicity",
             "prefer_scorecard",
         )
-    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None
+    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None or bool(policy.get("metric_thresholds"))
 
 
 def _selection_policy_has_hard_requirements(policy: dict) -> bool:
@@ -1002,10 +1019,11 @@ def _selection_policy_has_hard_requirements(policy: dict) -> bool:
             "require_scorecard",
             "require_monotonicity",
         )
-    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None
+    ) or policy.get("max_feature_count") is not None or policy.get("max_oot_psi") is not None or bool(policy.get("metric_thresholds"))
 
 
 def _selection_policy_decision(row: dict, policy: dict, *, explicit: bool) -> dict:
+    policy = _normalize_selection_policy(policy)
     profile = _row_policy_profile(row)
     requested = _selection_policy_requested(policy)
     violations = _selection_policy_violations(row, policy)
@@ -1108,7 +1126,79 @@ def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
                     f"但该候选{psi_label}为 {_format_number_token(float(oot_psi))}。"
                 ),
             })
+    violations.extend(_selection_policy_metric_threshold_violations(row, policy.get("metric_thresholds")))
     return violations
+
+
+def _normalize_selection_policy_metric_thresholds(source: dict) -> dict[str, dict[str, float]]:
+    thresholds: dict[str, dict[str, float]] = {}
+    raw_thresholds = source.get("metric_thresholds")
+    if isinstance(raw_thresholds, dict):
+        for raw_metric, raw_spec in raw_thresholds.items():
+            metric = _policy_metric_name(raw_metric)
+            if not metric or not isinstance(raw_spec, dict):
+                continue
+            spec: dict[str, float] = {}
+            minimum = _finite_float_or_none(raw_spec.get("min"))
+            maximum = _finite_float_or_none(raw_spec.get("max"))
+            if minimum is not None:
+                spec["min"] = minimum
+            if maximum is not None:
+                spec["max"] = maximum
+            if spec:
+                thresholds[metric] = spec
+    for key, (metric, direction) in _POLICY_METRIC_THRESHOLD_SHORTCUTS.items():
+        value = _finite_float_or_none(source.get(key))
+        if value is None:
+            continue
+        thresholds.setdefault(metric, {})[direction] = value
+    return thresholds
+
+
+def _selection_policy_metric_threshold_violations(row: dict, thresholds) -> list[dict]:
+    if not isinstance(thresholds, dict) or not thresholds:
+        return []
+    violations: list[dict] = []
+    for metric in sorted(thresholds):
+        spec = thresholds.get(metric)
+        if not isinstance(spec, dict):
+            continue
+        value = _finite_float_or_none(row.get(metric))
+        if value is None:
+            violations.append({
+                "code": "metric_threshold_missing",
+                "metric": metric,
+                "message": f"要求指标 `{metric}` 满足阈值,但该候选缺少该指标证据。",
+            })
+            continue
+        minimum = spec.get("min")
+        maximum = spec.get("max")
+        if isinstance(minimum, (int, float)) and value < float(minimum):
+            violations.append({
+                "code": "metric_min_threshold",
+                "metric": metric,
+                "message": (
+                    f"要求 `{metric}` 不低于 {_format_number_token(float(minimum))},"
+                    f"但该候选为 {_format_number_token(float(value))}。"
+                ),
+            })
+        if isinstance(maximum, (int, float)) and value > float(maximum):
+            violations.append({
+                "code": "metric_max_threshold",
+                "metric": metric,
+                "message": (
+                    f"要求 `{metric}` 不超过 {_format_number_token(float(maximum))},"
+                    f"但该候选为 {_format_number_token(float(value))}。"
+                ),
+            })
+    return violations
+
+
+def _policy_metric_name(value) -> str:
+    metric = str(value or "").strip()
+    if not _POLICY_METRIC_NAME.fullmatch(metric):
+        return ""
+    return metric
 
 
 def _selection_policy_block_message(experiment_id: str, decision: dict) -> str:
