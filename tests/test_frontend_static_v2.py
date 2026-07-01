@@ -7147,11 +7147,29 @@ def test_agent_markdown_renders_highlighted_code_blocks():
     assert '<span class="agent-code-token string">&quot;prob&quot;</span>' in html
     assert '<span class="agent-code-token comment"># pass</span>' in html
     assert "&gt; threshold" in html
-    assert ".agent-code-token.keyword" in styles_css
-    assert ".agent-code-token.string" in styles_css
-    assert ".agent-code-token.comment" in styles_css
-    assert ".agent-code-token.number" in styles_css
-    assert ".agent-code-token.function" in styles_css
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    for token in [
+        "--agent-code-token-keyword",
+        "--agent-code-token-function",
+        "--agent-code-token-string",
+        "--agent-code-token-number",
+    ]:
+        assert token in root_vars
+        assert token in dark_vars
+    assert "color: var(--agent-code-token-keyword)" in _css_rule(
+        styles_css, ".agent-code-token.keyword"
+    )
+    assert "color: var(--agent-code-token-function)" in _css_rule(
+        styles_css, ".agent-code-token.function"
+    )
+    assert "color: var(--agent-code-token-string)" in _css_rule(
+        styles_css, ".agent-code-token.string"
+    )
+    assert "color: var(--agent-code-token-number)" in _css_rule(
+        styles_css, ".agent-code-token.number"
+    )
+    assert "color: var(--text-muted)" in _css_rule(styles_css, ".agent-code-token.comment")
 
 
 def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():

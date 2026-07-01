@@ -126,6 +126,10 @@
   --agent-user-message-shadow:
     0 1px 2px rgba(0, 0, 0, 0.05),
     inset 0 1px 0 rgba(255, 255, 255, 0.52);
+  --agent-code-token-keyword: #9b1b7d;
+  --agent-code-token-function: #005ecb;
+  --agent-code-token-string: #0f7a45;
+  --agent-code-token-number: #ad4f00;
   --tone-feature-analysis: #3d6fd1;
   --tone-data-join: #1aa595;
   --tone-modeling: #745fd6;
@@ -260,6 +264,10 @@ body[data-theme="dark"] {
   --agent-user-message-shadow:
     0 1px 2px rgba(0, 0, 0, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --agent-code-token-keyword: #ff8bd8;
+  --agent-code-token-function: #8bbdff;
+  --agent-code-token-string: #70d898;
+  --agent-code-token-number: #ffb66d;
   --tone-feature-analysis: #6b93e6;
   --tone-data-join: #3fc7b4;
   --tone-modeling: #9c8bea;
@@ -5832,43 +5840,27 @@ dialog.draft-tools-dialog,
 }
 
 .agent-code-token.keyword {
-  color: #9b1b7d;
+  color: var(--agent-code-token-keyword);
   font-weight: 800;
 }
 
 .agent-code-token.function {
-  color: #005ecb;
+  color: var(--agent-code-token-function);
   font-weight: 750;
 }
 
 .agent-code-token.string {
-  color: #0f7a45;
+  color: var(--agent-code-token-string);
 }
 
 .agent-code-token.number {
-  color: #ad4f00;
+  color: var(--agent-code-token-number);
   font-weight: 700;
 }
 
 .agent-code-token.comment {
   color: var(--text-muted);
   font-style: italic;
-}
-
-body[data-theme="dark"] .agent-code-token.keyword {
-  color: #ff8bd8;
-}
-
-body[data-theme="dark"] .agent-code-token.function {
-  color: #8bbdff;
-}
-
-body[data-theme="dark"] .agent-code-token.string {
-  color: #70d898;
-}
-
-body[data-theme="dark"] .agent-code-token.number {
-  color: #ffb66d;
 }
 
 .agent-markdown-table-wrap {
