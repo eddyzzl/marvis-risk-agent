@@ -23,6 +23,7 @@ import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
 import {
   bindDialogBackdropDismissal,
   createMaterialSourceController,
+  renderMaterialUploadSelection,
 } from "./js/dialogs.js";
 import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
@@ -185,7 +186,7 @@ const showPlatformConfirm = platformConfirm.showPlatformConfirm;
 const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;
 const materialSourceController = createMaterialSourceController({
   $,
-  onFilesChanged: renderMaterialUploadSelection,
+  onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ }),
 });
 const createTaskDialog = createCreateTaskDialogController({
   $,
@@ -507,27 +508,6 @@ function openTaskTypeWelcome() {
 
 function closeTaskDialog() {
   createTaskDialog.closeTaskDialog();
-}
-
-function renderMaterialUploadSelection(files = materialSourceController.selectedFiles()) {
-  const status = $("materialUploadStatus");
-  if (!status) return;
-  if (files.length === 0) {
-    status.textContent = "请选择文件或文件夹。";
-    return;
-  }
-  const names = files
-    .slice(0, 3)
-    .map((file) => file.name)
-    .join("、");
-  const suffix = files.length > 3 ? ` 等 ${files.length} 个文件` : "";
-  const folderCount = new Set(
-    files
-      .map((file) => (file.relativePath || "").split("/").slice(0, -1).join("/"))
-      .filter(Boolean),
-  ).size;
-  const folderText = folderCount > 0 ? `，包含 ${folderCount} 个目录` : "";
-  status.textContent = `已选择 ${names}${suffix}${folderText}。`;
 }
 
 function bindRunModeDeselectableCards() {

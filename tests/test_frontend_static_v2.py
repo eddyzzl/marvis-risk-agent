@@ -1151,6 +1151,8 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert "暂未开放" not in material_section
 
     assert "export function createMaterialSourceController" in dialogs_js
+    assert "export function materialUploadSelectionText" in dialogs_js
+    assert "export function renderMaterialUploadSelection" in dialogs_js
     assert "function bindDropzone()" in dialogs_js
     assert "captureFiles(input.files)" in dialogs_js
     assert "file?.webkitRelativePath" in dialogs_js
@@ -1162,6 +1164,8 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert 'dropzone.classList.add("is-dragover")' in dialogs_js
     assert 'pathPanel.classList.toggle("hidden", !isPath)' in dialogs_js
     assert 'uploadPanel.classList.toggle("hidden", isPath)' in dialogs_js
+    assert "function renderMaterialUploadSelection" not in app_js
+    assert "onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ })" in app_js
     assert "createTaskDialog.bindMaterialSourceControls();" in app_js
     assert "materialSourceController.bindDropzone();" in create_dialog_js
 
@@ -1176,6 +1180,51 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert "border-radius: var(--radius-control)" in segment_rule
     source_tab_rule = _css_rule(styles_css, ".material-source-tab")
     assert "border-radius: var(--radius-control)" in source_tab_rule
+
+
+def test_material_upload_selection_renderer_summarizes_files():
+    script = """
+import assert from "node:assert/strict";
+import {
+  materialUploadSelectionText,
+  renderMaterialUploadSelection,
+} from "./marvis/static/js/dialogs.js";
+
+assert.equal(materialUploadSelectionText([]), "请选择文件或文件夹。");
+assert.equal(
+  materialUploadSelectionText([
+    { name: "a.csv", relativePath: "raw/a.csv" },
+    { name: "b.csv", relativePath: "raw/b.csv" },
+    { name: "c.csv", relativePath: "features/c.csv" },
+    { name: "d.csv", relativePath: "features/sub/d.csv" },
+  ]),
+  "已选择 a.csv、b.csv、c.csv 等 4 个文件，包含 3 个目录。",
+);
+
+const elements = {
+  materialUploadStatus: { textContent: "" },
+};
+renderMaterialUploadSelection({
+  files: [{ name: "sample.parquet", relativePath: "oot/sample.parquet" }],
+  getElementById: (id) => elements[id],
+});
+assert.equal(elements.materialUploadStatus.textContent, "已选择 sample.parquet，包含 1 个目录。");
+
+renderMaterialUploadSelection({
+  files: [],
+  getElementById: (id) => elements[id],
+});
+assert.equal(elements.materialUploadStatus.textContent, "请选择文件或文件夹。");
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_create_task_upload_mode_posts_materials_before_creating_task():

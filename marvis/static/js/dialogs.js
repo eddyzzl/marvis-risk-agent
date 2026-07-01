@@ -17,6 +17,31 @@ export function bindDialogBackdropDismissal({ root = document } = {}) {
   });
 }
 
+export function materialUploadSelectionText(files = []) {
+  if (!files.length) return "请选择文件或文件夹。";
+  const names = files
+    .slice(0, 3)
+    .map((file) => file?.name || file?.relativePath || "未命名文件")
+    .join("、");
+  const suffix = files.length > 3 ? ` 等 ${files.length} 个文件` : "";
+  const folderCount = new Set(
+    files
+      .map((file) => (file?.relativePath || "").split("/").slice(0, -1).join("/"))
+      .filter(Boolean),
+  ).size;
+  const folderText = folderCount > 0 ? `，包含 ${folderCount} 个目录` : "";
+  return `已选择 ${names}${suffix}${folderText}。`;
+}
+
+export function renderMaterialUploadSelection({
+  files = [],
+  getElementById = (id) => document.getElementById(id),
+} = {}) {
+  const status = getElementById("materialUploadStatus");
+  if (!status) return;
+  status.textContent = materialUploadSelectionText(files);
+}
+
 export function createMaterialSourceController({ $, onFilesChanged }) {
   let mode = "path";
   let files = [];
