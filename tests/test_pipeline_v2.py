@@ -1714,6 +1714,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
 
     def fake_metrics_writer(*, outputs_dir, **_kwargs):
         outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / "validation_results.json").write_text("{}", encoding="utf-8")
         (outputs_dir / "validation.xlsx").write_bytes(b"xlsx")
 
     monkeypatch.setattr("marvis.pipeline._scan_step", fake_scan_step)
@@ -1767,6 +1768,110 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
     assert final.status == TaskStatus.FAILED
     assert final.status_message == f"{REPORT_STAGE_FAILURE_PREFIX}RuntimeError: docx failed"
     assert (workspace / "tasks" / task.id / "outputs" / "validation.xlsx").exists()
+
+
+def test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "marvis.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+        )
+    )
+    artifact_paths = {
+        FileRole.NOTEBOOK: project / "model.ipynb",
+        FileRole.SAMPLE: project / "sample.csv",
+        FileRole.MODEL_PMML: project / "model.pmml",
+        FileRole.DATA_DICTIONARY: project / "dictionary.csv",
+    }
+    artifacts = [
+        FileArtifact(role, path, 1, None)
+        for role, path in artifact_paths.items()
+    ]
+
+    def fake_scan_step(repo_arg, task_arg):
+        repo_arg.update_status(
+            task_arg.id,
+            TaskStatus.SCANNED,
+            "source scanned",
+            expected={TaskStatus.CREATED, TaskStatus.SCANNED, TaskStatus.FAILED},
+        )
+        return artifacts
+
+    class FakeSession:
+        def close(self):
+            pass
+
+    def fake_notebook_step_v3(*, repo, task, **_kwargs):
+        repo.update_status(task.id, TaskStatus.RUNNING, "notebook running")
+        repo.update_status(task.id, TaskStatus.EXECUTED, "notebook executed")
+        return FakeSession()
+
+    def fake_metrics_writer(*, outputs_dir, **_kwargs):
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / "validation_results.json").write_text(
+            json.dumps({"new": True}),
+            encoding="utf-8",
+        )
+        (outputs_dir / "validation.xlsx").write_bytes(b"new-xlsx")
+
+    monkeypatch.setattr("marvis.pipeline._scan_step", fake_scan_step)
+    monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+    monkeypatch.setattr("marvis.pipeline._write_reproducibility_result_in_session", lambda **_kwargs: None)
+    monkeypatch.setattr("marvis.pipeline._write_metrics_results_in_session", fake_metrics_writer)
+    monkeypatch.setattr(
+        "marvis.pipeline.load_runtime_contract",
+        lambda _path: RuntimeContract(
+            target_col="y",
+            split_col="split",
+            time_col="apply_month",
+            pmml_output_field="probability_1",
+            score_decimal_places=6,
+            code_model_scores_path=tmp_path / "scores.csv",
+            feature_importance_path=None,
+            model_params_path=None,
+            algorithm="lgb",
+        ),
+    )
+    original_update = TaskRepository.update_status_on_connection
+
+    def failing_status_update(self, conn, task_id, status, *args, **kwargs):
+        original_update(self, conn, task_id, status, *args, **kwargs)
+        if status is TaskStatus.WRITING_ARTIFACTS:
+            raise RuntimeError("simulated legacy metrics status failure")
+
+    monkeypatch.setattr(TaskRepository, "update_status_on_connection", failing_status_update)
+
+    with pytest.raises(RuntimeError, match="simulated legacy metrics status failure"):
+        run_pipeline(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+                notebook_isolated_execution=False,
+                allow_legacy_live_notebook_execution=True,
+            ),
+        )
+
+    task_dir = workspace / "tasks" / task.id
+    outputs_dir = task_dir / "outputs"
+    assert not (outputs_dir / "validation_results.json").exists()
+    assert not (outputs_dir / "validation.xlsx").exists()
+    assert not (outputs_dir / ".metrics-stage-work").exists()
+    assert not (outputs_dir / ".staging").exists()
 
 
 def test_pipeline_marks_missing_required_input_failed(tmp_path: Path):

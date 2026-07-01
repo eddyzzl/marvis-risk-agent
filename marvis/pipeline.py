@@ -1264,9 +1264,11 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
     execution_dir = task_dir / "execution"
     outputs_dir = task_dir / "outputs"
     images_dir = task_dir / "images"
+    metrics_work_dir = outputs_dir / ".metrics-stage-work"
     execution_dir.mkdir(parents=True, exist_ok=True)
     outputs_dir.mkdir(parents=True, exist_ok=True)
     live_session: NotebookExecutionSession | None = None
+    metrics_uow: ArtifactUnitOfWork | None = None
     failure_prefix = NOTEBOOK_STAGE_FAILURE_PREFIX
 
     try:
@@ -1335,6 +1337,8 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             expected=TaskStatus.EXECUTED,
         )
         failure_prefix = METRICS_STAGE_FAILURE_PREFIX
+        _remove_dir_if_exists(metrics_work_dir)
+        metrics_work_dir.mkdir(parents=True, exist_ok=True)
         _write_metrics_results_in_session(
             session=live_session,
             task=task,
@@ -1344,16 +1348,27 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             contract=contract,
             model_meta_path=model_meta_path,
             reproducibility_json_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
-            outputs_dir=outputs_dir,
+            outputs_dir=metrics_work_dir,
         )
         live_session.close()
         live_session = None
 
-        repo.update_status(
-            task_id,
-            TaskStatus.WRITING_ARTIFACTS,
-            message="writing artifacts",
-            expected=TaskStatus.COMPUTING_METRICS,
+        _require_metrics_outputs(metrics_work_dir)
+        metrics_uow = _stage_metrics_outputs_for_commit(
+            task_dir=task_dir,
+            outputs_dir=outputs_dir,
+            metrics_work_dir=metrics_work_dir,
+        )
+        metrics_uow.finalize_with_connection(
+            repo.transaction,
+            lambda conn: repo.update_status_on_connection(
+                conn,
+                task_id,
+                TaskStatus.WRITING_ARTIFACTS,
+                message="writing artifacts",
+                expected=TaskStatus.COMPUTING_METRICS,
+                begin_immediate=True,
+            ),
         )
         failure_prefix = REPORT_STAGE_FAILURE_PREFIX
         results = _load_validation_results(outputs_dir)
@@ -1391,9 +1406,11 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             expected=TaskStatus.WRITING_ARTIFACTS,
         )
     except PipelineError as exc:
+        _rollback_artifact_uow(metrics_uow)
         _mark_failed(repo, task_id, _stage_failure_message(failure_prefix, str(exc)))
         raise
     except Exception as exc:
+        _rollback_artifact_uow(metrics_uow)
         _mark_failed(
             repo,
             task_id,
@@ -1403,6 +1420,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
     finally:
         if live_session is not None:
             live_session.close()
+        _remove_dir_if_exists(metrics_work_dir)
 
 
 def _scan_step(repo: TaskRepository, task: TaskRecord) -> list[FileArtifact]:
