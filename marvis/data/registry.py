@@ -34,24 +34,30 @@ class DatasetRegistry:
         source_path = Path(source_path)
         dataset_dir = self._dataset_dir(task_id)
         dataset_dir.mkdir(parents=True, exist_ok=True)
-        parquet_path, sheet = self._normalize_to_parquet(source_path, dataset_dir)
-        profiles = profile_dataset(self._backend, parquet_path, seed=seed)
-        sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
-        target = detect_target_column(profiles, sample)
-        dataset = Dataset(
-            id=_new_dataset_id(),
-            task_id=task_id,
-            role=role,
-            source_path=self._relative_path(parquet_path),
-            format="parquet",
-            sheet=sheet,
-            row_count=self._backend.row_count(parquet_path),
-            columns=tuple(profiles),
-            has_target=target is not None,
-            target_col=target,
-            created_at=_now_iso(),
-        )
-        self._repo.create_dataset(dataset)
+        parquet_path: Path | None = None
+        try:
+            parquet_path, sheet = self._normalize_to_parquet(source_path, dataset_dir)
+            profiles = profile_dataset(self._backend, parquet_path, seed=seed)
+            sample = self._backend.sample_rows(parquet_path, 1000, seed=seed)
+            target = detect_target_column(profiles, sample)
+            dataset = Dataset(
+                id=_new_dataset_id(),
+                task_id=task_id,
+                role=role,
+                source_path=self._relative_path(parquet_path),
+                format="parquet",
+                sheet=sheet,
+                row_count=self._backend.row_count(parquet_path),
+                columns=tuple(profiles),
+                has_target=target is not None,
+                target_col=target,
+                created_at=_now_iso(),
+            )
+            self._repo.create_dataset(dataset)
+        except Exception:
+            if parquet_path is not None:
+                parquet_path.unlink(missing_ok=True)
+            raise
         return dataset
 
     def register_existing(

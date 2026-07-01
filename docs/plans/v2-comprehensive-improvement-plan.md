@@ -759,6 +759,7 @@ Tasks:
 - Done: add `StepRunLedger`.
 - Done for first slice: add `TransactionalArtifactStore`.
 - Done for join execution: migrate join output persistence to staged write, final promote, and rollback on audit/DB failure.
+- Done for upload ingestion: remove upload-normalized parquet files when dataset registration fails before DB commit.
 - Done for data_ops derived outputs: migrate `clean_format` and `dedup_rows` parquet outputs to staged write/final promote/rollback.
 - Done for feature pack derived outputs: migrate shared feature-frame registration helper to staged parquet write/final promote/rollback.
 - Done for modeling derived parquet outputs: migrate `prepare_modeling_frame` / `make_split` and `reject_inference` output datasets to staged write/final promote/rollback.

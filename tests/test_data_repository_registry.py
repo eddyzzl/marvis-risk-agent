@@ -420,6 +420,30 @@ def test_dataset_registry_registers_csv_and_feather_as_profiled_parquet(tmp_path
     assert registry.list_for_task("task-1") == [sample, feature]
 
 
+def test_dataset_registry_register_from_upload_removes_parquet_when_db_write_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+    csv_path = tmp_path / "sample.csv"
+    pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [1]}).to_csv(csv_path, index=False)
+
+    def fail_create_dataset(*_args, **_kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(repo, "create_dataset", fail_create_dataset)
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        registry.register_from_upload("task-1", csv_path, role="sample")
+
+    assert not list((datasets_root / "task-1").glob("sample_*.parquet"))
+
+
 def test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fails(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
