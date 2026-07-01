@@ -17,13 +17,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
 from marvis.agent.auto_drive import decide_gate, parse_decision
+from marvis.agent.turn_handlers import DRIVER_TURN_FUNCS, agent_autodrive_turn
 from marvis.app import create_app
+from marvis.domain import TASK_TYPE_MODELING
 
 
 def _join_dir(root: Path, n: int = 50) -> Path:
@@ -78,6 +81,24 @@ class _FakeLLM:
     def complete(self, **kwargs) -> str:
         self.calls.append(kwargs)
         return self._payload
+
+
+class _TokenRepo:
+    def __init__(self):
+        self.messages = [
+            {
+                "role": "assistant",
+                "stage": "chat",
+                "content": "请确认当前 gate",
+                "metadata": {"kind": "gate", "step_id": "gate-1"},
+            }
+        ]
+
+    def list_agent_messages(self, task_id: str) -> list[dict]:
+        return list(self.messages)
+
+    def add_agent_message(self, task_id: str, *, role: str, stage: str, content: str, metadata: dict) -> None:
+        self.messages.append({"role": role, "stage": stage, "content": content, "metadata": metadata})
 
 
 class _SequencedLLM:
@@ -169,6 +190,29 @@ def test_agent_mode_autodrives_join_to_completion(client: TestClient, tmp_path: 
     # The LLM was consulted at each gate, and its rationale is visible in the transcript.
     assert len(fake.calls) >= 2
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
+
+
+@pytest.mark.parametrize("action", ["confirm", "replan"])
+def test_agent_autodrive_binds_gate_step_token_to_confirming_actions(monkeypatch, action):
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    client = (
+        _SequencedLLM([json.dumps({"action": "replan", "reason": "继续", "replan_goal": "重规划当前步骤"})])
+        if action == "replan"
+        else _FakeLLM(action=action, reason="继续")
+    )
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+
+    assert calls
+    assert calls[0]["expected_step_id"] == "gate-1"
 
 
 def test_agent_mode_halt_decision_stops_at_gate(client: TestClient, tmp_path: Path, monkeypatch):

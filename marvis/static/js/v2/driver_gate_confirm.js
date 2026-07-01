@@ -1,10 +1,22 @@
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export function renderDriverGateButton(message, options = {}) {
   const isAgentMode = typeof options.isAgentMode === "function"
     ? options.isAgentMode()
     : Boolean(options.isAgentMode);
   if (message?.metadata?.kind !== "gate" || isAgentMode) return "";
+  const expectedStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  const expectedAttr = expectedStepId
+    ? ` data-expected-step-id="${escapeHtml(expectedStepId)}"`
+    : "";
   return '<div class="driver-gate-actions">'
-    + '<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1">确认</button>'
+    + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedAttr}>确认</button>`
     + "</div>";
 }
 
@@ -23,11 +35,14 @@ function driverConfirmContext(context = {}) {
 export async function submitDriverConfirm(button, context = {}) {
   const { taskId, api, setActionStatus, setAgentMessages, renderAgentConversation } = driverConfirmContext(context);
   if (!taskId || typeof api !== "function") return;
+  const expectedStepId = button?.getAttribute?.("data-expected-step-id") || "";
+  const body = { content: "确认" };
+  if (expectedStepId) body.expected_step_id = expectedStepId;
   button.disabled = true;
   try {
     const result = await api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
-      body: JSON.stringify({ content: "确认" }),
+      body: JSON.stringify(body),
     });
     setAgentMessages(result.messages);
     renderAgentConversation();

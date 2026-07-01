@@ -1225,6 +1225,15 @@ def test_resume_structured_screen_control_rejects_stale_or_missing_gate_token(tm
         )
 
 
+def test_resume_plain_confirm_rejects_stale_gate_token_when_supplied(tmp_path):
+    driver, _repo = _driver(tmp_path)
+    driver._repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="待确认步骤已变化"):
+        driver.resume(plan_id="plan-1", user_text="确认", run_seq=1, expected_step_id="old-gate")
+
+
 def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

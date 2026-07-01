@@ -986,7 +986,9 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           renderDriverGateButton,
           submitDriverConfirm,
         }} from "./marvis/static/js/v2/driver_gate_confirm.js";
-        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}).includes("data-driver-confirm"), true);
+        const renderedButton = renderDriverGateButton({{ metadata: {{ kind: "gate", step_id: "gate<1>" }} }});
+        assert.equal(renderedButton.includes("data-driver-confirm"), true);
+        assert.equal(renderedButton.includes('data-expected-step-id="gate&lt;1&gt;"'), true);
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}, {{ isAgentMode: true }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "done" }} }}), "");
 
@@ -1004,11 +1006,14 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
             return {{ messages: [{{ id: "m2" }}] }};
           }},
         }};
-        const button = {{ disabled: false }};
+        const button = {{
+          disabled: false,
+          getAttribute: (name) => name === "data-expected-step-id" ? "gate-1" : null,
+        }};
         await submitDriverConfirm(button, context);
         assert.equal(button.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
-        assert.deepEqual(calls[0][1], {{ content: "确认" }});
+        assert.deepEqual(calls[0][1], {{ content: "确认", expected_step_id: "gate-1" }});
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
 

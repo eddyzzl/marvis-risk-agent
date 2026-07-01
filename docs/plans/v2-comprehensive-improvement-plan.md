@@ -362,6 +362,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_db.py tests/test_drafts_promotion.py tests/test_drafts_sandbox.py tests/test_data_api.py tests/test_data_join_api.py tests/test_frontend_v2_join.py tests/test_frontend_screen_table.py::test_dedup_picker_posts_strategies tests/test_frontend_screen_table.py::test_join_gate_controller_posts_c1_and_dedup_payloads -q`: `55 passed` after confirming draft, direct data/JOIN API, direct join review, and Agent dedup controls still pass.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the draft TOCTOU, JOIN aggregate warning, and modeling roadmap freshness updates.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1952 passed, 4 skipped, 2 warnings` in `530.04s` after the draft TOCTOU guard, JOIN synthetic-aggregate warning, and modeling roadmap freshness updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/agent/turn_handlers.py tests/test_agent_autodrive.py tests/test_plan_driver.py tests/test_frontend_screen_table.py && node --check marvis/static/js/v2/driver_gate_confirm.js`: passes after binding generic gate confirmation and AUTO confirming actions to the current `expected_step_id`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py::test_resume_plain_confirm_rejects_stale_gate_token_when_supplied tests/test_agent_autodrive.py::test_agent_autodrive_binds_gate_step_token_to_confirming_actions tests/test_frontend_screen_table.py::test_driver_gate_confirm_controller_renders_and_posts_confirm -q`: `4 passed` after covering stale-token rejection for plain confirms, frontend confirm payloads, and AUTO confirm/replan token binding.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_agent_autodrive.py tests/test_frontend_screen_table.py -q`: `90 passed` after confirming broader driver, AUTO, and gate-control frontend behavior still passes.
 
 ## Executive Summary
 
@@ -791,7 +794,7 @@ Tasks:
 - Done: add `GateEnvelope`, `FailureEnvelope`, and `EvidenceEnvelope`.
 - Mostly done: add output renderers, gate payload helpers, dependency gate adapters, message composer, and basic adjust specs; per-tool form adapters and schema-driven adjust specs remain.
 - Done: extend AUTO to structured bounded decisions.
-- Partial: add stale-token style `expected_step_id` enforcement for structured screen controls; expand to all gate actions.
+- Mostly done: add stale-token style `expected_step_id` enforcement for structured screen/dedup/modeling controls, rendered generic confirm buttons, and AUTO confirm/replan actions; raw typed manual replies remain compatible because they have no stable browser-side token.
 - Mostly done: add retry/failure contract metadata, downstream reset behavior, real step-run `error_kind` propagation, and first schema-driven retry fields; deeper per-tool form adapters remain.
 
 Acceptance:

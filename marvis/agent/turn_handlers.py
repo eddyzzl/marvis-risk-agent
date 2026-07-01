@@ -487,8 +487,10 @@ def agent_autodrive_turn(
             content=_auto_decision_content(decision),
             metadata=decision_meta,
         )
+        gate_meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
+        gate_step_id = gate_meta.get("step_id")
         if action == "confirm":
-            turn_fn(runtime, repo, task, user_text="确认")
+            turn_fn(runtime, repo, task, user_text="确认", expected_step_id=gate_step_id)
             continue
         if action == "adjust":
             params = decision.get("params") if isinstance(decision.get("params"), dict) else None
@@ -496,7 +498,6 @@ def agent_autodrive_turn(
             dedup = decision.get("dedup_strategies") if isinstance(decision.get("dedup_strategies"), dict) else None
             if not (params or selection or dedup):
                 return
-            gate_meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
             turn_fn(
                 runtime,
                 repo,
@@ -509,7 +510,13 @@ def agent_autodrive_turn(
             )
             continue
         if action == "replan":
-            turn_fn(runtime, repo, task, user_text=decision.get("replan_goal") or decision["reason"])
+            turn_fn(
+                runtime,
+                repo,
+                task,
+                user_text=decision.get("replan_goal") or decision["reason"],
+                expected_step_id=gate_step_id,
+            )
             continue
         return
 
