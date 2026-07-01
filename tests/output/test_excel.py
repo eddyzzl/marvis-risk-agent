@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 
 from openpyxl import load_workbook
+import pytest
 
 from marvis.output.excel import write_validation_excel
 from marvis.validation.results import (
@@ -236,6 +237,38 @@ def test_new_report_image_materials_are_in_excel(tmp_path: Path):
     pressure_sheet = wb["压力测试_分箱_征信"]
     assert pressure_sheet.cell(row=1, column=1).value == "征信"
     assert len(wb["ROC_KS曲线"]._images) == 3
+
+
+def test_write_excel_rolls_back_existing_file_and_images_when_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    output = tmp_path / "out.xlsx"
+    write_validation_excel(_make_results(), output)
+    previous_excel = output.read_bytes()
+    image_dir = tmp_path / "excel_images"
+    previous_images = {
+        item.name: item.read_bytes()
+        for item in image_dir.glob("*.png")
+    }
+    assert previous_images
+
+    def fail_save(self, filename):
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr("openpyxl.workbook.workbook.Workbook.save", fail_save)
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        write_validation_excel(_make_results(), output)
+
+    assert output.read_bytes() == previous_excel
+    assert {
+        item.name: item.read_bytes()
+        for item in image_dir.glob("*.png")
+    } == previous_images
+    assert not (tmp_path / ".staging").exists()
+    assert not list(tmp_path.glob(".out.xlsx.*.bak"))
+    assert not list(tmp_path.glob(".excel_images.*.bak"))
 
 
 def test_reference_conditional_formatting_ranges_are_applied(tmp_path: Path):

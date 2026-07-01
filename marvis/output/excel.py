@@ -10,6 +10,7 @@ from openpyxl.formatting.rule import ColorScaleRule, DataBarRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.output.image_render import render_roc_ks_graph
 from marvis.output.styles import (
     BORDER_COLOR,
@@ -30,38 +31,48 @@ _MAX_SHEET_TITLE_LENGTH = 31
 
 
 def write_validation_excel(results: ValidationResults, output_path: Path) -> Path:
+    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    uow = ArtifactUnitOfWork()
+    workbook_artifact = uow.stage_file(output_path.parent, output_path.name)
+    image_artifact = uow.stage_directory(output_path.parent, "excel_images")
     workbook = Workbook()
     workbook.remove(workbook.active)
 
-    _write_overview(workbook, results)
-    _write_basic_info(workbook, results)
-    _write_monthly_distribution(workbook, results)
-    _write_hyperparameters(workbook, results)
-    _write_feature_importance(workbook, results)
-    _write_effectiveness_overall(workbook, results)
-    _write_psi_stability(workbook, results)
-    _write_roc_ks_images(workbook, results, output_path.parent / "excel_images")
-    for split in ("train", "test", "oot"):
-        _write_bins(
-            workbook,
-            f"分箱_{split}",
-            results.effectiveness.bin_tables.get(split, []),
-            first_header=f"{split}(独立分箱)",
-        )
-    _write_monthly_effectiveness(workbook, results)
-    _write_stress_summary(workbook, results)
-    for category_result in results.stress_test.per_category:
-        sheet_name = f"压力测试_分箱_{category_result.category}"
-        _write_bins(
-            workbook,
-            sheet_name,
-            category_result.bin_table,
-            first_header=category_result.category,
-        )
+    try:
+        _write_overview(workbook, results)
+        _write_basic_info(workbook, results)
+        _write_monthly_distribution(workbook, results)
+        _write_hyperparameters(workbook, results)
+        _write_feature_importance(workbook, results)
+        _write_effectiveness_overall(workbook, results)
+        _write_psi_stability(workbook, results)
+        _write_roc_ks_images(workbook, results, image_artifact.path)
+        for split in ("train", "test", "oot"):
+            _write_bins(
+                workbook,
+                f"分箱_{split}",
+                results.effectiveness.bin_tables.get(split, []),
+                first_header=f"{split}(独立分箱)",
+            )
+        _write_monthly_effectiveness(workbook, results)
+        _write_stress_summary(workbook, results)
+        for category_result in results.stress_test.per_category:
+            sheet_name = f"压力测试_分箱_{category_result.category}"
+            _write_bins(
+                workbook,
+                sheet_name,
+                category_result.bin_table,
+                first_header=category_result.category,
+            )
 
-    workbook.save(output_path)
-    return output_path
+        workbook.save(workbook_artifact.path)
+        uow.promote_all()
+        uow.commit()
+        return workbook_artifact.final_path
+    except Exception:
+        uow.rollback()
+        raise
 
 
 def _write_overview(workbook: Workbook, results: ValidationResults) -> None:
