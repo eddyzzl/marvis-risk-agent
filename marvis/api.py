@@ -14,9 +14,7 @@ from fastapi import (
 from marvis.agent.orchestrator import (
     AgentValidationCancelled,
     agent_next_stage,
-    clear_agent_cancellation,
     is_metrics_failure,
-    raise_if_agent_cancelled,
     request_agent_cancellation,
 )
 from marvis.agent.service import (
@@ -31,6 +29,7 @@ from marvis.agent.service import (
     is_stop_validation_intent,  # noqa: F401 - compatibility export for validation-agent routes.
     summarize_stage,
 )
+from marvis.agent import validation_service as _validation_service
 from marvis.agent_memory.api_support import (
     agent_memory_context_from_store as _agent_memory_context_from_store,
     audit_agent_memory_use_from_store as _audit_agent_memory_use_from_store,
@@ -64,7 +63,6 @@ from marvis.api_stage_helpers import (
     start_task_job as _start_task_job,
 )
 from marvis.domain import (
-    TASK_STATUS_REASON_USER_CANCELLED,
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_MODELING,
@@ -83,14 +81,8 @@ from marvis.api_settings import router as settings_router
 from marvis.api_task_payloads import (
     task_payload as _task_payload,  # noqa: F401 - compatibility alias for structure tests/imports.
 )
-from marvis.notebook_cancellation import (
-    clear_pending_notebook_cancellation,
-    request_notebook_cancellation,
-)
-from marvis.notebooks import close_live_notebook_session
+from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.pipeline import (
-    NOTEBOOK_STAGE_FAILURE_PREFIX,
-    REPORT_STAGE_FAILURE_PREFIX,
     run_metrics_stage,
     run_notebook_stage,
     run_report_stage,
@@ -102,8 +94,33 @@ from marvis.validation.overfitting import overfitting_check_from_validation_resu
 router = APIRouter(prefix="/api")
 router.include_router(settings_router)
 logger = logging.getLogger(__name__)
-AGENT_STOP_ACK_CONTENT = "已停止当前动作，请问有什么指示？"
-AGENT_STOP_STATUS_MESSAGE = "已停止当前动作"
+
+AGENT_STOP_ACK_CONTENT = _validation_service.AGENT_STOP_ACK_CONTENT
+AGENT_STOP_STATUS_MESSAGE = _validation_service.AGENT_STOP_STATUS_MESSAGE
+_agent_cancellation_requested = _validation_service.agent_cancellation_requested
+_agent_has_cancellable_work = _validation_service.agent_has_cancellable_work
+_agent_has_stop_ack_message = _validation_service.agent_has_stop_ack_message
+_agent_rerun_stage_reached = _validation_service.agent_rerun_stage_reached
+_clear_agent_cancellation = _validation_service.clear_agent_and_notebook_cancellation
+_mark_agent_cancelled = _validation_service.mark_agent_cancelled
+_raise_if_agent_cancelled = _validation_service.raise_if_agent_cancelled
+_require_agent_rerun_stage_reached = (
+    _validation_service.require_agent_rerun_stage_reached
+)
+_reset_agent_task_for_rerun = _validation_service.reset_agent_task_for_rerun
+
+
+def _request_agent_cancellation(task_id: str) -> None:
+    request_agent_cancellation(task_id)
+
+
+def _handle_agent_stop_message(repo: TaskRepository, task: TaskRecord) -> dict:
+    return _validation_service.handle_agent_stop_message_with_callbacks(
+        repo,
+        task,
+        request_agent_cancellation_fn=request_agent_cancellation,
+        request_notebook_cancellation_fn=request_notebook_cancellation,
+    )
 
 
 AGENT_ACCEPTANCE_NORMAL = "normal"
@@ -353,29 +370,6 @@ def _run_agent_validation_job(
 def _agent_next_stage(repo: TaskRepository, task: TaskRecord) -> str | None:
     return agent_next_stage(repo, task, scan_failure_prefix=SCAN_FAILURE_PREFIX)
 
-
-def _reset_agent_task_for_rerun(
-    repo: TaskRepository,
-    task_id: str,
-    stage: str,
-) -> TaskRecord:
-    target_status = {
-        "scan": TaskStatus.CREATED,
-        "reproducibility": TaskStatus.SCANNED,
-        "metrics": TaskStatus.EXECUTED,
-        "word_conclusion_draft": TaskStatus.WRITING_ARTIFACTS,
-    }.get(stage)
-    if target_status is None:
-        raise HTTPException(status_code=422, detail=f"unknown rerun stage: {stage}")
-    repo.reset_status_for_agent_rerun(
-        task_id,
-        target_status,
-        f"agent rerun requested: {stage}",
-        clear_agent_report_conclusions=True,
-    )
-    if stage in {"scan", "reproducibility"}:
-        close_live_notebook_session(task_id)
-    return repo.get_task(task_id)
 
 
 def _open_agent_stage(
@@ -940,121 +934,6 @@ def _latest_pending_agent_report_draft(messages: list[dict]) -> dict:
     return {}
 
 
-def _handle_agent_stop_message(repo: TaskRepository, task: TaskRecord) -> dict:
-    if not _agent_has_cancellable_work(repo, task.id):
-        message = repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content="当前没有正在执行的 Agent 任务，无需停止。需要继续验证时可以重新发送指令。",
-            metadata={"intent": "stop", "active_job": None},
-        )
-        return {
-            "task_id": task.id,
-            "status": "message_saved",
-            "message": message["content"],
-            "messages": repo.list_agent_messages(task.id),
-        }
-    _request_agent_cancellation(task.id)
-    request_notebook_cancellation(task.id)
-    _mark_agent_cancelled(repo, task.id)
-    # Guard against a duplicate ack when stop is sent twice in quick succession
-    # (the background job cancel path already dedupes via the same check).
-    if _agent_has_stop_ack_message(repo, task.id):
-        ack_content = AGENT_STOP_ACK_CONTENT
-    else:
-        ack_content = repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content=AGENT_STOP_ACK_CONTENT,
-            metadata={"intent": "stop", "cancel_requested": True},
-        )["content"]
-    return {
-        "task_id": task.id,
-        "status": "cancel_requested",
-        "message": ack_content,
-        "messages": repo.list_agent_messages(task.id),
-    }
-
-
-def _require_agent_rerun_stage_reached(task: TaskRecord, stage: str) -> None:
-    if stage == "scan":
-        return
-    if _agent_rerun_stage_reached(task, stage):
-        return
-    raise HTTPException(
-        status_code=409,
-        detail="尚未执行到该阶段，不能重新执行；请先按顺序完成前置验证步骤。",
-    )
-
-
-def _agent_rerun_stage_reached(task: TaskRecord, stage: str) -> bool:
-    status = task.status
-    if stage == "reproducibility":
-        return (
-            status
-            in {
-                TaskStatus.SCANNED,
-                TaskStatus.RUNNING,
-                TaskStatus.EXECUTED,
-                TaskStatus.COMPUTING_METRICS,
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-            }
-            or task.status_message.startswith(NOTEBOOK_STAGE_FAILURE_PREFIX)
-            or is_metrics_failure(task)
-            or task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
-        )
-    if stage == "metrics":
-        return (
-            status
-            in {
-                TaskStatus.EXECUTED,
-                TaskStatus.COMPUTING_METRICS,
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-            }
-            or is_metrics_failure(task)
-            or task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
-        )
-    if stage == "word_conclusion_draft":
-        return (
-            status
-            in {
-                TaskStatus.WRITING_ARTIFACTS,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.REVIEW_REQUIRED,
-            }
-            or task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
-        )
-    return False
-
-
-def _agent_has_cancellable_work(repo: TaskRepository, task_id: str) -> bool:
-    if repo.get_active_job_kind(task_id) == "agent":
-        return True
-    return any(
-        message.get("role") == "assistant"
-        and bool((message.get("metadata") or {}).get("streaming"))
-        for message in repo.list_agent_messages(task_id)
-    )
-
-
-def _agent_has_stop_ack_message(repo: TaskRepository, task_id: str) -> bool:
-    for message in repo.list_agent_messages(task_id):
-        metadata = message.get("metadata") or {}
-        if (
-            message.get("role") == "assistant"
-            and metadata.get("intent") == "stop"
-            and metadata.get("cancel_requested") is True
-        ):
-            return True
-    return False
-
-
 
 def _resolve_driver_agent_client(request, task: TaskRecord, payload):
     """Agent mode hands the manual gate-controls to an LLM, so a configured LLM is
@@ -1178,54 +1057,6 @@ def _dispatch_agent_validation_job(
         "messages": repo.list_agent_messages(task.id),
     }
 
-
-def _request_agent_cancellation(task_id: str) -> None:
-    request_agent_cancellation(task_id)
-
-
-def _clear_agent_cancellation(task_id: str) -> None:
-    clear_agent_cancellation(task_id)
-    clear_pending_notebook_cancellation(task_id)
-
-
-def _agent_cancellation_requested(task_id: str) -> bool:
-    from marvis.agent.orchestrator import agent_cancellation_requested
-
-    return agent_cancellation_requested(task_id)
-
-
-def _raise_if_agent_cancelled(task_id: str) -> None:
-    raise_if_agent_cancelled(task_id)
-
-
-def _mark_agent_cancelled(repo: TaskRepository, task_id: str) -> None:
-    try:
-        task = repo.get_task(task_id)
-        resume_status_by_current = {
-            TaskStatus.SCANNED: TaskStatus.SCANNED,
-            TaskStatus.RUNNING: TaskStatus.SCANNED,
-            TaskStatus.COMPUTING_METRICS: TaskStatus.EXECUTED,
-            TaskStatus.WRITING_ARTIFACTS: TaskStatus.REVIEW_REQUIRED,
-        }
-        resume_status = resume_status_by_current.get(task.status)
-        if resume_status is None:
-            return
-        if task.status == resume_status:
-            repo.update_status_message(
-                task_id,
-                AGENT_STOP_STATUS_MESSAGE,
-                reason_code=TASK_STATUS_REASON_USER_CANCELLED,
-            )
-            return
-        repo.update_status(
-            task_id,
-            resume_status,
-            AGENT_STOP_STATUS_MESSAGE,
-            expected=task.status,
-            reason_code=TASK_STATUS_REASON_USER_CANCELLED,
-        )
-    except Exception:
-        pass
 
 
 def _agent_evidence(request: Request, task_id: str) -> dict:
