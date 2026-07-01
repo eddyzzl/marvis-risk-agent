@@ -1462,6 +1462,26 @@ def test_selection_policy_string_false_is_not_enabled():
     assert policy["prefer_scorecard"] is True
 
 
+def test_selection_policy_normalizes_string_thresholds_and_rejects_nonfinite():
+    from marvis.packs.modeling.tools import _normalize_selection_policy
+
+    policy = _normalize_selection_policy({
+        "max_feature_count": "30",
+        "max_oot_psi": "0.15",
+    })
+
+    assert policy["max_feature_count"] == 30
+    assert policy["max_oot_psi"] == 0.15
+
+    ignored = _normalize_selection_policy({
+        "max_feature_count": "0",
+        "max_oot_psi": "inf",
+    })
+
+    assert "max_feature_count" not in ignored
+    assert "max_oot_psi" not in ignored
+
+
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):
     """MODELING G1: make_split applies a channel/time rule set and returns a derived
     dataset plus a JSON-safe sample analysis (per-split counts + per-split x channel/month

@@ -1196,7 +1196,7 @@ def _nonnegative_float_or_none(value) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number >= 0 else None
+    return number if np.isfinite(number) and number >= 0 else None
 
 
 def _finite_float_or_none(value) -> float | None:
