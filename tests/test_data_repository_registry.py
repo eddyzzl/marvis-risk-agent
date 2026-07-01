@@ -16,6 +16,7 @@ from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
 import marvis.db as db_module
+import marvis.repositories.datasets as dataset_repo_module
 from marvis.state_machine import ConflictError
 
 
@@ -75,6 +76,10 @@ def _join_spec(*, confirmed: bool = False) -> JoinSpec:
         dedup_strategy=None,
         confirmed=confirmed,
     )
+
+
+def test_dataset_repository_is_reexported_from_db():
+    assert DatasetRepository is dataset_repo_module.DatasetRepository
 
 
 def test_dataset_repository_round_trips_datasets_and_roles(tmp_path):
@@ -170,7 +175,7 @@ def test_dataset_repository_rolls_back_join_spec_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.update_join_spec_with_audit(
@@ -208,7 +213,7 @@ def test_dataset_repository_rolls_back_join_executed_when_audit_write_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.set_join_plan_executed_with_audit(
@@ -325,7 +330,7 @@ def test_dataset_repository_rolls_back_join_result_dataset_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.record_join_result_with_audit(
@@ -440,8 +445,8 @@ def test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fail
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    original_write_audit = db_module._write_audit_row
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_join_executed_audit)
+    original_write_audit = dataset_repo_module._write_audit_row
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_join_executed_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         engine.execute_join_plan(plan.id, out_dir=datasets_root / "task-1" / "joins")
@@ -639,14 +644,14 @@ def test_dataset_registry_register_existing_with_audit_failure_removes_copied_da
         index=False,
     )
     sample = registry.register_existing(source, task_id="task-1", role="sample")
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = dataset_repo_module._write_audit_row
 
     def fail_dataset_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.dataset.derived":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_dataset_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_dataset_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         registry.register_existing_with_audit(

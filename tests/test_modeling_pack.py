@@ -11,8 +11,8 @@ from openpyxl import load_workbook
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-import marvis.db as db_module
 from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
+import marvis.repositories.datasets as dataset_repo_module
 from marvis.domain import TaskCreate
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
@@ -224,14 +224,14 @@ def test_reject_inference_audit_failure_rolls_back_dataset_and_file(tmp_path, mo
     path = tmp_path / "reject_sample.parquet"
     frame.to_parquet(path, index=False)
     dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = dataset_repo_module._write_audit_row
 
     def fail_reject_inference_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.reject_inference.created":
             raise RuntimeError("reject audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_reject_inference_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_reject_inference_audit)
 
     with pytest.raises(RuntimeError, match="reject audit down"):
         modeling_tools.tool_reject_inference(

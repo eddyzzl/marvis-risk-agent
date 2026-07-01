@@ -4,7 +4,7 @@ import pytest
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
-import marvis.db as db_module
+import marvis.repositories.datasets as dataset_repo_module
 from marvis.packs.modeling.prepare import ModelingError, _make_split, prepare_modeling_frame
 
 
@@ -69,14 +69,14 @@ def test_prepare_modeling_frame_audit_failure_rolls_back_dataset_and_file(tmp_pa
         "split": ["train", "train", "test", "oot"],
     })
     backend, registry, dataset = _register_frame(tmp_path, frame)
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = dataset_repo_module._write_audit_row
 
     def fail_modeling_dataset_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.dataset.derived":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_modeling_dataset_audit)
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_modeling_dataset_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         prepare_modeling_frame(
