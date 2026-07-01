@@ -10,7 +10,7 @@ from typing import Any
 
 import nbformat
 
-from marvis.artifacts import TransactionalDirectoryStore
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import DatasetRepository, TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
 from marvis.packs.modeling.artifact import export_pmml, persist_model_meta
@@ -55,7 +55,8 @@ def handoff_to_validation(
     )
 
     material_dir = _material_dir(settings, experiment, artifact)
-    staged_materials = TransactionalDirectoryStore(material_dir.parent).stage(material_dir.name)
+    uow = ArtifactUnitOfWork()
+    staged_materials = uow.stage_directory(material_dir.parent, material_dir.name)
     staged_materials.path.mkdir(parents=True, exist_ok=True)
     sample_material_name = f"sample{sample_path.suffix or '.parquet'}"
     model_material_name = f"model{model_path.suffix or '.joblib'}"
@@ -96,9 +97,9 @@ def handoff_to_validation(
         dictionary_path=DICTIONARY_NAME,
         report_values={},
     )
-    try:
-        staged_materials.activate()
-        validation_task = TaskRepository(settings.db_path).create_validation_handoff_with_audit(
+
+    def create_handoff_task():
+        return TaskRepository(settings.db_path).create_validation_handoff_with_audit(
             payload,
             experiment_id=artifact.experiment_id,
             experiment_status="handed_off",
@@ -114,10 +115,8 @@ def handoff_to_validation(
                 },
             },
         )
-        staged_materials.commit()
-    except Exception:
-        staged_materials.rollback()
-        raise
+
+    validation_task = uow.finalize(create_handoff_task)
     return validation_task.id
 
 
@@ -166,7 +165,8 @@ def create_challenger_backtest_task(
     )
 
     material_dir = _challenger_backtest_dir(settings, experiment, artifact)
-    staged_materials = TransactionalDirectoryStore(material_dir.parent).stage(material_dir.name)
+    uow = ArtifactUnitOfWork()
+    staged_materials = uow.stage_directory(material_dir.parent, material_dir.name)
     staged_materials.path.mkdir(parents=True, exist_ok=True)
     sample_material_name = f"sample{sample_path.suffix or '.parquet'}"
     model_material_name = f"model{model_path.suffix or '.joblib'}"
@@ -231,9 +231,9 @@ def create_challenger_backtest_task(
             "TEXT:plan_path": CHALLENGER_BACKTEST_PLAN_JSON,
         },
     )
-    try:
-        staged_materials.activate()
-        task = TaskRepository(settings.db_path).create_task_with_audit(
+
+    def create_backtest_task():
+        return TaskRepository(settings.db_path).create_task_with_audit(
             payload,
             audit_factory=lambda record: {
                 "kind": "modeling.challenger_backtest.create",
@@ -248,10 +248,8 @@ def create_challenger_backtest_task(
                 },
             },
         )
-        staged_materials.commit()
-    except Exception:
-        staged_materials.rollback()
-        raise
+
+    task = uow.finalize(create_backtest_task)
     return {
         "task_id": task.id,
         "package_path": str((material_dir / CHALLENGER_BACKTEST_PLAN_JSON).resolve()),
