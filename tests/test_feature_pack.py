@@ -180,6 +180,41 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     assert crossed.output["new_columns"] == ["x1_ratio_x2", "amount_by_cat_mean"]
 
 
+def test_woe_encode_fits_on_non_holdout_rows_and_applies_to_all_rows(tmp_path):
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "x": [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        "y": [0, 0, 1, 1, 1, 1, 0, 0],
+        "split": ["train", "test", "train", "test", "oot", "oot", "oot", "oot"],
+    })
+    path = tmp_path / "woe_holdout.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x"],
+            "target_col": "y",
+            "method": "manual",
+            "breakpoints": [0.5],
+            "split_col": "split",
+            "holdout_values": ["oot"],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    woe_map = result.output["woe_maps"]["x"]
+    assert woe_map["woe_by_bin"][0] > 1.0
+    assert woe_map["woe_by_bin"][1] < -1.0
+    encoded = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert encoded.shape[0] == frame.shape[0]
+    assert encoded.loc[0, "x_woe"] == pytest.approx(woe_map["woe_by_bin"][0])
+    assert encoded.loc[4, "x_woe"] == pytest.approx(woe_map["woe_by_bin"][0])
+
+
 def test_feature_transform_tools_return_feature_error_for_missing_columns(tmp_path):
     runner, registry, _repo, _backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)

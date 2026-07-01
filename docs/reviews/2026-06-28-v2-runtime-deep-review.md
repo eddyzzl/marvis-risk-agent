@@ -181,6 +181,7 @@
 - **问题**：`tool_woe_encode` 经 `_read_frame` 读**整张**数据集，无 `split_col/holdout` 过滤，`compute_woe_iv` 在全部行上推 WOE 分箱/值并把 `*_woe` 列写回派生数据集（横跨 train+test+OOT）。WOE map 用到了 holdout 行的标签，污染列被持久化给下游建模消费。与同子系统 `screen_features`（`_dev_mask` 明确排除 holdout）相悖。WOE 正是"在 test/OOT 上拟合会抬高 KS/AUC"的监督变换，违反 INV-6。
 - **验证**：对抗验证 confirmed/medium（"核心事实准确"）。
 - **修复**：把 `split_col/holdout_values` 接入 `tool_woe_encode`，`compute_woe_iv`（edges+WOE）仅在 dev 行拟合，再 apply 到全部行（镜像 `screen.py` 的 `_dev_mask`）。
+- **当前状态**：已修复。`woe_encode` schema 接受 `split_col`/`holdout_values`，边界和 WOE map 只在非 holdout 行拟合，派生数据仍编码全量行。验证：`CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_feature_pack.py tests/test_feature_iv.py tests/test_feature_encode.py -q`，`22 passed`。
 
 ---
 

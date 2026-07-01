@@ -298,20 +298,25 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     features = [str(item) for item in inputs["features"]]
     target_col = str(inputs["target_col"])
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
-    _assert_columns(frame, [*features, target_col])
+    required_columns = [*features, target_col]
+    if inputs.get("split_col"):
+        required_columns.append(str(inputs["split_col"]))
+    _assert_columns(frame, required_columns)
     out = frame.copy()
+    fit_frame = _woe_fit_frame(out, inputs)
     nan_labels_dropped = require_labels_confirmed(
-        out,
+        fit_frame,
         target_col,
         drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        scope="woe fit",
     )
     woe_maps = {}
     new_columns = []
     for feature in features:
-        edges = _edges_for(out, {**inputs, "feature": feature}, ctx)
+        edges = _edges_for(fit_frame, {**inputs, "feature": feature}, ctx)
         binning = compute_woe_iv(
-            out[feature].to_numpy(dtype=float),
-            _target_values(out, target_col),
+            fit_frame[feature].to_numpy(dtype=float),
+            _target_values(fit_frame, target_col),
             edges,
             feature=feature,
         )
@@ -327,6 +332,18 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         "woe_maps": woe_maps,
         "nan_labels_dropped": nan_labels_dropped,
     }
+
+
+def _woe_fit_frame(frame: pd.DataFrame, inputs: dict) -> pd.DataFrame:
+    split_col = inputs.get("split_col")
+    if not split_col:
+        return frame
+    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("oot",)))
+    mask = ~frame[str(split_col)].astype(str).isin(holdout_values)
+    fit_frame = frame.loc[mask]
+    if fit_frame.empty:
+        raise FeatureError("WOE fit frame is empty after excluding holdout rows")
+    return fit_frame
 
 
 def tool_onehot_encode(inputs: dict, ctx) -> dict:

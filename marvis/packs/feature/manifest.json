@@ -241,6 +241,8 @@
           "method": {"type": "string", "enum": ["equal_frequency", "quantile", "equal_width", "manual", "chimerge", "tree"]},
           "max_bins": {"type": "integer", "minimum": 1},
           "breakpoints": {"type": "array", "items": {"type": "number"}},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
           "seed": {"type": "integer"},
           "drop_nan_labels": {"type": "boolean"}
         },
