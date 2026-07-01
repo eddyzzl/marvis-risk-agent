@@ -19,6 +19,7 @@ from marvis.domain import TaskStatus
 from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
 from marvis.pipeline import (
     LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
+    legacy_live_notebook_execution_allowed,
     run_metrics_stage,
     run_notebook_stage,
     run_report_stage,
@@ -120,7 +121,7 @@ def run_task_metrics(
         in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
         and not pipeline_settings.notebook_isolated_execution
     ):
-        if not pipeline_settings.allow_legacy_live_notebook_execution:
+        if not legacy_live_notebook_execution_allowed(pipeline_settings):
             close_live_notebook_session(task_id)
             repo.finish_job(job_id, status="failed")
             raise HTTPException(

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -98,8 +99,10 @@ METRICS_STAGE_FAILURE_PREFIX = "模型效果&稳定性验证失败："
 REPORT_STAGE_FAILURE_PREFIX = "报告输出失败："
 LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE = (
     "legacy live notebook execution requires notebook_isolated_execution=False "
-    "and allow_legacy_live_notebook_execution=True"
+    "and allow_legacy_live_notebook_execution=True plus "
+    "MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION=1"
 )
+LEGACY_LIVE_NOTEBOOK_ENV_VAR = "MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION"
 V1_VALIDATION_APPENDED_CELL_KINDS = (
     "repro-pmml",
     "repro-compare",
@@ -124,8 +127,18 @@ def _metrics_cancel_marker_path(task_dir: Path) -> Path:
 
 
 def _require_legacy_live_notebook_execution(settings: PipelineSettings) -> None:
-    if settings.notebook_isolated_execution or not settings.allow_legacy_live_notebook_execution:
+    if not legacy_live_notebook_execution_allowed(settings):
         raise PipelineError(LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE)
+
+
+def legacy_live_notebook_execution_allowed(settings: PipelineSettings) -> bool:
+    if settings.notebook_isolated_execution or not settings.allow_legacy_live_notebook_execution:
+        return False
+    return _truthy_env(LEGACY_LIVE_NOTEBOOK_ENV_VAR)
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def run_notebook_stage(
@@ -321,7 +334,7 @@ def run_metrics_stage(
                 if live_session is not None:
                     close_live_notebook_session(task_id)
                     live_session = None
-            elif not settings.allow_legacy_live_notebook_execution:
+            elif not legacy_live_notebook_execution_allowed(settings):
                 if live_session is not None:
                     close_live_notebook_session(task_id)
                 raise PipelineError(LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE)

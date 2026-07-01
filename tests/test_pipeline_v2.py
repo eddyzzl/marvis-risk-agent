@@ -19,6 +19,7 @@ from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.notebooks import close_live_notebook_session, register_live_notebook_session
 from marvis import pipeline as pipeline_module
 from marvis.pipeline import (
+    LEGACY_LIVE_NOTEBOOK_ENV_VAR,
     NOTEBOOK_STAGE_FAILURE_PREFIX,
     REPORT_STAGE_FAILURE_PREFIX,
     REPRODUCIBILITY_RESULT_JSON,
@@ -42,6 +43,29 @@ from marvis.pipeline import (
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _allow_legacy_live_notebook(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, "1")
+
+
+def test_legacy_live_notebook_execution_requires_process_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = PipelineSettings(
+        workspace=tmp_path,
+        db_path=tmp_path / "marvis.sqlite",
+        report_template_path=tmp_path / "template.docx",
+        notebook_isolated_execution=False,
+        allow_legacy_live_notebook_execution=True,
+    )
+
+    monkeypatch.delenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, raising=False)
+    assert not pipeline_module.legacy_live_notebook_execution_allowed(settings)
+
+    monkeypatch.setenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, "yes")
+    assert pipeline_module.legacy_live_notebook_execution_allowed(settings)
 
 
 def test_scan_artifacts_tags_limit_breach_as_scan_failure(monkeypatch):
@@ -622,6 +646,7 @@ def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
     tmp_path: Path,
     monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = _build_project(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -936,7 +961,11 @@ def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
     assert repo.get_task(task.id).status is TaskStatus.WRITING_ARTIFACTS
 
 
-def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(tmp_path: Path):
+def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     sample_path = project / "sample.csv"
@@ -1036,6 +1065,7 @@ def test_metrics_stage_success_captures_model_experience_memory(
     tmp_path: Path,
     monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     db_path = workspace / "marvis.sqlite"
@@ -1163,6 +1193,7 @@ def test_metrics_stage_status_failure_rolls_back_outputs_report_and_images(
     tmp_path: Path,
     monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     sample_path = project / "sample.csv"
@@ -1274,7 +1305,11 @@ def test_metrics_stage_status_failure_rolls_back_outputs_report_and_images(
     assert not (task_dir / ".staging").exists()
 
 
-def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):
+def test_metrics_stage_cancel_returns_to_executed_status(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     sample_path = project / "sample.csv"
@@ -1546,7 +1581,9 @@ def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
 
 def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(
     tmp_path: Path,
+    monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     (project / "sample.csv").write_text("placeholder\n1\n", encoding="utf-8")
@@ -1601,7 +1638,9 @@ def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(
 
 def test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed(
     tmp_path: Path,
+    monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     (project / "sample.csv").write_text("placeholder\n1\n", encoding="utf-8")
@@ -1667,6 +1706,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
     tmp_path: Path,
     monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     workspace = tmp_path / "workspace"
@@ -1774,6 +1814,7 @@ def test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs(
     tmp_path: Path,
     monkeypatch,
 ):
+    _allow_legacy_live_notebook(monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     workspace = tmp_path / "workspace"

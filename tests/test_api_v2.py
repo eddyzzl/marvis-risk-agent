@@ -28,7 +28,7 @@ from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.routers.tasks import router as tasks_router
 from marvis.routers.validation_agent import router as validation_agent_router
 from marvis.routers.validation_stages import router as validation_stages_router
-from marvis.pipeline import PipelineSettings
+from marvis.pipeline import LEGACY_LIVE_NOTEBOOK_ENV_VAR, PipelineSettings
 
 
 class FakeTaskRepository:
@@ -1908,10 +1908,48 @@ def test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_explicit_all
     assert calls == []
 
 
+def test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_process_env(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.delenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, raising=False)
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.pipeline_settings_from_request",
+        lambda request, task, feature_columns: PipelineSettings(
+            workspace=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+            report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/metrics")
+
+    assert response.status_code == 409
+    assert f"{LEGACY_LIVE_NOTEBOOK_ENV_VAR}=1" in response.json()["detail"]
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SUCCEEDED
+    assert calls == []
+
+
 def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled(
     tmp_path: Path,
     monkeypatch,
 ):
+    monkeypatch.setenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, "1")
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
