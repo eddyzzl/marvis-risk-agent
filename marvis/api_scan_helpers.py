@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
 from marvis.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
 from marvis.files import scan_source_dir
 from marvis.notebook_contract import NotebookContractError, precheck_notebook_contract
 from marvis.notebook_steps import notebook_step_preview
 from marvis.notebooks import close_live_notebook_session
-from marvis.pipeline import SCAN_STAGE_FAILURE_PREFIX, _clear_generated_artifacts
+from marvis.pipeline import SCAN_STAGE_FAILURE_PREFIX
 from marvis.safe_paths import assert_within
 
 
@@ -86,10 +87,18 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
     # source_dir is normalized at task-create time, so pipeline and /scan agree.
     artifacts = scan_source_dir(Path(task.source_dir))
     checks = scan_preflight_checks(task, artifacts)
-    execution_dir = settings.tasks_dir / task.id / "execution"
-    _clear_generated_artifacts(settings.tasks_dir / task.id, stage="scan")
-    execution_dir.mkdir(parents=True, exist_ok=True)
-    notebook_steps = scan_notebook_steps(settings, task, artifacts)
+    task_dir = settings.tasks_dir / task.id
+    uow = ArtifactUnitOfWork()
+    staged_execution = uow.stage_directory(task_dir, "execution")
+    staged_execution.path.mkdir(parents=True, exist_ok=True)
+    uow.remove_path(task_dir / "outputs")
+    uow.remove_path(task_dir / "images")
+    notebook_steps = scan_notebook_steps(
+        settings,
+        task,
+        artifacts,
+        execution_dir=staged_execution.path,
+    )
     scan_status = TaskStatus.FAILED if scan_error_checks(checks) else TaskStatus.SCANNED
     scan_message = scan_status_message(checks)
     payload = {
@@ -101,25 +110,45 @@ def perform_scan_task(repo: TaskRepository, task: TaskRecord, settings) -> dict:
         "checks": checks,
         "notebook_steps": notebook_steps,
     }
-    (execution_dir / "scan_result.json").write_text(
+    (staged_execution.path / "scan_result.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     close_live_notebook_session(task.id)
-    repo.update_status(
-        task.id,
-        scan_status,
-        scan_message,
-        expected={
-            TaskStatus.CREATED,
-            TaskStatus.SCANNED,
-            TaskStatus.FAILED,
-            TaskStatus.EXECUTED,
-            TaskStatus.WRITING_ARTIFACTS,
-            TaskStatus.SUCCEEDED,
-            TaskStatus.REVIEW_REQUIRED,
-        },
-    )
+    expected_statuses = {
+        TaskStatus.CREATED,
+        TaskStatus.SCANNED,
+        TaskStatus.FAILED,
+        TaskStatus.EXECUTED,
+        TaskStatus.WRITING_ARTIFACTS,
+        TaskStatus.SUCCEEDED,
+        TaskStatus.REVIEW_REQUIRED,
+    }
+
+    def commit_scan(conn):
+        repo.update_status_on_connection(
+            conn,
+            task.id,
+            scan_status,
+            scan_message,
+            expected=expected_statuses,
+            begin_immediate=True,
+        )
+        return payload
+
+    def commit_scan_legacy():
+        repo.update_status(
+            task.id,
+            scan_status,
+            scan_message,
+            expected=expected_statuses,
+        )
+        return payload
+
+    if hasattr(repo, "transaction") and hasattr(repo, "update_status_on_connection"):
+        uow.finalize_with_connection(repo.transaction, commit_scan)
+    else:
+        uow.finalize(commit_scan_legacy)
     return payload
 
 
@@ -148,6 +177,8 @@ def scan_notebook_steps(
     settings,
     task: TaskRecord,
     artifacts: list[FileArtifact],
+    *,
+    execution_dir: Path | None = None,
 ) -> list[dict]:
     notebook_path, error = resolve_scan_material(
         task=task,
@@ -162,7 +193,7 @@ def scan_notebook_steps(
         steps = notebook_step_preview(notebook_path)
     except Exception:
         return []
-    execution_dir = settings.tasks_dir / task.id / "execution"
+    execution_dir = execution_dir or settings.tasks_dir / task.id / "execution"
     execution_dir.mkdir(parents=True, exist_ok=True)
     (execution_dir / "notebook_steps.json").write_text(
         json.dumps({"steps": steps, "cells": []}, ensure_ascii=False, indent=2),
