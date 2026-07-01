@@ -22,6 +22,9 @@ class ModelingRepository:
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
+    def transaction(self):
+        return connect(self.db_path)
+
     def create_experiment(self, experiment: Experiment) -> None:
         with connect(self.db_path) as conn:
             _insert_experiment_row(conn, experiment)
@@ -141,8 +144,23 @@ class ModelingRepository:
         audit: dict,
     ) -> None:
         with connect(self.db_path) as conn:
-            _set_model_artifact_params_row(conn, artifact_id, params)
-            _write_audit_row(conn, **audit)
+            self.set_model_artifact_params_with_audit_on_connection(
+                conn,
+                artifact_id,
+                params,
+                audit=audit,
+            )
+
+    def set_model_artifact_params_with_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        artifact_id: str,
+        params: dict,
+        *,
+        audit: dict,
+    ) -> None:
+        _set_model_artifact_params_row(conn, artifact_id, params)
+        _write_audit_row(conn, **audit)
 
     def get_model_artifact(self, artifact_id: str) -> ModelArtifact | None:
         with connect(self.db_path) as conn:

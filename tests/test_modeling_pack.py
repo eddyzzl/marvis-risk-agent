@@ -13,6 +13,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
 import marvis.repositories.datasets as dataset_repo_module
+import marvis.repositories.modeling as modeling_repo_module
 from marvis.domain import TaskCreate
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
@@ -392,6 +393,75 @@ def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
     assert any("PMML" in item and "校准" in item for item in post_training.output["model_card"]["limitations"])
     assert "PMML" in Path(post_training.output["model_card_markdown_path"]).read_text(encoding="utf-8")
     assert "校准" in Path(post_training.output["approval_package_markdown_path"]).read_text(encoding="utf-8")
+
+
+def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"max_iter": 200},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    artifact_id = trained.output["artifact_id"]
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    artifact_meta_path = base_dir / f"{artifact_id}.model_meta.json"
+    generic_meta_path = base_dir / "model_meta.json"
+    calibration_path = base_dir / f"{artifact_id}.calibration.sigmoid.joblib"
+    original_artifact_meta = artifact_meta_path.read_text(encoding="utf-8")
+    original_generic_meta = generic_meta_path.read_text(encoding="utf-8")
+    original_artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact_id)
+    assert original_artifact is not None
+    original_params = original_artifact.params
+
+    original_write_audit = modeling_repo_module._write_audit_row
+
+    def fail_calibration_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.artifact.calibrate":
+            raise RuntimeError("audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_calibration_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        modeling_tools.tool_calibrate_model(
+            {
+                "artifact_id": artifact_id,
+                "dataset_id": dataset.id,
+                "method": "sigmoid",
+                "split": "test",
+                "min_samples": 20,
+                "n_bins": 5,
+            },
+            SimpleNamespace(
+                task_id=task.id,
+                datasets_root=settings.datasets_dir,
+                workspace=settings.workspace,
+                seed=None,
+            ),
+        )
+
+    assert not calibration_path.exists()
+    assert not (base_dir / ".staging").exists()
+    assert artifact_meta_path.read_text(encoding="utf-8") == original_artifact_meta
+    assert generic_meta_path.read_text(encoding="utf-8") == original_generic_meta
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact_id)
+    assert artifact.params == original_params
+    assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.calibrate") == []
 
 
 def test_select_features_supports_woe_space_on_train_split(tmp_path):

@@ -28,7 +28,6 @@ from marvis.packs.modeling.artifact import (
     load_model,
     persist_model_meta,
     validate_scorecard_pmml_payload,
-    write_artifact_file,
 )
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
@@ -1288,7 +1287,13 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "calibrator": calibrator,
         "created_at": datetime.now(UTC).isoformat(),
     }
-    write_artifact_file(base_dir, calibration_path, lambda path: joblib.dump(calibration_payload, path))
+    uow = ArtifactUnitOfWork()
+    calibration_artifact = uow.stage_file(base_dir, calibration_path)
+    try:
+        joblib.dump(calibration_payload, calibration_artifact.path)
+    except Exception:
+        uow.rollback()
+        raise
     calibration = {
         "method": method,
         "path": calibration_path,
@@ -1311,29 +1316,40 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     params = {**dict(artifact.params or {}), CALIBRATION_PARAMS_KEY: calibration}
     updated_artifact = replace(artifact, params=params)
     try:
-        persist_model_meta(base_dir, updated_artifact, config=config)
-        runtime.modeling_repo.set_model_artifact_params_with_audit(
-            artifact.id,
-            params,
-            audit={
-                "kind": "modeling.artifact.calibrate",
-                "target_ref": artifact.id,
-                "outcome": "succeeded",
-                "detail": {
-                    "method": method,
-                    "dataset_id": dataset.id,
-                    "sample_count": int(labels.size),
-                    "calibration_path": calibration_path,
-                },
-            },
-        )
+        persist_model_meta(base_dir, updated_artifact, config=config, uow=uow)
     except Exception:
-        (base_dir / calibration_path).unlink(missing_ok=True)
-        try:
-            persist_model_meta(base_dir, artifact, config=config)
-        except Exception:
-            pass
+        uow.rollback()
         raise
+    audit = {
+        "kind": "modeling.artifact.calibrate",
+        "target_ref": artifact.id,
+        "outcome": "succeeded",
+        "detail": {
+            "method": method,
+            "dataset_id": dataset.id,
+            "sample_count": int(labels.size),
+            "calibration_path": calibration_path,
+        },
+    }
+    set_params_on_connection = getattr(
+        runtime.modeling_repo,
+        "set_model_artifact_params_with_audit_on_connection",
+        None,
+    )
+    transaction = getattr(runtime.modeling_repo, "transaction", None)
+    if callable(set_params_on_connection) and callable(transaction):
+        uow.finalize_with_connection(
+            transaction,
+            lambda conn: set_params_on_connection(conn, artifact.id, params, audit=audit),
+        )
+    else:
+        uow.finalize(
+            lambda: runtime.modeling_repo.set_model_artifact_params_with_audit(
+                artifact.id,
+                params,
+                audit=audit,
+            )
+        )
     return {
         "artifact_id": artifact.id,
         "method": method,

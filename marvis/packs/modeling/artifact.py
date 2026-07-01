@@ -9,7 +9,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 
@@ -93,7 +93,13 @@ def save_model(
     return artifact
 
 
-def persist_model_meta(out_dir: Path, artifact: ModelArtifact, *, config=None) -> Path:
+def persist_model_meta(
+    out_dir: Path,
+    artifact: ModelArtifact,
+    *,
+    config=None,
+    uow: ArtifactUnitOfWork | None = None,
+) -> Path:
     out_dir = Path(out_dir)
     meta = {
         "artifact_id": artifact.id,
@@ -114,6 +120,15 @@ def persist_model_meta(out_dir: Path, artifact: ModelArtifact, *, config=None) -
     }
     meta_path = out_dir / f"{artifact.id}.model_meta.json"
     payload = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False, default=str)
+    if uow is not None:
+        staged = [
+            uow.stage_file(out_dir, meta_path.name),
+            uow.stage_file(out_dir, "model_meta.json"),
+        ]
+        for artifact_file in staged:
+            artifact_file.path.write_text(payload + "\n", encoding="utf-8")
+        return meta_path
+
     store = TransactionalArtifactStore(out_dir)
     staged = [store.stage(meta_path.name), store.stage("model_meta.json")]
     try:
