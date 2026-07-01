@@ -90,6 +90,7 @@ def test_app_entry_is_split_into_frontend_modules():
         "render-metrics.js",
         "state.js",
         "theme.js",
+        "toast.js",
         "ui-utils.js",
     ]:
         assert (STATIC_DIR / "js" / module_name).exists()
@@ -105,6 +106,7 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/render-metrics.js"' in app_js
     assert 'from "./js/state.js"' in app_js
     assert 'from "./js/theme.js"' in app_js
+    assert 'from "./js/toast.js"' in app_js
     assert 'from "./js/ui-utils.js"' in app_js
 
 

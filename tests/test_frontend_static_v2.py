@@ -3031,6 +3031,7 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     app_js = _read_static("app.js")
     create_dialog_js = _read_static("js/create-task-dialog.js")
     task_types_js = _read_static("js/task-types.js")
+    toast_js = _read_static("js/toast.js")
     for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
         start = index_html.index(f'id="{card_id}"')
         tag_end = index_html.index(">", start)
@@ -3050,9 +3051,92 @@ def test_strategy_and_vintage_welcome_cards_are_enabled():
     assert "card.dataset.comingSoon" not in app_js
     assert "definition.available === false" in create_dialog_js
     assert "unavailableMessage" in create_dialog_js
-    assert "function showComingSoonToast" in app_js
+    assert "export function createComingSoonToastController" in toast_js
+    assert 'from "./js/toast.js"' in app_js
+    assert "function showComingSoonToast" not in app_js
+    assert "const { showComingSoonToast } = createComingSoonToastController" in app_js
     assert 'setActionStatus(message, "info"' in app_js
     assert "新功能开发中，敬请期待" in create_dialog_js
+
+
+def test_coming_soon_toast_controller_reuses_node_and_resets_timer():
+    script = """
+import assert from "node:assert/strict";
+import { createComingSoonToastController } from "./marvis/static/js/toast.js";
+
+const elements = {};
+const appended = [];
+const timers = [];
+const cleared = [];
+function createElement(tagName) {
+  assert.equal(tagName, "div");
+  return {
+    id: "",
+    className: "",
+    attributes: {},
+    classList: {
+      values: new Set(),
+      add(value) {
+        this.values.add(value);
+      },
+      remove(value) {
+        this.values.delete(value);
+      },
+      contains(value) {
+        return this.values.has(value);
+      },
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+    textContent: "",
+  };
+}
+
+const controller = createComingSoonToastController({
+  body: {
+    appendChild(node) {
+      appended.push(node);
+      elements[node.id] = node;
+    },
+  },
+  clearTimeoutFn: (timer) => cleared.push(timer),
+  createElement,
+  getElementById: (id) => elements[id] || null,
+  setTimeoutFn: (fn, delay) => {
+    const timer = { fn, delay };
+    timers.push(timer);
+    return timer;
+  },
+  visibleDurationMs: 1200,
+});
+
+controller.showComingSoonToast("敬请期待");
+const toast = elements.comingSoonToast;
+assert.equal(appended.length, 1);
+assert.equal(toast.className, "coming-soon-toast");
+assert.equal(toast.attributes.role, "status");
+assert.equal(toast.attributes["aria-live"], "polite");
+assert.equal(toast.textContent, "敬请期待");
+assert.equal(toast.classList.contains("is-visible"), true);
+assert.equal(timers[0].delay, 1200);
+
+controller.showComingSoonToast("开发中");
+assert.equal(appended.length, 1);
+assert.equal(cleared.length, 1);
+assert.equal(toast.textContent, "开发中");
+timers[1].fn();
+assert.equal(toast.classList.contains("is-visible"), false);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_acceptance_chip_relabels_auto_accept_per_task_type():

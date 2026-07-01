@@ -41,6 +41,7 @@ import {
 } from "./js/task-workspace-view.js";
 import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
 import { createThemeController } from "./js/theme.js";
+import { createComingSoonToastController } from "./js/toast.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import {
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
@@ -184,6 +185,10 @@ let taskHeroCanScroll = false;
 const platformConfirm = createPlatformConfirmController({ getElementById: $ });
 const showPlatformConfirm = platformConfirm.showPlatformConfirm;
 const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;
+const { showComingSoonToast } = createComingSoonToastController({
+  body: document.body,
+  getElementById: $,
+});
 const materialSourceController = createMaterialSourceController({
   $,
   onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ }),
@@ -474,23 +479,6 @@ function openTaskDialog(taskType = defaultTaskType) {
 
 function openTaskDialogFromCard(event) {
   createTaskDialog.openTaskDialogFromCard(event);
-}
-
-let comingSoonToastTimer = null;
-function showComingSoonToast(message) {
-  let toast = $("comingSoonToast");
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.id = "comingSoonToast";
-    toast.className = "coming-soon-toast";
-    toast.setAttribute("role", "status");
-    toast.setAttribute("aria-live", "polite");
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  toast.classList.add("is-visible");
-  if (comingSoonToastTimer) clearTimeout(comingSoonToastTimer);
-  comingSoonToastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
 }
 
 function openTaskTypeWelcome() {
