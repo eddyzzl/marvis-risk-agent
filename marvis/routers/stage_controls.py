@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
 from marvis.domain import TaskStatus
+from marvis.files import write_text_atomic
 from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.pipeline import _metrics_cancel_marker_path
 
@@ -74,5 +75,4 @@ def cancel_task_report(task_id: str, request: Request) -> dict:
 
 def _write_metrics_cancel_marker(task_dir: Path) -> None:
     marker_path = _metrics_cancel_marker_path(task_dir)
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_text("cancelled\n", encoding="utf-8")
+    write_text_atomic(marker_path, "cancelled\n")

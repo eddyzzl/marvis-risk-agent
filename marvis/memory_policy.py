@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
+from marvis.files import write_json_atomic
+
 
 SETTINGS_FILE = "memory_policy.json"
 
@@ -55,15 +57,7 @@ def save_memory_policy(
     settings: MemoryPolicySettings,
 ) -> MemoryPolicySettings:
     path = _memory_policy_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: write to a sibling temp file then replace, so a crash mid-write
-    # can never leave a half-written (corrupt) settings file behind.
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(asdict(settings), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
+    write_json_atomic(path, asdict(settings))
     return settings
 
 

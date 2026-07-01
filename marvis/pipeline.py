@@ -26,7 +26,7 @@ from marvis.domain import (
     TaskRecord,
     TaskStatus,
 )
-from marvis.files import scan_source_dir
+from marvis.files import scan_source_dir, write_json_atomic
 from marvis.execution_environment import (
     load_execution_environment,
     validate_execution_environment,
@@ -2000,11 +2000,7 @@ def _notebook_step_v3(
             isolated=isolated,
         )
     if result.step_events is not None:
-        notebook_steps_path.parent.mkdir(parents=True, exist_ok=True)
-        notebook_steps_path.write_text(
-            json.dumps(result.step_events, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_json_atomic(notebook_steps_path, result.step_events)
     if result.cancelled:
         if live_session is not None:
             live_session.close()

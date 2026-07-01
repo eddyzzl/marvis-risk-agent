@@ -6,7 +6,7 @@ from pathlib import Path
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
 from marvis.domain import FileArtifact, FileRole, TaskRecord, TaskStatus
-from marvis.files import scan_source_dir
+from marvis.files import scan_source_dir, write_json_atomic
 from marvis.notebook_contract import NotebookContractError, precheck_notebook_contract
 from marvis.notebook_steps import notebook_step_preview
 from marvis.notebooks import close_live_notebook_session
@@ -195,10 +195,7 @@ def scan_notebook_steps(
         return []
     execution_dir = execution_dir or settings.tasks_dir / task.id / "execution"
     execution_dir.mkdir(parents=True, exist_ok=True)
-    (execution_dir / "notebook_steps.json").write_text(
-        json.dumps({"steps": steps, "cells": []}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json_atomic(execution_dir / "notebook_steps.json", {"steps": steps, "cells": []})
     return steps
 
 

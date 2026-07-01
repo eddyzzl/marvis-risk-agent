@@ -1,10 +1,16 @@
+import json
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from marvis.domain import FileRole
-from marvis.files import classify_file, scan_source_dir
+from marvis.files import (
+    classify_file,
+    scan_source_dir,
+    write_json_atomic,
+    write_text_atomic,
+)
 
 
 def test_classify_file_roles():
@@ -111,3 +117,45 @@ def test_v2_scan_only_classifies_v2_roles(tmp_path):
 
     roles = {artifact.role.value for artifact in artifacts}
     assert roles == {"model_pmml", "sample"}
+
+
+def test_write_text_atomic_replaces_existing_file(tmp_path: Path):
+    target = tmp_path / "settings" / "state.txt"
+    target.parent.mkdir()
+    target.write_text("old", encoding="utf-8")
+
+    result = write_text_atomic(target, "new")
+
+    assert result == target
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not list(target.parent.glob(".*.tmp"))
+
+
+def test_write_json_atomic_writes_utf8_json(tmp_path: Path):
+    target = tmp_path / "state.json"
+
+    write_json_atomic(target, {"状态": "通过", "count": 2})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"状态": "通过", "count": 2}
+
+
+def test_write_text_atomic_keeps_existing_file_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target = tmp_path / "state.txt"
+    target.write_text("old", encoding="utf-8")
+    original_replace = Path.replace
+
+    def fail_replace(self, destination):
+        if Path(destination) == target:
+            raise RuntimeError("replace failed")
+        return original_replace(self, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="replace failed"):
+        write_text_atomic(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert not list(tmp_path.glob(".*.tmp"))

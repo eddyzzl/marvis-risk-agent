@@ -32,6 +32,7 @@ from marvis.notebook_contract import (
     precheck_notebook_contract,
 )
 from marvis.notebook_steps import NotebookStepPlan, notebook_step_plan
+from marvis.files import write_json_atomic, write_text_atomic
 
 
 @dataclass(frozen=True)
@@ -882,7 +883,8 @@ def _write_resource_limit_log(
     error_value: str,
     resource_usage: dict[str, Any],
 ) -> None:
-    log_path.write_text(
+    write_text_atomic(
+        log_path,
         "\n".join(
             [
                 "failed",
@@ -895,12 +897,11 @@ def _write_resource_limit_log(
             ]
         )
         + "\n",
-        encoding="utf-8",
     )
 
 
 def _write_cancel_log(log_path: Path) -> None:
-    log_path.write_text("cancelled\n", encoding="utf-8")
+    write_text_atomic(log_path, "cancelled\n")
 
 
 def run_notebook(
@@ -1252,17 +1253,10 @@ def _write_step_events(
     plan: NotebookStepPlan,
     cell_events: dict[int, dict[str, Any]],
 ) -> None:
-    progress_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = progress_path.with_name(f"{progress_path.name}.tmp")
-    temporary_path.write_text(
-        json.dumps(
-            _build_step_events(plan, cell_events),
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    write_json_atomic(
+        progress_path,
+        _build_step_events(plan, cell_events),
     )
-    temporary_path.replace(progress_path)
 
 
 def _utc_now() -> str:
