@@ -88,6 +88,70 @@ def test_export_lr_pmml_can_be_loaded_by_pypmml(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("algorithm", "model"),
+    [
+        (
+            "lgb",
+            lgb.LGBMClassifier(
+                n_estimators=3,
+                min_child_samples=1,
+                random_state=7,
+                verbosity=-1,
+                n_jobs=1,
+            ),
+        ),
+        (
+            "xgb",
+            xgb.XGBClassifier(
+                n_estimators=3,
+                max_depth=2,
+                learning_rate=0.5,
+                eval_metric="logloss",
+                random_state=7,
+                n_jobs=1,
+            ),
+        ),
+    ],
+)
+def test_export_tree_sklearn_wrapper_pmml_can_be_loaded_by_pypmml(
+    tmp_path,
+    algorithm,
+    model,
+):
+    frame = pd.DataFrame({
+        "x1": [0.05, 0.15, 0.25, 0.35, 0.65, 0.75, 0.85, 0.95],
+        "x2": [0.20, 0.10, 0.25, 0.30, 0.70, 0.80, 0.75, 0.90],
+        "y": [0, 0, 0, 0, 1, 1, 1, 1],
+    })
+    sample_path = tmp_path / "sample.parquet"
+    frame.to_parquet(sample_path, index=False)
+    model.fit(frame[["x1", "x2"]], frame["y"])
+    artifact = save_model(
+        model,
+        algorithm,
+        tmp_path / algorithm,
+        feature_list=("x1", "x2"),
+        params={},
+    )
+
+    pmml_path = export_pmml(
+        artifact,
+        sample_path,
+        tmp_path / algorithm / f"{algorithm}.pmml",
+        base_dir=tmp_path / algorithm,
+        target_col="y",
+    )
+
+    assert pmml_path.exists()
+    assert not (tmp_path / algorithm / ".staging").exists()
+    pmml_predictions = Model.load(pmml_path.as_posix()).predict(frame[["x1", "x2"]])
+    assert pmml_predictions["probability(1)"].tolist() == pytest.approx(
+        model.predict_proba(frame[["x1", "x2"]])[:, 1].tolist(),
+        abs=1e-6,
+    )
+
+
 def test_export_pmml_uses_explicit_target_when_sample_weight_precedes_label(tmp_path):
     frame = pd.DataFrame({
         "x1": [0.1, 0.2, 0.8, 0.9],
