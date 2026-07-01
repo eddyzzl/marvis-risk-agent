@@ -351,7 +351,12 @@ def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:
             traceback=traceback.format_exc(),
         )
         raise
-    status = "failed" if result.status == PlanStatus.FAILED else "succeeded"
+    if result.status == PlanStatus.FAILED:
+        status = "failed"
+    elif result.status == PlanStatus.CANCELLED:
+        status = "cancelled"
+    else:
+        status = "succeeded"
     repo.finish_job(job_id, status=status)
 
 

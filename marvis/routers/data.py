@@ -74,9 +74,19 @@ async def _request_json_or_empty(request: Request) -> dict:
 
 def _join_async_requested(payload: dict) -> bool:
     return any(
-        bool(payload.get(key))
+        _coerce_bool(payload.get(key))
         for key in ("async", "async_execute", "background")
     )
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
 
 
 def _coerce_key_pairs(raw_pairs: list, *, anchor, feature) -> list[KeyPair]:

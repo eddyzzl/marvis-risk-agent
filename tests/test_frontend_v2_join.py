@@ -494,6 +494,53 @@ def test_join_handlers_surface_async_job_poll_errors():
     )
 
 
+def test_join_handlers_ignore_latest_job_from_different_async_execute():
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { pollJoinExecution } from "./marvis/static/js/v2/join_review.js";
+
+        await assert.rejects(
+          pollJoinExecution({
+            accepted: { job_id: "job-original" },
+            joinId: "join-1",
+            taskId: "task-1",
+            maxAttempts: 1,
+            refreshJoin: async () => ({ id: "join-1", status: "draft" }),
+            getLatestTaskJob: async () => ({
+              job: {
+                id: "job-retry",
+                status: "failed",
+                error_value: "newer retry failed",
+              },
+            }),
+            sleepFn: async () => {},
+          }),
+          /后台拼接任务已结束/,
+        );
+
+        await assert.rejects(
+          pollJoinExecution({
+            accepted: { job_id: "job-original" },
+            joinId: "join-1",
+            taskId: "task-1",
+            maxAttempts: 1,
+            refreshJoin: async () => ({ id: "join-1", status: "draft" }),
+            getLatestTaskJob: async () => ({
+              job: {
+                id: "job-original",
+                status: "failed",
+                error_value: "accepted job failed",
+              },
+            }),
+            sleepFn: async () => {},
+          }),
+          /accepted job failed/,
+        );
+        """
+    )
+
+
 def test_join_handlers_surface_execute_api_errors_without_bubbling():
     run_node(
         """

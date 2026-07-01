@@ -293,7 +293,8 @@ async function defaultRefreshJoin(joinId) {
   return joinPlan;
 }
 
-async function defaultPollJoinExecution({
+export async function pollJoinExecution({
+  accepted = null,
   joinId,
   taskId = "",
   refreshJoin = defaultRefreshJoin,
@@ -307,6 +308,7 @@ async function defaultPollJoinExecution({
   }
   const attempts = Math.max(1, Number(maxAttempts) || 1);
   const resolvedTaskId = String(taskId || "").trim();
+  const acceptedJobId = String(accepted?.job_id || "").trim();
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const joinPlan = await refreshJoin(joinId);
     if (joinExecutionComplete(joinPlan)) {
@@ -317,6 +319,13 @@ async function defaultPollJoinExecution({
     }
     const payload = await getLatestTaskJob(resolvedTaskId, "join");
     const job = payload?.job || null;
+    if (acceptedJobId && job?.id && String(job.id) !== acceptedJobId) {
+      if (attempt < attempts - 1) {
+        await sleepFn(intervalMs);
+        continue;
+      }
+      break;
+    }
     if (job?.status === "failed") {
       throw new Error(job.error_value || job.error_name || "后台拼接失败。");
     }
@@ -341,7 +350,7 @@ export function attachJoinHandlers(root, taskId = "", deps = {}) {
     listDatasets: listDatasetsApi,
     proposeJoin: proposeJoinApi,
     getCurrentJoin,
-    pollJoinExecution: defaultPollJoinExecution,
+    pollJoinExecution,
     refreshJoin: defaultRefreshJoin,
     setCurrentJoin,
     setDatasets,

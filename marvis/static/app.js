@@ -361,6 +361,8 @@ function taskBusyAction(taskId = selectedTaskId) {
 function taskServerBusyAction(task = selectedTask) {
   const kind = task?.active_job_kind || "";
   if (kind === "agent") return "agent";
+  if (kind === "plan") return "agent";
+  if (kind === "join") return "join";
   if (kind === "pipeline" || kind === "notebook") return "notebook";
   if (kind === "metrics") return "metrics";
   if (kind === "report") return "report";
@@ -1347,6 +1349,8 @@ function actionFailureStatusTitle(actionId) {
   switch (actionId) {
     case "agent":
       return "Agent 执行失败。";
+    case "join":
+      return "数据拼接失败。";
     case "scan":
       return "材料识别失败。";
     case "notebook":
@@ -1383,6 +1387,8 @@ function actionCancelledStatusTitle(actionId) {
 function taskActionStatusSnapshot(task = selectedTask) {
   if (!task) return { message: "", kind: "info" };
   if (taskStopped(task)) return { message: "已停止当前动作。", kind: "stopped" };
+  if (task.active_job_kind === "join") return { message: "数据拼接进行中。", kind: "busy" };
+  if (task.active_job_kind === "plan") return { message: "计划执行进行中。", kind: "busy" };
   switch (task.status) {
     case "created":
       return { message: "任务已创建。", kind: "info" };

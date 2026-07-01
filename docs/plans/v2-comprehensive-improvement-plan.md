@@ -13,7 +13,7 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - Agent loop, AUTO decisions, gates, evidence, retry contracts.
   - Modeling lifecycle, PMML/PKL/report/handoff, sample weights.
   - Frontend workspace, visual system, user experience.
-- Latest known full-suite evidence from the preceding runtime hardening pass: `1752 passed, 2 warnings`. This must be rerun after the implementation pass because the current working tree is dirty.
+- Latest known full-suite evidence must come from the final committed tree before merge/release; earlier dirty-worktree caveats are superseded by the topic commits and verification entries below.
 - 2026-06-29 follow-up review evidence:
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check`.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_data_join_api.py tests/test_artifacts_transactional.py tests/test_orch_db.py tests/test_orch_executor.py tests/test_modeling_artifact.py tests/test_modeling_pack.py tests/test_frontend_screen_table.py -q`: `127 passed`.
@@ -300,6 +300,9 @@ This document consolidates the remaining V2 work, previous review findings, and 
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py tests/test_data_join_api.py tests/test_data_ops_pack.py tests/test_join_engine.py -q`: `37 passed` after confirming direct data/join APIs, data_ops pack, and the join engine still pass with the frontend async-default contract.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py::test_get_latest_job_returns_filtered_status_and_error tests/test_api_v2.py::test_latest_task_job_endpoint_exposes_job_error_without_traceback tests/test_frontend_v2_api_state.py tests/test_frontend_v2_join.py -q`: `25 passed` after adding the latest task-job status endpoint and surfacing JOIN background job failures in the V2 join review component.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_api_v2.py -q`: `107 passed` after confirming the latest-job API preserves existing task/DB contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1980 passed, 4 skipped, 2 warnings` in `545.56s` before the final small-risk pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_join.py tests/test_frontend_static_v2.py::test_busy_state_is_scoped_to_selected_task_for_parallel_tasks tests/test_frontend_static_v2.py::test_delete_task_blocks_active_jobs_instead_of_stale_running_status tests/test_data_api.py::test_join_api_execute_coerces_async_flags tests/test_orch_api.py::test_plan_run_records_cancelled_job_when_executor_returns_cancelled -q`: `23 passed` after binding JOIN polling to the accepted job id, adding plan/join busy states, coercing async flags, and mapping cancelled plan jobs to cancelled.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py tests/test_orch_api.py tests/test_frontend_v2_join.py tests/test_frontend_v2_api_state.py tests/test_frontend_static_v2.py -q`: `285 passed` after the same final small-risk pass.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after extracting `PlanMessageComposer` for plan overview, gate, done, review, and failure-envelope messages.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO/modeling edge-fixture update.
   - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO high-risk confirm guard update.
@@ -454,6 +457,7 @@ The follow-up review confirmed several earlier concerns were still real and fixe
   - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `confirm`/`adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review/production deployment risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
   - The modeling setup gate now renders a real setup panel rather than only a weight picker: it stays visible without weight candidates, shows target type, selected algorithms, primary tuning recipe, candidate feature count, tuning trials, metric policy, algorithm/PMML support, split/OOT counts and warnings, feeds the same context into AUTO prompts, and its renderer plus setup-adjust controller are extracted to `static/js/v2/modeling_setup_panel.js`. Target type, algorithms, tuning trials, and sample weight can now be adjusted through structured controls; structural changes require a human override reason and rerun the spec plus downstream screening. Family-mismatch recipes such as `lgb_regressor`/`lgb_multiclass` are selectable when changing target type, and invalid target/algorithm combinations are blocked before submission.
   - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, stability/feature-count/calibration/delivery business signals, model-report readiness/section coverage, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
+  - Final small-risk pass: `join_review.js` now ignores latest JOIN jobs whose id does not match the accepted `job_id`, the shell recognizes `active_job_kind` values `join` and `plan`, JOIN async flags coerce string booleans such as `"false"` correctly, and plan jobs returned as `PlanStatus.CANCELLED` are recorded as cancelled rather than succeeded.
 
 Items confirmed still not complete and therefore still part of the plan:
 
@@ -492,10 +496,10 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Implemented: `scripts/check` plus `.github/workflows/ci.yml` now run `git diff --check`, ruff, `node --check`, and pytest; `docs/versioning.md` documents the local command.
    - Remaining acceptance: CI must pass on the final committed branch after all remaining refactors.
 
-2. Current branch has many uncommitted changes.
-   - Impact: final review and release risk are hard to reason about unless changes are staged by topic.
-   - Fix: before merge/release, group changes into explicit commits: runtime/audit, modeling, frontend, docs/CI.
-   - Acceptance: `git status --short` is clean after commit, then smoke tests are rerun from the committed tree.
+2. Keep the branch reviewable with topic commits.
+   - Current state: tracked changes are being grouped into explicit commits; unrelated local untracked files remain outside this plan.
+   - Impact: final review and release risk stay manageable only if each remaining fix is committed and verified independently.
+   - Acceptance: `git status --short --untracked-files=no` is clean, then smoke/full checks are rerun from the committed tree.
 
 ### P1: Agent Intelligence And Gate Contracts
 
@@ -788,7 +792,7 @@ Current merge stance: this branch is not "V2 complete" yet. It can become an int
    - Fix:
      - Define job policy: quick synchronous route vs background job vs subprocess sandbox.
      - Apply to join, validation stages, modeling train/tune/report, notebook/plugin execution.
-   - Current update: `/api/joins/{join_plan_id}/execute` still supports synchronous execution when explicitly requested, and the V2 frontend join wrapper now defaults to background execution via `async_execute: true`. The async path creates a task job with `kind="join"`, rejects existing active jobs, records succeeded/failed job state from a fresh data runtime, and `join_review.js` polls the accepted `job_id` path by refreshing the join plan and reading `/api/tasks/{task_id}/jobs/latest?kind=join` for failure details without exposing traceback.
+   - Current update: `/api/joins/{join_plan_id}/execute` still supports synchronous execution when explicitly requested, and the V2 frontend join wrapper now defaults to background execution via `async_execute: true`. The async path creates a task job with `kind="join"`, rejects existing active jobs, records succeeded/failed job state from a fresh data runtime, and `join_review.js` polls the accepted `job_id` path by refreshing the join plan and reading `/api/tasks/{task_id}/jobs/latest?kind=join` for failure details without exposing traceback. String flags such as `"false"` no longer accidentally opt into async execution.
    - Remaining: wire the main app workspace to the V2 join component and standardize the same first-class task/job status UX across other long-running task kinds before treating join execution as fully productized background work.
 
 3. Add performance regression tests.

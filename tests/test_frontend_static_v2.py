@@ -3120,6 +3120,8 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     server_busy_end = app_js.index("function selectedTaskIsBusy", server_busy_start)
     server_busy = app_js[server_busy_start:server_busy_end]
     assert server_busy.index('kind === "agent"') < server_busy.index("taskStopped(task)")
+    assert 'kind === "plan"' in server_busy
+    assert 'kind === "join"' in server_busy
 
     renderer_start = app_js.index("function stepActionButtonHtml")
     renderer_end = app_js.index("function notebookStepTone", renderer_start)
@@ -3133,6 +3135,14 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     downloads_ready = app_js[downloads_ready_start:downloads_ready_end]
     assert "const selectedBusyAction = taskBusyAction();" in downloads_ready
     assert "selectedTask?.report_available === true" in downloads_ready
+
+    status_start = app_js.index("function taskActionStatusSnapshot")
+    status_end = app_js.index("function clearStatus", status_start)
+    status_snapshot = app_js[status_start:status_end]
+    assert 'task.active_job_kind === "join"' in status_snapshot
+    assert "数据拼接进行中。" in status_snapshot
+    assert 'task.active_job_kind === "plan"' in status_snapshot
+    assert "计划执行进行中。" in status_snapshot
 
     action_start = app_js.index("async function runAction")
     action_end = app_js.index("function handleTaskListKeydown", action_start)

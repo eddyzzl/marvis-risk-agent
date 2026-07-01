@@ -2,6 +2,7 @@ import hashlib
 import json
 
 import pandas as pd
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -66,6 +67,38 @@ def _register_csv(settings, tmp_path, task_id: str, name: str, frame: pd.DataFra
     path = tmp_path / f"{name}.csv"
     frame.to_csv(path, index=False)
     return _registry(settings).register_from_upload(task_id, path, role=role)
+
+
+def _confirmed_join_plan(client, settings, tmp_path):
+    task = _create_task(settings)
+    anchor = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        f"anchor_{task.id}",
+        pd.DataFrame({"customer_id": [1, 2]}),
+        "sample",
+    )
+    feature = _register_csv(
+        settings,
+        tmp_path,
+        task.id,
+        f"feature_{task.id}",
+        pd.DataFrame({"customer_id": [1, 2], "balance": [10, 20]}),
+        "feature",
+    )
+    plan = client.post(
+        f"/api/tasks/{task.id}/joins/propose",
+        json={
+            "anchor_dataset_id": anchor.id,
+            "feature_dataset_ids": [feature.id],
+        },
+    ).json()
+    client.post(
+        f"/api/joins/{plan['join_plan_id']}/confirm",
+        json={"feature_id": feature.id, "confirmed": True},
+    )
+    return task, plan
 
 
 def test_data_routes_are_served_from_dedicated_router():
@@ -418,6 +451,34 @@ def test_join_api_execute_supports_explicit_async_job(tmp_path):
     loaded = DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"])
     assert loaded.status == "executed"
     assert loaded.result_dataset_id
+    assert TaskRepository(settings.db_path).get_active_job_kind(task.id) is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status_code"),
+    [
+        ({"async_execute": False}, 200),
+        ({"async_execute": "false"}, 200),
+        ({"async_execute": "0"}, 200),
+        ({"async_execute": True}, 202),
+        ({"async_execute": "true"}, 202),
+        ({"async_execute": "1"}, 202),
+    ],
+)
+def test_join_api_execute_coerces_async_flags(tmp_path, payload, expected_status_code):
+    client, settings = _client(tmp_path)
+    task, plan = _confirmed_join_plan(client, settings, tmp_path)
+
+    execute = client.post(f"/api/joins/{plan['join_plan_id']}/execute", json=payload)
+
+    assert execute.status_code == expected_status_code
+    body = execute.json()
+    if expected_status_code == 202:
+        assert body["status"] == "accepted"
+        assert body["job_id"]
+    else:
+        assert body["result_dataset_id"]
+    assert DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status == "executed"
     assert TaskRepository(settings.db_path).get_active_job_kind(task.id) is None
 
 

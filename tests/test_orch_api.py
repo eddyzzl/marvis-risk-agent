@@ -284,6 +284,29 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     assert cancelled.json()["plan"]["status"] == "cancelled"
 
 
+def test_plan_run_records_cancelled_job_when_executor_returns_cancelled(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=task_id))
+
+    class CancelledExecutor:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, plan_id):
+            self.calls.append(plan_id)
+            return SimpleNamespace(status=PlanStatus.CANCELLED)
+
+    client.app.state.plan_executor = CancelledExecutor()
+
+    response = client.post("/api/plans/plan-1/run")
+
+    assert response.status_code == 202
+    assert client.app.state.plan_executor.calls == ["plan-1"]
+    assert _job_statuses(repo.db_path) == ["cancelled"]
+
+
 def test_plan_step_confirm_endpoint_rejects_non_awaiting_step(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo
