@@ -1,6 +1,7 @@
 import pytest
 
 import marvis.db as db_module
+import marvis.repositories.tasks as task_repo_module
 from marvis.db import TaskRepository, _ensure_column, connect, init_db
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
@@ -31,6 +32,10 @@ def _task_create(model_name: str = "模型", **overrides) -> TaskCreate:
     }
     values.update(overrides)
     return TaskCreate(**values)
+
+
+def test_task_repository_is_reexported_from_db_for_compatibility():
+    assert TaskRepository is task_repo_module.TaskRepository
 
 
 def test_create_and_get_task_round_trips_v2_fields(tmp_path):
@@ -251,7 +256,7 @@ def test_update_report_values_with_audit_rolls_back_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.update_report_values_with_audit(
@@ -366,7 +371,7 @@ def test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails(
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit down")
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_audit)
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         repo.update_agent_report_conclusions_with_audit(

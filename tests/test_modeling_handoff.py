@@ -17,6 +17,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository, PluginRepository, TaskRepository, init_db
 import marvis.db as db_module
+import marvis.repositories.tasks as task_repo_module
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
 from marvis.notebook_contract import precheck_notebook_contract
 from marvis.packs.modeling.artifact import save_model
@@ -187,14 +188,14 @@ def test_handoff_to_validation_rolls_back_task_status_and_materials_when_audit_f
     monkeypatch,
 ):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = task_repo_module._write_audit_row
 
     def fail_handoff_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.validation_handoff.create":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_handoff_audit)
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_handoff_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         handoff_to_validation(
@@ -282,14 +283,14 @@ def test_create_challenger_backtest_task_rolls_back_materials_when_audit_fails(
     monkeypatch,
 ):
     settings, store, source_task, dataset, artifact = _seed_experiment(tmp_path)
-    original_write_audit = db_module._write_audit_row
+    original_write_audit = task_repo_module._write_audit_row
 
     def fail_challenger_audit(conn, *args, **kwargs):
         if kwargs.get("kind") == "modeling.challenger_backtest.create":
             raise RuntimeError("audit down")
         return original_write_audit(conn, *args, **kwargs)
 
-    monkeypatch.setattr(db_module, "_write_audit_row", fail_challenger_audit)
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_challenger_audit)
 
     with pytest.raises(RuntimeError, match="audit down"):
         create_challenger_backtest_task(
