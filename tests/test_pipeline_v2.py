@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import nbformat
 import pandas as pd
+import pytest
 from docx import Document
 
 from marvis.agent_memory.store import AgentMemoryStore
@@ -1335,6 +1336,88 @@ def test_report_stage_cancel_during_word_write_does_not_promote_partial_docx(
     assert final.status_message == "report cancelled"
     assert report_path.read_bytes() == b"previous-docx"
     assert not (outputs_dir / ".validation_report.docx.tmp").exists()
+
+
+def test_report_stage_status_failure_rolls_back_promoted_docx_and_images(
+    tmp_path: Path,
+    monkeypatch,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "marvis.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, message="source scanned")
+    repo.update_status(task.id, TaskStatus.RUNNING, message="notebook queued")
+    repo.update_status(task.id, TaskStatus.EXECUTED, message="notebook executed")
+    repo.update_status(task.id, TaskStatus.COMPUTING_METRICS, message="metrics queued")
+    repo.update_status(
+        task.id,
+        TaskStatus.WRITING_ARTIFACTS,
+        message="metrics and excel generated",
+    )
+    task_dir = workspace / "tasks" / task.id
+    outputs_dir = task_dir / "outputs"
+    images_dir = task_dir / "images"
+    outputs_dir.mkdir(parents=True)
+    images_dir.mkdir(parents=True)
+    report_path = outputs_dir / "validation_report.docx"
+    report_path.write_bytes(b"previous-docx")
+    (images_dir / "old.png").write_bytes(b"old-image")
+
+    monkeypatch.setattr(
+        "marvis.pipeline._load_validation_results",
+        lambda _outputs_dir: SimpleNamespace(
+            reproducibility=SimpleNamespace(
+                summary=SimpleNamespace(status=pipeline_module.ConsistencyStatus.PASS)
+            )
+        ),
+    )
+
+    def fake_word_writer(*_args, output_path, image_output_dir, **_kwargs):
+        Path(output_path).write_bytes(b"new-docx")
+        Path(image_output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(image_output_dir) / "new.png").write_bytes(b"new-image")
+        return SimpleNamespace(unresolved_placeholders=[])
+
+    monkeypatch.setattr("marvis.pipeline.write_validation_word", fake_word_writer)
+    original_update = TaskRepository.update_status_on_connection
+
+    def failing_status_update(self, conn, *args, **kwargs):
+        original_update(self, conn, *args, **kwargs)
+        raise RuntimeError("simulated status commit failure")
+
+    monkeypatch.setattr(TaskRepository, "update_status_on_connection", failing_status_update)
+
+    with pytest.raises(RuntimeError, match="simulated status commit failure"):
+        run_report_stage(
+            task_id=task.id,
+            settings=PipelineSettings(
+                workspace=workspace,
+                db_path=db_path,
+                report_template_path=tmp_path / "template.docx",
+            ),
+        )
+
+    final = repo.get_task(task.id)
+    assert final.status == TaskStatus.WRITING_ARTIFACTS
+    assert final.status_message == "metrics and excel generated"
+    assert report_path.read_bytes() == b"previous-docx"
+    assert (images_dir / "old.png").read_bytes() == b"old-image"
+    assert not (images_dir / "new.png").exists()
+    assert not (outputs_dir / ".validation_report.docx.tmp").exists()
+    assert not (outputs_dir / ".staging").exists()
+    assert not (task_dir / ".staging").exists()
 
 
 def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(

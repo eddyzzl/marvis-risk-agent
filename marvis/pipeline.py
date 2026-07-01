@@ -15,6 +15,7 @@ from marvis.agent_memory.extractors import (
     extract_validation_pitfall,
 )
 from marvis.agent_memory.store import AgentMemoryStore
+from marvis.artifacts import ArtifactUnitOfWork
 from marvis.db import TaskRepository
 from marvis.memory_policy import load_memory_policy
 from marvis.domain import (
@@ -440,6 +441,7 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
     temp_report_path = outputs_dir / ".validation_report.docx.tmp"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     cancellation_token = register_notebook_cancellation(task_id)
+    report_uow: ArtifactUnitOfWork | None = None
     try:
         cancellation_token.raise_if_cancelled()
         if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
@@ -447,31 +449,39 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
                 f"word output requires generated metrics; current status is {task.status.value}"
             )
         _unlink_if_exists(temp_report_path)
-        _remove_dir_if_exists(images_dir)
+        report_uow = ArtifactUnitOfWork()
+        staged_report = report_uow.stage_file(outputs_dir, report_path.name)
+        staged_images = report_uow.stage_directory(task_dir, images_dir.name)
         results = _load_validation_results(outputs_dir)
         report_values, _ = repo.get_report_values(task_id)
         word_result = write_validation_word(
             results,
             template_path=settings.report_template_path,
-            output_path=temp_report_path,
-            image_output_dir=images_dir,
+            output_path=staged_report.path,
+            image_output_dir=staged_images.path,
             report_values=report_values,
         )
         cancellation_token.raise_if_cancelled()
-        temp_report_path.replace(report_path)
         if word_result.unresolved_placeholders:
             if task.status != TaskStatus.REVIEW_REQUIRED:
                 try:
-                    repo.update_status(
-                        task_id,
-                        TaskStatus.REVIEW_REQUIRED,
-                        message="报告已生成，需人工复核",
-                        expected=TaskStatus.WRITING_ARTIFACTS,
+                    report_uow.finalize_with_connection(
+                        repo.transaction,
+                        lambda conn: repo.update_status_on_connection(
+                            conn,
+                            task_id,
+                            TaskStatus.REVIEW_REQUIRED,
+                            message="报告已生成，需人工复核",
+                            expected=TaskStatus.WRITING_ARTIFACTS,
+                            begin_immediate=True,
+                        ),
                     )
                 except IllegalTransition:
                     # Another concurrent report request already advanced the task;
                     # this run lost the race, so leave the winner's result intact.
                     return
+            else:
+                report_uow.finalize(lambda: None)
             return
         terminal_status = (
             TaskStatus.REVIEW_REQUIRED
@@ -479,25 +489,32 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
             else TaskStatus.SUCCEEDED
         )
         try:
-            repo.update_status(
-                task_id,
-                terminal_status,
-                message=(
-                    "验证已完成，需人工复核报告"
-                    if terminal_status is TaskStatus.REVIEW_REQUIRED
-                    else "pipeline succeeded"
+            report_uow.finalize_with_connection(
+                repo.transaction,
+                lambda conn: repo.update_status_on_connection(
+                    conn,
+                    task_id,
+                    terminal_status,
+                    message=(
+                        "验证已完成，需人工复核报告"
+                        if terminal_status is TaskStatus.REVIEW_REQUIRED
+                        else "pipeline succeeded"
+                    ),
+                    expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
+                    begin_immediate=True,
                 ),
-                expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
             )
         except IllegalTransition:
             # Lost a concurrent report race; the other worker already finalized
             # the task. Do not fall through to _mark_failed and clobber it.
             return
     except NotebookCancelled:
+        _rollback_report_uow(report_uow)
         _unlink_if_exists(temp_report_path)
         _mark_cancelled(repo, task_id, TaskStatus.REVIEW_REQUIRED, "report cancelled")
         return
     except PipelineError as exc:
+        _rollback_report_uow(report_uow)
         _unlink_if_exists(temp_report_path)
         message = _stage_failure_message(REPORT_STAGE_FAILURE_PREFIX, str(exc))
         _mark_failed(repo, task_id, message)
@@ -509,6 +526,7 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
         )
         raise
     except Exception as exc:
+        _rollback_report_uow(report_uow)
         _unlink_if_exists(temp_report_path)
         message = _stage_failure_message(
             REPORT_STAGE_FAILURE_PREFIX,
@@ -524,6 +542,15 @@ def run_report_stage(*, task_id: str, settings: PipelineSettings) -> None:
         raise
     finally:
         unregister_notebook_cancellation(task_id, cancellation_token)
+
+
+def _rollback_report_uow(uow: ArtifactUnitOfWork | None) -> None:
+    if uow is None:
+        return
+    try:
+        uow.rollback()
+    except Exception:
+        pass
 
 
 def _write_reproducibility_result_in_session(

@@ -246,3 +246,26 @@ def test_artifact_unit_of_work_rolls_back_promoted_file_when_callback_fails(tmp_
     assert not artifact.path.exists()
     assert not artifact.backup_path.exists()
     assert not (root / ".staging").exists()
+
+
+def test_artifact_unit_of_work_rollback_is_idempotent_after_finalize_failure(tmp_path: Path):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    existing = root / "joined.parquet"
+    existing.write_bytes(b"old")
+    uow = ArtifactUnitOfWork()
+    artifact = uow.stage_file(root, "joined.parquet")
+    artifact.path.write_bytes(b"new")
+
+    def fail_db_write():
+        raise RuntimeError("audit failed")
+
+    with pytest.raises(RuntimeError, match="audit failed"):
+        uow.finalize(fail_db_write)
+
+    uow.rollback()
+
+    assert existing.read_bytes() == b"old"
+    assert not artifact.path.exists()
+    assert not artifact.backup_path.exists()
+    assert not (root / ".staging").exists()

@@ -156,45 +156,67 @@ class TaskRepository:
         expected: TaskStatus | set[TaskStatus] | None = None,
         reason_code: str = "",
     ) -> None:
-        expected_set = _expected_status_set(expected)
         with connect(self.db_path) as conn:
+            self.update_status_on_connection(
+                conn,
+                task_id,
+                status,
+                message,
+                expected=expected,
+                reason_code=reason_code,
+                begin_immediate=True,
+            )
+
+    def update_status_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        status: TaskStatus,
+        message: str,
+        *,
+        expected: TaskStatus | set[TaskStatus] | None = None,
+        reason_code: str = "",
+        begin_immediate: bool = False,
+    ) -> None:
+        expected_set = _expected_status_set(expected)
+        if begin_immediate:
             conn.execute("BEGIN IMMEDIATE")
-            current_row = conn.execute(
+        current_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if current_row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        current = TaskStatus(current_row["status"])
+        if current not in expected_set:
+            raise IllegalTransition(current, status)
+        assert_transition(current, status)
+        placeholders = ",".join(["?"] * len(expected_set))
+        cursor = conn.execute(
+            f"""
+            UPDATE tasks
+               SET status = ?,
+                   status_message = ?,
+                   status_reason_code = ?,
+                   updated_at = ?
+             WHERE id = ?
+               AND status IN ({placeholders})
+            """,
+            (
+                status.value,
+                message,
+                reason_code,
+                _now(),
+                task_id,
+                *(allowed.value for allowed in expected_set),
+            ),
+        )
+        if cursor.rowcount == 0:
+            latest = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
-            if current_row is None:
+            if latest is None:
                 raise KeyError(f"Task not found: {task_id}")
-            current = TaskStatus(current_row["status"])
-            if current not in expected_set:
-                raise IllegalTransition(current, status)
-            assert_transition(current, status)
-            placeholders = ",".join(["?"] * len(expected_set))
-            cursor = conn.execute(
-                f"""
-                UPDATE tasks
-                   SET status = ?,
-                       status_message = ?,
-                       status_reason_code = ?,
-                       updated_at = ?
-                 WHERE id = ?
-                   AND status IN ({placeholders})
-                """,
-                (
-                    status.value,
-                    message,
-                    reason_code,
-                    _now(),
-                    task_id,
-                    *(allowed.value for allowed in expected_set),
-                ),
-            )
-            if cursor.rowcount == 0:
-                latest = conn.execute(
-                    "SELECT status FROM tasks WHERE id = ?", (task_id,)
-                ).fetchone()
-                if latest is None:
-                    raise KeyError(f"Task not found: {task_id}")
-                raise IllegalTransition(TaskStatus(latest["status"]), status)
+            raise IllegalTransition(TaskStatus(latest["status"]), status)
 
     def update_status_message(
         self,

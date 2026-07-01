@@ -245,6 +245,8 @@ class ArtifactUnitOfWork:
         self._closed = True
 
     def rollback(self) -> None:
+        if self._closed:
+            return
         for item in reversed(self._items):
             item.rollback()
         self._closed = True
