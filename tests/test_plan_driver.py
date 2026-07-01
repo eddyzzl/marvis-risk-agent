@@ -19,6 +19,7 @@ from marvis.agent.plan_driver import (
     is_confirm,
     render_tool_output,
 )
+from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.db import PlanRepository, init_db
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.executor import PlanExecutor
@@ -1121,10 +1122,10 @@ def test_driver_sample_weight_adjust_rejects_unknown_candidate_without_reset(tmp
     assert loaded_spec.inputs["sample_weight_col"] == ""
 
 
-def test_plan_overview_message_carries_gate_envelope(tmp_path):
-    driver, _repo = _driver(tmp_path)
+def test_plan_overview_message_carries_gate_envelope():
+    composer = PlanMessageComposer(load_output=lambda _step_id: None)
 
-    msg = driver._plan_overview_message(_gated_modeling_plan())
+    msg = composer.plan_overview_message(_gated_modeling_plan())
 
     assert msg.metadata["gate_envelope"]["kind"] == "plan_overview"
     assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "replan", "clarify", "halt"]

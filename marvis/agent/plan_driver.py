@@ -20,14 +20,10 @@ from __future__ import annotations
 import re
 
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
-from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
-from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
-from marvis.agent.gate_payloads import build_model_delivery_payload
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
-from marvis.agent.plan_utils import downstream_step_ids as _downstream_step_ids
-from marvis.agent.plan_utils import find_step as _find_step
+from marvis.agent.plan_message_composer import PlanMessageComposer
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
@@ -83,12 +79,16 @@ class PlanDriver:
         # Optional LLM for agent-mode free-text gate instructions (adjust / replan).
         # None in manual mode — non-confirm replies then show the canned hint.
         self._llm = llm_client
+        self._composer = PlanMessageComposer(
+            load_output=self._safe_output,
+            latest_failed_step_run_error_kind=self._latest_failed_step_run_error_kind,
+        )
         self._gate_execution = GateExecutionAdapter(
             self._repo,
             self._executor,
             safe_output=self._safe_output,
             run_and_handle=self._run_and_handle,
-            plan_overview_message=self._plan_overview_message,
+            plan_overview_message=self._composer.plan_overview_message,
         )
 
     # -- entry points ---------------------------------------------------------
@@ -103,7 +103,7 @@ class PlanDriver:
         plan = self.build_plan(
             task_id=task_id, template_id=template_id, slots=slots, autonomy=autonomy, tier=tier
         )
-        return DriverTurn(plan.id, plan.status.value, [self._plan_overview_message(plan)])
+        return DriverTurn(plan.id, plan.status.value, [self._composer.plan_overview_message(plan)])
 
     def resume(
         self,
@@ -196,16 +196,17 @@ class PlanDriver:
             return self._gate_execution.apply_adjust(plan, gate, route["params"], run_seq)
         if action == "replan":
             return self._gate_execution.apply_replan(plan, gate, user_text, run_seq)
-        return self._instruction_message(
-            plan, gate, run_seq,
-            route.get("reason") or "请明确指令:回复「确认」继续,或说明要调整的参数。",
-        )
-
-    def _instruction_message(self, plan, gate, run_seq, text) -> DriverTurn:
         return DriverTurn(
             plan.id,
             plan.status.value,
-            [DriverMessage("gate", text, {"plan_id": plan.id, "step_id": gate.id if gate else None, "run_seq": run_seq})],
+            [
+                self._composer.instruction_message(
+                    plan,
+                    gate,
+                    run_seq=run_seq,
+                    text=route.get("reason") or "请明确指令:回复「确认」继续,或说明要调整的参数。",
+                )
+            ],
         )
 
     def _adjust_placeholder(self, plan_id, gate, run_seq) -> DriverTurn:
@@ -214,13 +215,7 @@ class PlanDriver:
         return DriverTurn(
             plan_id,
             plan.status.value,
-            [
-                DriverMessage(
-                    "gate",
-                    "收到。确认当前结果请回复「确认」继续。",
-                    {"plan_id": plan_id, "step_id": gate.id if gate else None, "run_seq": run_seq},
-                )
-            ],
+            [self._composer.manual_adjust_placeholder_message(plan, gate, run_seq=run_seq)],
         )
 
     # -- plan build -----------------------------------------------------------
@@ -247,12 +242,12 @@ class PlanDriver:
         status = result.status
         if status == PlanStatus.AWAITING_CONFIRM:
             gate = self._awaiting_step(plan)
-            return DriverTurn(plan_id, status.value, [self._compose_gate_message(plan, gate, run_seq=run_seq)])
+            return DriverTurn(plan_id, status.value, [self._composer.gate_message(plan, gate, run_seq=run_seq)])
         if status == PlanStatus.DONE:
-            return DriverTurn(plan_id, status.value, [self._compose_done_message(plan, run_seq=run_seq)])
+            return DriverTurn(plan_id, status.value, [self._composer.done_message(plan, run_seq=run_seq)])
         if status == PlanStatus.REVIEW:
-            return DriverTurn(plan_id, status.value, [self._compose_review_message(plan, run_seq=run_seq)])
-        return DriverTurn(plan_id, status.value, [self._compose_failed_message(plan, run_seq=run_seq)])
+            return DriverTurn(plan_id, status.value, [self._composer.review_message(plan, run_seq=run_seq)])
+        return DriverTurn(plan_id, status.value, [self._composer.failed_message(plan, run_seq=run_seq)])
 
     @staticmethod
     def _awaiting_step(plan: Plan) -> PlanStep | None:
@@ -261,133 +256,17 @@ class PlanDriver:
                 return step
         return None
 
-    # -- message composition --------------------------------------------------
-    def _plan_overview_message(self, plan: Plan) -> DriverMessage:
-        order: list[str] = []
-        by_phase: dict[str, list[str]] = {}
-        for step in plan.steps:
-            phase = step.phase or "步骤"
-            if phase not in by_phase:
-                by_phase[phase] = []
-                order.append(phase)
-            by_phase[phase].append(step.title)
-        lines = ["我已生成执行计划,会在每个关键节点停下与你确认:"]
-        for phase in order:
-            lines.append(f"**{phase}**:{' → '.join(by_phase[phase])}")
-        lines.append("确认「开始」后按计划执行。")
-        meta = {"plan_id": plan.id, "kind": "plan_overview"}
-        meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
-        return DriverMessage(
-            "plan_overview", "\n".join(lines), meta
-        )
-
-    def _compose_gate_message(self, plan: Plan, gate: PlanStep | None, *, run_seq) -> DriverMessage:
-        rendered = render_gate_dependencies(plan, gate, self._safe_output)
-        parts = rendered.parts
-        if not parts:
-            parts.append("上一步已完成。")
-        parts.append("确认请回复「确认」继续;要调整可直接说明。")
-        meta = {
-            "plan_id": plan.id,
-            "step_id": gate.id if gate else None,
-            "run_seq": run_seq,
-            "tables": rendered.tables,
-            "kind": "gate",  # marks a needs-confirmation gate (manual-mode confirm control)
-        }
-        if rendered.output_refs:
-            meta["output_refs"] = rendered.output_refs
-        if rendered.screen is not None:
-            meta["screen"] = rendered.screen
-        if rendered.dedup is not None:
-            meta["dedup"] = rendered.dedup
-        if rendered.modeling_setup is not None:
-            meta["modeling_setup"] = rendered.modeling_setup
-        if rendered.model_delivery is not None:
-            meta["model_delivery"] = rendered.model_delivery
-        meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
-        return DriverMessage("gate", "\n\n".join(parts), meta)
-
-    def _compose_done_message(self, plan: Plan, *, run_seq) -> DriverMessage:
-        terminal = max(
-            (s for s in plan.steps if s.status == StepStatus.DONE and s.output_ref),
-            key=lambda s: s.index,
-            default=None,
-        )
-        parts = ["✅ 计划已全部完成。"]
-        tables: list[dict] = []
-        output = None
-        if terminal is not None:
-            output = self._safe_output(terminal.id)
-            if output is not None:
-                text, tables = render_tool_output(terminal.tool_ref.tool, output)
-                if text:
-                    parts.append(text)
-        meta = {"plan_id": plan.id, "run_seq": run_seq, "tables": tables}
-        if terminal is not None and output is not None:
-            report_output, report_step = self._report_dependency_output(plan, terminal)
-            delivery = build_model_delivery_payload(
-                output,
-                terminal,
-                report_output=report_output,
-                report_step=report_step,
-            )
-            if delivery is not None:
-                meta["model_delivery"] = delivery
-        return DriverMessage("done", "\n\n".join(parts), meta)
-
-    def _report_dependency_output(self, plan: Plan, step: PlanStep) -> tuple[dict | None, PlanStep | None]:
-        for dep_id in step.depends_on or []:
-            dep = _find_step(plan, dep_id)
-            if dep is None or dep.tool_ref.tool != "generate_model_report":
-                continue
-            output = self._safe_output(dep.id)
-            return (output if isinstance(output, dict) else None), dep
-        return None, None
-
-    def _compose_review_message(self, plan: Plan, *, run_seq) -> DriverMessage:
-        return DriverMessage(
-            "review",
-            "计划已执行完,但结果需要你复核一下再定论。",
-            {"plan_id": plan.id, "run_seq": run_seq},
-        )
-
-    def _compose_failed_message(self, plan: Plan, *, run_seq) -> DriverMessage:
-        failed = next((s for s in plan.steps if s.status == StepStatus.FAILED), None)
-        detail = f"「{failed.title}」失败:{failed.error}" if failed and failed.error else "执行中断。"
-        meta = {"plan_id": plan.id, "step_id": failed.id if failed else None, "run_seq": run_seq}
-        reset_steps: tuple[str, ...] = ()
-        error_kind = "execution"
-        if failed is not None:
-            downstream = _downstream_step_ids(plan, [failed.id])
-            reset_steps = tuple(
-                step.id
-                for step in sorted(plan.steps, key=lambda item: (item.index, item.id))
-                if step.id == failed.id or step.id in downstream
-            )
-            latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)
-            if callable(latest_error_kind):
-                error_kind = latest_error_kind(failed.id) or error_kind
-        meta["failure_envelope"] = build_failure_envelope(
-            plan_id=plan.id,
-            step_id=failed.id if failed else None,
-            run_seq=run_seq,
-            message=detail,
-            step_inputs=failed.inputs if failed else None,
-            downstream_reset_steps=reset_steps,
-            error_kind=error_kind,
-            retryable=failed is not None,
-        ).to_dict()
-        return DriverMessage(
-            "error",
-            f"❌ {detail}",
-            meta,
-        )
-
     def _safe_output(self, step_id: str):
         try:
             return self._repo.load_step_output(step_id)
         except KeyError:
             return None
+
+    def _latest_failed_step_run_error_kind(self, step_id: str) -> str | None:
+        latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)
+        if callable(latest_error_kind):
+            return latest_error_kind(step_id)
+        return None
 __all__ = [
     "PlanDriver",
     "DriverMessage",
