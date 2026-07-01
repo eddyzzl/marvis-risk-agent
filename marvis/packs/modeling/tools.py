@@ -2476,6 +2476,11 @@ def _approval_package_markdown(payload: dict) -> str:
         f"- 状态: `{_md_inline(policy.get('status') or 'not_requested')}`",
         f"- Override原因: {_md_inline(policy.get('override_reason') or '-')}",
     ])
+    policy_requirement_rows = _selection_policy_requirement_markdown_rows(policy.get("policy"))
+    if policy_requirement_rows:
+        lines.extend(["", "| 策略要求 | 配置 |", "| --- | --- |"])
+        for label, value in policy_requirement_rows:
+            lines.append(f"| {_md_cell(label)} | {_md_cell(value)} |")
     if sample_weight:
         lines.extend(_sample_weight_policy_markdown_section(sample_weight, heading="## 样本权重治理"))
     if violations:
@@ -2576,6 +2581,41 @@ def _approval_package_markdown(payload: dict) -> str:
     else:
         lines.append("- -")
     return "\n".join(lines) + "\n"
+
+
+def _selection_policy_requirement_markdown_rows(policy) -> list[tuple[str, str]]:
+    if not isinstance(policy, dict) or not policy:
+        return []
+    rows: list[tuple[str, str]] = []
+    boolean_labels = {
+        "require_pmml": "要求 PMML",
+        "require_handoff": "要求验证移交",
+        "require_scorecard": "要求评分卡",
+        "require_monotonicity": "要求单调性证据",
+        "prefer_scorecard": "优先评分卡",
+        "allow_policy_override": "允许策略 override",
+    }
+    for key, label in boolean_labels.items():
+        if key in policy:
+            rows.append((label, "是" if policy.get(key) else "否"))
+    if policy.get("max_feature_count") is not None:
+        rows.append(("最大特征数", _metric_display(policy.get("max_feature_count"))))
+    if policy.get("max_oot_psi") is not None:
+        rows.append(("最大 OOT PSI", _metric_display(policy.get("max_oot_psi"))))
+    metric_thresholds = policy.get("metric_thresholds")
+    if isinstance(metric_thresholds, dict):
+        for metric in sorted(metric_thresholds):
+            spec = metric_thresholds.get(metric)
+            if not isinstance(spec, dict):
+                continue
+            parts = []
+            if spec.get("min") is not None:
+                parts.append(f">= {_metric_display(spec.get('min'))}")
+            if spec.get("max") is not None:
+                parts.append(f"<= {_metric_display(spec.get('max'))}")
+            if parts:
+                rows.append((f"指标 {metric}", " 且 ".join(parts)))
+    return rows
 
 
 def _sample_weight_policy_markdown_section(policy: dict, *, heading: str) -> list[str]:

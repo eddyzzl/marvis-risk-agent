@@ -1572,6 +1572,53 @@ def test_selection_policy_normalizes_string_thresholds_and_rejects_nonfinite():
     }
 
 
+def test_approval_package_markdown_surfaces_configured_selection_policy_thresholds():
+    from marvis.packs.modeling.tools import _approval_package_markdown
+
+    markdown = _approval_package_markdown({
+        "experiment_id": "exp-1",
+        "artifact_id": "art-1",
+        "algorithm": "lgb",
+        "target_type": "binary",
+        "target_col": "bad",
+        "sample_dataset_id": "sample-1",
+        "feature_count": 12,
+        "sample_weight_col": "",
+        "metrics": {"oot_ks": 0.34, "psi_oot_vs_train": 0.08},
+        "selection_policy_decision": {
+            "status": "accepted",
+            "override_reason": "",
+            "policy": {
+                "require_pmml": True,
+                "require_handoff": True,
+                "max_feature_count": 30,
+                "max_oot_psi": 0.15,
+                "metric_thresholds": {
+                    "oot_ks": {"min": 0.30},
+                    "oot_rmse": {"max": 1.80},
+                },
+            },
+            "violations": [],
+        },
+        "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        "monitoring_policy": {},
+        "challenger_comparison": {},
+        "delivery_actions": [],
+        "artifacts": {},
+        "features": ["x1", "x2"],
+        "training": {},
+    })
+
+    assert "## 策略执行" in markdown
+    assert "| 策略要求 | 配置 |" in markdown
+    assert "| 要求 PMML | 是 |" in markdown
+    assert "| 要求验证移交 | 是 |" in markdown
+    assert "| 最大特征数 | 30 |" in markdown
+    assert "| 最大 OOT PSI | 0.15 |" in markdown
+    assert "| 指标 oot_ks | >= 0.3 |" in markdown
+    assert "| 指标 oot_rmse | <= 1.8 |" in markdown
+
+
 def test_make_split_tool_returns_sample_analysis_with_channel_distribution(tmp_path):
     """MODELING G1: make_split applies a channel/time rule set and returns a derived
     dataset plus a JSON-safe sample analysis (per-split counts + per-split x channel/month
