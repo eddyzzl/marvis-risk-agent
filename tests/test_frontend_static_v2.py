@@ -5293,6 +5293,7 @@ def test_agent_stop_response_polls_until_active_agent_job_finishes():
 
 def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     app_js = _read_static("app.js")
+    mount_js = _read_static("js/agent-conversation-mount.js")
 
     stored_start = app_js.index("function renderStoredStateSummaries")
     stored_end = app_js.index("function renderAll", stored_start)
@@ -5318,8 +5319,10 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     timeline_end = app_js.index("function resetAgentTypingState", timeline_start)
     timeline_body = app_js[timeline_start:timeline_end]
     assert "agentTimelineVisibleStages()" in timeline_body
-    assert "agentTimelineItems(messages, visibleStages, {" in timeline_body
-    assert "snapshotsByTrigger: agentFrozenSnapshotsByTriggerId({" in timeline_body
+    assert "renderAgentTimelineDom(messages, {" in timeline_body
+    assert "taskFrozenSectionSnapshots" in timeline_body
+    assert "agentTimelineItems(messages, deps.visibleStages || [], {" in mount_js
+    assert "snapshotsByTrigger: deps.snapshotsByTrigger || agentFrozenSnapshotsByTriggerId({" in mount_js
 
     report_visibility_start = app_js.index("function updateAgentReportSectionVisibility")
     report_visibility_end = app_js.index(
@@ -5737,6 +5740,7 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
     conversation_js = _read_static("js/agent-conversation-view.js")
+    mount_js = _read_static("js/agent-conversation-mount.js")
 
     assert 'id="agentConversationPanel"' in index_html
     assert 'id="agentScanLeadMessages"' in index_html
@@ -5967,7 +5971,8 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "function agentReportMessagesForDisplay" in conversation_js
     assert "function agentMessagesHtml" in conversation_js
     assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
-    assert "agentMessagesHtml(item.messages, undefined, {" in app_js
+    assert "agentMessagesHtml(item.messages, undefined, {" in mount_js
+    assert "export function renderAgentTimeline" in mount_js
     assert "agentMessageMetaLabel(message, labelStage)" in app_js
     alias_start = app_js.index("function agentValidatorAlias")
     stage_label_start = app_js.index("function agentStageLabel", alias_start)

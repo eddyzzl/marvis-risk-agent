@@ -5,16 +5,19 @@ import {
 } from "./js/agent-memory-panel.js";
 import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";
 import {
-  agentFrozenSnapshotsByTriggerId,
   agentMessageContent,
   agentMessageIsAdvanceIntent,
   agentMessageIsContinuePrompt,
-  agentMessagesHtml,
   agentReportMessagesForDisplay,
   agentRerunMessageFingerprint,
-  agentTimelineItems,
   agentTimelineStageDefinitions,
 } from "./js/agent-conversation-view.js";
+import {
+  removeAgentTimelineBuckets as removeAgentTimelineBucketsDom,
+  renderAgentTimeline as renderAgentTimelineDom,
+  restoreResultScrollDefaultOrder as restoreResultScrollDefaultOrderDom,
+  updateAgentMessageContentsInPlace as updateAgentMessageContentsInPlaceDom,
+} from "./js/agent-conversation-mount.js";
 import { applyBranding, normalizeBranding } from "./js/branding.js";
 import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
 import { createMaterialSourceController } from "./js/dialogs.js";
@@ -5051,47 +5054,15 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
 }
 
 function updateAgentMessageContentsInPlace(messages = []) {
-  const scrollContent = $("resultScrollContent");
-  if (!scrollContent) return false;
-  for (const message of messages) {
-    const messageId = message?.id ? String(message.id) : "";
-    // No id means we cannot locate the article in DOM; fall back to a full
-    // rebuild so the message still renders correctly.
-    if (!messageId) return false;
-    const article = scrollContent.querySelector(
-      `article[data-agent-message-id="${cssEscapeAttr(messageId)}"]`,
-    );
-    if (!article) return false;
-    const contentNode = article.querySelector(".agent-message-content");
-    if (!contentNode) return false;
-    const streaming = agentMessageIsStreaming(message);
-    const thinking = agentMessageIsThinking(message);
-    const nextHtml = thinking
-      ? agentThinkingHtml()
-      : formatAgentMessageContent(
-        agentVisibleContent(message),
-        { markdown: message?.role !== "user" },
-      );
-    if (contentNode.innerHTML !== nextHtml) contentNode.innerHTML = nextHtml;
-    contentNode.dataset.agentStreaming = streaming ? "true" : "false";
-    contentNode.dataset.agentThinking = thinking ? "true" : "false";
-    const referencesNode = article.querySelector(".agent-memory-references");
-    const referencesHtml = message?.role === "user" ? "" : agentMemoryReferencesHtml(message?.metadata?.memory_references);
-    if (referencesNode) {
-      if (referencesHtml) referencesNode.outerHTML = referencesHtml;
-      else referencesNode.remove();
-    } else if (referencesHtml) {
-      contentNode.insertAdjacentHTML("afterend", referencesHtml);
-    }
-  }
-  return true;
-}
-
-function cssEscapeAttr(value) {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(value);
-  }
-  return String(value).replace(/["\\]/g, (ch) => `\\${ch}`);
+  return updateAgentMessageContentsInPlaceDom(messages, {
+    getElementById: $,
+    isStreaming: agentMessageIsStreaming,
+    isThinking: agentMessageIsThinking,
+    thinkingHtml: agentThinkingHtml,
+    visibleContent: agentVisibleContent,
+    formatMessageContent: formatAgentMessageContent,
+    memoryReferencesHtml: agentMemoryReferencesHtml,
+  });
 }
 
 function agentFrozenStageConfig(stage) {
@@ -5217,13 +5188,10 @@ function agentPersistentTimelineElementIds() {
 }
 
 function restoreResultScrollDefaultOrder() {
-  const scrollContent = $("resultScrollContent");
-  if (!scrollContent) return;
-  removeAgentTimelineBuckets();
-  for (const elementId of agentPersistentTimelineElementIds()) {
-    const element = $(elementId);
-    if (element) scrollContent.appendChild(element);
-  }
+  restoreResultScrollDefaultOrderDom({
+    getElementById: $,
+    persistentElementIds: agentPersistentTimelineElementIds(),
+  });
 }
 
 function appendOptimisticAgentUserMessage(content, modelId = "") {
@@ -5290,8 +5258,7 @@ function clearAgentStageMessages() {
 }
 
 function removeAgentTimelineBuckets() {
-  document.querySelectorAll("[data-agent-timeline-bucket]").forEach((bucket) => bucket.remove());
-  document.querySelectorAll("[data-agent-frozen-snapshot]").forEach((node) => node.remove());
+  removeAgentTimelineBucketsDom(document);
 }
 
 function agentTimelineVisibleStages() {
@@ -5303,73 +5270,18 @@ function agentTimelineVisibleStages() {
     .map(({ stage }) => stage);
 }
 
-function createAgentTimelineBucket() {
-  const bucket = document.createElement("section");
-  bucket.className = "agent-conversation agent-timeline-bucket";
-  bucket.dataset.agentTimelineBucket = "true";
-  bucket.setAttribute("aria-label", "Agent 对话片段");
-  const messages = document.createElement("div");
-  messages.className = "agent-messages";
-  bucket.appendChild(messages);
-  return bucket;
-}
-
 function renderAgentTimeline(messages = []) {
-  const scrollContent = $("resultScrollContent");
-  const basePanel = $("agentConversationPanel");
-  const baseMessages = $("agentMessages");
-  if (!scrollContent || !basePanel || !baseMessages) return;
-
-  removeAgentTimelineBuckets();
-  baseMessages.innerHTML = "";
-  basePanel.classList.add("hidden");
-  basePanel.setAttribute("aria-hidden", "true");
-
-  const visibleStages = agentTimelineVisibleStages();
-  const items = agentTimelineItems(messages, visibleStages, {
-    snapshotsByTrigger: agentFrozenSnapshotsByTriggerId({
-      selectedTaskId,
-      taskFrozenSectionSnapshots,
-      agentMessages,
-    }),
+  renderAgentTimelineDom(messages, {
+    getElementById: $,
+    visibleStages: agentTimelineVisibleStages(),
+    selectedTaskId,
+    taskFrozenSectionSnapshots,
+    agentMessages,
+    createFrozenSnapshotElement: createAgentFrozenSnapshotElement,
+    persistentElementIds: agentPersistentTimelineElementIds(),
+    agentStageLabel,
+    agentMessageHtml,
   });
-  const appendedSections = new Set();
-  let basePanelUsed = false;
-
-  for (const item of items) {
-    if (item.type === "stage") {
-      const section = $(item.sectionId);
-      if (!section) continue;
-      scrollContent.appendChild(section);
-      appendedSections.add(item.sectionId);
-      continue;
-    }
-    if (item.type === "frozen") {
-      const frozen = createAgentFrozenSnapshotElement(item.snapshot);
-      scrollContent.appendChild(frozen);
-      continue;
-    }
-    if (item.type !== "messages" || !item.messages.length) continue;
-    const bucket = basePanelUsed ? createAgentTimelineBucket() : basePanel;
-    const bucketMessages = basePanelUsed ? bucket.querySelector(".agent-messages") : baseMessages;
-    basePanelUsed = true;
-    bucket.classList.remove("hidden");
-    bucket.setAttribute("aria-hidden", "false");
-    bucketMessages.innerHTML = agentMessagesHtml(item.messages, undefined, {
-      agentStageLabel,
-      agentMessageHtml,
-    });
-    scrollContent.appendChild(bucket);
-  }
-
-  if (!basePanelUsed) {
-    scrollContent.appendChild(basePanel);
-  }
-  for (const elementId of agentPersistentTimelineElementIds()) {
-    if (elementId === "agentConversationPanel" || appendedSections.has(elementId)) continue;
-    const element = $(elementId);
-    if (element) scrollContent.appendChild(element);
-  }
 }
 
 function stripChatInstructions(content) {
