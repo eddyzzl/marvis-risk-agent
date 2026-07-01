@@ -10,7 +10,7 @@ import pytest
 from marvis.app import create_app
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.db import TaskRepository
+from marvis.db import PluginRepository, TaskRepository
 from marvis.domain import TaskStatus
 from marvis.pipeline import NOTEBOOK_STAGE_FAILURE_PREFIX
 
@@ -608,6 +608,13 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
     assert report_calls == [task_id]
     assert repo.get_task(task_id).status == TaskStatus.SUCCEEDED
     assert repo.get_report_values(task_id)[0] == REQUIRED_AGENT_CONCLUSIONS
+    audit = PluginRepository(tmp_path / "marvis.sqlite").list_audit(
+        kind="report.agent_conclusions.confirm",
+    )
+    assert len(audit) == 1
+    assert audit[0]["target_ref"] == task_id
+    assert audit[0]["detail"]["auto_accept"] is True
+    assert audit[0]["detail"]["keys"] == sorted(REQUIRED_AGENT_CONCLUSIONS)
     assert [message["stage"] for message in messages] == [
         "word_conclusion_draft",
         "word_conclusion_confirmed",
