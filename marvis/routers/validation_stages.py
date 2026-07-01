@@ -16,8 +16,9 @@ from marvis.api_stage_helpers import (
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
 from marvis.domain import TaskStatus
-from marvis.notebooks import get_live_notebook_session
+from marvis.notebooks import close_live_notebook_session, get_live_notebook_session
 from marvis.pipeline import (
+    LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
     run_metrics_stage,
     run_notebook_stage,
     run_report_stage,
@@ -117,14 +118,21 @@ def run_task_metrics(
     if (
         task.status
         in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}
-        and get_live_notebook_session(task_id) is None
         and not pipeline_settings.notebook_isolated_execution
     ):
-        repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail="live notebook kernel is not available; rerun notebook stage before metrics",
-        )
+        if not pipeline_settings.allow_legacy_live_notebook_execution:
+            close_live_notebook_session(task_id)
+            repo.finish_job(job_id, status="failed")
+            raise HTTPException(
+                status_code=409,
+                detail=LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
+            )
+        if get_live_notebook_session(task_id) is None:
+            repo.finish_job(job_id, status="failed")
+            raise HTTPException(
+                status_code=409,
+                detail="live notebook kernel is not available; rerun notebook stage before metrics",
+            )
     if task.status in {
         TaskStatus.CREATED,
         TaskStatus.SCANNED,

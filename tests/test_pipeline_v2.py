@@ -723,6 +723,7 @@ def test_notebook_stage_writes_reproducibility_evidence_before_metrics(
             report_template_path=tmp_path / "template.docx",
             random_sample_size=2,
             notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
         ),
         stage_claimed=True,
     )
@@ -827,7 +828,7 @@ def test_notebook_stage_can_write_reproducibility_in_isolated_worker(
     assert repo.get_task(task.id).status is TaskStatus.EXECUTED
 
 
-def test_metrics_stage_reruns_isolated_notebook_when_live_session_missing(
+def test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -891,6 +892,14 @@ def test_metrics_stage_reruns_isolated_notebook_when_live_session_missing(
         json.dumps({"summary": {"status": "pass"}, "rows": []}),
         encoding="utf-8",
     )
+    live_closed = {"value": False}
+    register_live_notebook_session(
+        task.id,
+        SimpleNamespace(
+            closed=False,
+            close=lambda: live_closed.__setitem__("value", True),
+        ),
+    )
 
     def fake_notebook_step_v3(*, extra_code_cells, **kwargs):
         assert kwargs["keep_alive"] is False
@@ -921,6 +930,7 @@ def test_metrics_stage_reruns_isolated_notebook_when_live_session_missing(
         stage_claimed=True,
     )
 
+    assert live_closed["value"] is True
     assert repo.get_task(task.id).status is TaskStatus.WRITING_ARTIFACTS
 
 
@@ -996,6 +1006,8 @@ def test_metrics_stage_marks_sample_column_failure_as_metrics_failure(tmp_path: 
                 workspace=workspace,
                 db_path=db_path,
                 report_template_path=tmp_path / "template.docx",
+                notebook_isolated_execution=False,
+                allow_legacy_live_notebook_execution=True,
             ),
             stage_claimed=True,
         )
@@ -1120,6 +1132,8 @@ def test_metrics_stage_success_captures_model_experience_memory(
             workspace=workspace,
             db_path=db_path,
             report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
         ),
         stage_claimed=True,
     )
@@ -1209,6 +1223,8 @@ def test_metrics_stage_cancel_returns_to_executed_status(tmp_path: Path):
             workspace=workspace,
             db_path=db_path,
             report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
         ),
         stage_claimed=True,
     )
@@ -1360,6 +1376,7 @@ def test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook(
         report_template_path=tmp_path / "template.docx",
         random_sample_size=12,
         notebook_isolated_execution=False,
+        allow_legacy_live_notebook_execution=True,
     )
 
     run_notebook_stage(task_id=task.id, settings=settings)
@@ -1414,6 +1431,7 @@ def test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed(
         report_template_path=tmp_path / "template.docx",
         random_sample_size=12,
         notebook_isolated_execution=False,
+        allow_legacy_live_notebook_execution=True,
     )
 
     run_notebook_stage(task_id=task.id, settings=settings)
@@ -1530,6 +1548,7 @@ def test_full_pipeline_marks_word_failures_as_report_stage_failures(
                 db_path=db_path,
                 report_template_path=tmp_path / "template.docx",
                 notebook_isolated_execution=False,
+                allow_legacy_live_notebook_execution=True,
             ),
         )
     except RuntimeError as exc:

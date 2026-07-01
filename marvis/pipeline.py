@@ -63,6 +63,7 @@ class PipelineSettings:
     notebook_kernel_name: str = "python3"
     notebook_memory_limit_mb: int | None = 4096
     notebook_isolated_execution: bool = True
+    allow_legacy_live_notebook_execution: bool = False
     bin_count: int = 10
     random_sample_size: int = 1000
     random_seed: int = 42
@@ -88,6 +89,10 @@ SCAN_STAGE_FAILURE_PREFIX = "材料扫描失败："
 NOTEBOOK_STAGE_FAILURE_PREFIX = "模型可复现性验证失败："
 METRICS_STAGE_FAILURE_PREFIX = "模型效果&稳定性验证失败："
 REPORT_STAGE_FAILURE_PREFIX = "报告输出失败："
+LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE = (
+    "legacy live notebook execution requires notebook_isolated_execution=False "
+    "and allow_legacy_live_notebook_execution=True"
+)
 V1_VALIDATION_APPENDED_CELL_KINDS = (
     "repro-pmml",
     "repro-compare",
@@ -109,6 +114,11 @@ V1_VALIDATION_APPENDED_EXECUTION_POLICY = AppendedCellExecutionPolicy(
 
 def _metrics_cancel_marker_path(task_dir: Path) -> Path:
     return task_dir / "execution" / METRICS_CANCEL_MARKER
+
+
+def _require_legacy_live_notebook_execution(settings: PipelineSettings) -> None:
+    if settings.notebook_isolated_execution or not settings.allow_legacy_live_notebook_execution:
+        raise PipelineError(LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE)
 
 
 def run_notebook_stage(
@@ -184,6 +194,7 @@ def run_notebook_stage(
                 )
                 return
 
+            _require_legacy_live_notebook_execution(settings)
             live_session = _notebook_step_v3(
                 repo=repo,
                 task=task,
@@ -297,7 +308,15 @@ def run_metrics_stage(
         cancellation_token = register_notebook_cancellation(task_id)
         try:
             live_session = get_live_notebook_session(task_id)
-            if live_session is None and not settings.notebook_isolated_execution:
+            if settings.notebook_isolated_execution:
+                if live_session is not None:
+                    close_live_notebook_session(task_id)
+                    live_session = None
+            elif not settings.allow_legacy_live_notebook_execution:
+                if live_session is not None:
+                    close_live_notebook_session(task_id)
+                raise PipelineError(LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE)
+            elif live_session is None:
                 raise PipelineError(
                     "live notebook kernel is not available; rerun notebook stage before metrics"
                 )
@@ -1151,6 +1170,7 @@ def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
     if settings.notebook_isolated_execution:
         run_staged_pipeline(task_id=task_id, settings=settings)
         return
+    _require_legacy_live_notebook_execution(settings)
 
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
