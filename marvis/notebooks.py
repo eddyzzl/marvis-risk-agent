@@ -383,7 +383,7 @@ class NotebookExecutionSession:
             )
         self._finalize_pending_cell_completions()
         nbformat.write(self.notebook, self.executed_path)
-        log_path.write_text("succeeded\n", encoding="utf-8")
+        write_text_atomic(log_path, "succeeded\n")
         self._write_progress()
         return NotebookRunResult(
             succeeded=True,
@@ -863,7 +863,8 @@ def _write_failure_log(
     error_name: str | None,
     error_value: str | None,
 ) -> None:
-    log_path.write_text(
+    write_text_atomic(
+        log_path,
         "\n".join(
             [
                 "failed",
@@ -873,7 +874,6 @@ def _write_failure_log(
             ]
         )
         + "\n",
-        encoding="utf-8",
     )
 
 
