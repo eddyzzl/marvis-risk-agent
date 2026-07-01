@@ -62,6 +62,45 @@ def test_store_distillation_crud_and_search_order(tmp_path):
     assert store.list_distillations(category="field_convention") == [created_low]
 
 
+def test_store_distillation_search_ties_are_deterministic(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    base = {
+        "category": "field_convention",
+        "scope_key": "field_convention:score",
+        "distilled_summary": "共同字段口径需要稳定排序。",
+        "structured": {"field_role": "score"},
+        "source_memory_ids": ("mem-1", "mem-2"),
+        "support_count": 2,
+    }
+    older = replace(
+        new_distillation(**base),
+        id="dist_a",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    same_time_low_id = replace(
+        new_distillation(**base),
+        id="dist_b",
+        created_at="2026-02-01T00:00:00+00:00",
+        updated_at="2026-02-01T00:00:00+00:00",
+    )
+    same_time_high_id = replace(
+        new_distillation(**base),
+        id="dist_c",
+        created_at="2026-02-01T00:00:00+00:00",
+        updated_at="2026-02-01T00:00:00+00:00",
+    )
+    store.create_distillation(older)
+    store.create_distillation(same_time_low_id)
+    store.create_distillation(same_time_high_id)
+
+    ranked = store.search_distillations({"keywords": ["共同"]}, limit=3)
+
+    assert [item.id for item in ranked] == ["dist_c", "dist_b", "dist_a"]
+
+
 def test_store_distillation_redacts_summary_and_structured_payload(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

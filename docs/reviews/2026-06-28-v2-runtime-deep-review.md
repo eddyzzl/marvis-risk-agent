@@ -174,6 +174,7 @@
 - **问题**：`search_distillations` 跑 `SELECT * FROM memory_distillations {where_sql}` **无 ORDER BY**，再在 Python 里 `scored.sort(key=...score, reverse=True)`（稳定排序）。最终顺序取决于 SQLite 行返回顺序（无 ORDER BY 不保证、随版本/计划/vacuum 变）。同分（同 confidence+support 很常见）时 top-N 截断在相同输入下可能返回不同集合，记忆注入提示词影响下游 LLM，**把顺序泄进输出**，违反确定性不变量。
 - **验证**：对抗验证 confirmed/medium。
 - **修复**：SELECT 加确定性 `ORDER BY updated_at DESC, id DESC`，并把 Python sort key 改成含稳定次键的元组。
+- **当前状态**：已修复。`search_distillations` 现在按 score、`updated_at`、`id` 确定性排序。验证：`CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_memory_distill_db.py tests/test_memory_determinism_guard.py -q`，`8 passed`。
 
 ### M10. WOE 编码在全量数据（含 holdout/OOT）上拟合 —— 目标泄漏进编码特征
 - **位置**：[`marvis/packs/feature/tools.py:273-306`](marvis/packs/feature/tools.py:273)；拟合在 `feature/iv.py:compute_woe_iv`

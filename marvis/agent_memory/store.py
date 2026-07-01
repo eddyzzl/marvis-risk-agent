@@ -580,6 +580,7 @@ class AgentMemoryStore:
                 SELECT *
                   FROM memory_distillations
                   {where_sql}
+                 ORDER BY updated_at DESC, id DESC
                 """,
                 params,
             ).fetchall()
@@ -588,7 +589,7 @@ class AgentMemoryStore:
             for distillation in (_row_to_distillation(row) for row in rows)
         ]
         scored = [item for item in scored if item[1] > 0 or not (keywords or scope_text)]
-        scored.sort(key=lambda item: item[1], reverse=True)
+        scored.sort(key=lambda item: (item[1], item[0].updated_at, item[0].id), reverse=True)
         return [item[0] for item in scored[: max(1, int(limit))]]
 
     def mark_consolidated(self, category: str, *, at: str) -> None:
