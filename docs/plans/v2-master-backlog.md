@@ -143,7 +143,7 @@
 | ✅ | REL-2 | 重启 reclaim 识别 metrics 可续场景改发 METRICS_STAGE_FAILURE 前缀消息（`bfba3983`），is_metrics_failure 命中→metrics-only 重试；last_completed_step 接通 | High/S | ✅ |
 | ✅ | REL-5 | jobs 心跳列+看门狗（`c9a9be7b`，超时默认可配、/api/health 暴露 stuck_jobs）+ join/plan job cancel 端点（协作式） | Med/M | — |
 | ✅ | REL-3 | ProcessTreeResourceMonitor 已泛化接入 ToolRunner（`a278a0ff`）：默认 4096MB 可配、超限杀进程树、error_kind=resource_limit+peak 审计；真杀路径实测验证 | High/M | ✅ |
-| ⬜ | REL-7 | 文件级 staging `.bak` 崩溃残留：datasets/tasks 根下既不恢复也不清理 | Med/M | — |
+| ✅ | REL-7 | reconcile 已泛化到 datasets/tasks 根（`6dac2349`）：.bak 恢复、.tmp 孤儿清理、幂等、7 个回归 | Med/M | — |
 | ✅ | PERF-5 | worker 入口依赖链已切断（`c1313514`，ToolContext 抽到无依赖 contracts 模块）：入口 import 实测 1.085s→0.021s，sys.modules 无 pandas/sklearn/marvis.db（回归断言守住） | High/S | ✅ |
 | ✅ | PERF-3 | 隔离模式复现+metrics cells 合并进单次 notebook 子进程（`0e832a99`）：端到端断言执行次数==1；metrics 重试与非隔离路径不受影响 | High/M | ✅ |
 | ✅ | PERF-4 | 诊断请求级 memoization + 多方法单扫描批量化（`90667a7b`）：200k 行 propose 15.9s→10.1s、relaxation 1.02s→0.63s | High/M | ✅ |
