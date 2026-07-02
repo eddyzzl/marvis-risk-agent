@@ -73,7 +73,7 @@ def test_feature_analysis_end_to_end(client: TestClient, tmp_path: Path):
     assert "long_y" not in feature_names and "cust_id" not in feature_names
     # No optional metric selected → no collinear / VIF section computed (spec §2).
     titles = {t["title"] for t in done["metadata"].get("tables", [])}
-    assert "VIF(共线性)" not in titles
+    assert "VIF（共线性）" not in titles
 
 
 def test_feature_analysis_with_vif_metric_shows_collinear_section(client: TestClient, tmp_path: Path):
@@ -93,7 +93,7 @@ def test_feature_analysis_with_vif_metric_shows_collinear_section(client: TestCl
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     titles = {t["title"] for t in done["metadata"].get("tables", [])}
     assert "特征指标" in titles  # base metrics still present
-    assert "VIF(共线性)" in titles  # the selected optional metric was computed + shown
+    assert "VIF（共线性）" in titles  # the selected optional metric was computed + shown
 
 
 @pytest.mark.slow

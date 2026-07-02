@@ -102,7 +102,7 @@ DECIDE_GATE_CASES: tuple[TouchpointCase, ...] = (
         touchpoint="decide_gate",
         degradation="truncated_json",
         raw_output='{"action":"conf',
-        expected={"action": "halt", "reason": "无法解析模型决策,转人工确认。"},
+        expected={"action": "halt", "reason": "无法解析模型决策，转人工确认。"},
         notes="Unparseable -> safe halt fallback; decide_gate's retry gets a fresh chance.",
     ),
     TouchpointCase(

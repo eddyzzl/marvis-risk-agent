@@ -161,7 +161,7 @@
 | ⬜ | S3 | 组合分析套件：**前置 NEW-1 cum_bad_rate**；新建 packs/analysis（已拍板）；vintage/roll-rate 升级 + flow/migration + segment_profile + PORTFOLIO_ANALYSIS + 表现期契约（含 balance/EAD）+ 合成表现数据生成脚本（兼解 UX-9） | 5–8天 |
 | ⬜ | DOM-8 | （并入 S3）Roll-rate 缺月盲视、无余额口径、period 硬编码 | Med/M |
 | ⬜ | DOM-11 | （并入 S2/S3）swap/bad rate 空集显示 0.0%、缺标签覆盖率口径 | Low/S |
-| ⬜ | UX-9 | （并入 S3）零首跑体验：无示例数据 | Med/M |
+| ✅ | UX-9 | 一键示例数据首跑（`bd274e71`）：sample_data.py + POST /api/sample-data + 欢迎页入口；S3 的合成表现数据脚本仍随 S3 批次补充 | Med/M |
 
 ## 7. 阶段六：审查 Batch 3 —— 智能闭环（2–3 周）
 
@@ -237,7 +237,7 @@
 | ✅ | GAP-1 | 编码 try 链（utf-8→sig→gbk→gb18030）+长数字列防截断读为字符串+摄取报告含 warnings（`ce39ec67`） | High/M | — |
 | ✅ | GAP-2 | purge_task 同事务清理全资产+引用计数保护+task.delete 审计+purge-preview 端点+删除框摘要（`caf21fe7`/`2988c155`） | High/M | — |
 | ✅ | GAP-3 | 审计读取面落地（`b9dfcd3f`）：GET /api/audit 多维过滤+分页、CSV 流式导出、任务审计时间线端点、新索引 idx_audit_target_ref_at；15 个新测试 | High/M | — |
-| ⬜ | GAP-4 | 数据字典/列业务语义层在 V2 全链路缺位 | High/M | — |
+| ✅ | GAP-4 | 数据字典全链路（`fbda4883`）：agent/data_dictionary.py 统一识别/注册/查询，四个 setup 流通用注册、筛选门与 JOIN C1/去重门带业务含义标注、LLM 门决策 prompt 注入紧凑字典上下文、handoff dictionary.csv 用真实业务名；端到端测试 | High/M | ✅ |
 | ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
 | ✅ | TST-3 | 真 e2e 落地（`1978319c`）：真 `marvis serve` 子进程全旅程（JOIN→standard_modeling 全门→PMML），三连跑确定性验证（~30s/次，e2e marker） | High/M | ✅ |
 | ⬜ | TST-4 | 隔离/资源护栏测试全是 mock 断言：真杀/真 OOM 零验证（INV-6） | High/M | ✅ |
