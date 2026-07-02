@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from marvis.agent_memory.models import (
+    JOIN_EXPERIENCE_REQUIRED_FIELDS,
     MODEL_EXPERIENCE_REQUIRED_FIELDS,
     MemoryCandidate,
 )
@@ -30,6 +31,26 @@ def extract_model_experience(result: dict[str, Any]) -> MemoryCandidate | None:
         source_task_id=str(payload["source_task_id"]),
         confidence="high",
         reason="structured validation result",
+    )
+    return _allow(candidate)
+
+
+def extract_join_experience(result: dict[str, Any]) -> MemoryCandidate | None:
+    payload = _join_experience_payload(result)
+    if payload is None:
+        return None
+
+    candidate = MemoryCandidate(
+        memory_type="join_experience",
+        summary=(
+            f"{payload['scope']}拼接{payload['feature_table_count']}张特征表，"
+            f"命中率{payload['match_rate']}，样本行数{payload['anchor_rows']}"
+            f"→{payload['joined_rows']}。"
+        ),
+        payload=payload,
+        source_task_id=str(payload["source_task_id"]),
+        confidence="high",
+        reason="structured join execution result",
     )
     return _allow(candidate)
 
@@ -158,6 +179,20 @@ def extract_memory_candidates(
             candidates.append(preference)
 
     return candidates
+
+
+def _join_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    payload = {
+        "match_rate": _first_value(result, {}, "match_rate"),
+        "anchor_rows": _first_value(result, {}, "anchor_rows"),
+        "joined_rows": _first_value(result, {}, "joined_rows"),
+        "feature_table_count": _first_value(result, {}, "feature_table_count"),
+        "scope": _first_value(result, {}, "scope"),
+        "source_task_id": _first_value(result, {}, "source_task_id", "task_id"),
+    }
+    if any(_is_missing(payload[field]) for field in JOIN_EXPERIENCE_REQUIRED_FIELDS):
+        return None
+    return payload
 
 
 def _model_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:

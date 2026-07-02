@@ -63,6 +63,14 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "source_task_id",
         "important_feature_sources",
     }),
+    "join_experience": frozenset({
+        "match_rate",
+        "anchor_rows",
+        "joined_rows",
+        "feature_table_count",
+        "scope",
+        "source_task_id",
+    }),
     "skill_experience_reserved": frozenset(),
 }
 SECRET_PATTERNS = (

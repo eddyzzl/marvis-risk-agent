@@ -7,6 +7,7 @@ from typing import Any
 from marvis.agent.auto_drive import decide_gate
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
 from marvis.agent.join_setup import JoinSetupError, build_join_proposal
+from marvis.agent.memory_bridge import capture_agent_memory_for_driver_done
 from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
 from marvis.agent.plan_driver import DriverError, PlanDriver, is_confirm
 from marvis.agent.strategy_setup import StrategySetupError, build_strategy_proposal
@@ -78,7 +79,7 @@ def run_join_driver_turn(
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
             )
-            append_driver_messages(repo, task.id, turn)
+            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
             return join_turn_response(repo, task.id)
         conversation = repo.list_agent_messages(task.id)
         c1_state = _latest_c1_state(conversation)
@@ -114,7 +115,7 @@ def run_join_driver_turn(
             slots={"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
             tier=runtime.tier,
         )
-        append_driver_messages(repo, task.id, turn)
+        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
         return join_turn_response(repo, task.id)
     except JoinSetupError as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -342,7 +343,7 @@ def run_modeling_driver_turn(
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
             )
-            append_driver_messages(repo, task.id, turn)
+            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
             return join_turn_response(repo, task.id)
         backend, registry = _modeling_data_runtime(runtime.settings)
         conversation = repo.list_agent_messages(task.id)
@@ -401,7 +402,7 @@ def run_modeling_driver_turn(
             slots=slots,
             tier=runtime.tier,
         )
-        append_driver_messages(repo, task.id, turn)
+        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
         return join_turn_response(repo, task.id)
     except (JoinSetupError, ModelingSetupError) as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -521,7 +522,14 @@ def agent_autodrive_turn(
         return
 
 
-def append_driver_messages(repo: TaskRepository, task_id: str, turn) -> None:
+def append_driver_messages(
+    repo: TaskRepository,
+    task_id: str,
+    turn,
+    *,
+    settings=None,
+    task: TaskRecord | None = None,
+) -> None:
     for message in turn.messages:
         repo.add_agent_message(
             task_id,
@@ -530,6 +538,18 @@ def append_driver_messages(repo: TaskRepository, task_id: str, turn) -> None:
             content=message.content,
             metadata=dict(message.metadata),
         )
+        # MEM-1 write side: once a V2 modeling/data_join plan reaches its terminal
+        # "done" message, capture the champion result into agent memory so future
+        # same-kind tasks get a historical anchor. Optional settings/task keep this
+        # a no-op for every other driver-turn call site (feature/strategy/vintage,
+        # and the mid-plan gate messages of modeling/data_join itself).
+        if settings is not None and task is not None and message.stage == "done":
+            capture_agent_memory_for_driver_done(
+                settings,
+                task,
+                done_message_content=message.content,
+                done_message_metadata=dict(message.metadata),
+            )
 
 
 def join_turn_response(repo: TaskRepository, task_id: str) -> dict:

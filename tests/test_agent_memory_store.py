@@ -38,6 +38,8 @@ def test_memory_types_cover_v1_1_foundation_categories():
         "validation_pitfall",
         "task_experience",
         "model_experience",
+        # MEM-1: V2 data_join plan-completion capture (join match rate / row scale).
+        "join_experience",
         "skill_experience_reserved",
     }
 
