@@ -337,3 +337,94 @@ def test_pipeline_failure_capture_downgrades_prior_task_memory(tmp_path: Path):
         not any(ev["event_type"] == "negative_feedback" for ev in store.list_events(e.id))
         for e in task_experience_entries
     )
+
+
+def test_capture_sends_receipt_when_explicit_preference_hits_reserved_topic(tmp_path: Path):
+    # MEM-9: when the user's message actually invoked the explicit "please
+    # remember" contract but the topic is the reserved skill/runtime
+    # capability, the caller must get a receipt via add_agent_message instead
+    # of the silent drop the memory system used to produce.
+    from marvis.agent_memory.api_support import RESERVED_TOPIC_RECEIPT_TEXT
+    from marvis.db import TaskRepository
+    from marvis.domain import TaskCreate
+
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                settings=SimpleNamespace(workspace=tmp_path, db_path=db_path),
+                hook_dispatcher=None,
+            )
+        )
+    )
+
+    api._capture_user_preference_memory(
+        request,
+        task.id,
+        {"content": "请记住这个 skill：以后自动调用 auto-validator。", "id": "msg-1"},
+    )
+
+    messages = repo.list_agent_messages(task.id)
+    receipts = [message for message in messages if message["content"] == RESERVED_TOPIC_RECEIPT_TEXT]
+    assert len(receipts) == 1
+    assert receipts[0]["role"] == "assistant"
+    assert receipts[0]["metadata"]["intent"] == "memory_capture_declined"
+    assert receipts[0]["metadata"]["reason"] == "reserved_topic"
+
+
+def test_capture_sends_no_receipt_when_no_marker_present(tmp_path: Path):
+    # A message with no explicit "please remember" marker at all was never a
+    # memory-capture attempt in the first place -- no receipt should appear.
+    from marvis.agent_memory.api_support import RESERVED_TOPIC_RECEIPT_TEXT
+    from marvis.db import TaskRepository
+    from marvis.domain import TaskCreate
+
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡模型",
+            model_version="V2026",
+            validator="qa",
+            source_dir=str(tmp_path),
+            run_mode="agent",
+        )
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                settings=SimpleNamespace(workspace=tmp_path, db_path=db_path),
+                hook_dispatcher=None,
+            )
+        )
+    )
+
+    api._capture_user_preference_memory(
+        request,
+        task.id,
+        {"content": "这个 skill 的 runtime 今天跑得挺快。", "id": "msg-2"},
+    )
+
+    messages = repo.list_agent_messages(task.id)
+    receipts = [message for message in messages if message["content"] == RESERVED_TOPIC_RECEIPT_TEXT]
+    assert receipts == []

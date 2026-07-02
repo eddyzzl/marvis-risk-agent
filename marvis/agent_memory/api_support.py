@@ -4,11 +4,23 @@ from dataclasses import replace
 import logging
 from pathlib import Path
 
-from marvis.agent_memory.extractors import extract_user_preference
+from marvis.agent_memory.extractors import (
+    USER_PREFERENCE_RESERVED_TOPIC,
+    classify_user_preference_capture,
+    extract_user_preference,
+)
 from marvis.agent_memory.retrieval import MemoryQuery, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
+from marvis.db import TaskRepository
 from marvis.domain import TaskRecord
 from marvis.memory_policy import load_memory_policy
+
+
+# MEM-9: shown to the user (via add_agent_message, same channel memory
+# reference badges already use) when an explicit "please remember" marker was
+# present but the preference was declined because it targets the reserved
+# skill/runtime capability -- a receipt instead of a silent drop.
+RESERVED_TOPIC_RECEIPT_TEXT = "该偏好涉及保留能力（技能/运行时配置），本次未记录为记忆。"
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +41,21 @@ def capture_user_preference_memory(
     # POST /agent-memory/consolidate endpoint stays functional regardless.)
     if not load_memory_policy(settings.workspace).auto_distill:
         return
-    candidate = extractor(
-        {
-            "content": message.get("content"),
-            "id": message.get("id"),
-        }
-    )
+    extractor_message = {"content": message.get("content"), "id": message.get("id")}
+    candidate = extractor(extractor_message)
     if candidate is None:
+        # MEM-9: an explicit "please remember" marker that got declined for
+        # touching the reserved skill/runtime topic deserves a receipt, not a
+        # silent drop -- this is the user's one direct, self-initiated
+        # contract with the memory system. Every other reason for returning
+        # None (no marker present at all, or the generic redaction/size
+        # policy rejecting it -- already audited as a 'reject' memory event
+        # by store.create) stays silent as before.
+        if (
+            extractor is extract_user_preference
+            and classify_user_preference_capture(extractor_message) == USER_PREFERENCE_RESERVED_TOPIC
+        ):
+            _add_reserved_topic_receipt(settings, task_id)
         return
     store = AgentMemoryStore(settings.db_path)
     try:
@@ -55,6 +75,23 @@ def capture_user_preference_memory(
         return
     if entry.status == "active":
         dispatch_memory_after_save(hook_dispatcher, task_id=task_id, memory_type=entry.memory_type)
+
+
+def _add_reserved_topic_receipt(settings, task_id: str) -> None:
+    try:
+        TaskRepository(settings.db_path).add_agent_message(
+            task_id,
+            role="assistant",
+            stage="chat",
+            content=RESERVED_TOPIC_RECEIPT_TEXT,
+            metadata={"intent": "memory_capture_declined", "reason": "reserved_topic"},
+        )
+    except Exception as exc:
+        logger.warning(
+            "failed to record reserved-topic memory receipt for task %s: %s",
+            task_id,
+            exc,
+        )
 
 
 def dispatch_memory_after_save(
