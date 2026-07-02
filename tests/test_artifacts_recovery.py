@@ -123,6 +123,146 @@ def test_create_app_runs_artifact_recovery(tmp_path: Path):
     assert not staging.exists()
 
 
+# REL-7: file-level staging backups (".<name>.<hex32>.bak") and orphaned atomic
+# write scratch files (".<name>.<hex32>.tmp") left under the datasets/tasks
+# roots by an interrupted ArtifactUnitOfWork.promote_all()/RemovedPath.remove()
+# or files.write_text_atomic() must be reconciled the same way the plugins and
+# validation_handoff directory backups already are.
+
+
+def test_reconcile_workspace_artifacts_restores_dataset_file_backup(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    dataset_dir = settings.datasets_dir / "task-1"
+    dataset_dir.mkdir(parents=True)
+    final_path = dataset_dir / "upload_abcd1234.parquet"
+    backup_path = dataset_dir / ".upload_abcd1234.parquet.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bak"
+    final_path.write_bytes(b"new-bytes-not-yet-committed")
+    backup_path.write_bytes(b"old-bytes-last-committed")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.restored_backups == 1
+    assert final_path.read_bytes() == b"old-bytes-last-committed"
+    assert not backup_path.exists()
+
+
+def test_reconcile_workspace_artifacts_restores_task_root_file_backup(tmp_path: Path):
+    # Mirrors persist_model_meta()'s uow.stage_file(out_dir, "model_meta.json")
+    # under tasks_dir/<task>/modeling_artifacts, i.e. outside validation_handoff.
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    out_dir = settings.tasks_dir / "task-1" / "modeling_artifacts"
+    out_dir.mkdir(parents=True)
+    final_path = out_dir / "model_meta.json"
+    backup_path = out_dir / ".model_meta.json.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bak"
+    final_path.write_text('{"artifact_id": "new"}', encoding="utf-8")
+    backup_path.write_text('{"artifact_id": "old"}', encoding="utf-8")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.restored_backups == 1
+    assert final_path.read_text(encoding="utf-8") == '{"artifact_id": "old"}'
+    assert not backup_path.exists()
+
+
+def test_reconcile_workspace_artifacts_restores_task_root_dir_backup(tmp_path: Path):
+    # Mirrors uow.remove_path(task_dir / "outputs") in pipeline.py: RemovedPath
+    # backs up a whole directory as ".outputs.<hex32>.bak" directly under the
+    # per-task root, one level above validation_handoff.
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task_dir = settings.tasks_dir / "task-1"
+    final_dir = task_dir / "outputs"
+    backup_dir = task_dir / ".outputs.cccccccccccccccccccccccccccccccc.bak"
+    final_dir.mkdir(parents=True)
+    (final_dir / "validation.xlsx").write_bytes(b"new-report")
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "validation.xlsx").write_bytes(b"old-report")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.restored_backups == 1
+    assert (final_dir / "validation.xlsx").read_bytes() == b"old-report"
+    assert not backup_dir.exists()
+
+
+def test_reconcile_workspace_artifacts_removes_orphan_dataset_tmp_file(tmp_path: Path):
+    # Mirrors marvis.files.write_text_atomic being interrupted before the
+    # final os.replace(): the scratch ".tmp" sibling must be deleted, and
+    # since the real target was never touched by the interrupted write, it is
+    # left completely alone.
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task_dir = settings.tasks_dir / "task-1"
+    task_dir.mkdir(parents=True)
+    final_path = task_dir / "execution_environment.json"
+    tmp_path_file = task_dir / ".execution_environment.json.dddddddddddddddddddddddddddddddd.tmp"
+    final_path.write_text('{"ok": true}', encoding="utf-8")
+    tmp_path_file.write_text('{"partial": ', encoding="utf-8")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.removed_orphan_tmp_files == 1
+    assert not tmp_path_file.exists()
+    assert final_path.read_text(encoding="utf-8") == '{"ok": true}'
+
+
+def test_reconcile_workspace_artifacts_removes_orphan_tmp_file_with_no_final_target(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    dataset_dir = settings.datasets_dir / "task-1"
+    dataset_dir.mkdir(parents=True)
+    tmp_path_file = dataset_dir / ".new_upload.parquet.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.tmp"
+    tmp_path_file.write_bytes(b"partial-parquet-bytes")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.removed_orphan_tmp_files == 1
+    assert not tmp_path_file.exists()
+
+
+def test_reconcile_workspace_artifacts_datasets_tasks_backup_reconcile_is_idempotent(tmp_path: Path):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    dataset_dir = settings.datasets_dir / "task-1"
+    dataset_dir.mkdir(parents=True)
+    final_path = dataset_dir / "upload_abcd1234.parquet"
+    backup_path = dataset_dir / ".upload_abcd1234.parquet.ffffffffffffffffffffffffffffffff.bak"
+    final_path.write_bytes(b"new-bytes")
+    backup_path.write_bytes(b"old-bytes")
+    tmp_file = dataset_dir / ".stray.parquet.11111111111111111111111111111111.tmp"
+    tmp_file.write_bytes(b"scratch")
+
+    first = reconcile_workspace_artifacts(settings)
+    second = reconcile_workspace_artifacts(settings)
+
+    assert first.restored_backups == 1
+    assert first.removed_orphan_tmp_files == 1
+    assert second.restored_backups == 0
+    assert second.removed_orphan_tmp_files == 0
+    assert final_path.read_bytes() == b"old-bytes"
+    assert not backup_path.exists()
+    assert not tmp_file.exists()
+
+
+def test_reconcile_workspace_artifacts_leaves_committed_dataset_files_untouched(tmp_path: Path):
+    # No .bak/.tmp present: an ordinary, fully-committed dataset file must not
+    # be renamed, deleted, or otherwise disturbed by the new generic pass.
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    dataset_dir = settings.datasets_dir / "task-1"
+    dataset_dir.mkdir(parents=True)
+    final_path = dataset_dir / "upload_abcd1234.parquet"
+    final_path.write_bytes(b"committed-bytes")
+
+    report = reconcile_workspace_artifacts(settings)
+
+    assert report.restored_backups == 0
+    assert report.removed_orphan_tmp_files == 0
+    assert final_path.read_bytes() == b"committed-bytes"
+
+
 def _write_plugin_dir(path: Path, *, marker: str) -> None:
     path.mkdir(parents=True)
     (path / "__init__.py").write_text("", encoding="utf-8")
