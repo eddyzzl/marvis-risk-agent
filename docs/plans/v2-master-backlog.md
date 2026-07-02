@@ -69,7 +69,7 @@
 #### 特征预处理
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | PREP-1 | FEATURE 阶段 fit 类变换无 train-only 纪律：WOE 默认用 test（无 split 时连 OOT）标签参与拟合，impute/normalize/cap 全量池化拟合 | High/M | ✅ |
+| ✅ | PREP-1 | 四工具 train-only 拟合已落地（`bc537dba`）：woe/impute/normalize/cap 默认排除 ("test","oot")、无 split 抛 FitRequiresSplitError（allow_full_fit 逃生口）、fit_rows/fit_split 口径回显 | High/M | ✅ |
 | ⬜ | PREP-2 | 预处理器不随模型 artifact 落盘、打分期无法重放：变换原地覆盖同名列导致新数据打分静默错误 | High/L | ✅ |
 | ⬜ | PREP-3 | 类别特征全链路缺位：候选只取数值列、所有配方强转 float、无类别 WOE/target encoding/罕见类归并、CatBoost 未传 cat_features（与 FS-3 同主题，合并执行） | High/L | ✅ |
 | ⬜ | PREP-4 | 哨兵值/特殊值（-999/-1/9999 类）无识别与处理机制，污染填充/标准化/截断/分箱 | Med/M | — |
@@ -84,7 +84,7 @@
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | FS-1 | V2 默认建模流没有任何多变量精筛环节：screen 把全部干净列直通模型，无 IV 底线/去冗余/迭代剪枝（select_features 只挂在 legacy 模板；吸收 roadmap-1d"重要性选择"） | High/M | ✅ |
-| ⬜ | FS-2 | select_features 的 IV/相关/VIF/WOE 拟合默认在含 test+OOT 的全量数据上计算 | Med/S | — |
+| ✅ | FS-2 | select_features 默认排除 test+oot、自动识别 SPLIT_COLUMN、typed error 兜底（`bc537dba`）；legacy 模板筛选步已接 split_col | Med/S | — |
 | ⬜ | FS-3 | 类别型特征被静默排除且无防泄漏类别编码（→ 与 PREP-3 合并执行） | Med/M | — |
 | ⬜ | FS-4 | 泄漏检测只有'合并样本单变量强度'一条线：无按 split 突变检测、无时间维度审计 | Med/M | — |
 | ⬜ | FS-5 | 特征衍生工作流最终筛选步骤筛的是原始列——新衍生列从未进入筛选 | Med/S | — |
@@ -99,7 +99,7 @@
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | TUNE-1 | 调参器只为 LGB 一家服务：挑战者全部以硬编码弱默认参赛（xgb 20 棵/catboost 50 轮），scorecard 零调参（吸收 roadmap-1c"lgb 真实默认参数"） | High/L | ✅ |
-| ⬜ | TUNE-2 | 默认搜索预算仅 12 轮纯随机：无 TPE/贝叶斯、无两阶段，gate 文案劝退加预算；空间两处失真（lambda 线性均匀、lr 上限 0.08） | High/M | ✅ |
+| ✅ | TUNE-2 | 确定性两阶段搜索已落地（`5909edba`）：60/40 粗搜+邻域细搜、lambda log-uniform、lr 0.01–0.3 与轮数反比联动、默认 40 轮、gate 文案改按规模建议；无新依赖；全量 2012 passed | High/M | ✅ |
 | ⬜ | TUNE-3 | 单一 train/test 切分调参：无 CV/重复切分，早停/选参/校准三用同一 test | Med/M | — |
 | ⬜ | TUNE-4 | 超参定型后无'全量在时样本重训'：冠军只见过 ~50-70% 标注样本 | Med/S | — |
 | ⬜ | TUNE-5 | 样本权重链路断裂：加权训练却用未加权 KS 选参/选冠军 | Med/S | — |
