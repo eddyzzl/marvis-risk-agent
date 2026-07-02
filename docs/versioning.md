@@ -201,6 +201,8 @@ scripts/check
 
 如果只是文档修订，通常只需要 `scripts/check --skip-pytest --skip-ruff --skip-node`。最终说明中写明未运行代码测试的原因。
 
+日常本地迭代可用 `scripts/check --fast` 只跑快层测试（`-m "not slow and not e2e"`，排除真训练/真子进程/浏览器 e2e 用例，明显更快）；发布前检查仍需跑不带 `--fast` 的全量。可选加 `--audit` 跑 `pip-audit` 依赖 CVE 扫描（未安装时打印跳过原因，不会失败）。
+
 本机开发工作区可使用 `conda run -n py_313 python -m pytest ...` 和
 `conda run -n py_313 python -m ruff check ...` 执行同一组检查；公开 README/runbook 示例仍使用普通
 `python`，避免把个人 conda 环境写成用户安装前提。
