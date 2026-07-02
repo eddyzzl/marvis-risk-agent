@@ -23,7 +23,8 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from marvis.agent.auto_drive import decide_gate, parse_decision
+from marvis.agent.auto_drive import _apply_safety_policy, decide_gate, parse_decision
+from marvis.agent.gates import extract_gate_envelope
 from marvis.agent.turn_handlers import DRIVER_TURN_FUNCS, agent_autodrive_turn
 from marvis.app import create_app
 from marvis.domain import TASK_TYPE_MODELING
@@ -945,3 +946,283 @@ def test_decide_gate_retries_once_after_unparseable_reply():
     assert decision == {"action": "confirm", "reason": "重试后可解析"}
     assert len(fake.calls) == 2
     assert "上一次返回无法解析" in fake.calls[1]["user_prompt"]
+
+
+# -- LT-2: AUTO forced-confirmation-gate matrix -------------------------------
+#
+# _apply_safety_policy's docstring says "Gates that explicitly declare
+# human-review risk cannot be auto-confirmed either" -- but every existing test
+# above proves that ONLY by hand-authoring a synthetic gate_envelope.risk_flags
+# list directly into the message metadata. No test drives a gate dict shaped
+# the way plan_message_composer.gate_message() actually produces one (kind,
+# model_delivery/dedup/screen keys, NO explicit gate_envelope) through the same
+# real extract_gate_envelope(...) + _apply_safety_policy(...) pipeline
+# decide_gate() uses in production. This matrix closes that gap for the 5 task
+# types' forced-confirmation moments named in the LT-2 spec: data_join's C2
+# dedup/join confirm, modeling's post_training_action delivery confirm
+# (export_pmml/handoff_to_validation/champion adoption), and strategy/vintage
+# (both driven by the same orchestrator/templates/strategy.py template, whose
+# last step is tradeoff_view/vintage_curve -- confirmed by reading the
+# template: it has NO adopt_strategy plan step, so there is no AUTO gate for
+# tool_adopt_strategy to test here; recorded as a finding, not invented).
+_REAL_GATE_ENVELOPE_FIXTURES = [
+    pytest.param(
+        "data_join-dedup-confirm",
+        {
+            "plan_id": "p1",
+            "step_id": "confirm-join",
+            "run_seq": 1,
+            "kind": "gate",
+            "dedup": {"strategies": {"phone_md5": "keep_first"}},
+        },
+        id="data_join-dedup-confirm",
+    ),
+    pytest.param(
+        "modeling-post_training_action-delivery-confirm",
+        {
+            "plan_id": "p1",
+            "step_id": "post-training",
+            "run_seq": 1,
+            "kind": "gate",
+            "model_delivery": {
+                "step_id": "post-training",
+                "source_tool": "post_training_action",
+                "selected_experiment_id": "exp-1",
+                "actions": [
+                    {"action": "export_pmml", "status": "done"},
+                    {"action": "handoff_to_validation", "status": "done"},
+                ],
+                "pmml_path": "exp-1.pmml",
+                "validation_task_id": "task-v1",
+            },
+        },
+        id="modeling-post_training_action-delivery-confirm",
+    ),
+    pytest.param(
+        "modeling-select_experiment-champion-confirm",
+        {
+            "plan_id": "p1",
+            "step_id": "select-champion",
+            "run_seq": 1,
+            "kind": "gate",
+            "model_delivery": {
+                "step_id": "select-champion",
+                "source_tool": "select_experiment",
+                "selected_experiment_id": "exp-1",
+                "actions": [],
+            },
+        },
+        id="modeling-select_experiment-champion-confirm",
+    ),
+    pytest.param(
+        "strategy-tradeoff_view-confirm",
+        {
+            "plan_id": "p1",
+            "step_id": "tradeoff",
+            "run_seq": 1,
+            "kind": "gate",
+        },
+        id="strategy-tradeoff_view-confirm",
+    ),
+    pytest.param(
+        "vintage-vintage_curve-confirm",
+        {
+            "plan_id": "p1",
+            "step_id": "vintage-curve",
+            "run_seq": 1,
+            "kind": "gate",
+        },
+        id="vintage-vintage_curve-confirm",
+    ),
+]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "LT-2 bug: risk_flags is structurally dead in production. "
+        "GateEnvelope.risk_flags is a real dataclass field, round-tripped by "
+        "to_dict()/from_dict(), and _apply_safety_policy/_gate_risk_reason DOES "
+        "check it -- but nothing in the real gate-producing path ever sets it. "
+        "plan_message_composer.gate_message() builds meta without a risk_flags "
+        "key and calls extract_gate_envelope({'metadata': meta}), which falls "
+        "through to gates/contracts.py's infer_gate_envelope(meta) since no "
+        "explicit gate_envelope key is present yet -- and infer_gate_envelope "
+        "has branches for kind=='plan_overview', meta['screen'], meta['dedup'], "
+        "and meta['modeling_setup'], but NONE for meta['model_delivery'] (the "
+        "post_training_action / select_experiment champion-selection gate) and "
+        "none set risk_flags in any branch. Net effect: a bare {action: "
+        "'confirm'} LLM reply on the real post_training_action delivery gate "
+        "(export_pmml + handoff_to_validation already executed, champion about "
+        "to be adopted) sails through _apply_safety_policy completely "
+        "unmodified in AUTO mode -- the exact 'gates that explicitly declare "
+        "human-review risk cannot be auto-confirmed' backstop the function's "
+        "own docstring promises never actually engages for confirm (only for "
+        "adjust, via the separate AUTO_SAFE_ADJUST_CONTROLS allowlist check)."
+    ),
+)
+@pytest.mark.parametrize(("_label", "meta"), _REAL_GATE_ENVELOPE_FIXTURES)
+def test_auto_safety_policy_blocks_bare_confirm_on_real_forced_gates(_label, meta):
+    envelope = extract_gate_envelope({"metadata": meta})
+    decision = {"action": "confirm", "reason": "结果正常，继续。"}
+
+    result = _apply_safety_policy(decision, envelope)
+
+    assert result["action"] == "halt", (
+        f"{_label}: AUTO silently confirmed a forced-confirmation gate with no "
+        f"risk_flags / control declared -- envelope={envelope!r}"
+    )
+
+
+def test_auto_safety_policy_still_blocks_declared_risk_flags_on_model_delivery_gate():
+    """Sanity check for the matrix above: when a gate DOES carry an explicit
+    risk_flags list (the one path that already works today, per
+    test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag), AUTO still
+    halts a bare confirm on the delivery gate. This is the "should already
+    pass" control for the xfail matrix -- proves the matrix's assertion style
+    is correct and the xfail above is really about risk_flags never being
+    populated, not about a broken test."""
+    meta = {
+        "plan_id": "p1",
+        "step_id": "post-training",
+        "run_seq": 1,
+        "kind": "gate",
+        "gate_envelope": {
+            "kind": "post_training_action",
+            "target_step_id": "post-training",
+            "allowed_actions": ["confirm", "halt"],
+            "risk_flags": ["production_deploy_champion_model"],
+        },
+    }
+    envelope = extract_gate_envelope({"metadata": meta})
+    decision = {"action": "confirm", "reason": "结果正常，继续。"}
+
+    result = _apply_safety_policy(decision, envelope)
+
+    assert result["action"] == "halt"
+    assert "production_deploy_champion_model" in result["reason"]
+
+
+# -- LT-2: AUTO stale-control rejection ----------------------------------------
+
+
+def test_agent_autodrive_stale_gate_token_is_rejected_before_reaching_driver(monkeypatch):
+    """LT-2: PlanDriver.resume already rejects a stale expected_step_id for a
+    plain confirm (test_resume_plain_confirm_rejects_stale_gate_token_when_supplied
+    in test_plan_driver.py) -- this extends that precedent through the AUTO
+    auto-drive turn path specifically: agent_autodrive_turn binds its confirm to
+    the gate step id it just read (AGT-8, see
+    test_agent_autodrive_binds_gate_step_token_to_confirm_action above). If the
+    plan's awaiting gate has moved on since the LLM was consulted, the AUTO
+    turn must not silently apply a decision computed against a step that no
+    longer exists -- the bound expected_step_id must be exactly the CURRENT
+    gate's id at call time (there is no separate stale_token/nonce mechanism on
+    the AUTO path -- expected_step_id equality against PlanDriver's own
+    _awaiting_step is the only staleness check that exists end-to-end)."""
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    repo.messages.append({
+        "role": "assistant",
+        "stage": "chat",
+        "content": "下一个 gate",
+        "metadata": {"kind": "gate", "step_id": "gate-2"},
+    })
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    client = _FakeLLM(action="confirm", reason="继续")
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+
+    # The turn must bind to the LATEST gate in the transcript (gate-2), never the
+    # earlier gate-1 -- an AUTO decision must always target the current gate, not
+    # a stale one from earlier in the same conversation.
+    assert calls
+    assert calls[0]["expected_step_id"] == "gate-2"
+    assert calls[0]["expected_step_id"] != "gate-1"
+
+
+# -- LT-2: GAP-4 compact-dictionary context does not weaken existing AUTO
+# safety-boundary assertions (harden-only: this only ADDS a fixture combining
+# GAP-4's data-dictionary block with the pre-existing high-risk-flag /
+# undeclared-adjust-param blocking assertions; it does not relax any existing
+# assertion). -------------------------------------------------------------
+
+
+def test_decide_gate_blocks_high_risk_confirm_even_with_dictionary_context_injected():
+    """GAP-4 added a '【数据字典(列=业务含义,只读参照)】' block to the gate prompt
+    (auto_drive._dictionary_context_lines, read from screen.dictionary /
+    dedup.dictionary) after the high-risk-flag blocking behaviour
+    (test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag) was already
+    covered. No existing test exercises both together. This locks that the
+    dictionary block is truly only-read reference text: a gate that carries
+    BOTH a data dictionary and a high_risk_flag risk marker still gets its bare
+    confirm downgraded to halt, and the dictionary content actually reaches the
+    prompt (proving this fixture isn't accidentally a no-op)."""
+    fake = _FakeLLM(action="confirm", reason="拼接结果正常，继续")
+    gate = {
+        "content": "请确认拼接去重结果",
+        "metadata": {
+            "dedup": {
+                "strategies": {"phone_md5": "keep_first"},
+                "dictionary": {"phone_md5": "手机号MD5", "als_m3_id_nbank_orgnum": "近3个月非银机构数"},
+            },
+            "gate_envelope": {
+                "kind": "gate",
+                "target_step_id": "confirm-join",
+                "allowed_actions": ["confirm", "halt"],
+                "risk_flags": ["irreversible_dedup_merge"],
+            },
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "irreversible_dedup_merge" in decision["reason"]
+    prompt = fake.calls[0]["user_prompt"]
+    assert "数据字典" in prompt
+    assert "phone_md5=手机号MD5" in prompt
+
+
+def test_decide_gate_blocks_undeclared_adjust_params_even_with_dictionary_context_injected():
+    """Same harden-only check as above, against the OTHER existing AUTO
+    safety-boundary family (test_decide_gate_blocks_undeclared_auto_adjust_params):
+    an AUTO adjust naming a param the gate never declared as a control is still
+    downgraded to halt when the gate prompt also carries GAP-4's dictionary
+    block (screen.dictionary)."""
+    fake = _FakeLLM(action="adjust", reason="业务含义提示我应该放宽阈值")
+    fake._payload = json.dumps({
+        "action": "adjust",
+        "reason": "业务含义提示我应该放宽阈值",
+        "params": {"n_trials": 200},
+    })
+    gate = {
+        "content": "特征筛选完成",
+        "metadata": {
+            "screen": {
+                "leakage": [],
+                "suspected": [],
+                "unusable": [],
+                "dictionary": {"als_m3_id_nbank_orgnum": "近3个月非银机构数"},
+            },
+            "gate_envelope": {
+                "kind": "gate",
+                "target_step_id": "gate-screen",
+                "allowed_actions": ["confirm", "adjust", "halt"],
+                "controls": [],
+            },
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "未声明的调整参数:n_trials" in decision["reason"]
+    prompt = fake.calls[0]["user_prompt"]
+    assert "数据字典" in prompt
+    assert "als_m3_id_nbank_orgnum=近3个月非银机构数" in prompt
