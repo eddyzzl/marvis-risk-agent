@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 from typing import Any
 
 from marvis.agent_memory.models import (
@@ -154,6 +155,47 @@ def extract_user_preference(message: dict[str, Any]) -> MemoryCandidate | None:
     return _allow(candidate)
 
 
+# MEM-9: capture_user_preference_memory() (api_support.py) previously called
+# extract_user_preference() and, on None, silently dropped the turn with no
+# feedback to the user -- indistinguishable from "the user never asked to
+# remember anything" in the first place. classify_user_preference_capture()
+# exposes *why* a marked "please remember" instruction did not get stored, so
+# the caller can send a receipt only when the user actually invoked the
+# explicit-memory contract (a marker was present) and it was declined.
+USER_PREFERENCE_CAPTURED = "captured"
+USER_PREFERENCE_NO_MARKER = "no_marker"
+USER_PREFERENCE_RESERVED_TOPIC = "reserved_topic"
+USER_PREFERENCE_POLICY_REJECTED = "policy_rejected"
+
+
+def classify_user_preference_capture(message: dict[str, Any]) -> str:
+    text = _clean_text(message.get("text") or message.get("content"))
+    if not text:
+        return USER_PREFERENCE_NO_MARKER
+    if _mentions_reserved_skill_runtime(text):
+        return (
+            USER_PREFERENCE_RESERVED_TOPIC
+            if _EXPLICIT_PREFERENCE_MARKER_PATTERN.search(text)
+            else USER_PREFERENCE_NO_MARKER
+        )
+    preference = _truncate_text(_explicit_preference(text), USER_PREFERENCE_MAX_CHARS)
+    if not preference:
+        return USER_PREFERENCE_NO_MARKER
+    candidate = MemoryCandidate(
+        memory_type="user_preference",
+        summary=preference,
+        payload={"preference": preference},
+        source_message_id=_first_text(message, "message_id", "id"),
+        confidence="high",
+        reason="explicit user memory instruction",
+    )
+    return (
+        USER_PREFERENCE_CAPTURED
+        if _allow(candidate) is not None
+        else USER_PREFERENCE_POLICY_REJECTED
+    )
+
+
 def extract_memory_candidates(
     *,
     task_result: dict[str, Any] | None = None,
@@ -259,12 +301,22 @@ def _failure_message(failure: Any) -> str:
     return _clean_text(failure)
 
 
+# MEM-9: explicit user "remember this" triggers. Kept intentionally
+# conservative -- these are markers the user must type themselves, no
+# whole-message LLM judgment -- but widened beyond a hard text.startswith so
+# a marker mid-sentence ("好的，请记住：...") is still captured, and beyond
+# the original six literal strings to cover the other common phrasings users
+# actually type ("记一下", "以后都/以后请/以后统一").
+_EXPLICIT_PREFERENCE_MARKER_PATTERN = re.compile(
+    r"(?:请记住|记住|记一下|纠正一下|以后都|以后请|以后统一)[：:，,]?\s*"
+)
+
+
 def _explicit_preference(text: str) -> str:
-    markers = ("请记住：", "请记住:", "记住：", "记住:", "纠正一下：", "纠正一下:")
-    for marker in markers:
-        if text.startswith(marker):
-            return text[len(marker) :].strip()
-    return ""
+    match = _EXPLICIT_PREFERENCE_MARKER_PATTERN.search(text)
+    if not match:
+        return ""
+    return text[match.end() :].strip()
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -273,9 +325,24 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+# MEM-9: the reserved skill/runtime veto used to fire on a bare substring
+# match ('runtime' inside an unrelated lightgbm hyperparameter sentence was
+# enough to silently drop the whole preference). Narrowed to word-boundary
+# matching, and to require the message's *topic* to actually be about a
+# skill/tool runtime -- a skill/runtime marker together with an execute/run/
+# invoke marker -- rather than any message that merely mentions the word.
+_SKILL_RUNTIME_TOPIC_PATTERN = re.compile(
+    r"(?:\bskill\b|\bruntime\b|技能|运行时)", re.IGNORECASE
+)
+_SKILL_RUNTIME_ACTION_PATTERN = re.compile(
+    r"(?:\brun\b|\bexecute\b|执行|运行|调用|触发)", re.IGNORECASE
+)
+
+
 def _mentions_reserved_skill_runtime(text: str) -> bool:
-    lowered = text.lower()
-    return "skill" in lowered or "runtime" in lowered
+    return bool(_SKILL_RUNTIME_TOPIC_PATTERN.search(text)) and bool(
+        _SKILL_RUNTIME_ACTION_PATTERN.search(text)
+    )
 
 
 def _first_value(

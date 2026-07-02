@@ -170,7 +170,7 @@ class DistillationEngine:
         members: list[Any],
     ) -> MemoryDistillation | None:
         structured = self._merge_structured(category, members)
-        support = _distinct_task_support(members)
+        support = self._net_support(members)
         summary = self._summarize(category, scope_key, members, structured)
         summary = summary[:MAX_DISTILLED_SUMMARY_CHARS]
         verdict = (
@@ -188,6 +188,26 @@ class DistillationEngine:
             source_memory_ids=tuple(_entry_id(member) for member in members),
             support_count=support,
         )
+
+    def _net_support(self, members: list[Any]) -> int:
+        # MEM-7c: fold negative feedback into the distillation's support value
+        # (net = positive distinct-task support minus distinct-task negative
+        # feedback) instead of counting only positive occurrences. A group
+        # whose members were mostly discredited by task failures or user
+        # "not useful/wrong" reports should not present the same confidence
+        # as an equally-sized group with a clean record. Never drops below 0
+        # -- support only ever gates confidence tiers, it does not go negative.
+        positive_support = _distinct_task_support(members)
+        try:
+            negative_counts = self._store.negative_feedback_counts(
+                [_entry_id(member) for member in members]
+            )
+        except AttributeError:
+            return positive_support
+        negative_support = _distinct_task_support(
+            [member for member in members if negative_counts.get(_entry_id(member), 0) > 0]
+        )
+        return max(0, positive_support - negative_support)
 
     def _merge_structured(self, category: str, members: list[Any]) -> dict:
         payloads = [_entry_payload(member) for member in members]

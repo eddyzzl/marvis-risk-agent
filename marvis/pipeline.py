@@ -1989,8 +1989,9 @@ def _capture_agent_memory_for_failure(
     # Gate on auto_distill (see _capture_agent_memory_for_metrics_success).
     if not load_memory_policy(repo.db_path.parent).auto_distill:
         return
+    store = AgentMemoryStore(repo.db_path)
+    _downgrade_task_memory_on_failure(store, task_id=task_id, reason=f"task_failed:{failure_kind}")
     try:
-        store = AgentMemoryStore(repo.db_path)
         payload = {
             "task_id": task_id,
             "status": "failed",
@@ -2005,6 +2006,39 @@ def _capture_agent_memory_for_failure(
                 store.create(candidate, task_id=task_id)
     except Exception:
         return
+
+
+def _downgrade_task_memory_on_failure(
+    store: AgentMemoryStore,
+    *,
+    task_id: str,
+    reason: str,
+) -> None:
+    # MEM-7 negative feedback loop: when a task reaches its FAILED terminal
+    # state, every active memory entry that task itself produced earlier in
+    # its lifecycle (field conventions, model experience, etc. captured before
+    # it ultimately failed) gets a negative_feedback audit event and a
+    # one-tier confidence downgrade -- a weak prior tied to a failed run is
+    # worse than no prior. This runs before the failure-record candidates
+    # below are created, so the task_experience/validation_pitfall entries
+    # that describe *this* failure are not immediately self-downgraded. This
+    # is a pure retrieval-ranking signal -- it never touches deterministic
+    # metrics (INV-4). Kept in its own try/except so a downgrade failure
+    # (or a store stub in tests that only implements a subset of the API)
+    # never blocks the failure-record candidates below from being captured.
+    try:
+        entries = store.list_entries(source_task_id=task_id, limit=200)
+    except Exception:
+        return
+    for entry in entries:
+        try:
+            store.record_negative_feedback(
+                entry.id,
+                task_id=task_id,
+                reason=reason,
+            )
+        except (KeyError, ValueError):
+            continue
 
 
 def _read_validation_results_payload(outputs_dir: Path) -> dict:

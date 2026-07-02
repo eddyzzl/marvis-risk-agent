@@ -179,6 +179,27 @@ def enable_agent_memory(memory_id: str, request: Request) -> dict:
     return _set_agent_memory_status(request, memory_id, "active")
 
 
+@router.post("/agent-memory/{memory_id}/negative-feedback")
+def report_agent_memory_negative_feedback(
+    memory_id: str,
+    request: Request,
+    reason: str = "",
+) -> dict:
+    # MEM-7b: lightweight "this memory was unhelpful/wrong" user feedback,
+    # reusing the same negative-feedback audit path task-failure downgrades
+    # use (record_negative_feedback). One click from the memory management
+    # panel; no separate storage table needed -- confidence + audit trail
+    # already live on the entry/event tables.
+    store = AgentMemoryStore(request.app.state.settings.db_path)
+    try:
+        entry = store.record_negative_feedback(memory_id, reason=reason or "user_reported")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"memory": memory_entry_payload(entry), "events": store.list_events(memory_id)}
+
+
 @router.delete("/agent-memory/{memory_id}")
 def delete_agent_memory(memory_id: str, request: Request) -> dict:
     store = AgentMemoryStore(request.app.state.settings.db_path)

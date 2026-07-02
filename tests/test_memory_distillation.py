@@ -221,3 +221,79 @@ class _FakeLLM:
     def complete(self, **kwargs):
         self.calls.append(kwargs)
         return self.response
+
+
+def test_distillation_support_nets_out_negative_feedback(tmp_path):
+    # MEM-7c: distillation support becomes a net value (distinct-task positive
+    # support minus distinct-task negative feedback) instead of a raw member
+    # count, so a group whose entries were mostly discredited by task
+    # failures / user "not useful" reports does not present the same
+    # confidence as an equally-sized clean group.
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    payload = {
+        "model_name": "A卡",
+        "model_version": "V1",
+        "scope": "train",
+        "channel": "app",
+        "month": "202601",
+        "ks": 0.31,
+        "auc": 0.72,
+        "psi": 0.08,
+        "important_feature_sources": ["征信"],
+    }
+    entries = []
+    for task_id in ("task-1", "task-2", "task-3", "task-4"):
+        entries.append(
+            store.create(
+                MemoryCandidate(
+                    memory_type="model_experience",
+                    summary=f"模型经验 {task_id}",
+                    payload={**payload, "source_task_id": task_id},
+                    source_task_id=task_id,
+                ),
+                task_id=task_id,
+            )
+        )
+    # Flag two of the four distinct-task entries as negative.
+    store.record_negative_feedback(entries[0].id, downgrade=False)
+    store.record_negative_feedback(entries[1].id, downgrade=False)
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "model_experience"
+    )
+
+    assert len(distillations) == 1
+    distilled = distillations[0]
+    # 4 distinct-task positive support - 2 distinct-task negative = 2 net.
+    assert distilled.support_count == 2
+    assert distilled.confidence == "medium"
+    # The raw per-field "support" annotation inside the structured payload is
+    # left untouched (still counts merged entries, purely descriptive) --
+    # only support_count, which drives confidence_from_support, uses the net
+    # value.
+    assert distilled.structured["support"] == 4
+
+
+def test_distillation_support_never_goes_below_zero(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    entry = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="字段口径：目标字段=bad_flag",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-1",
+        )
+    )
+    store.record_negative_feedback(entry.id, downgrade=False)
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "field_convention"
+    )
+
+    assert len(distillations) == 1
+    assert distillations[0].support_count == 0
+    assert distillations[0].confidence == "low"
