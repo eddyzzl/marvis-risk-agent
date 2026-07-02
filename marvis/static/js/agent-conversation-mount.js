@@ -4,6 +4,25 @@ import {
   agentTimelineItems,
 } from "./agent-conversation-view.js";
 
+// UX-2: same "only the latest assistant gate is interactive" rule manual mode
+// uses (driver_manual_analysis.js's lastAssistantMessageId), narrowed to
+// actual gate messages the same way the backend's own latest_open_gate()
+// does (turn_handlers.py): kind === "gate", or a join_c1 turn (which carries
+// no explicit kind — see plan_message_composer.py). Kept as a local copy
+// here since this module has no dependency on the v2 driver modules, and the
+// timeline bucketing needs it computed once over the FULL message list,
+// before messages are split into per-bucket chunks below.
+function lastGateMessageId(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const meta = message?.metadata || {};
+    if (meta.kind === "gate" || meta.join_c1) return String(message.id || "");
+    return "";
+  }
+  return "";
+}
+
 function defaultDocument() {
   return globalThis.document || null;
 }
@@ -106,6 +125,7 @@ export function renderAgentTimeline(messages = [], deps = {}) {
       agentMessages: deps.agentMessages,
     }),
   });
+  const latestGateMessageId = deps.latestGateMessageId ?? lastGateMessageId(messages);
   const appendedSections = new Set();
   let basePanelUsed = false;
 
@@ -131,6 +151,7 @@ export function renderAgentTimeline(messages = [], deps = {}) {
     bucketMessages.innerHTML = agentMessagesHtml(item.messages, undefined, {
       agentStageLabel: deps.agentStageLabel,
       agentMessageHtml: deps.agentMessageHtml,
+      latestGateMessageId,
     });
     scrollContent.appendChild(bucket);
   }

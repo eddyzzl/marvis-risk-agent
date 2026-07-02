@@ -47,6 +47,8 @@ import { createThemeController } from "./js/theme.js";
 import { createComingSoonToastController } from "./js/toast.js";
 import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
 import {
+  driverGateBodyHtml as driverGateBodyHtmlController,
+  driverGateHasWidget as driverGateHasWidgetController,
   driverManualAnalysisHtml as driverManualAnalysisHtmlController,
   latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
   stripChatInstructions as stripChatInstructionsController,
@@ -4753,6 +4755,22 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
   // streaming/thinking state, or label visibility forces a full timeline
   // rebuild. Pure content edits (typewriter tick) leave this signature
   // unchanged and take the fast path.
+  // UX-2: a gate widget's interactive/read-only state (only the latest gate
+  // is interactive) must also be part of this signature — otherwise a driver
+  // turn that resolves the pending gate and opens a new one would leave the
+  // OLD gate's widget stuck rendered as interactive (and the new one stuck
+  // read-only) under the fast path, which only patches .agent-message-content
+  // text and never touches widget markup.
+  const latestGateId = (() => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message?.role !== "assistant") continue;
+      const meta = message?.metadata || {};
+      if (meta.kind === "gate" || meta.join_c1) return String(message.id || "");
+      return "";
+    }
+    return "";
+  })();
   let previousAssistantLabel = "";
   const skeleton = messages.map((message) => {
     const role = message?.role === "user" ? "user" : "assistant";
@@ -4776,6 +4794,7 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
             reference.id || "",
@@ -5344,8 +5363,8 @@ if (typeof document !== "undefined") {
   document.addEventListener("click", handleModelingWeightAdjustClick);
 }
 
-function agentMessageC1FormHtml(message) {
-  return renderJoinC1Form(message);
+function agentMessageC1FormHtml(message, options = {}) {
+  return renderJoinC1Form(message, options);
 }
 
 async function submitC1Assignment(button) {
@@ -5453,8 +5472,8 @@ if (typeof document !== "undefined") {
   document.addEventListener("change", handleScreenPickChange);
 }
 
-function agentMessageDedupPickerHtml(message) {
-  return renderDedupPicker(message);
+function agentMessageDedupPickerHtml(message, options = {}) {
+  return renderDedupPicker(message, options);
 }
 
 async function submitDedupStrategies(button) {
@@ -5469,7 +5488,7 @@ if (typeof document !== "undefined") {
 }
 
 function agentMessageGateButtonHtml(message) {
-  return renderDriverGateButton(message, { isAgentMode: selectedTaskIsAgentMode });
+  return renderDriverGateButton(message);
 }
 
 async function submitDriverConfirm(button) {
@@ -5604,6 +5623,26 @@ function driverGateCardHtml(message, innerHtml) {
   ].join("");
 }
 
+// UX-2: agent-mode gate widgets reuse the exact renderers + widget/table
+// placement manual mode uses (driverGateBodyHtmlController), instead of a
+// separate agent-only render branch, so a screening table / dedup picker /
+// modeling setup panel / join-C1 form always looks and behaves identically
+// in both modes — the controllers underneath (screen_gate_controller.js etc.)
+// are already mode-agnostic and post through the same structured
+// /agent/messages fields (selection / dedup_strategies / adjust_params /
+// expected_step_id). Free text in the composer remains a second channel that
+// can advance the same gate (agent mode's LLM-routing value is kept, not
+// replaced).
+function agentMessageGateBodyHtml(message, interactive) {
+  return driverGateBodyHtmlController(message, {
+    renderC1Form: agentMessageC1FormHtml,
+    renderDedupPicker: agentMessageDedupPickerHtml,
+    renderModelingSetup: agentMessageModelingSetupHtml,
+    renderScreenTable: agentMessageScreenTableHtml,
+    renderTables: agentMessageTablesHtml,
+  }, { interactive });
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
   // join_c1 turns carry no explicit metadata.kind (backend groups them with
@@ -5612,6 +5651,7 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   // get the same card treatment.
   const isGate = role === "assistant"
     && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
+  const hasWidget = isGate && driverGateHasWidgetController(message);
   const className = role === "user"
     ? "agent-message user"
     : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
@@ -5625,11 +5665,16 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
+  // VD-2/UX-2: only the latest gate (stale-protection identical to manual
+  // mode's latestInteractiveScreenMessageId / lastAssistantMessageId) renders
+  // its widgets as interactive; earlier gate cards render the same widgets as
+  // read-only snapshots so a stale card cannot be actioned against an
+  // already-advanced step.
+  const interactive = hasWidget && Boolean(options.isLatestGate);
   const bodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
-    role === "assistant"
-      ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}`)
-      : "",
+    role === "assistant" && hasWidget ? agentMessageGateBodyHtml(message, interactive) : "",
+    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}` : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
   ].join("");
   return [

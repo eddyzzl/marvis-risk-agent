@@ -1333,14 +1333,22 @@ def test_dedup_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/join_gate_controller.js")
     manual_module_js = _read("js/v2/driver_manual_analysis.js")
-    assert "function agentMessageDedupPickerHtml(message)" in app_js
-    assert "return renderDedupPicker(message);" in app_js
+    assert "function agentMessageDedupPickerHtml(message, options = {})" in app_js
+    assert "return renderDedupPicker(message, options);" in app_js
     assert "if (meta.dedup)" in manual_module_js
-    assert "export function renderDedupPicker(message)" in module_js
+    # UX-2: both modes mount the picker through the shared driverGateBodyHtml,
+    # so the render branch decision lives in driver_manual_analysis.js, not a
+    # per-mode copy.
+    assert "if (meta.dedup) return" in manual_module_js
+    assert "export function renderDedupPicker(message, options = {})" in module_js
     assert "message?.metadata?.dedup" in module_js
     # a first/last strategy <select> per conflicting feature
     assert 'class="dedup-strategy"' in module_js
     assert "data-dedup-feature" in module_js
+    # UX-2: an earlier (non-latest) dedup gate renders read-only so a stale tab
+    # cannot re-submit strategies against an already-advanced step.
+    assert 'data-dedup-readonly="true"' in module_js
+    assert "form.dataset.dedupReadonly" in module_js
 
 
 def test_dedup_picker_posts_strategies():
@@ -1369,10 +1377,12 @@ def test_join_c1_form_renderer_and_submit_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/join_gate_controller.js")
     manual_module_js = _read("js/v2/driver_manual_analysis.js")
-    assert "function agentMessageC1FormHtml(message)" in app_js
-    assert "return renderJoinC1Form(message);" in app_js
+    assert "function agentMessageC1FormHtml(message, options = {})" in app_js
+    assert "return renderJoinC1Form(message, options);" in app_js
     assert "if (meta.join_c1)" in manual_module_js
-    assert "export function renderJoinC1Form(message)" in module_js
+    # UX-2: both modes mount the form through the shared driverGateBodyHtml.
+    assert "if (meta.join_c1) return" in manual_module_js
+    assert "export function renderJoinC1Form(message, options = {})" in module_js
     assert 'class="c1-role"' in module_js
     assert "data-c1-dataset" in module_js
     assert "function submitC1Assignment(button)" in app_js
@@ -1390,6 +1400,10 @@ def test_join_c1_form_renderer_and_submit_are_wired():
     assert "pollAgentMessagesUntilSettled" in module_js
     assert "resetFetchThrottle" in module_js
     assert "renderWorkflowStepper" in module_js
+    # UX-2: an earlier (non-latest) C1 form renders read-only so a stale tab
+    # cannot re-submit role assignments against an already-advanced step.
+    assert 'data-c1-readonly="true"' in module_js
+    assert "form.dataset.c1Readonly" in module_js
 
 
 def test_join_gate_controller_posts_c1_and_dedup_payloads():
@@ -1434,6 +1448,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(c1Html.includes('data-c1-dataset="main"'), true);
         assert.equal(c1Html.includes('value="bad" selected'), true);
         const c1Form = {{
+          dataset: {{}},
           querySelectorAll: (selector) => selector === ".c1-role" ? [
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "feature" }},
@@ -1454,6 +1469,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         }});
 
         const noAnchorForm = {{
+          dataset: {{}},
           querySelectorAll: () => [{{ getAttribute: () => "feat", value: "feature" }}],
           querySelector: () => null,
         }};
@@ -1464,6 +1480,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         // not silently collapsed to a single anchor with the second dropped.
         const callsBeforeDuplicateAttempt = calls.length;
         const duplicateAnchorForm = {{
+          dataset: {{}},
           querySelectorAll: (selector) => selector === ".c1-role" ? [
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
             {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "anchor" }},
@@ -1472,6 +1489,13 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         }};
         await submitC1Assignment({{ disabled: false, closest: () => duplicateAnchorForm }}, context);
         assert.deepEqual(statuses.at(-1), ["只能有一张样本主表，请把其余表改为「特征表」或「忽略」。", "error"]);
+        assert.equal(calls.length, callsBeforeDuplicateAttempt);
+
+        // UX-2: a read-only (stale) C1 form must refuse to submit, matching the
+        // screen/modeling-setup/dedup readonly-guard convention.
+        const readonlyC1Form = {{ dataset: {{ c1Readonly: "true" }} }};
+        await submitC1Assignment({{ disabled: false, closest: () => readonlyC1Form }}, context);
+        assert.deepEqual(statuses.at(-1), ["这是历史拼接角色结果,请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeDuplicateAttempt);
 
         const dedupHtml = renderDedupPicker({{
@@ -1486,6 +1510,18 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         }});
         assert.equal(dedupHtml.includes('data-dedup-gate-step-id="gate-dedup"'), true);
         assert.equal(dedupHtml.includes('data-dedup-feature="feat"'), true);
+        const readonlyDedupHtml = renderDedupPicker({{
+          id: "dedup-msg-old",
+          metadata: {{
+            step_id: "gate-dedup-old",
+            dedup: {{
+              strategies: ["first", "last"],
+              features: [{{ feature_id: "feat", conflict_keys: 3 }}],
+            }},
+          }},
+        }}, {{ interactive: false }});
+        assert.equal(readonlyDedupHtml.includes('data-dedup-readonly="true"'), true);
+        assert.equal(readonlyDedupHtml.includes("历史结果"), true);
         const dedupForm = {{
           dataset: {{ dedupGateStepId: "gate-dedup" }},
           querySelectorAll: (selector) => selector === ".dedup-strategy" ? [
@@ -1499,6 +1535,13 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(calls[1][1].expected_step_id, "gate-dedup");
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 2);
+
+        // UX-2: a read-only (stale) dedup picker must refuse to submit.
+        const callsBeforeReadonlyDedup = calls.length;
+        const readonlyDedupForm = {{ dataset: {{ dedupReadonly: "true" }} }};
+        await submitDedupStrategies({{ disabled: false, closest: () => readonlyDedupForm }}, context);
+        assert.deepEqual(statuses.at(-1), ["这是历史去重结果,请使用最新待确认步骤确认。", "error"]);
+        assert.equal(calls.length, callsBeforeReadonlyDedup);
         process.stdout.write("ok");
         """
     )
@@ -1518,7 +1561,14 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         const renderedButton = renderDriverGateButton({{ metadata: {{ kind: "gate", step_id: "gate<1>" }} }});
         assert.equal(renderedButton.includes("data-driver-confirm"), true);
         assert.equal(renderedButton.includes('data-expected-step-id="gate&lt;1&gt;"'), true);
-        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}, {{ isAgentMode: true }}), "");
+        // UX-2: the plain confirm button now renders identically in agent mode
+        // too (no more isAgentMode short-circuit) — it only steps aside when the
+        // gate carries a structured widget (screen/dedup/modeling_setup/join_c1),
+        // since that widget already owns the primary confirm action.
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate" }} }}).includes("data-driver-confirm"), true);
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", screen: {{ selected: ["x"] }} }} }}), "");
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", dedup: {{ features: [{{ feature_id: "f" }}] }} }} }}), "");
+        assert.equal(renderDriverGateButton({{ metadata: {{ kind: "gate", modeling_setup: {{}} }} }}), "");
         assert.equal(renderDriverGateButton({{ metadata: {{ kind: "done" }} }}), "");
 
         let agentMessages = [];

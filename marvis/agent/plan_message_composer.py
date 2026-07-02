@@ -52,7 +52,12 @@ class PlanMessageComposer:
         parts = rendered.parts
         if not parts:
             parts.append("上一步已完成。")
-        parts.append("确认请回复「确认」继续;要调整可直接说明。")
+        # UX-2: the frontend now mounts the structured gate widgets (screening
+        # table / dedup picker / modeling setup panel / C1 role form) directly
+        # in the agent-mode chat timeline (app.js's agentMessageHtml), so the
+        # gate copy tells the user both channels work — click the widget below
+        # or describe the change in free text.
+        parts.append("确认请回复「确认」继续;可直接操作下方控件，或用文字说明要调整的参数。")
         meta = {
             "plan_id": plan.id,
             "step_id": gate.id if gate else None,

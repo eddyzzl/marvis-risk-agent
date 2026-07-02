@@ -1291,6 +1291,12 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .c1-form-foot .c1-confirm {
   margin-left: auto;
 }
+.c1-form[data-c1-readonly="true"] .c1-form-table {
+  opacity: 0.78;
+}
+.c1-form[data-c1-readonly="true"] .c1-form-foot {
+  background: var(--surface-soft, var(--surface-subtle));
+}
 
 /* Manual-mode gate confirm control (no free-text composer in manual mode). */
 .driver-gate-actions {
@@ -2132,4 +2138,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   justify-content: flex-end;
   padding: 10px 12px;
   background: var(--surface-subtle);
+}
+.dedup-picker[data-dedup-readonly="true"] .dedup-table {
+  opacity: 0.78;
 }
