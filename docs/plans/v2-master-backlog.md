@@ -249,10 +249,10 @@
 | ✅ | GAP-8 | 测试连接端点+设置按钮+health.llm_configured（`efbc8880`） | Med/S | — |
 | ✅ | GAP-9 | marvis backup/restore 命令（SQLite backup API 一致性快照+tar，`4522a628`） | Med/S | — |
 | ✅ | GAP-10 | logging_setup+RotatingFileHandler 落 workspace/logs+关键模块事件（`96ecdf4c`） | Med/S | — |
-| ⬜ | TST-5 | 1729 用例扁平层：无 marker/分层 | Med/S | — |
+| ✅ | TST-5 | slow/e2e/llm markers+strict+scripts/check --fast（`8bcbd6d3`）：39 慢测打标（真 durations 数据），fast 层 2374 用例 6m14s（全量 14m，2.25×——审查的 3 分钟目标经实测不改测试逻辑达不到，如实记录） | Med/S | — |
 | ⬜ | TST-6 | redaction 过度/漏 masking；会话转录整体不脱敏 | Med/M | — |
 | ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
-| ⬜ | TST-8 | 无依赖 CVE 扫描（pip-audit/safety/bandit） | Med/S | — |
+| ✅ | TST-8 | CI security job（pip-audit+bandit -ll，continue-on-error 观察期，`22299d71`）；首扫：pip-audit 零漏洞、bandit 42 中危（40×B608 f-string SQL 等）**留待 FIN-2 审查裁决** | Med/S | — |
 | ⬜ | TST-9 | 并发路径零测试：轮询读 vs 长写事务争用 | Med/M | — |
 | ⬜ | ARCH-4 | 五个 run_*_driver_turn 成片复制粘贴（~330 行同构） | Med/M | — |
 | ⬜ | ARCH-5 | 插件 worker 协议无版本握手；子进程反向 import 拖入 DB 链 | Med/M | — |
