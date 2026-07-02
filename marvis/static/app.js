@@ -362,6 +362,12 @@ function taskServerBusyAction(task = selectedTask) {
   const kind = task?.active_job_kind || "";
   if (kind === "agent") return "agent";
   if (kind === "plan") return "agent";
+  // REL-1/UX-1: the V2 driver turn (JOIN/feature/modeling/strategy/vintage
+  // conversation confirm) now runs inside a task job of kind "driver" so this
+  // busy state is visible after a refresh or from any entry point, not just the
+  // tab that sent the confirm — and it claims the same 1s progress polling as
+  // every other long-running kind below.
+  if (kind === "driver") return "agent";
   if (kind === "join") return "join";
   if (kind === "pipeline" || kind === "notebook") return "notebook";
   if (kind === "metrics") return "metrics";
@@ -1389,6 +1395,11 @@ function taskActionStatusSnapshot(task = selectedTask) {
   if (taskStopped(task)) return { message: "已停止当前动作。", kind: "stopped" };
   if (task.active_job_kind === "join") return { message: "数据拼接进行中。", kind: "busy" };
   if (task.active_job_kind === "plan") return { message: "计划执行进行中。", kind: "busy" };
+  // REL-1/UX-1: V2 driver-turn task (data_join/feature_analysis/modeling/
+  // strategy/vintage) job — these task types don't carry the V1.1 validation
+  // task.status values the switch below keys on, so without this the busy pill
+  // would go blank for the whole turn instead of showing "正在执行下一步…".
+  if (task.active_job_kind === "driver") return { message: "正在执行下一步…", kind: "busy" };
   switch (task.status) {
     case "created":
       return { message: "任务已创建。", kind: "info" };
@@ -5231,6 +5242,12 @@ function modelingSetupControllerContext() {
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
   };
 }
 if (typeof document !== "undefined") {
@@ -5261,6 +5278,12 @@ function joinGateControllerContext() {
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
   };
 }
 if (typeof document !== "undefined") {
@@ -5299,6 +5322,12 @@ function screenGateControllerContext() {
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
   };
 }
 if (typeof document !== "undefined") {
@@ -5344,6 +5373,12 @@ function driverConfirmControllerContext() {
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
   };
 }
 if (typeof document !== "undefined") {

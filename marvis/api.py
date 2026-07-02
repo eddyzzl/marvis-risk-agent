@@ -613,6 +613,10 @@ def _driver_llm_client(request, task: TaskRecord):
 
 
 
+_DRIVER_JOB_KIND = "driver"
+_DRIVER_JOB_BUSY_DETAIL = "该任务正在执行上一步，请等待完成"
+
+
 def _dispatch_driver_turn(
     request, repo: TaskRepository, task: TaskRecord, *, user_text: str | None,
     agent_client, acceptance_mode: str | None = None, selection: list | None = None,
@@ -625,7 +629,23 @@ def _dispatch_driver_turn(
     confirm — even with an LLM configured. Manual mode (agent_client None) always
     stops at the gate for the control button. ``selection`` carries an edited feature
     set from the §4 screening table; ``dedup_strategies`` carries the per-feature dedup
-    map from the §4 join dedup picker."""
+    map from the §4 join dedup picker.
+
+    REL-1: the whole turn (including any AUTO-mode multi-gate auto-drive loop) is
+    wrapped in a task job so the ``idx_jobs_active_task`` unique index rejects a
+    second concurrent turn (double-sent confirm / dual tabs / a retried request)
+    with 409 *before* it ever reaches ``PlanExecutor.run`` a second time, instead of
+    racing in and getting misjudged as a server-restart orphan. The job stays
+    synchronous (it mirrors the synchronous HTTP request, not a BackgroundTasks
+    job) — it exists purely as the concurrency lock + observability record
+    (REL-6), so ``GET /api/tasks`` shows ``active_job_kind == "driver"`` for the
+    duration of the turn. A hung driver turn is out of scope here (REL-5 covers
+    job heartbeat/watchdog + a cancel endpoint separately)."""
+    try:
+        job_id = repo.start_job(task.id, _DRIVER_JOB_KIND)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=_DRIVER_JOB_BUSY_DETAIL) from exc
+    repo.mark_job_running(job_id)
     runtime = DriverTurnRuntime(
         settings=request.app.state.settings,
         plan_repo=request.app.state.plan_repo,
@@ -636,14 +656,21 @@ def _dispatch_driver_turn(
         tier=_task_tier(request, task),
     )
     try:
-        return dispatch_plan_driver_turn(
+        result = dispatch_plan_driver_turn(
             runtime, repo, task, user_text=user_text, agent_client=agent_client,
             auto_accept_enabled=_agent_auto_accept(acceptance_mode), selection=selection,
             dedup_strategies=dedup_strategies, adjust_params=adjust_params,
             expected_step_id=expected_step_id,
         )
     except DriverError as exc:
+        repo.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        repo.finish_job(job_id, status="failed", error_name=exc.__class__.__name__, error_value=str(exc))
+        raise
+    else:
+        repo.finish_job(job_id, status="succeeded")
+        return result
 
 
 def _dispatch_agent_validation_job(

@@ -251,11 +251,41 @@ def _load_plan(request: Request, plan_id: str):
 def _plan_payload(request: Request, plan) -> dict:
     payload = plan_to_dict(plan)
     _attach_failure_envelopes(payload)
+    _attach_running_step_started_at(request, payload, plan.id)
     payload["sub_agents"] = [
         _sub_agent_payload(sub)
         for sub in request.app.state.plan_repo.list_sub_agents_for_plan(plan.id)
     ]
     return {"plan": payload}
+
+
+def _attach_running_step_started_at(request: Request, payload: dict, plan_id: str) -> None:
+    """UX-1/REL-6: give the plan rail a ``started_at`` for the step currently
+    RUNNING, sourced from plan_step_runs (already recorded per attempt), so the
+    rail can reuse the validation stepper's formatStepElapsed() to show elapsed
+    time instead of a plain spinner during a long driver-turn step."""
+    steps = payload.get("steps") or []
+    running_step_ids = {
+        str(step.get("id") or "") for step in steps if step.get("status") == StepStatus.RUNNING.value
+    }
+    if not running_step_ids:
+        return
+    running_runs = request.app.state.plan_repo.list_running_step_runs(plan_id)
+    started_at_by_step: dict[str, str] = {}
+    for run in running_runs:
+        step_id = str(run.get("step_id") or "")
+        if step_id not in running_step_ids:
+            continue
+        started_at = str(run.get("started_at") or "")
+        if not started_at:
+            continue
+        # ORDER BY started_at ASC in list_running_step_runs; keep the earliest
+        # attempt's start time per step.
+        started_at_by_step.setdefault(step_id, started_at)
+    for step in steps:
+        step_id = str(step.get("id") or "")
+        if step_id in started_at_by_step:
+            step["started_at"] = started_at_by_step[step_id]
 
 
 def _attach_failure_envelopes(payload: dict) -> None:

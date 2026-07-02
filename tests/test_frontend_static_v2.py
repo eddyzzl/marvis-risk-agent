@@ -8677,6 +8677,12 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
             "function agentAcceptanceModeValue() { return 'manual'; }",
             "function setActionStatus() {}",
             "function renderAgentConversation() {}",
+            # UX-1: the context factories now also carry busy-state plumbing
+            # (REL-1 job-wrapped driver turns) — stub it so the sliced source
+            # executes; this test's own scope is only the stale-message guard.
+            "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
+            "function renderWorkflowStepper() {}",
+            "const planRailController = { resetFetchThrottle() {} };",
             context_bodies,
             "const results = {};",
             "for (const [name, factory] of Object.entries({"
@@ -8707,6 +8713,81 @@ def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally()
             f"{name}: a task-A response resolving after switching to task B "
             f"must not overwrite agentMessages (got {agent_messages!r})."
         )
+
+
+def test_submit_driver_confirm_shows_busy_state_and_polls_before_response_resolves():
+    """UX-1 step 1: clicking a driver gate's confirm button must show the busy
+    pill and start polling agent messages *immediately* (before the POST
+    resolves), since the backend now runs the whole turn inside a job (REL-1)
+    and can take minutes. Also guards that the pre-existing "task switched
+    while pending" no-op guard on setAgentMessages (UX-3) still holds once the
+    busy-state polling plumbing is wired through the same context.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ submitDriverConfirm }} from {json.dumps(module_url)};",
+            "const statusCalls = [];",
+            "function setActionStatus(message, kind) { statusCalls.push({ message, kind }); }",
+            "const pollCalls = [];",
+            "function pollAgentMessagesUntilSettled(taskId, pendingPromise) {",
+            "  pollCalls.push(taskId);",
+            "  return pendingPromise.then(() => {}, () => {});",
+            "}",
+            "const railTicks = [];",
+            "function resetFetchThrottle(taskId) { railTicks.push(['reset', taskId]); }",
+            "function renderWorkflowStepper(opts) { railTicks.push(['render', opts && opts.force]); }",
+            "let selectedTaskId = 'task-A';",
+            "let agentMessages = ['seed'];",
+            "let resolveApi;",
+            "function api() { return new Promise((resolve) => { resolveApi = resolve; }); }",
+            "const button = { disabled: false, getAttribute: () => '' };",
+            "const context = {",
+            "  getSelectedTaskId: () => selectedTaskId,",
+            "  api,",
+            "  setActionStatus,",
+            "  setAgentMessages: (messages) => {",
+            "    if (selectedTaskId !== 'task-A') return;",
+            "    agentMessages = messages || agentMessages;",
+            "  },",
+            "  renderAgentConversation: () => {},",
+            "  pollAgentMessagesUntilSettled,",
+            "  resetFetchThrottle,",
+            "  renderWorkflowStepper,",
+            "};",
+            "const confirmPromise = submitDriverConfirm(button, context);",
+            "await new Promise((resolve) => setTimeout(resolve, 0));",
+            "const busyCallBeforeResolve = statusCalls[0];",
+            "const buttonDisabledDuring = button.disabled;",
+            "const polledBeforeResolve = pollCalls.slice();",
+            # Simulate switching to task B while the confirm's turn is still
+            # running server-side, then the (stale) request finally resolving.
+            "selectedTaskId = 'task-B';",
+            "resolveApi({ messages: ['A-turn-finished-late'] });",
+            "await confirmPromise;",
+            "process.stdout.write(JSON.stringify({",
+            "  busyCallBeforeResolve, buttonDisabledDuring, polledBeforeResolve,",
+            "  railTicks, agentMessagesAfter: agentMessages,",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["busyCallBeforeResolve"] == {"message": "正在执行下一步…", "kind": "busy"}
+    assert payload["buttonDisabledDuring"] is True
+    assert payload["polledBeforeResolve"] == ["task-A"]
+    # the plan-rail ticker fired at least once while the request was pending,
+    # and the final finally-block tick still runs after the response resolves.
+    assert ["render", True] in payload["railTicks"]
+    # UX-3: task switched away before the stale response resolved, so the
+    # setAgentMessages guard inside this call's own context must still drop it.
+    assert payload["agentMessagesAfter"] == ["seed"]
 
 
 def test_recompute_agent_auto_scroll_follow_toggles_on_position():
