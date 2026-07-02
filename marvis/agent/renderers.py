@@ -922,6 +922,46 @@ def _render_score_dataset(o: dict):
     return text, [{"title": "打分结果摘要", "columns": ["项", "值"], "rows": rows}]
 
 
+#: S1b/DOM-3: gate copy fragments per monitor_run verdict level, keyed by the
+#: same green/amber/red vocabulary tool_monitor_run emits -- the confirmation
+#: gate text names which flags fired and the suggested action so a weak LLM (or
+#: a manual reviewer) doesn't have to re-derive it from the raw checks table.
+_MONITOR_LEVEL_LABEL = {"green": "绿", "amber": "黄", "red": "红"}
+
+
+def _render_monitor_run(o: dict):
+    overall = str(o.get("overall_level") or "")
+    checks = [c for c in (o.get("checks") or []) if isinstance(c, dict)]
+    red_flags = [c for c in checks if c.get("level") == "red"]
+    amber_flags = [c for c in checks if c.get("level") == "amber"]
+    label = _MONITOR_LEVEL_LABEL.get(overall, overall)
+    text = f"**监控运行完成**:总体判级【{label}】。{o.get('recommendation') or ''}"
+    if red_flags:
+        names = "、".join(str(c.get("label") or c.get("id")) for c in red_flags)
+        text += f" 红旗:{names}。"
+    if amber_flags:
+        names = "、".join(str(c.get("label") or c.get("id")) for c in amber_flags)
+        text += f" 黄旗:{names}。"
+    rows = [
+        [
+            str(c.get("label") or c.get("id") or ""),
+            _MONITOR_LEVEL_LABEL.get(str(c.get("level")), str(c.get("level"))),
+            _fmt(c.get("value")) if c.get("value") is not None else "n/a",
+            str(c.get("message") or ""),
+        ]
+        for c in checks
+    ]
+    tables = [{"title": "监控判级明细", "columns": ["检查项", "判级", "值", "说明"], "rows": rows}]
+    drifted = [row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)]
+    if drifted:
+        tables.append({
+            "title": "特征漂移 Top",
+            "columns": ["特征", "CSI"],
+            "rows": [[str(row.get("feature") or ""), _fmt(row.get("csi"))] for row in drifted[:10]],
+        })
+    return text, tables
+
+
 _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
@@ -945,6 +985,7 @@ _RENDERERS = {
     "tradeoff_view": _render_tradeoff_view,
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,
+    "monitor_run": _render_monitor_run,
 }
 
 
