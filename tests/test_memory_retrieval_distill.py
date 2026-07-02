@@ -119,8 +119,13 @@ def test_distillation_prompt_packet_preserves_audit_fields():
     packet = normalized["memories"][0]
     assert packet["kind"] == "distillation"
     assert packet["support_count"] == 4
-    assert packet["source_memory_ids"] == ["mem-1", "mem-2"]
+    # The prompt-facing packet bounds source_memory_ids to a count + sample
+    # (MEM-11 budget) instead of an unbounded id list.
+    assert packet["source_memory_ids_count"] == 2
+    assert packet["source_memory_ids_sample"] == ["mem-1", "mem-2"]
     assert packet["payload"] == {"fields": {"target_col": ["bad_flag"]}}
+    # The audit trail (memory_references) is built independently and keeps
+    # the full source_memory_ids list for traceability.
     references = memory_references(context, use_reason="chat")
     assert references == [
         {
@@ -192,3 +197,71 @@ def test_raw_recall_targets_by_kind_so_old_model_experience_is_not_crowded_out(t
         packet["kind"] == "raw" and packet["source_task_id"] == "task-old"
         for packet in packets
     )
+
+
+
+def test_memory_packet_bounds_unbounded_source_task_ids_to_count_and_recent_sample():
+    task_ids = [f"task-{i:03d}" for i in range(40)]
+    context = {
+        "memories": [
+            {
+                "kind": "distillation",
+                "id": "dist-big",
+                "memory_type": "model_experience",
+                "summary": "A卡模型历史经验汇总。",
+                "payload": {
+                    "model_name": "A卡",
+                    "scopes": ["train"],
+                    "channels": ["自营"],
+                    "metric_ranges": {"ks": {"min": 0.28, "max": 0.34}},
+                    "support": len(task_ids),
+                    "source_task_ids": task_ids,
+                },
+                "confidence": "high",
+                "support_count": len(task_ids),
+            }
+        ]
+    }
+
+    normalized = normalize_memory_context(context)
+
+    payload = normalized["memories"][0]["payload"]
+    assert "source_task_ids" not in payload
+    assert payload["source_task_ids_count"] == 40
+    assert payload["source_task_ids_sample"] == task_ids[-3:]
+    # Other structured fields pass through untouched.
+    assert payload["metric_ranges"] == {"ks": {"min": 0.28, "max": 0.34}}
+    assert payload["support"] == 40
+
+
+def test_cross_task_memory_char_budget_drops_low_confidence_packets_first():
+    # important_feature_sources is an allowlisted model_experience field, so
+    # it survives _bounded_payload trimming and can be used to legitimately
+    # inflate a packet past the char budget.
+    big_payload = {"important_feature_sources": [f"feature_{i}" for i in range(400)]}
+    context = {
+        "memories": [
+            {
+                "kind": "raw",
+                "id": "mem-high",
+                "memory_type": "model_experience",
+                "summary": "高置信度经验",
+                "payload": dict(big_payload),
+                "confidence": "high",
+            },
+            {
+                "kind": "raw",
+                "id": "mem-low",
+                "memory_type": "model_experience",
+                "summary": "低置信度经验",
+                "payload": dict(big_payload),
+                "confidence": "low",
+            },
+        ]
+    }
+
+    normalized = normalize_memory_context(context)
+
+    ids = [memory["id"] for memory in normalized["memories"]]
+    assert "mem-high" in ids
+    assert "mem-low" not in ids
