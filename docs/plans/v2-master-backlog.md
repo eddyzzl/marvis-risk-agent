@@ -233,8 +233,8 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | GAP-1 | CSV 摄取硬编码 UTF-8 且无 dtype 防线：GBK 直接失败、长 ID 被 float64 截断损坏 JOIN 键 | High/M | — |
-| ⬜ | GAP-2 | 删除任务残留原始信贷数据与孤儿行，删除不写审计 | High/M | — |
+| ✅ | GAP-1 | 编码 try 链（utf-8→sig→gbk→gb18030）+长数字列防截断读为字符串+摄取报告含 warnings（`ce39ec67`） | High/M | — |
+| ✅ | GAP-2 | purge_task 同事务清理全资产+引用计数保护+task.delete 审计+purge-preview 端点+删除框摘要（`caf21fe7`/`2988c155`） | High/M | — |
 | ⬜ | GAP-3 | 审计日志只写不读：无 API/UI/导出（+6-28 余项"审计恢复队列"顺带评估） | High/M | — |
 | ⬜ | GAP-4 | 数据字典/列业务语义层在 V2 全链路缺位 | High/M | — |
 | ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
@@ -243,11 +243,11 @@
 | ⬜ | ARCH-1 | api.py 拆分停在"搬家"：legacy_api 反向调用 36 处私有函数 | High/M | ⚠️ |
 | ⬜ | ARCH-2 | packs/modeling/tools.py 4386 行新 god file | High/M | ⚠️ |
 | ⬜ | GAP-5 | 共享主机 loopback 全信任（装插件=任意代码执行） | Med/S | — |
-| ⬜ | GAP-6 | 模型资产无注册表：experiments 无 HTTP 端点 | Med/M | — |
-| ⬜ | GAP-7 | 数据集按任务孤岛复制：无内容指纹复用 | Med/M | — |
-| ⬜ | GAP-8 | LLM 配置零预检：无测试连接、/api/health 不含 LLM | Med/S | — |
-| ⬜ | GAP-9 | 零备份/恢复故事 | Med/S | — |
-| ⬜ | GAP-10 | 254 模块仅 7 个有 logger：无日志配置/落盘 | Med/S | — |
+| ✅ | GAP-6 | 只读注册表 API（跨任务列表/详情/分页，`fc4e737f`）；前端面板按预授权降级（进 UX 后续） | Med/M | — |
+| ✅ | GAP-7 | content_hash 指纹复用（同内容跨任务共享 parquet+profile，dedup 审计，`da47ae0e`），删除引用计数联动 | Med/M | — |
+| ✅ | GAP-8 | 测试连接端点+设置按钮+health.llm_configured（`efbc8880`） | Med/S | — |
+| ✅ | GAP-9 | marvis backup/restore 命令（SQLite backup API 一致性快照+tar，`4522a628`） | Med/S | — |
+| ✅ | GAP-10 | logging_setup+RotatingFileHandler 落 workspace/logs+关键模块事件（`96ecdf4c`） | Med/S | — |
 | ⬜ | TST-5 | 1729 用例扁平层：无 marker/分层 | Med/S | — |
 | ⬜ | TST-6 | redaction 过度/漏 masking；会话转录整体不脱敏 | Med/M | — |
 | ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
