@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 import hashlib
@@ -996,6 +997,11 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     seed = int(inputs["seed"])
     drop_nan = bool(inputs.get("drop_nan_labels"))
     target_type = str(inputs.get("target_type", "binary"))
+    # DOM-6: an explicit eval_metric input (e.g. "response_lift" for a marketing/
+    # recall scenario) drives champion selection below; every experiment's own
+    # TrainConfig also records it so compare_experiments/select_experiment can
+    # recover it later without the caller having to repeat it.
+    eval_metric = str(inputs.get("eval_metric") or "ks_auc").strip() or "ks_auc"
     dataset_path = runtime.registry.resolve_path(dataset.id)
     training_dataset = TrainingDataset.load(runtime.backend, dataset_path)
     training_backend = training_dataset.backend_adapter(runtime.backend)
@@ -1034,6 +1040,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             early_stopping_rounds=early_stopping_rounds,
             recipe_id=recipe,
             target_type=target_type,
+            eval_metric=eval_metric,
             drop_nan_labels=drop_nan,
         )
         experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
@@ -1081,13 +1088,16 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         if last_exc is not None:
             raise last_exc
         raise ModelingError("all requested recipes failed to train")
-    best, selection_metric = _pick_best_experiment(experiments, target_type=target_type)
+    best, selection_metric = _pick_best_experiment(
+        experiments, target_type=target_type, eval_metric=eval_metric
+    )
     return {
         "experiments": experiments,
         "experiment_ids": [exp["experiment_id"] for exp in experiments],
         "best_experiment_id": best["experiment_id"],
         "best_recipe": best["recipe"],
         "target_type": target_type,
+        "eval_metric": eval_metric,
         "selection_metric": selection_metric,
         "failed": failed,
     }
@@ -1100,6 +1110,12 @@ _CHAMPION_OVERFIT_PENALTY = 0.5
 #: Binary champion selection metric name/basis: OOT is reported but never used to pick
 #: a winner (mirrors tune_hyperparameters' "OOT reports only" policy — DOM-9).
 BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
+
+#: DOM-6: champion selection metric name/basis when a scenario declares
+#: eval_metric="response_lift" (marketing/recall templates) -- test-only, no OOT
+#: peeking, matching BINARY_SELECTION_METRIC's DOM-9 policy. No train reading is
+#: computed for lift, so (unlike KS) there is no overfit penalty term to subtract.
+RESPONSE_LIFT_SELECTION_METRIC = "test_lift_head_10"
 
 
 def _overfit_penalized_test_ks(metrics: dict) -> float:
@@ -1129,11 +1145,39 @@ def _overfit_penalized_test_ks(metrics: dict) -> float:
     return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
 
 
-def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary") -> tuple[dict, str]:
+def _response_lift_score(metrics: dict) -> float:
+    """DOM-6: ``test_lift_head_10`` (top-decile response lift), ``-inf`` when missing.
+
+    Mirrors ``_overfit_penalized_test_ks``'s DOM-9 "test only, OOT reports but
+    never selects" policy -- head_tail_lift's OOT reading is still surfaced on the
+    comparison row for transparency, it just never drives the winner.
+    """
+    value = metrics.get("test_lift_head_10")
+    if not isinstance(value, (int, float)):
+        return float("-inf")
+    return float(value)
+
+
+def _binary_selection_score_and_metric(eval_metric: str) -> tuple[Callable[[dict], float], str]:
+    """DOM-6: resolve a binary target's champion-selection scoring function and its
+    metric label from the scenario's declared ``eval_metric`` -- ``response_lift``
+    (marketing/recall scenario templates) selects by top-decile test lift instead
+    of KS; every other value (including the default ``ks_auc``) keeps the
+    pre-existing overfit-penalized test KS behaviour unchanged."""
+    if str(eval_metric or "").strip() == "response_lift":
+        return _response_lift_score, RESPONSE_LIFT_SELECTION_METRIC
+    return _overfit_penalized_test_ks, BINARY_SELECTION_METRIC
+
+
+def _pick_best_experiment(
+    experiments: list[dict], *, target_type: str = "binary", eval_metric: str = "ks_auc"
+) -> tuple[dict, str]:
     """Pick the best experiment with the metric family that matches the target.
 
-    Binary maximizes the overfit-penalized test KS (OOT is reported, not selected on —
-    DOM-9); regression minimizes OOT/test RMSE; multiclass maximizes OOT/test macro-AUC,
+    Binary maximizes the overfit-penalized test KS by default (OOT is reported,
+    not selected on — DOM-9); when ``eval_metric="response_lift"`` (marketing/
+    recall scenario templates, DOM-6) it instead maximizes test top-decile lift.
+    Regression minimizes OOT/test RMSE; multiclass maximizes OOT/test macro-AUC,
     falling back to minimizing logloss.
     """
     target_type = str(target_type or "binary")
@@ -1167,15 +1211,39 @@ def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary
 
         return max(experiments, key=score), "oot_macro_auc"
 
-    def score(experiment: dict) -> float:
-        return _overfit_penalized_test_ks(experiment.get("metrics") or {})
+    metric_score, selection_metric = _binary_selection_score_and_metric(eval_metric)
 
-    return max(experiments, key=score), BINARY_SELECTION_METRIC
+    def score(experiment: dict) -> float:
+        return metric_score(experiment.get("metrics") or {})
+
+    return max(experiments, key=score), selection_metric
+
+
+def _resolve_scenario_eval_metric(runtime: _Runtime, experiment_ids: list[str], override: str) -> str:
+    """DOM-6: resolve the eval_metric that should drive champion selection for a set
+    of experiments. An explicit ``eval_metric`` tool input always wins; otherwise
+    read it off the first resolvable experiment's stored ``TrainConfig.eval_metric``
+    (populated by ``apply_scenario`` at train time, e.g. "response_lift" for the
+    marketing/recall scenario templates) -- every candidate compared/selected
+    together came from the same training run, so they share one scenario. Falls
+    back to the platform default ``"ks_auc"`` when neither is available."""
+    if override:
+        return override
+    for experiment_id in experiment_ids:
+        try:
+            experiment = runtime.experiments.get(experiment_id)
+        except KeyError:
+            continue
+        eval_metric = getattr(experiment.config, "eval_metric", None)
+        if eval_metric:
+            return str(eval_metric)
+    return "ks_auc"
 
 
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    compared = runtime.experiments.compare([str(item) for item in inputs["experiment_ids"]])
+    experiment_ids = [str(item) for item in inputs["experiment_ids"]]
+    compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
     _attach_policy_profile_to_comparison_rows(runtime, rows)
@@ -1184,15 +1252,21 @@ def tool_compare_experiments(inputs: dict, ctx) -> dict:
         first_id = str(rows[0].get("id") or "")
         if first_id:
             target_type = getattr(runtime.experiments.get(first_id).config, "target_type", "binary")
+    eval_metric = _resolve_scenario_eval_metric(
+        runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
+    )
     # SEL-5: surface the same "within sampling error" hint the gate text uses in
     # select_experiment, here against the metric-best row -- so a caller
     # comparing candidates (before ever calling select_experiment) sees the same
     # signal ahead of time.
     ks_ci_note = ""
     if rows and str(target_type or "binary") == "binary":
-        best_row, _metric = _pick_best_comparison_row(rows, target_type=target_type or "binary")
+        best_row, _metric = _pick_best_comparison_row(
+            rows, target_type=target_type or "binary", eval_metric=eval_metric
+        )
         ks_ci_note = _ks_ci_overlap_note(best_row, rows, target_type=target_type or "binary")
     compared["ks_ci_note"] = ks_ci_note
+    compared["eval_metric"] = eval_metric
     return _jsonable(compared)
 
 
@@ -1204,6 +1278,9 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     target_type = str(inputs.get("target_type") or "").strip()
     if not target_type:
         target_type = getattr(runtime.experiments.get(experiment_ids[0]).config, "target_type", "binary")
+    eval_metric = _resolve_scenario_eval_metric(
+        runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
+    )
     compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
@@ -1224,8 +1301,18 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
             rows,
             target_type=target_type,
             policy=selection_policy,
+            eval_metric=eval_metric,
         )
         selected_id = str(selected.get("id") or "")
+        # DOM-6: name the scenario's evaluation basis in the gate text whenever
+        # selection deviated from the platform default (ks_auc / overfit-penalized
+        # test KS) -- e.g. "本场景按 test_lift_head_10 选优" for a marketing/recall
+        # scenario, so the divergence from KS is explicit instead of silent.
+        scenario_note = (
+            f"本场景按 {eval_metric} 选优;实际选择指标 {selection_metric}。"
+            if eval_metric and eval_metric != "ks_auc"
+            else ""
+        )
         if _selection_policy_requested(selection_policy) and policy_decision["status"] == "accepted":
             selection_reason = f"按 {selection_metric} 在满足交付/审批策略的候选中自动选择。"
             if policy_decision.get("selected_by_preference"):
@@ -1236,6 +1323,8 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
             selection_reason = f"按 {selection_metric} 在 PMML/验证移交可用候选中自动选择。"
         else:
             selection_reason = f"按 {selection_metric} 自动选择。"
+        if scenario_note:
+            selection_reason = f"{selection_reason} {scenario_note}"
     artifact_id = str(selected.get("artifact_id") or "")
     if not artifact_id:
         raise ModelingError(f"selected experiment has no artifact: {selected_id}")
@@ -1266,6 +1355,7 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,
         "target_type": target_type,
+        "eval_metric": eval_metric,
         "selection_metric": selection_metric,
         "selection_reason": selection_reason,
         "metrics": final_metrics,
@@ -1381,10 +1471,11 @@ def _pick_best_comparison_row_with_policy(
     *,
     target_type: str,
     policy: dict,
+    eval_metric: str = "ks_auc",
 ) -> tuple[dict, str, dict]:
     policy = _normalize_selection_policy(policy)
     if not _selection_policy_requested(policy):
-        selected, metric = _pick_best_comparison_row(rows, target_type=target_type)
+        selected, metric = _pick_best_comparison_row(rows, target_type=target_type, eval_metric=eval_metric)
         return selected, metric, _selection_policy_decision(selected, policy, explicit=False)
 
     compliant = [row for row in rows if not _selection_policy_violations(row, policy)]
@@ -1405,7 +1496,7 @@ def _pick_best_comparison_row_with_policy(
             candidates = scorecard_candidates
             selected_by_preference = True
 
-    selected, metric = _pick_best_comparison_row(candidates, target_type=target_type)
+    selected, metric = _pick_best_comparison_row(candidates, target_type=target_type, eval_metric=eval_metric)
     decision = _selection_policy_decision(selected, policy, explicit=False)
     decision["evaluated_candidates"] = len(rows)
     decision["policy_candidate_count"] = len(compliant)
@@ -1415,9 +1506,14 @@ def _pick_best_comparison_row_with_policy(
     return selected, metric, decision
 
 
-def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
-    """Pick the best comparison row. Binary maximizes the overfit-penalized test KS —
-    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9).
+def _pick_best_comparison_row(
+    rows: list[dict], *, target_type: str, eval_metric: str = "ks_auc"
+) -> tuple[dict, str]:
+    """Pick the best comparison row. Binary maximizes the overfit-penalized test KS by
+    default — OOT is reported but not used for selection, matching
+    tune_hyperparameters (DOM-9). When ``eval_metric="response_lift"``
+    (marketing/recall scenario templates, DOM-6) binary instead maximizes test
+    top-decile lift.
 
     SEL-7: candidates excluded by the delivery-ready (PMML+handoff) pre-filter no
     longer vanish silently -- when the metric-best row overall is NOT
@@ -1430,7 +1526,7 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
     if not rows:
         raise ModelingError("experiment_ids must resolve to experiments")
     target_type = str(target_type or "binary")
-    metric_key, minimize = _selection_metric_basis(target_type)
+    metric_key, minimize = _selection_metric_basis(target_type, eval_metric=eval_metric)
     delivery_ready = [row for row in rows if _delivery_ready(row)]
     if delivery_ready and len(delivery_ready) < len(rows):
         raw_best = max(rows, key=lambda row: _score_first(row, (metric_key,), minimize=minimize))
@@ -1464,22 +1560,26 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
         if _score_first(auc_best, ("oot_macro_auc", "test_macro_auc")) != float("-inf"):
             return auc_best, "oot_macro_auc"
         return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
-    return max(rows, key=_overfit_penalized_test_ks), BINARY_SELECTION_METRIC
+    metric_score, selection_metric = _binary_selection_score_and_metric(eval_metric)
+    return max(rows, key=metric_score), selection_metric
 
 
-def _selection_metric_basis(target_type: str) -> tuple[str, bool]:
+def _selection_metric_basis(target_type: str, *, eval_metric: str = "ks_auc") -> tuple[str, bool]:
     """The single metric key (and min/max direction) used to detect whether the
     delivery-ready pre-filter actually excluded a better-scoring candidate
     (SEL-7). Mirrors each target type's primary ranking metric in
     ``_pick_best_comparison_row`` -- binary's real selection key is the
-    overfit-penalized test KS (not a plain column), so it is approximated here
-    by the raw test_ks column, which is what the pre-filter comparison cares
-    about (relative ranking, not the exact champion score)."""
+    overfit-penalized test KS (not a plain column) by default, so it is
+    approximated here by the raw test_ks column (DOM-6: test_lift_head_10 when
+    the scenario's eval_metric is "response_lift"), which is what the pre-filter
+    comparison cares about (relative ranking, not the exact champion score)."""
     target_type = str(target_type or "binary")
     if target_type == "continuous":
         return "oot_rmse", True
     if target_type == "multiclass":
         return "oot_macro_auc", False
+    if str(eval_metric or "").strip() == "response_lift":
+        return "test_lift_head_10", False
     return "test_ks", False
 
 

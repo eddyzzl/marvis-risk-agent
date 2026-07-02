@@ -152,6 +152,16 @@ def _comparison_row(experiment: Experiment) -> dict:
         "psi_test_vs_train": None if metrics is None else metrics.psi_test_vs_train,
         "psi_oot_vs_train": None if metrics is None else metrics.psi_oot_vs_train,
         "overfit_flag": None if metrics is None else metrics.overfit_flag,
+        # DOM-6: deterministic head/tail lift on the model score, so scenario
+        # eval_metric="response_lift" champion selection has a real column to sort.
+        "test_lift_head_5": None if metrics is None else metrics.test_lift_head_5,
+        "test_lift_tail_5": None if metrics is None else metrics.test_lift_tail_5,
+        "test_lift_head_10": None if metrics is None else metrics.test_lift_head_10,
+        "test_lift_tail_10": None if metrics is None else metrics.test_lift_tail_10,
+        "oot_lift_head_5": None if metrics is None else metrics.oot_lift_head_5,
+        "oot_lift_tail_5": None if metrics is None else metrics.oot_lift_tail_5,
+        "oot_lift_head_10": None if metrics is None else metrics.oot_lift_head_10,
+        "oot_lift_tail_10": None if metrics is None else metrics.oot_lift_tail_10,
         # SEL-5: bootstrap KS sampling-error interval, deterministic per config.seed.
         "test_ks_ci_low": None if metrics is None else metrics.test_ks_ci_low,
         "test_ks_ci_high": None if metrics is None else metrics.test_ks_ci_high,

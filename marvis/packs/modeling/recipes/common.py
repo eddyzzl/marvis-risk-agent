@@ -12,6 +12,7 @@ from marvis.feature.metrics import (
     feature_auc,
     feature_ks,
     feature_psi,
+    head_tail_lift,
     weighted_feature_auc,
     weighted_feature_ks,
     weighted_feature_psi,
@@ -374,6 +375,15 @@ def compute_model_metrics(
     )
     gap_tt, gap_to, overfit_flag = overfitting_check(train_ks, test_ks, oot_ks)
     ks_ci = _ks_confidence_intervals(test_scores, test_target, oot_scores, oot_target, config)
+    # DOM-6: deterministic head/tail lift on test/OOT (same direction-aware
+    # head_tail_lift already used per-trial in tune.py) -- gives scenario
+    # eval_metric="response_lift" a real metric to select champions on.
+    test_lift = head_tail_lift(test_scores, test_target)
+    oot_lift = (
+        {key: None for key in ("lift_head_5", "lift_tail_5", "lift_head_10", "lift_tail_10")}
+        if oot_scores is None or oot_target is None
+        else head_tail_lift(oot_scores, oot_target)
+    )
     return ModelMetrics(
         train_ks=train_ks,
         test_ks=test_ks,
@@ -386,6 +396,14 @@ def compute_model_metrics(
         overfit_train_test_gap=gap_tt,
         overfit_train_oot_gap=gap_to,
         overfit_flag=overfit_flag,
+        test_lift_head_5=test_lift.get("lift_head_5"),
+        test_lift_tail_5=test_lift.get("lift_tail_5"),
+        test_lift_head_10=test_lift.get("lift_head_10"),
+        test_lift_tail_10=test_lift.get("lift_tail_10"),
+        oot_lift_head_5=oot_lift.get("lift_head_5"),
+        oot_lift_tail_5=oot_lift.get("lift_tail_5"),
+        oot_lift_head_10=oot_lift.get("lift_head_10"),
+        oot_lift_tail_10=oot_lift.get("lift_tail_10"),
         **weighted,
         **ks_ci,
     )

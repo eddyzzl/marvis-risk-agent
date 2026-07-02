@@ -79,6 +79,18 @@ class ModelMetrics:
     oot_ks_ci_high: float | None = None
     oot_ks_ci_std: float | None = None
     ks_ci_n_boot: int | None = None
+    # DOM-6: head/tail lift on the model score (feature/metrics.head_tail_lift,
+    # direction-aware -- reuses the same fractions/keys tune.py already reports per
+    # trial) so scenario eval_metric="response_lift" has a real, deterministic
+    # metric to select champions on instead of dead scenario metadata.
+    test_lift_head_5: float | None = None
+    test_lift_tail_5: float | None = None
+    test_lift_head_10: float | None = None
+    test_lift_tail_10: float | None = None
+    oot_lift_head_5: float | None = None
+    oot_lift_tail_5: float | None = None
+    oot_lift_head_10: float | None = None
+    oot_lift_tail_10: float | None = None
 
 
 @dataclass(frozen=True)

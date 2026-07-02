@@ -1552,6 +1552,105 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["failed"] == []
 
 
+def test_train_models_wires_scenario_eval_metric_into_champion_selection(tmp_path):
+    """DOM-6 end-to-end: a marketing-style caller passes eval_metric="response_lift"
+    into train_models. The champion must be selected by test_lift_head_10 (not
+    KS), every trained experiment's own TrainConfig must have recorded the same
+    eval_metric, and the champion must actually be the candidate with the highest
+    test_lift_head_10 among the trained recipes -- confirming the wiring from tool
+    input through TrainConfig.eval_metric to _pick_best_experiment is intact."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    result = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": ["lgb", "lr"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+            "eval_metric": "response_lift",
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    out = result.output
+    assert out["eval_metric"] == "response_lift"
+    assert out["selection_metric"] == "test_lift_head_10"
+    lift_by_experiment = {
+        exp["experiment_id"]: exp["metrics"].get("test_lift_head_10") for exp in out["experiments"]
+    }
+    assert lift_by_experiment[out["best_experiment_id"]] == max(
+        value for value in lift_by_experiment.values() if value is not None
+    )
+
+    store = ExperimentStore(settings.db_path)
+    for experiment_id in out["experiment_ids"]:
+        assert store.get(experiment_id).config.eval_metric == "response_lift"
+
+    # compare_experiments/select_experiment must recover the same eval_metric from
+    # the experiments' own stored config without the caller repeating it, and
+    # select the same champion by the same lift metric.
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": out["experiment_ids"]},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    assert compared.output["eval_metric"] == "response_lift"
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": out["experiment_ids"],
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert selected.output["eval_metric"] == "response_lift"
+    assert selected.output["selection_metric"] == "test_lift_head_10"
+    assert selected.output["selected_experiment_id"] == out["best_experiment_id"]
+    assert "test_lift_head_10" in selected.output["selection_reason"]
+
+
+def test_train_models_default_scenario_still_selects_by_ks(tmp_path):
+    """Regression guard: leaving eval_metric unset must keep selecting by the
+    overfit-penalized test KS exactly like before DOM-6 -- the default scenario's
+    behaviour must not change."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    result = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": dataset.id,
+            "recipes": ["lgb", "lr"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    out = result.output
+    assert out["eval_metric"] == "ks_auc"
+    assert out["selection_metric"] == "test_ks(overfit-penalized)"
+
+    store = ExperimentStore(settings.db_path)
+    for experiment_id in out["experiment_ids"]:
+        assert store.get(experiment_id).config.eval_metric == "ks_auc"
+
+
 def test_train_models_reports_deterministic_ks_bootstrap_confidence_intervals(tmp_path):
     """SEL-5: every trained experiment carries a bootstrap 95% CI for test_ks (and
     oot_ks when OOT is present), and the interval is a pure function of the
@@ -2388,6 +2487,77 @@ def test_pick_best_experiment_prefers_weighted_ks_when_present():
 
     assert best["experiment_id"] == "low-unweighted-high-weighted"
     assert metric == "test_ks(overfit-penalized)"
+
+
+def test_pick_best_experiment_selects_by_lift_when_eval_metric_is_response_lift():
+    """DOM-6: a marketing/recall scenario declares eval_metric="response_lift" --
+    champion selection must then maximize test top-decile lift instead of KS. This
+    fixture is deliberately constructed so the two metrics disagree: the higher-KS
+    candidate has WEAKER top-decile lift and must lose."""
+    from marvis.packs.modeling.tools import _pick_best_experiment
+
+    experiments = [
+        {
+            "experiment_id": "high-ks-low-lift",
+            "recipe": "lgb",
+            "metrics": {
+                "train_ks": 0.50, "test_ks": 0.48, "oot_ks": 0.45,
+                "test_lift_head_10": 1.2, "oot_lift_head_10": 1.1,
+            },
+        },
+        {
+            "experiment_id": "low-ks-high-lift",
+            "recipe": "lr",
+            "metrics": {
+                "train_ks": 0.40, "test_ks": 0.38, "oot_ks": 0.35,
+                "test_lift_head_10": 3.5, "oot_lift_head_10": 3.1,
+            },
+        },
+    ]
+
+    best, metric = _pick_best_experiment(
+        experiments, target_type="binary", eval_metric="response_lift"
+    )
+
+    assert best["experiment_id"] == "low-ks-high-lift"
+    assert metric == "test_lift_head_10"
+
+    # Default scenario (eval_metric unset / "ks_auc") must still pick by KS --
+    # same fixture, opposite winner, confirming the two paths are independent.
+    default_best, default_metric = _pick_best_experiment(experiments, target_type="binary")
+    assert default_best["experiment_id"] == "high-ks-low-lift"
+    assert default_metric == "test_ks(overfit-penalized)"
+
+
+def test_pick_best_comparison_row_selects_by_lift_when_eval_metric_is_response_lift():
+    """DOM-6: same lift-vs-KS disagreement as above, exercised through
+    _pick_best_comparison_row (the compare_experiments/select_experiment path)."""
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "high-ks-low-lift",
+            "recipe": "lgb",
+            "train_ks": 0.50, "test_ks": 0.48, "oot_ks": 0.45,
+            "test_lift_head_10": 1.2, "oot_lift_head_10": 1.1,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "low-ks-high-lift",
+            "recipe": "lr",
+            "train_ks": 0.40, "test_ks": 0.38, "oot_ks": 0.35,
+            "test_lift_head_10": 3.5, "oot_lift_head_10": 3.1,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+    ]
+
+    best, metric = _pick_best_comparison_row(rows, target_type="binary", eval_metric="response_lift")
+    assert best["id"] == "low-ks-high-lift"
+    assert metric == "test_lift_head_10"
+
+    default_best, default_metric = _pick_best_comparison_row(rows, target_type="binary")
+    assert default_best["id"] == "high-ks-low-lift"
+    assert default_metric == "test_ks(overfit-penalized)"
 
 
 def test_pick_best_comparison_row_prefers_delivery_ready_candidate():

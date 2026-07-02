@@ -1392,6 +1392,10 @@
           },
           "drop_nan_labels": {
             "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1437,6 +1441,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "eval_metric": {
+            "type": "string"
           }
         },
         "required": [
@@ -1445,7 +1452,8 @@
           "best_experiment_id",
           "best_recipe",
           "target_type",
-          "selection_metric"
+          "selection_metric",
+          "eval_metric"
         ],
         "additionalProperties": false
       },
@@ -1477,6 +1485,10 @@
           },
           "target_type": {
             "type": "string"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1494,6 +1506,9 @@
             }
           },
           "ks_ci_note": {
+            "type": "string"
+          },
+          "eval_metric": {
             "type": "string"
           }
         },
@@ -1616,6 +1631,10 @@
           },
           "refit_on_train_plus_test": {
             "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1670,6 +1689,9 @@
           },
           "ks_ci_note": {
             "type": "string"
+          },
+          "eval_metric": {
+            "type": "string"
           }
         },
         "required": [
@@ -1678,7 +1700,8 @@
           "selection_metric",
           "selection_reason",
           "capabilities",
-          "policy_decision"
+          "policy_decision",
+          "eval_metric"
         ],
         "additionalProperties": false
       },
@@ -1734,6 +1757,10 @@
           "n_bins": {
             "type": "integer",
             "minimum": 2
+          },
+          "fit_split": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
