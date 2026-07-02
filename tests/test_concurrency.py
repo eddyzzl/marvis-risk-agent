@@ -255,31 +255,6 @@ def test_sequential_double_confirm_step_should_conflict_but_does_not(tmp_path):
         plan_repo.confirm_step("step-race")  # second confirm: SHOULD conflict
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Real bug found by this test (TST-9b HTTP layer), not fixed here per "
-        "task scope (reported separately to avoid colliding with in-flight "
-        "branches): two concurrent POST .../steps/{id}/confirm calls on the "
-        "same gate do not reliably yield exactly one 202 and one 409. Root "
-        "cause is the same confirm_step non-guard documented in "
-        "test_sequential_double_confirm_step_should_conflict_but_does_not "
-        "(marvis/repositories/plans.py:195-215) -- both requests can reach "
-        "202. A second, independent race compounds this: confirm_step's HTTP "
-        "handler starts a bookkeeping job *before* calling confirm_step "
-        "(marvis/routers/plans.py:172-174), and TaskRepository.start_job "
-        "(marvis/repositories/tasks.py:351-369) has its own TOCTOU on the "
-        "jobs.task_id UNIQUE constraint: on conflict it re-checks "
-        "task_has_active_job(task_id), but if the other thread's job has "
-        "already finished by then, that check returns False and the raw "
-        "sqlite3.IntegrityError is re-raised instead of ConflictError, "
-        "surfacing as an unhandled 500. Across 10 repeated runs, observed "
-        "outcomes were {202,202} (double confirm), {202,409} (works), and "
-        "{202, raw 500} (start_job TOCTOU) -- not deterministic, so this is "
-        "kept xfail(strict=False) as a live repro rather than asserting one "
-        "specific failure mode."
-    ),
-    strict=False,
-)
 def test_concurrent_double_confirm_over_http_yields_exactly_one_success(tmp_path):
     client = _confirm_race_client(tmp_path)
 
