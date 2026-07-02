@@ -4,7 +4,6 @@ import pytest
 
 from marvis.data.backend import DataBackend
 from marvis.feature.errors import FitRequiresSplitError
-from marvis.feature.iv import compute_woe_iv
 from marvis.packs.modeling.select import SelectionResult, select_features
 
 
