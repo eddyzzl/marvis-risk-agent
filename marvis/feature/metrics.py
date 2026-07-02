@@ -10,6 +10,10 @@ from marvis.feature.errors import FeatureError
 from marvis.feature.iv import compute_woe_iv
 
 
+# FS-9: the equal-frequency IV binning convention used by feature_metrics() by default.
+DEFAULT_IV_BINS = 10
+
+
 def feature_ks(scores: np.ndarray, target: np.ndarray) -> float:
     scores_arr, target_arr = _finite_binary_pairs(scores, target)
     if scores_arr.size == 0:
@@ -204,7 +208,7 @@ def feature_metrics(
     target: np.ndarray,
     *,
     feature: str,
-    bins: int = 10,
+    bins: int = DEFAULT_IV_BINS,
     compare_values: np.ndarray | None = None,
 ) -> FeatureMetrics:
     values_arr = np.asarray(values, dtype=float)
@@ -288,6 +292,7 @@ def _finite_binary_weighted_triples(
 
 
 __all__ = [
+    "DEFAULT_IV_BINS",
     "compute_psi",
     "feature_auc",
     "feature_ks",

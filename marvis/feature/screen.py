@@ -21,7 +21,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from marvis.feature.metrics import feature_ks, feature_metrics
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.feature.transform import detect_sentinel_values
 
 # Columns whose names strongly suggest a model output / score that would leak the
@@ -266,10 +266,14 @@ def screen_features(
                     continue
                 values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)[dev]
                 try:
-                    iv = float(feature_metrics(values, target_dev, feature=col).iv)
+                    iv = float(feature_metrics(values, target_dev, feature=col, bins=DEFAULT_IV_BINS).iv)
                 except Exception:
                     iv = 0.0
-                scores.setdefault(col, {})["iv"] = iv
+                col_scores = scores.setdefault(col, {})
+                col_scores["iv"] = iv
+                # FS-9: record the binning convention so IV is comparable across tools —
+                # this path always uses equal-frequency DEFAULT_IV_BINS bins.
+                col_scores["iv_binning"] = f"equal_frequency_{DEFAULT_IV_BINS}"
 
     return ScreenResult(
         ranked=ranked,

@@ -146,3 +146,22 @@ def test_screen_surfaces_coverage_and_low_coverage_note_without_changing_rank(tm
     # ranking is still KS descending (annotation must not reorder).
     ks_seq = [ks for _c, ks in result.ranked]
     assert ks_seq == sorted(ks_seq, reverse=True)
+
+
+def test_screen_records_iv_binning_convention(tmp_path):
+    """FS-9: the IV enrichment step always records which binning convention produced it
+    (equal-frequency DEFAULT_IV_BINS bins), so callers can tell IV values from different
+    tools/paths apart instead of silently comparing incompatible bin counts."""
+    rows = 200
+    rng = np.random.RandomState(2)
+    y = np.array(([0, 1] * 100))
+    # Moderate signal (KS well under the 0.40 leakage gate) so the feature reaches the
+    # IV enrichment step (selected), not the leakage bucket.
+    moderate = np.where(y == 1, 0.55, 0.45) + rng.normal(scale=0.3, size=rows)
+    frame = pd.DataFrame({"f": moderate, "y": y})
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(backend, path, features=["f"], target_col="y")
+
+    assert "f" in result.selected
+    assert result.scores["f"]["iv_binning"] == "equal_frequency_10"

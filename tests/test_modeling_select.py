@@ -139,6 +139,35 @@ def test_select_features_vif_unavailable_is_skipped_and_warned(tmp_path):
     assert any("VIF 样本不足" in w for w in result.warnings)
 
 
+def test_select_features_records_iv_binning_convention_raw_and_woe(tmp_path):
+    """FS-9: raw-space selection records the equal-frequency convention; WOE-space
+    selection records the chimerge convention — so an IV value's bin count is always
+    traceable instead of silently mixing two incompatible binning conventions."""
+    rows = 200
+    target = np.array([0, 1] * (rows // 2))
+    frame = pd.DataFrame({
+        "strong": target + np.linspace(0, 0.01, rows),
+        "y": target,
+        "split": ["train"] * rows,
+    })
+    path = tmp_path / "iv_binning.parquet"
+    frame.to_parquet(path, index=False)
+
+    raw_result = select_features(
+        DataBackend(tmp_path), path,
+        features=["strong"], target_col="y", iv_min=0.0,
+        split_col="split", allow_full_fit=True, space="raw",
+    )
+    assert raw_result.scores["strong"]["iv_binning"] == "equal_frequency_10"
+
+    woe_result = select_features(
+        DataBackend(tmp_path), path,
+        features=["strong"], target_col="y", iv_min=0.0,
+        split_col="split", allow_full_fit=True, space="woe", scorecard_max_bins=6,
+    )
+    assert woe_result.scores["strong"]["iv_binning"] == "chimerge_6"
+
+
 def test_select_features_without_split_raises_typed_error_unless_allow_full_fit(tmp_path):
     """FS-2: select_features must stop with a typed error when it has no split column
     to exclude holdout rows from fitting, mirroring PREP-1's woe/impute/normalize/cap gate."""

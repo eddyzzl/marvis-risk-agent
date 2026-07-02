@@ -12,7 +12,7 @@ from marvis.feature.correlation import correlation_matrix, find_collinear_pairs,
 from marvis.feature.encode import woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
-from marvis.feature.metrics import feature_ks, feature_metrics
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.packs.modeling.prepare import SPLIT_COLUMN
 
 
@@ -169,8 +169,16 @@ def _select_features_raw(
             frame[feature].to_numpy(dtype=float),
             target,
             feature=feature,
+            bins=DEFAULT_IV_BINS,
         )
-        scores[feature] = {"iv": float(metrics.iv), "ks": float(metrics.ks), "space": "raw"}
+        # FS-9: record the binning convention (equal-frequency, DEFAULT_IV_BINS bins) so
+        # this IV is comparable against the WOE-space chimerge convention (see below).
+        scores[feature] = {
+            "iv": float(metrics.iv),
+            "ks": float(metrics.ks),
+            "space": "raw",
+            "iv_binning": f"equal_frequency_{DEFAULT_IV_BINS}",
+        }
         if metrics.iv < iv_min:
             dropped.append((feature, f"low IV {metrics.iv:.3f}"))
         else:
@@ -228,12 +236,17 @@ def _select_features_woe(
         woe = woe_result_from_binning(binning)
         encoded[feature] = woe_encode(frame, feature, woe).to_numpy(dtype=float)
         directions[feature] = resolved_direction
+        # FS-9: record the binning convention — this path always uses chimerge with
+        # max_bins bins (a different convention than the raw-space equal-frequency default;
+        # the 0.02 iv_min threshold means different things under each, so record which was
+        # used rather than silently mixing them).
         scores[feature] = {
             "iv": float(binning.total_iv),
             "ks": float(feature_ks(encoded[feature].to_numpy(dtype=float), target)),
             "space": "woe",
             "monotonic_direction": resolved_direction,
             "bin_count": len(binning.bins),
+            "iv_binning": f"chimerge_{max_bins}",
         }
         if binning.total_iv < iv_min:
             dropped.append((feature, f"low WOE IV {binning.total_iv:.3f}"))
