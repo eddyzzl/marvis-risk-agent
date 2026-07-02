@@ -135,19 +135,12 @@ DECIDE_GATE_CASES: tuple[TouchpointCase, ...] = (
             "应该停下</think>最终 "
             '{"action":"halt","reason":"命中率异常偏低，需人工复核"}'
         ),
-        expected={"action": "confirm", "reason": "看起来正常"},
-        expected_failure=(
-            "load_json_object's _extract_first_object returns the FIRST "
-            "balanced {...} block in the text, which for a thinking model is "
-            "the draft embedded inside <think>...</think>, not the final "
-            "answer after it. Here the model's real final decision is halt "
-            "(it caught a real anomaly during its own reasoning) but "
-            "decide_gate returns the draft confirm instead -- a direct "
-            "safety-direction reversal: an anomalous gate gets auto-confirmed "
-            "instead of routed to human review. Confirms LLM-6's predicted "
-            "risk on the real decide_gate code path. No <think> stripping "
-            "exists anywhere in marvis/agent/json_reply.py."
-        ),
+        # LLM-6 (strip_thinking_segments at the client boundary) removes the
+        # <think> draft before JSON extraction, so the FINAL halt decision wins.
+        # This case originally documented the draft-vs-final reversal as an
+        # expected failure; it now guards the fix against regression.
+        expected={"action": "halt", "reason": "命中率异常偏低，需人工复核"},
+        expected_failure=None,
     ),
 )
 
@@ -220,14 +213,10 @@ ROUTE_INSTRUCTION_CASES: tuple[TouchpointCase, ...] = (
             "</think>"
             '{"action":"adjust","params":{"horizon_weeks":2},"reason":"改成两周"}'
         ),
-        expected={"action": "confirm", "params": {}},
-        expected_failure=(
-            "Same _extract_first_object first-match bug as decide_gate: the "
-            "draft confirm inside <think> is returned instead of the final "
-            "adjust decision, so the user's actual instruction (adjust "
-            "horizon_weeks to 2) is silently dropped and treated as a bare "
-            "confirm."
-        ),
+        # LLM-6 strips the <think> draft before extraction: the final adjust
+        # decision (the user's real instruction) wins. Regression guard for the fix.
+        expected={"action": "adjust", "params": {"horizon_weeks": 2}},
+        expected_failure=None,
     ),
 )
 
@@ -444,15 +433,10 @@ REVIEWER_CASES: tuple[TouchpointCase, ...] = (
             "但仔细看有问题</think>"
             '{"passed": false, "reasons": ["oot_ks 明显低于 train_ks,疑似过拟合"]}'
         ),
-        expected={"passed": True, "reasons": []},
-        expected_failure=(
-            "Same _extract_first_object first-match bug: the draft "
-            "passed=true inside <think> is returned instead of the model's "
-            "actual final verdict (passed=false, flagging likely "
-            "overfitting). Bounded impact only by AGT-3's structural limit "
-            "on what an LLM verdict alone can do (it can never solely FAIL a "
-            "plan), but the review signal itself is still silently wrong."
-        ),
+        # LLM-6 strips the <think> draft before extraction: the model's final
+        # verdict (passed=false, overfitting flag) wins. Regression guard.
+        expected={"passed": False, "reasons": ["oot_ks 明显低于 train_ks,疑似过拟合"]},
+        expected_failure=None,
     ),
 )
 
