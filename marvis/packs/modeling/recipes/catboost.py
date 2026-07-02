@@ -14,6 +14,7 @@ from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainRes
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
+    cat_feature_indices,
     compute_model_metrics,
     model_params,
     sample_weight_values,
@@ -34,13 +35,14 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
         "thread_count": 1,
         "allow_writing_files": False,
     }
+    features = list(config.features)
+    cat_features = cat_feature_indices(train, features, params.pop("cat_features", None))
     iterations = int(params.pop("iterations", params.pop("num_boost_round", 50)))
     od_wait = params.pop("od_wait", None)
     if config.early_stopping_rounds:
         params.setdefault("od_type", "Iter")
         od_wait = int(config.early_stopping_rounds)
-    model = CatBoostClassifier(**params, iterations=iterations, od_wait=od_wait)
-    features = list(config.features)
+    model = CatBoostClassifier(**params, iterations=iterations, od_wait=od_wait, cat_features=cat_features or None)
     model.fit(
         train[features],
         train[config.target_col].to_numpy(dtype=int),
@@ -61,7 +63,15 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
         model,
         config,
         out_dir,
-        artifact_params({**params, "iterations": iterations, "best_iteration": resolved_iterations}, config),
+        artifact_params(
+            {
+                **params,
+                "iterations": iterations,
+                "best_iteration": resolved_iterations,
+                "cat_features": [features[index] for index in cat_features],
+            },
+            config,
+        ),
     )
     return TrainResult(
         artifact=artifact,

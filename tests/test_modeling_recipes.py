@@ -15,12 +15,14 @@ from marvis.packs.modeling.artifact import load_model
 from marvis.packs.modeling.contracts import TrainConfig
 from marvis.packs.modeling.recipes import get_recipe, list_recipes
 from marvis.packs.modeling.recipes.common import (
+    cat_feature_indices,
     compute_model_metrics,
     compute_multiclass_metrics,
     resolve_auto_scale_pos_weight,
     sample_weight_values,
     split_modeling_frame,
 )
+from marvis.packs.modeling.recipes.catboost import train_catboost
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
@@ -338,6 +340,82 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
     assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
+
+
+def test_train_catboost_uses_native_categorical_features_without_float_coercion(tmp_path):
+    """PREP-3/FS-3: catboost must consume string columns natively (no strong float cast,
+    no crash) and auto-detect them as cat_features when the caller doesn't override."""
+    rows = 180
+    frame = pd.DataFrame({
+        "chan": (["A", "B", "C"] * (rows // 3 + 1))[:rows],
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "y": [1 if i % 5 == 0 else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "catboost_categorical.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("chan", "x1"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"iterations": 6},
+        seed=11,
+        early_stopping_rounds=None,
+    )
+
+    result = train_catboost(backend, path, config, out_dir=tmp_path / "catboost_native")
+
+    assert (tmp_path / "catboost_native" / result.artifact.model_path).exists()
+    assert result.artifact.params["cat_features"] == ["chan"]
+    assert [name for name, _ in result.feature_importance] == ["chan", "x1"]
+    assert 0.0 <= result.metrics.test_ks <= 1.0
+
+    # scoring the persisted model on new rows works without any manual encoding
+    model = load_model(result.artifact, base_dir=tmp_path / "catboost_native")
+    scored = model.predict_proba(frame[["chan", "x1"]].head(10))
+    assert scored.shape == (10, 2)
+
+
+def test_train_catboost_accepts_explicit_cat_features_override(tmp_path):
+    rows = 120
+    frame = pd.DataFrame({
+        "chan": (["A", "B"] * (rows // 2 + 1))[:rows],
+        "x1": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 4 == 0 else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "catboost_explicit.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("chan", "x1"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"iterations": 5, "cat_features": ["chan"]},
+        seed=5,
+        early_stopping_rounds=None,
+    )
+
+    result = train_catboost(backend, path, config, out_dir=tmp_path / "catboost_explicit")
+
+    assert result.artifact.params["cat_features"] == ["chan"]
+
+
+def test_cat_feature_indices_auto_detects_non_numeric_columns_and_resolves_explicit_names():
+    frame = pd.DataFrame({"chan": ["A", "B"], "region": ["east", "west"], "x1": [1.0, 2.0]})
+    features = ["chan", "region", "x1"]
+
+    assert cat_feature_indices(frame, features, None) == [0, 1]
+    assert cat_feature_indices(frame, features, ["region"]) == [1]
+    assert cat_feature_indices(frame, features, [0, 2]) == [0, 2]
+
+    with pytest.raises(ModelingError, match="cat_features column not in features"):
+        cat_feature_indices(frame, features, ["missing_col"])
 
 
 def test_train_lgb_resolves_auto_scale_pos_weight_before_fit(tmp_path):
@@ -961,6 +1039,54 @@ def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_pat
     slots = proposal.template_slots()
     assert slots["target_type"] == "binary"
     assert slots["selection_policy"] == {"require_pmml": True, "require_handoff": True}
+
+
+def test_build_modeling_proposal_surfaces_excluded_categorical_notice(tmp_path):
+    """PREP-3/FS-3: candidate inference still excludes string columns from feature_cols
+    (default behaviour unchanged), but the setup notes must now say so explicitly instead
+    of silently dropping them."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "chan": (["online", "offline", "partner"] * (rows // 3 + 1))[:rows],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "categorical_binary_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-cat", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-cat", tmp_path, recipes=["lgb"])
+
+    # Default behaviour is unchanged: the categorical column never enters feature_cols.
+    assert "chan" not in proposal.feature_cols
+    assert "x1" in proposal.feature_cols
+    notice = next((note for note in proposal.notes if "类别列未入模" in note), None)
+    assert notice is not None
+    assert "chan" in notice
+    assert "woe_encode_categorical" in notice
+    assert "catboost" in notice
+
+
+def test_build_modeling_proposal_omits_categorical_notice_when_no_categorical_columns(tmp_path):
+    """No string columns in the sample -> no excluded-categorical notice (current
+    behaviour for an all-numeric sample stays exactly as before)."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "all_numeric_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-nocat", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-nocat", tmp_path, recipes=["lgb"])
+
+    assert not any("类别列未入模" in note for note in proposal.notes)
 
 
 def test_build_modeling_proposal_detects_sample_weight_candidate_without_feature_leakage(tmp_path):

@@ -44,6 +44,7 @@ import pandas as pd
 from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
 from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.recipes.common import cat_feature_indices
 
 # Reference learning rate used to scale the per-trial boost-round ceiling: lower
 # sampled learning rates get proportionally more rounds (early stopping still
@@ -554,10 +555,12 @@ def _run_catboost_trial(
         **fixed_params,
     }
     od_wait = int(trial_params.pop("od_wait", early_stopping_rounds))
+    cat_features = cat_feature_indices(train, feats, trial_params.pop("cat_features", None))
     model = CatBoostClassifier(
         **trial_params,
         iterations=iterations,
         od_wait=od_wait,
+        cat_features=cat_features or None,
     )
     model.fit(
         train[feats], ytr.astype(int),
@@ -568,7 +571,12 @@ def _run_catboost_trial(
     best_iteration = int(model.get_best_iteration() or model.tree_count_ - 1) + 1
     score_fn = lambda data: model.predict_proba(data[feats])[:, 1]  # noqa: E731
     return _score_trial(
-        params={**trial_params, "iterations": best_iteration, "od_wait": od_wait},
+        params={
+            **trial_params,
+            "iterations": best_iteration,
+            "od_wait": od_wait,
+            "cat_features": [feats[index] for index in cat_features],
+        },
         train_preds=score_fn(train), ytr=ytr,
         test_preds=score_fn(test), yte=yte,
         oot=oot, oot_has_labels=oot_has_labels, target_col=target_col,
