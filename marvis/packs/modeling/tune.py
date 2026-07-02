@@ -23,10 +23,11 @@ across families:
   * Deterministic given ``seed``: stage 1 and stage 2 each draw from their own
     seed-derived ``RandomState`` (``seed`` and ``seed + 1``).
   * Tree recipes (lgb/xgb/catboost) run every trial with early stopping against
-    the test split (mirrors ``train_models``' early-stopping policy) and report
-    the resolved ``best_iteration``/``num_boost_round`` in ``best_params`` so the
-    downstream ``train_models`` step trains at the tuned depth, not a re-run of
-    the full ceiling.
+    a validation fold carved from ``train`` (default 15%, SEL-4/TUNE-3 -- not
+    ``test``, which stays free to serve only as the trial-selection/comparison
+    set) and report the resolved ``best_iteration``/``num_boost_round`` in
+    ``best_params`` so the downstream ``train_models`` step trains at the tuned
+    depth, not a re-run of the full ceiling.
 
 ``recipe="lgb"`` (the default) preserves the exact historical search space and
 trial semantics -- no behaviour change for existing single-recipe callers.
@@ -44,7 +45,7 @@ import pandas as pd
 from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
 from marvis.packs.modeling.errors import ModelingError
-from marvis.packs.modeling.recipes.common import cat_feature_indices
+from marvis.packs.modeling.recipes.common import carve_early_stop_fold, cat_feature_indices
 
 # Reference learning rate used to scale the per-trial boost-round ceiling: lower
 # sampled learning rates get proportionally more rounds (early stopping still
@@ -137,6 +138,20 @@ DEFAULT_TRIAL_BUDGET: dict[str, int] = {
     "scorecard": 12,
     "mlp": 12,
 }
+
+#: Tree recipes that early-stop against a carved validation fold instead of the
+#: full test split (SEL-4/TUNE-3) -- mirrors train_models' _EARLY_STOPPED_TREE_RECIPES.
+_EARLY_STOPPED_TREE_RECIPES = frozenset({"lgb", "xgb", "catboost"})
+
+
+def _group_cols_from_params(params: dict | None) -> list[str] | None:
+    """Optional group/identity column(s) for the early-stopping valid-fold carve,
+    read from the caller-supplied base_params (mirrors
+    ``recipes.common.VALID_GROUP_COLS_PARAM_KEY``); absent by default."""
+    raw = dict(params or {}).get("valid_group_cols")
+    if not raw:
+        return None
+    return raw if isinstance(raw, list) else [raw]
 
 
 @dataclass(frozen=True)
@@ -452,8 +467,12 @@ def _run_xgb_trial(
     feats: list[str],
     ytr: np.ndarray,
     yte: np.ndarray,
-    wtr: np.ndarray | None,
-    wte: np.ndarray | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
+    wva: np.ndarray | None,
     n_estimators: int,
     early_stopping_rounds: int,
     overfit_penalty: float,
@@ -475,11 +494,12 @@ def _run_xgb_trial(
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
     )
+    # SEL-4/TUNE-3: fit/early-stop against the carved fit_train/valid, not train/test.
     model.fit(
-        train[feats], ytr.astype(int),
-        sample_weight=wtr,
-        eval_set=[(test[feats], yte.astype(int))],
-        sample_weight_eval_set=[wte] if wte is not None else None,
+        fit_train[feats], yfit.astype(int),
+        sample_weight=wfit,
+        eval_set=[(valid[feats], yva.astype(int))],
+        sample_weight_eval_set=[wva] if wva is not None else None,
         verbose=False,
     )
     best_iteration = int(getattr(model, "best_iteration", n_estimators - 1)) + 1
@@ -535,7 +555,11 @@ def _run_catboost_trial(
     feats: list[str],
     ytr: np.ndarray,
     yte: np.ndarray,
-    wtr: np.ndarray | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
     iterations: int,
     early_stopping_rounds: int,
     overfit_penalty: float,
@@ -562,10 +586,11 @@ def _run_catboost_trial(
         od_wait=od_wait,
         cat_features=cat_features or None,
     )
+    # SEL-4/TUNE-3: fit/early-stop against the carved fit_train/valid, not train/test.
     model.fit(
-        train[feats], ytr.astype(int),
-        sample_weight=wtr,
-        eval_set=(test[feats], yte.astype(int)),
+        fit_train[feats], yfit.astype(int),
+        sample_weight=wfit,
+        eval_set=(valid[feats], yva.astype(int)),
         verbose=False,
     )
     best_iteration = int(model.get_best_iteration() or model.tree_count_ - 1) + 1
@@ -882,12 +907,31 @@ def tune_hyperparameters(
     neg = _weighted_count(ytr, wtr, 0.0)
     pos_weight_hint = round(neg / pos, 1) if pos > 0 else 1.0
 
+    # SEL-4/TUNE-3: tree recipes early-stop each trial against a fold carved from
+    # train (default 15%), not test -- test stays the trial-selection metric (and,
+    # downstream, the one-time champion comparison set) instead of also deciding
+    # each trial's round count. lr/scorecard/mlp have no early-stopping concept so
+    # they keep fitting/scoring against the full train/test split unchanged.
+    if recipe in _EARLY_STOPPED_TREE_RECIPES:
+        fit_train, valid = carve_early_stop_fold(
+            train, seed=seed, group_cols=_group_cols_from_params(base_params),
+        )
+        yfit = fit_train[target_col].to_numpy(dtype=float)
+        yva = valid[target_col].to_numpy(dtype=float)
+        wfit = _sample_weight(fit_train, weight_col)
+        wva = _sample_weight(valid, weight_col)
+    else:
+        fit_train, valid = train, test
+        yfit, yva, wfit, wva = ytr, yte, wtr, wte
+
     # Recipe-specific search hook: (coarse_sampler, fine_sampler, trial_runner).
     coarse_sampler, fine_sampler, trial_runner = _recipe_search_hooks(
         recipe,
         train=train, test=test, oot=oot,
+        fit_train=fit_train, valid=valid,
         feats=feats, target_col=target_col,
         ytr=ytr, yte=yte, wtr=wtr, wte=wte,
+        yfit=yfit, yva=yva, wfit=wfit, wva=wva,
         seed=seed, early_stopping_rounds=early_stopping_rounds,
         max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
         oot_has_labels=oot_has_labels,
@@ -953,12 +997,18 @@ def _recipe_search_hooks(
     train: pd.DataFrame,
     test: pd.DataFrame,
     oot: pd.DataFrame | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
     feats: list[str],
     target_col: str,
     ytr: np.ndarray,
     yte: np.ndarray,
     wtr: np.ndarray | None,
     wte: np.ndarray | None,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
+    wva: np.ndarray | None,
     seed: int,
     early_stopping_rounds: int,
     max_boost_round: int,
@@ -976,8 +1026,9 @@ def _recipe_search_hooks(
 
         fixed_params = _lgb_base_params(base_params, pos_weight_hint=pos_weight_hint)
         trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
-        dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
-        dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
+        # SEL-4/TUNE-3: early stopping watches the carved valid fold, not test.
+        dtrain = lgb.Dataset(fit_train[feats], label=yfit, weight=wfit, free_raw_data=False)
+        dvalid = lgb.Dataset(valid[feats], label=yva, weight=wva, reference=dtrain, free_raw_data=False)
 
         def runner(params: dict, stage: str) -> dict:
             return _run_lgb_trial(
@@ -1002,7 +1053,8 @@ def _recipe_search_hooks(
                 params, stage,
                 fixed_params=fixed_params, seed=seed,
                 train=train, test=test, oot=oot, feats=feats,
-                ytr=ytr, yte=yte, wtr=wtr, wte=wte,
+                ytr=ytr, yte=yte,
+                fit_train=fit_train, valid=valid, yfit=yfit, yva=yva, wfit=wfit, wva=wva,
                 n_estimators=n_estimators,
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
@@ -1020,7 +1072,8 @@ def _recipe_search_hooks(
                 params, stage,
                 fixed_params=fixed_params, seed=seed,
                 train=train, test=test, oot=oot, feats=feats,
-                ytr=ytr, yte=yte, wtr=wtr,
+                ytr=ytr, yte=yte,
+                fit_train=fit_train, valid=valid, yfit=yfit, yva=yva, wfit=wfit,
                 iterations=iterations,
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,

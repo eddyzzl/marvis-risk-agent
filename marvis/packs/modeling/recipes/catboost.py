@@ -14,6 +14,7 @@ from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainRes
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
+    carve_early_stop_fold_for_config,
     cat_feature_indices,
     compute_model_metrics,
     model_params,
@@ -39,15 +40,22 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
     cat_features = cat_feature_indices(train, features, params.pop("cat_features", None))
     iterations = int(params.pop("iterations", params.pop("num_boost_round", 50)))
     od_wait = params.pop("od_wait", None)
+    fit_train = train
     if config.early_stopping_rounds:
+        # SEL-4/TUNE-3: early stopping watches a fold carved from train, not test --
+        # test stays a one-time, unbiased comparison set instead of also picking the
+        # round count.
         params.setdefault("od_type", "Iter")
         od_wait = int(config.early_stopping_rounds)
+        fit_train, valid = carve_early_stop_fold_for_config(train, config)
+    else:
+        valid = test
     model = CatBoostClassifier(**params, iterations=iterations, od_wait=od_wait, cat_features=cat_features or None)
     model.fit(
-        train[features],
-        train[config.target_col].to_numpy(dtype=int),
-        sample_weight=sample_weight_values(train, config),
-        eval_set=(test[features], test[config.target_col].to_numpy(dtype=int)),
+        fit_train[features],
+        fit_train[config.target_col].to_numpy(dtype=int),
+        sample_weight=sample_weight_values(fit_train, config),
+        eval_set=(valid[features], valid[config.target_col].to_numpy(dtype=int)),
         verbose=False,
     )
     metrics = compute_model_metrics(

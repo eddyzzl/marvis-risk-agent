@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 
 import numpy as np
@@ -34,8 +35,6 @@ PREPROCESSING_STEPS_PARAM_KEY = "preprocessing_steps"
 #: sidecar at all (as opposed to a sidecar with zero steps) — surfaced on the model
 #: card as "预处理链不可追溯" rather than silently implying no preprocessing occurred.
 PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY = "preprocessing_chain_traceable"
-
-_PLATFORM_ONLY_PARAM_KEYS = frozenset({PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY})
 _MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
 
@@ -60,6 +59,98 @@ def split_modeling_frame(
     if oot is not None and oot.empty:
         oot = None
     return train, test, oot
+
+
+#: Default fraction of ``train`` carved out as the early-stopping fold (SEL-4/TUNE-3).
+DEFAULT_EARLY_STOP_VALID_FRACTION = 0.15
+
+#: Platform-only param key naming a group/identity column (if present in the modeling
+#: frame) to keep whole groups together when carving the early-stopping fold -- mirrors
+#: prepare.py's anti-leakage grouping semantics one level down (within train, not across
+#: train/test/oot). Optional: falls back to per-row carving when absent or not in the frame.
+VALID_GROUP_COLS_PARAM_KEY = "valid_group_cols"
+
+_PLATFORM_ONLY_PARAM_KEYS = frozenset({
+    PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY, VALID_GROUP_COLS_PARAM_KEY,
+})
+
+
+def carve_early_stop_fold(
+    train: pd.DataFrame,
+    *,
+    seed: int,
+    group_cols: list[str] | None = None,
+    valid_fraction: float = DEFAULT_EARLY_STOP_VALID_FRACTION,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split ``train`` into ``(fit_train, valid)`` for early stopping (SEL-4/TUNE-3).
+
+    Early stopping previously watched the ``test`` split, so test simultaneously served
+    early-stopping, hyperparameter selection, and champion comparison -- three roles on
+    one set, with the reported ``test_ks`` implicitly optimism-biased by the trials/
+    rounds chosen against it. ``valid`` is carved from ``train`` instead (default 15%),
+    freeing ``test`` to be a one-time, unbiased comparison set and ``oot`` to stay
+    report-only. Deterministic given ``seed`` (derives its own RandomState so the draw
+    doesn't collide with any other seeded step). Group-aware when ``group_cols`` names
+    column(s) present in ``train`` (keeps whole groups on one side, mirroring
+    prepare.py's anti-leakage grouping); otherwise falls back to per-row assignment.
+    """
+    if not (0.0 < valid_fraction < 1.0):
+        raise ModelingError(f"valid_fraction must be in (0, 1): {valid_fraction}")
+    rng = np.random.RandomState(_valid_fold_seed(seed))
+    resolved_group_cols = [str(col) for col in (group_cols or []) if str(col) in train.columns]
+    groups = _group_ids(train, resolved_group_cols)
+    unique_groups = np.unique(groups)
+    rng.shuffle(unique_groups)
+    target_rows = int(round(len(train) * valid_fraction))
+    chosen: set = set()
+    covered = 0
+    for group in unique_groups:
+        if covered >= target_rows or len(chosen) >= len(unique_groups) - 1:
+            break
+        chosen.add(int(group))
+        covered += int((groups == group).sum())
+    valid_mask = np.isin(groups, list(chosen))
+    valid = train.loc[valid_mask]
+    fit_train = train.loc[~valid_mask]
+    if fit_train.empty or valid.empty:
+        raise ModelingError("early-stopping valid fold carve produced an empty split")
+    return fit_train, valid
+
+
+def carve_early_stop_fold_for_config(
+    train: pd.DataFrame,
+    config: TrainConfig,
+    *,
+    valid_fraction: float = DEFAULT_EARLY_STOP_VALID_FRACTION,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``carve_early_stop_fold`` convenience wrapper reading seed/group_cols off a
+    ``TrainConfig`` (the shape every recipe module already has on hand)."""
+    return carve_early_stop_fold(
+        train,
+        seed=config.seed,
+        group_cols=_resolve_valid_group_cols(config),
+        valid_fraction=valid_fraction,
+    )
+
+
+def _valid_fold_seed(seed: int) -> int:
+    """Deterministic seed derivation distinct from the base training seed, so the
+    valid-fold draw doesn't reuse the exact same RandomState stream as model fitting."""
+    digest = hashlib.sha256(f"{int(seed)}:valid_fold".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
+
+
+def _resolve_valid_group_cols(config: TrainConfig) -> list[str]:
+    raw = config.params.get(VALID_GROUP_COLS_PARAM_KEY)
+    if not raw:
+        return []
+    return raw if isinstance(raw, list) else [raw]
+
+
+def _group_ids(frame: pd.DataFrame, group_cols: list[str]) -> np.ndarray:
+    if group_cols:
+        return frame.groupby(group_cols, sort=False).ngroup().to_numpy()
+    return np.arange(len(frame))
 
 
 def model_params(params: dict | None) -> dict:
@@ -601,7 +692,11 @@ def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, flo
 
 
 __all__ = [
+    "DEFAULT_EARLY_STOP_VALID_FRACTION",
+    "VALID_GROUP_COLS_PARAM_KEY",
     "artifact_params",
+    "carve_early_stop_fold",
+    "carve_early_stop_fold_for_config",
     "cat_feature_indices",
     "compute_model_metrics",
     "compute_multiclass_metrics",
