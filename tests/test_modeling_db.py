@@ -3,8 +3,9 @@ from dataclasses import replace
 import pytest
 
 import marvis.db as db_module
-from marvis.db import ModelingRepository, connect, init_db
+from marvis.db import ModelingRepository, TaskRepository, connect, init_db
 import marvis.repositories.modeling as modeling_repo_module
+from marvis.domain import TaskCreate
 from marvis.packs.modeling import (
     Experiment,
     ModelArtifact,
@@ -98,6 +99,69 @@ def test_modeling_repository_round_trips_experiment_and_artifact(tmp_path):
 
 def test_modeling_repository_is_reexported_from_db():
     assert ModelingRepository is modeling_repo_module.ModelingRepository
+
+
+def _task_create(model_name: str) -> TaskCreate:
+    return TaskCreate(
+        model_name=model_name,
+        model_version="v1",
+        validator="qa",
+        source_dir="/tmp/source",
+        algorithm="lgb",
+        run_mode="manual",
+        target_col="bad",
+        score_col="score",
+        split_col="split",
+        time_col="month",
+        feature_columns=[],
+        notebook_path=None,
+        sample_path=None,
+        pmml_path=None,
+        dictionary_path=None,
+        report_values={},
+    )
+
+
+def test_list_experiments_all_joins_task_identity_across_tasks_and_paginates(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task_repo = TaskRepository(db_path)
+    task_a = task_repo.create_task(_task_create("A-card"))
+    task_b = task_repo.create_task(_task_create("B-card"))
+    modeling_repo = ModelingRepository(db_path)
+    experiment_a = Experiment(
+        id="experiment-a",
+        task_id=task_a.id,
+        recipe_id="lgb",
+        config=_config(),
+        metrics=_metrics(),
+        artifact_id=None,
+        status="trained",
+        created_at="2026-06-19T00:00:00Z",
+    )
+    experiment_b = Experiment(
+        id="experiment-b",
+        task_id=task_b.id,
+        recipe_id="xgb",
+        config=_config(),
+        metrics=None,
+        artifact_id=None,
+        status="pending",
+        created_at="2026-06-19T00:01:00Z",
+    )
+    modeling_repo.create_experiment(experiment_a)
+    modeling_repo.create_experiment(experiment_b)
+
+    all_rows = modeling_repo.list_experiments_all()
+    assert [row["experiment"].id for row in all_rows] == ["experiment-b", "experiment-a"]
+    assert all_rows[0]["task_model_name"] == "B-card"
+    assert all_rows[1]["task_model_name"] == "A-card"
+
+    trained_only = modeling_repo.list_experiments_all(status="trained")
+    assert [row["experiment"].id for row in trained_only] == ["experiment-a"]
+
+    paginated = modeling_repo.list_experiments_all(limit=1, offset=1)
+    assert [row["experiment"].id for row in paginated] == ["experiment-a"]
 
 
 def test_modeling_repository_round_trips_drop_nan_label_config(tmp_path):

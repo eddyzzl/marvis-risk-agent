@@ -61,6 +61,46 @@ class ModelingRepository:
             ).fetchall()
         return [_experiment_from_row(row) for row in rows]
 
+    def list_experiments_all(
+        self,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Cross-task read model registry (GAP-6): experiments joined to their
+        owning task's identifying fields, for the "which models have I delivered"
+        asset view. Read-only, no write path -- naturally honors INV-1."""
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        params: list[object] = []
+        query = """
+            SELECT e.id, e.task_id, e.recipe_id, e.config_json, e.metrics_json,
+                   e.artifact_id, e.status, e.created_at,
+                   t.model_name, t.model_version, t.task_type, t.algorithm
+              FROM experiments e
+              JOIN tasks t ON t.id = e.task_id
+        """
+        if status is not None:
+            query += " WHERE e.status = ?"
+            params.append(status)
+        query += " ORDER BY e.created_at DESC, e.id DESC"
+        if bounded_limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([bounded_limit, bounded_offset])
+        with connect(self.db_path) as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [
+            {
+                "experiment": _experiment_from_row(row),
+                "task_model_name": str(row["model_name"]),
+                "task_model_version": str(row["model_version"]),
+                "task_type": str(row["task_type"]) if row["task_type"] else "",
+                "task_algorithm": str(row["algorithm"]) if row["algorithm"] else "",
+            }
+            for row in rows
+        ]
+
     def attach_experiment_result(
         self,
         experiment_id: str,
