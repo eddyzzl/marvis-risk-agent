@@ -115,6 +115,12 @@ def init_db(db_path: Path) -> None:
         _ensure_column(
             conn,
             table="tasks",
+            column="oot_ks_min",
+            definition="REAL",
+        )
+        _ensure_column(
+            conn,
+            table="tasks",
             column="metrics_json",
             definition="TEXT NOT NULL DEFAULT '[]'",
         )

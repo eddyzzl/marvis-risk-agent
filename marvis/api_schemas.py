@@ -19,6 +19,9 @@ class CreateTaskRequest(BaseModel):
     target_type: str = ""
     recipes: list[str] = Field(default_factory=list)
     sample_weight_col: str = ""
+    # AGT-4 (optional, modeling tasks only): None/absent → no success criterion is
+    # injected into the plan. Never defaulted to a platform-chosen number.
+    oot_ks_min: float | None = None
     metrics: list[str] = Field(default_factory=list)
     # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
     capability_tier: str = ""

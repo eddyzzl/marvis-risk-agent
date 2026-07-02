@@ -261,6 +261,19 @@
                 disabled
               />
             </div>
+            <div class="wide-field success-criteria-create">
+              <span>成功标准（可选）</span>
+              <input
+                id="modelOotKsMin"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                placeholder="留空 = 不设置最低 OOT KS 要求"
+                autocomplete="off"
+              />
+              <p class="dialog-subtitle">设置后，模型 OOT KS 未达到该值会触发计划重规划或失败，而不是静默通过。</p>
+            </div>
           </section>
           <section id="createTaskMetricField" class="task-form-section" hidden>
             <h3>可选指标</h3>
