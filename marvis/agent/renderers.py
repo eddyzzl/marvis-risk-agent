@@ -67,20 +67,20 @@ def _render_screen(o: dict):
     n = o.get("n_screened") or o.get("n") or (len(selected) + len(leak) + len(susp))
     text = (
         f"**特征筛选完成**:从 {n} 个候选中提议保留 **{len(selected)}** 个特征。\n"
-        f"- 剔除疑似**泄漏** {len(leak_names)} 个" + (f"(如 {leak_names[:3]})" if leak_names else "") + "\n"
-        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"(如 {susp_names[:5]})" if susp_names else "") + "\n"
-        f"- 剔除**不可用**(常量/稀疏) {len(unusable)} 个"
+        f"- 剔除疑似**泄漏** {len(leak_names)} 个" + (f"（如 {leak_names[:3]}）" if leak_names else "") + "\n"
+        f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"（如 {susp_names[:5]}）" if susp_names else "") + "\n"
+        f"- 剔除**不可用**（常量/稀疏） {len(unusable)} 个"
     )
     if excluded_categorical:
         preview = "、".join(
-            f"{item.get('column')}(基数{item.get('cardinality')})"
+            f"{item.get('column')}（基数{item.get('cardinality')}）"
             for item in excluded_categorical[:8]
             if isinstance(item, dict)
         )
         more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
         text += (
-            f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more};"
-            "如需使用,请先用 woe_encode_categorical 编码,或改用 catboost(原生支持类别列)。"
+            f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more}；"
+            "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
         )
     tables = []
     if selected:
@@ -88,16 +88,16 @@ def _render_screen(o: dict):
         for feat in selected[:20]:
             s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
             rows.append([feat, _num(s.get("ks")), _num(s.get("iv")), _pct(s.get("missing_rate"))])
-        tables.append({"title": "入选特征(前20)", "columns": ["特征", "KS", "IV", "缺失率"], "rows": rows})
+        tables.append({"title": "入选特征（前20）", "columns": ["特征", "KS", "IV", "缺失率"], "rows": rows})
     if leak:
         tables.append({
-            "title": f"疑似泄漏(KS≥阈值,共{len(leak)})",
+            "title": f"疑似泄漏（KS≥阈值，共{len(leak)}）",
             "columns": ["特征", "KS", "原因"],
             "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in leak[:20])],
         })
     if susp:
         tables.append({
-            "title": f"疑似模型输出/评分列(共{len(susp)})",
+            "title": f"疑似模型输出/评分列（共{len(susp)}）",
             "columns": ["特征", "KS", "原因"],
             "rows": [[f, _num(k), r] for f, k, r in (_triple(i) for i in susp[:20])],
         })
@@ -108,7 +108,7 @@ def _render_screen(o: dict):
                 rows.append([str(item[0]) if item else "", str(item[1]) if len(item) > 1 else ""])
             else:
                 rows.append([str(item), ""])
-        tables.append({"title": f"剔除·不可用(常量/稀疏,共{len(unusable)})", "columns": ["特征", "原因"], "rows": rows})
+        tables.append({"title": f"剔除·不可用（常量/稀疏，共{len(unusable)}）", "columns": ["特征", "原因"], "rows": rows})
     return text, tables
 
 
@@ -127,7 +127,7 @@ def _render_select(o: dict):
     other = [item for item in dropped if item not in low_iv and item not in collinear and item not in high_vif and item not in top_k_dropped]
     text = (
         f"**精选特征完成**:从 {n_in} 个候选中精选出 **{len(selected)}** 个特征"
-        f"(淘汰 {len(dropped)} 个)。\n"
+        f"（淘汰 {len(dropped)} 个）。\n"
         f"- IV 底线淘汰 {len(low_iv)} 个\n"
         f"- 相关性去冗余淘汰 {len(collinear)} 个\n"
         f"- 高 VIF 淘汰 {len(high_vif)} 个\n"
@@ -145,7 +145,7 @@ def _render_select(o: dict):
         for feat in selected[:20]:
             s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
             rows.append([feat, _num(s.get("iv")), _num(s.get("ks"))])
-        tables.append({"title": f"最终清单(前20,共{len(selected)})", "columns": ["特征", "IV", "KS"], "rows": rows})
+        tables.append({"title": f"最终清单（前20，共{len(selected)}）", "columns": ["特征", "IV", "KS"], "rows": rows})
     if dropped:
         rows = []
         for item in dropped[:30]:
@@ -155,7 +155,7 @@ def _render_select(o: dict):
             else:
                 feat, reason = str(item), ""
             rows.append([feat, reason])
-        tables.append({"title": f"淘汰清单(前30,共{len(dropped)})", "columns": ["特征", "原因"], "rows": rows})
+        tables.append({"title": f"淘汰清单（前30，共{len(dropped)}）", "columns": ["特征", "原因"], "rows": rows})
     return text, tables
 
 
@@ -165,8 +165,8 @@ def _render_choose_modeling_spec(o: dict):
     sample_weight_col = str(o.get("sample_weight_col") or "")
     metric_policy = str(o.get("metric_policy") or "")
     text = (
-        f"**建模规格已生成**:目标类型 `{target_type}`,"
-        f"算法 {'/'.join(recipes) or '-'},选择策略 `{metric_policy}`。"
+        f"**建模规格已生成**:目标类型 `{target_type}`，"
+        f"算法 {'/'.join(recipes) or '-'}，选择策略 `{metric_policy}`。"
     )
     tables = [{
         "title": "建模规格",
@@ -225,14 +225,14 @@ def _render_configure_tuning(o: dict):
     if multi:
         budget_note = "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)
         text = (
-            f"**调参配置已生成**:候选算法 {'/'.join(recipes)},"
+            f"**调参配置已生成**:候选算法 {'/'.join(recipes)}，"
             f"{'每个算法各自执行' if tune_enabled else '跳过'}两阶段随机搜索"
-            f"(按算法预算 {budget_note};多算法总预算=Σ各配方预算={_fmt(total_n_trials)} 轮)。"
+            f"（按算法预算 {budget_note}；多算法总预算=Σ各配方预算={_fmt(total_n_trials)} 轮）。"
         )
     else:
         text = (
-            f"**调参配置已生成**:算法 `{o.get('recipe', '')}`,"
-            f"{'执行' if tune_enabled else '跳过'}两阶段随机搜索,"
+            f"**调参配置已生成**:算法 `{o.get('recipe', '')}`，"
+            f"{'执行' if tune_enabled else '跳过'}两阶段随机搜索，"
             f"轮数 {o.get('n_trials', 0)}。"
         )
     rows = [
@@ -241,7 +241,7 @@ def _render_configure_tuning(o: dict):
         ["随机搜索", "是" if tune_enabled else "否"],
     ]
     if multi:
-        rows.append(["按算法调参预算(轮数,总预算=Σ各配方预算)", "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)])
+        rows.append(["按算法调参预算（轮数，总预算=Σ各配方预算）", "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)])
         rows.append(["总预算", _fmt(total_n_trials)])
     else:
         rows.append(["调参轮数", _fmt(o.get("n_trials", ""))])
@@ -266,7 +266,7 @@ def _render_tune(o: dict):
     best_params = o.get("best_params") or {}
     best_metrics = o.get("best_metrics") or {}
     trials = [t for t in (o.get("trials") or []) if isinstance(t, dict)]
-    text = f"**调参完成**:{o.get('n_trials', '?')} 轮搜索,选出最优超参组合。"
+    text = f"**调参完成**:{o.get('n_trials', '?')} 轮搜索，选出最优超参组合。"
     tables = []
     if trials:
         # trials leaderboard (G4): each trial's train/test/oot KS + overfit gap,
@@ -291,11 +291,11 @@ def _render_tune(o: dict):
                 _num(gap_tt), _num(trial.get("overfit_gap_to")),
             ])
         tables.append({
-            "title": "trials 排行(按 in-time 选优;前15)",
+            "title": "trials 排行（按 in-time 选优；前15）",
             "columns": [
                 "#", "train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc",
                 "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
-                "过拟合gap(tt)", "过拟合gap(to)",
+                "过拟合gap（tt）", "过拟合gap（to）",
             ],
             "rows": rows,
         })
@@ -320,7 +320,7 @@ def _render_train(o: dict):
         if isinstance(item, (list, tuple)) and item:
             rows.append([str(item[0]), _fmt(item[1]) if len(item) > 1 else ""])
     if rows:
-        tables.append({"title": "特征重要性(前15)", "columns": ["特征", "重要性"], "rows": rows})
+        tables.append({"title": "特征重要性（前15）", "columns": ["特征", "重要性"], "rows": rows})
     return text, tables
 
 
@@ -351,7 +351,7 @@ def _render_train_models(o: dict):
             + [_num(metrics.get(column)) for column in metric_columns]
         )
     if len(experiments) > 1:
-        text = f"**训练完成**:对比 {len(experiments)} 个算法,最优 **{best_recipe}**(★;{selector_label})。"
+        text = f"**训练完成**:对比 {len(experiments)} 个算法，最优 **{best_recipe}**（★；{selector_label}）。"
         tables.append({
             "title": "候选模型对比",
             "columns": ["算法", *metric_columns],
@@ -396,7 +396,7 @@ def _render_select_experiment(o: dict):
     metric = o.get("selection_metric") or ""
     reason = o.get("selection_reason") or ""
     caps = o.get("capabilities") or {}
-    text = f"**已选择最终实验**:`{selected}`({recipe});{reason}"
+    text = f"**已选择最终实验**:`{selected}`（{recipe}）；{reason}"
     rows = [
         ["PMML", "是" if caps.get("pmml_supported") else "否"],
         ["移交验证", "是" if caps.get("handoff_supported") else "否"],
@@ -417,7 +417,7 @@ def _render_select_experiment(o: dict):
         if policy.get("override_reason"):
             rows.append(["Override", policy.get("override_reason")])
     tables = [{
-        "title": f"最终模型交付能力({metric})",
+        "title": f"最终模型交付能力（{metric}）",
         "columns": ["能力", "状态"],
         "rows": rows,
     }]
@@ -438,9 +438,9 @@ def _render_report(o: dict):
     skipped = len(sections) - available
     text = (
         f"**模型开发报告已生成**:`{path}`"
-        f"(业务章节 {available}/{len(sections)} 可生成"
-        + (f", {skipped} 个缺输入/跳过" if skipped else "")
-        + ",可在右栏下载)。"
+        f"（业务章节 {available}/{len(sections)} 可生成"
+        + (f"，{skipped} 个缺输入/跳过" if skipped else "")
+        + "，可在右栏下载）。"
     )
     tables = []
     if sections:
@@ -497,7 +497,7 @@ def _render_feature_metrics(o: dict):
         rows.append(row)
     text = (
         f"**特征分析完成**:{len(rows)} 个特征的指标如下"
-        "(IV/KS/AUC 越高区分力越强;PSI/缺失率越低越稳)。可在右栏下载分析报告。"
+        "（IV/KS/AUC 越高区分力越强；PSI/缺失率越低越稳）。可在右栏下载分析报告。"
     )
     tables = []
     if rows:
@@ -512,7 +512,7 @@ def _render_feature_metrics(o: dict):
         vif = collinear.get("vif") or {}
         if vif:
             tables.append({
-                "title": "VIF(共线性)",
+                "title": "VIF（共线性）",
                 "columns": ["特征", "VIF"],
                 "rows": [[str(feat), _num(value)] for feat, value in vif.items()],
             })
@@ -531,7 +531,7 @@ def _render_feature_report(o: dict):
     text, tables = _render_feature_metrics(o)
     path = o.get("report_path") or ""
     if path:
-        text += f"\n\n**特征分析报告已生成**:`{path}`(可在右栏下载)。"
+        text += f"\n\n**特征分析报告已生成**:`{path}`（可在右栏下载）。"
     return text, tables
 
 
@@ -542,12 +542,12 @@ def _render_build_strategy(o: dict):
     score_col = str(o.get("score_col") or "")
     text = (
         f"**策略候选已生成**:`{o.get('strategy_id', '')}`。"
-        f"类型 `{strategy_type}`,评分列 `{score_col}`,默认动作 `{default_decision}`。"
+        f"类型 `{strategy_type}`，评分列 `{score_col}`，默认动作 `{default_decision}`。"
     )
     tables = []
     if rules:
         tables.append({
-            "title": "策略规则(按顺序命中)",
+            "title": "策略规则（按顺序命中）",
             "columns": ["#", "条件", "动作", "取值"],
             "rows": [
                 [
@@ -565,9 +565,9 @@ def _render_build_strategy(o: dict):
 def _render_backtest_strategy(o: dict):
     text = (
         "**策略回测完成**:"
-        f"审批率 {_pct(o.get('approval_rate'))},"
-        f"通过客群坏率 {_pct(o.get('approved_bad_rate'))},"
-        f"拒绝客群坏率 {_pct(o.get('rejected_bad_rate'))},"
+        f"审批率 {_pct(o.get('approval_rate'))}，"
+        f"通过客群坏率 {_pct(o.get('approved_bad_rate'))}，"
+        f"拒绝客群坏率 {_pct(o.get('rejected_bad_rate'))}，"
         f"预期利润 {_num(o.get('expected_profit'))}。"
     )
     rows = [
@@ -604,9 +604,9 @@ def _render_tradeoff_view(o: dict):
     if recommended:
         text = (
             "**策略权衡视图完成**:"
-            f"推荐 cutoff `{_fmt(recommended.get('cutoff'))}`,"
-            f"审批率 {_pct(recommended.get('approval_rate'))},"
-            f"坏率 {_pct(recommended.get('bad_rate'))},"
+            f"推荐 cutoff `{_fmt(recommended.get('cutoff'))}`，"
+            f"审批率 {_pct(recommended.get('approval_rate'))}，"
+            f"坏率 {_pct(recommended.get('bad_rate'))}，"
             f"预期利润 {_num(recommended.get('expected_profit'))}。"
         )
     else:
@@ -634,7 +634,7 @@ def _render_vintage_curve(o: dict):
     mob_axis = list(o.get("mob_axis") or [])
     summary = o.get("summary") if isinstance(o.get("summary"), dict) else {}
     trend = str(summary.get("trend") or "stable")
-    text = f"**Vintage 曲线完成**:{len(cohorts)} 个 cohort,趋势 `{trend}`。"
+    text = f"**Vintage 曲线完成**:{len(cohorts)} 个 cohort，趋势 `{trend}`。"
     tables = []
     curves = o.get("curves") if isinstance(o.get("curves"), dict) else {}
     counts = o.get("counts") if isinstance(o.get("counts"), dict) else {}
@@ -715,34 +715,34 @@ def _render_propose_join(o: dict):
             dedup_cell,
         ])
     text = (
-        f"**拼接诊断完成**:{len(joins)} 张特征表待左连接到锚样本(锚行数 **1:1 保留**)。\n"
-        "请核对每张表的命中率/键唯一性/是否膨胀。键不唯一的特征需选去重策略;确认后才会真正执行拼接。"
+        f"**拼接诊断完成**:{len(joins)} 张特征表待左连接到锚样本（锚行数 **1:1 保留**）。\n"
+        "请核对每张表的命中率/键唯一性/是否膨胀。键不唯一的特征需选去重策略；确认后才会真正执行拼接。"
     )
     if any_conflict:
         text += (
-            "\n\n⚠️ 检测到**同键值冲突**(同一键多行但特征值不一致):这类**不会自动删除**,"
+            "\n\n⚠️ 检测到**同键值冲突**（同一键多行但特征值不一致）：这类**不会自动删除**，"
             "请先确认去重策略或清洗数据后再拼接。"
         )
     if any_fp_mismatch:
         text += (
-            "\n\n⚠️ 检测到**键指纹不一致**(`✗ raw≠md5`:锚/特征侧一为原文、一为 md5):"
-            "系统会自动对齐哈希后再连接,但请确认这是同一标识(避免误配)。"
+            "\n\n⚠️ 检测到**键指纹不一致**（`✗ raw≠md5`:锚/特征侧一为原文、一为 md5）："
+            "系统会自动对齐哈希后再连接，但请确认这是同一标识（避免误配）。"
         )
     if relax_rows:
         text += (
-            "\n\n💡 部分特征表命中率偏低,**减一个识别要素**可提高命中(见下「择键建议」):"
-            "系统只提议、不会自动改键;若减后**膨胀**需配合去重策略。请确认后再选用。"
+            "\n\n💡 部分特征表命中率偏低，**减一个识别要素**可提高命中（见下「择键建议」）："
+            "系统只提议、不会自动改键；若减后**膨胀**需配合去重策略。请确认后再选用。"
         )
     tables = []
     if rows:
         tables.append({
-            "title": "拼接诊断(逐特征表)",
-            "columns": ["特征表", "匹配键", "指纹(raw=md5?)", "命中率", "键唯一", "膨胀", "去重(安全/冲突键)"],
+            "title": "拼接诊断（逐特征表）",
+            "columns": ["特征表", "匹配键", "指纹（raw=md5?）", "命中率", "键唯一", "膨胀", "去重（安全/冲突键）"],
             "rows": rows,
         })
     if relax_rows:
         tables.append({
-            "title": "择键建议(减要素换更高命中)",
+            "title": "择键建议（减要素换更高命中）",
             "columns": ["特征表", "当前命中率", "建议键", "减后命中率", "减后唯一", "减后膨胀"],
             "rows": relax_rows,
         })
@@ -760,8 +760,8 @@ def _render_confirm_join(o: dict):
         labels = o.get("needs_dedup_labels") or {}
         listed = "、".join(f"`{labels.get(f, f)}`" for f in needs)
         return (
-            f"⚠️ 特征 {listed} 存在**同键冲突**(同一键多行、特征值不一致),"
-            "需先定去重策略才能拼接。回复「去重 first」(保留首条)或「去重 last」(保留末条)解决;"
+            f"⚠️ 特征 {listed} 存在**同键冲突**（同一键多行、特征值不一致），"
+            "需先定去重策略才能拼接。回复「去重 first」（保留首条）或「去重 last」（保留末条）解决；"
             "或排除这些特征后重试。"
         ), []
     return "", []
@@ -772,9 +772,9 @@ def _render_execute_join(o: dict):
     joined_rows = o.get("joined_rows")
     ok = anchor_rows == joined_rows
     text = (
-        f"**拼接执行完成**:结果数据集 `{o.get('result_dataset_id', '')}`,"
+        f"**拼接执行完成**:结果数据集 `{o.get('result_dataset_id', '')}`，"
         f"锚行 {anchor_rows} → 拼接后 {joined_rows} 行"
-        + ("(1:1 保持 ✓)" if ok else "(⚠️ 行数发生变化,请检查膨胀)")
+        + ("（1:1 保持 ✓）" if ok else "（⚠️ 行数发生变化，请检查膨胀）")
     )
     warnings = o.get("warnings") or []
     if warnings:
@@ -805,7 +805,7 @@ def _render_post_training_action(o: dict):
     succeeded = sum(1 for item in actions if item.get("status") == "succeeded")
     skipped = sum(1 for item in actions if item.get("status") == "skipped")
     text = (
-        f"**训练后交付动作完成**:成功 {succeeded} 个,跳过 {skipped} 个。"
+        f"**训练后交付动作完成**:成功 {succeeded} 个，跳过 {skipped} 个。"
         if actions else "**训练后交付动作完成**。"
     )
     rows = [
@@ -876,12 +876,12 @@ def _render_make_split(o: dict):
     ]
     text = (
         f"**样本切分完成**:共 {total} 行。请核对 train/test/oot 划分"
-        "(占比是否合理、OOT 是否按时间、分组是否防泄漏)后再继续。"
+        "（占比是否合理、OOT 是否按时间、分组是否防泄漏）后再继续。"
     )
     tables = []
     if rows:
         tables.append({
-            "title": "切分计数(train/test/oot)",
+            "title": "切分计数（train/test/oot）",
             "columns": ["划分", "行数", "占比"],
             "rows": rows,
         })
@@ -895,7 +895,7 @@ def _render_make_split(o: dict):
         ]
         if grows:
             tables.append({
-                "title": f"按「{group_col}」分布(逐划分)",
+                "title": f"按「{group_col}」分布（逐划分）",
                 "columns": ["划分", *[str(gv) for gv in group_values]],
                 "rows": grows,
             })

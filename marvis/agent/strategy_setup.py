@@ -77,7 +77,7 @@ def build_strategy_proposal(
     resolved_score = _resolve_score_col(columns, score_col)
     if not resolved_score.isidentifier():
         raise StrategySetupError(
-            f"策略条件暂只支持 Python 标识符列名;评分列 `{resolved_score}` 需先重命名后再回测。"
+            f"策略条件暂只支持 Python 标识符列名；评分列 `{resolved_score}` 需先重命名后再回测。"
         )
     frame = backend.read_frame(path, columns=[resolved_target, resolved_score])
     profile = _score_profile(frame, target_col=resolved_target, score_col=resolved_score)
@@ -122,7 +122,7 @@ def _resolve_target_col(backend, path: Path, columns: list[str], requested: str 
     setup = detect_setup(backend, path)
     if setup.target_col:
         return setup.target_col
-    raise StrategySetupError("未能识别 0/1 目标列;请在创建任务时指定 target_col。")
+    raise StrategySetupError("未能识别 0/1 目标列；请在创建任务时指定 target_col。")
 
 
 def _resolve_score_col(columns: list[str], requested: str | None) -> str:
@@ -137,7 +137,7 @@ def _resolve_score_col(columns: list[str], requested: str | None) -> str:
         low = column.lower()
         if "score" in low or low in {"pred", "pd"} or "prob" in low:
             return column
-    raise StrategySetupError("未能识别评分列;请在创建任务时指定 score_col。")
+    raise StrategySetupError("未能识别评分列；请在创建任务时指定 score_col。")
 
 
 def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> dict:
@@ -158,11 +158,11 @@ def _score_profile(frame: pd.DataFrame, *, target_col: str, score_col: str) -> d
     if higher_score_riskier:
         condition = f"{score_col} >= {cutoff_literal}"
         direction = "higher_score_riskier"
-        notes = [f"评分越高坏样本率越高,默认拒绝评分最高约 20%(cutoff={cutoff_literal})。"]
+        notes = [f"评分越高坏样本率越高，默认拒绝评分最高约 20%（cutoff={cutoff_literal}）。"]
     else:
         condition = f"{score_col} < {cutoff_literal}"
         direction = "lower_score_riskier"
-        notes = [f"评分越低坏样本率越高,默认拒绝评分最低约 20%(cutoff={cutoff_literal})。"]
+        notes = [f"评分越低坏样本率越高，默认拒绝评分最低约 20%（cutoff={cutoff_literal}）。"]
     return {
         "condition": condition,
         "cutoff": cutoff,

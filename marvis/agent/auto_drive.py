@@ -371,7 +371,7 @@ def parse_decision(raw: str, *, allowed_actions: tuple[str, ...] = DEFAULT_GATE_
 def _parse_decision(raw, *, allowed_actions: tuple[str, ...] = DEFAULT_GATE_ACTIONS) -> tuple[dict, bool]:
     data, error = load_json_object(raw)
     if data is None:
-        return {"action": "halt", "reason": "无法解析模型决策,转人工确认。"}, False
+        return {"action": "halt", "reason": "无法解析模型决策，转人工确认。"}, False
     action = str(data.get("action") or "").strip().lower()
     allowed = _normalize_allowed_actions(allowed_actions)
     if action not in allowed:
@@ -379,11 +379,11 @@ def _parse_decision(raw, *, allowed_actions: tuple[str, ...] = DEFAULT_GATE_ACTI
         suffix = f" 原因:{reason}" if reason else ""
         return {
             "action": "halt",
-            "reason": f"模型返回了当前节点不允许的动作 `{action or '空'}`,转人工确认。{suffix}",
+            "reason": f"模型返回了当前节点不允许的动作 `{action or '空'}`，转人工确认。{suffix}",
         }, False
     reason = str(data.get("reason") or "").strip()
     if not reason:
-        reason = "结果正常,继续。" if action == "confirm" else "请人工确认。"
+        reason = "结果正常，继续。" if action == "confirm" else "请人工确认。"
     decision: dict[str, Any] = {"action": action, "reason": reason}
     if action == "adjust":
         decision["params"] = _object_or_empty(data.get("params"))
@@ -420,7 +420,7 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
         confidence = decision.get("confidence")
         if isinstance(confidence, (int, float)) and confidence < AUTO_MIN_CONFIDENCE:
             return _policy_halt(
-                f"AUTO 决策置信度 {confidence:.2f} 低于阈值 {AUTO_MIN_CONFIDENCE},不足以自动{action}。"
+                f"AUTO 决策置信度 {confidence:.2f} 低于阈值 {AUTO_MIN_CONFIDENCE}，不足以自动{action}。"
             )
     if action == "adjust":
         allowed_controls = {str(control.id) for control in getattr(envelope, "controls", ())}
@@ -431,9 +431,9 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
                 f"AUTO 返回了当前节点未声明的调整参数:{', '.join(unknown_params)}。"
             )
         if decision.get("selection") and "selection" not in allowed_controls:
-            return _policy_halt("AUTO 试图调整特征选择,但当前节点没有声明 selection 控件。")
+            return _policy_halt("AUTO 试图调整特征选择，但当前节点没有声明 selection 控件。")
         if decision.get("dedup_strategies") and "dedup_strategies" not in allowed_controls:
-            return _policy_halt("AUTO 试图设置去重策略,但当前节点没有声明 dedup_strategies 控件。")
+            return _policy_halt("AUTO 试图设置去重策略，但当前节点没有声明 dedup_strategies 控件。")
         requested_controls = set(str(key) for key in params)
         if decision.get("selection"):
             requested_controls.add("selection")
@@ -467,7 +467,7 @@ def _gate_risk_reason(envelope) -> str:
         return f"当前节点声明了大范围下游重置策略:{scope}。"
     reset_count = _reset_step_count(reset_policy)
     if reset_count is not None and reset_count > AUTO_MAX_AUTO_RESET_STEPS:
-        return f"当前节点会重置 {reset_count} 个下游步骤,超出 AUTO 自动调整上限。"
+        return f"当前节点会重置 {reset_count} 个下游步骤，超出 AUTO 自动调整上限。"
     return ""
 
 

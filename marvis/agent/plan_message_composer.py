@@ -39,7 +39,7 @@ class PlanMessageComposer:
                 by_phase[phase] = []
                 order.append(phase)
             by_phase[phase].append(step.title)
-        lines = ["我已生成执行计划,会在每个关键节点停下与你确认:"]
+        lines = ["我已生成执行计划，会在每个关键节点停下与你确认:"]
         for phase in order:
             lines.append(f"**{phase}**:{' → '.join(by_phase[phase])}")
         lines.append("确认「开始」后按计划执行。")
@@ -57,7 +57,7 @@ class PlanMessageComposer:
         # in the agent-mode chat timeline (app.js's agentMessageHtml), so the
         # gate copy tells the user both channels work — click the widget below
         # or describe the change in free text.
-        parts.append("确认请回复「确认」继续;可直接操作下方控件，或用文字说明要调整的参数。")
+        parts.append("确认请回复「确认」继续；可直接操作下方控件，或用文字说明要调整的参数。")
         meta = {
             "plan_id": plan.id,
             "step_id": gate.id if gate else None,
@@ -116,7 +116,7 @@ class PlanMessageComposer:
     def review_message(self, plan: Plan, *, run_seq) -> DriverMessage:
         return DriverMessage(
             "review",
-            "计划已执行完,但结果需要你复核一下再定论。",
+            "计划已执行完，但结果需要你复核一下再定论。",
             {"plan_id": plan.id, "run_seq": run_seq},
         )
 

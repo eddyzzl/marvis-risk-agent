@@ -5233,7 +5233,7 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
     const label = String(raw).replace(/\s★$/, "");
     return {
       cls: "cell-text cell-champion",
-      html: `<span class="champion-badge" data-tip="表现最优,当前推荐候选">${escapeHtml(label)}</span>`,
+      html: `<span class="champion-badge" data-tip="表现最优，当前推荐候选">${escapeHtml(label)}</span>`,
     };
   }
   if (kind === "psi") {

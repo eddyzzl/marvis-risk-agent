@@ -305,9 +305,9 @@ def _split_summary(output: dict | None) -> dict | None:
     if lowered.get("test", 0) <= 0:
         warnings.append("缺少 test 样本。")
     if lowered.get("oot", 0) <= 0:
-        warnings.append("缺少 OOT 样本,上线前建议补充时间外验证。")
+        warnings.append("缺少 OOT 样本，上线前建议补充时间外验证。")
     if total_rows and lowered.get("oot", 0) / total_rows < 0.05:
-        warnings.append("OOT 占比低于 5%,稳定性结论需谨慎。")
+        warnings.append("OOT 占比低于 5%，稳定性结论需谨慎。")
     return {
         "split_col": str(output.get("split_col") or ""),
         "split_counts": split_counts,
@@ -394,9 +394,9 @@ def _modeling_override_guidance(
                 "label": "调参预算",
                 "level": "info",
                 "message": (
-                    f"多算法对比:按算法预算 {budget_note};多算法总预算=Σ各配方预算={total_budget} 轮"
-                    "(树模型 lgb/xgb/catboost 默认各 40 轮两阶段搜索,lr/scorecard/mlp 默认各 12 轮;"
-                    "总预算越大,本步运行耗时越长,可按需在本门调整每个算法的预算)。"
+                    f"多算法对比:按算法预算 {budget_note}；多算法总预算=Σ各配方预算={total_budget} 轮"
+                    "（树模型 lgb/xgb/catboost 默认各 40 轮两阶段搜索，lr/scorecard/mlp 默认各 12 轮；"
+                    "总预算越大，本步运行耗时越长，可按需在本门调整每个算法的预算）。"
                 ),
             })
         else:
@@ -655,7 +655,7 @@ def _calibration_label(row: dict) -> str:
     calibration = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
     if calibration:
         includes_pmml = calibration.get("pmml_includes_calibration")
-        return "已校准(PMML不含)" if includes_pmml is False else "已校准"
+        return "已校准（PMML不含）" if includes_pmml is False else "已校准"
     caps = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
     reason = str(caps.get("reason") or "")
     if "calibration" in reason.lower() or "校准" in reason:

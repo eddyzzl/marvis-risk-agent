@@ -137,7 +137,7 @@ def parse_route(raw):
 def _parse_route(raw) -> tuple[dict, bool]:
     data, error = load_json_object(raw)
     if data is None:
-        return {"action": "clarify", "params": {}, "constraint": "", "reason": "无法解析指令,请换种说法。"}, False
+        return {"action": "clarify", "params": {}, "constraint": "", "reason": "无法解析指令，请换种说法。"}, False
     action = str(data.get("action") or "").strip().lower()
     if action not in _ACTIONS:
         action = "clarify"
@@ -147,7 +147,7 @@ def _parse_route(raw) -> tuple[dict, bool]:
     # An "adjust" with no extractable parameters is not actionable → clarify.
     if action == "adjust" and not params:
         action = "clarify"
-        reason = reason or "没识别到要调整的参数,请写明参数名和取值。"
+        reason = reason or "没识别到要调整的参数，请写明参数名和取值。"
     return {"action": action, "params": params, "constraint": constraint, "reason": reason}, error is None
 
 

@@ -686,7 +686,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           currentRecipes: "lgb",
           reason: "目标改为连续",
         }}) }}, context);
-        assert.deepEqual(statuses.at(-1), ["目标类型 continuous 与算法 lgb 不匹配,请选择同一目标类型的算法。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["目标类型 continuous 与算法 lgb 不匹配，请选择同一目标类型的算法。", "error"]);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           targetType: "continuous",
           selectedRecipes: ["lgb_regressor"],
@@ -1503,7 +1503,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         // screen/modeling-setup/dedup readonly-guard convention.
         const readonlyC1Form = {{ dataset: {{ c1Readonly: "true" }} }};
         await submitC1Assignment({{ disabled: false, closest: () => readonlyC1Form }}, context);
-        assert.deepEqual(statuses.at(-1), ["这是历史拼接角色结果,请使用最新待确认步骤确认。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["这是历史拼接角色结果，请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeDuplicateAttempt);
 
         const dedupHtml = renderDedupPicker({{
@@ -1562,7 +1562,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         const callsBeforeReadonlyDedup = calls.length;
         const readonlyDedupForm = {{ dataset: {{ dedupReadonly: "true" }} }};
         await submitDedupStrategies({{ disabled: false, closest: () => readonlyDedupForm }}, context);
-        assert.deepEqual(statuses.at(-1), ["这是历史去重结果,请使用最新待确认步骤确认。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["这是历史去重结果，请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeReadonlyDedup);
 
         // UX-6: "排除该特征表" posts the same free-text instruction channel a typed
@@ -1582,7 +1582,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         // UX-2: a read-only (stale) dedup picker must refuse the exclude submit too.
         const callsBeforeReadonlyExclude = calls.length;
         await submitDedupExclude({{ disabled: false, closest: () => readonlyDedupForm }}, context);
-        assert.deepEqual(statuses.at(-1), ["这是历史去重结果,请使用最新待确认步骤确认。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["这是历史去重结果，请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeReadonlyExclude);
         process.stdout.write("ok");
         """

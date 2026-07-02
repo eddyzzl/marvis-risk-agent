@@ -1,10 +1,10 @@
 import { escapeHtml } from "../ui-utils.js";
 
-const DEDUP_STRATEGY_LABELS = { first: "保留首条 (first)", last: "保留末条 (last)" };
+const DEDUP_STRATEGY_LABELS = { first: "保留首条（first）", last: "保留末条（last）" };
 // UX-6: first/last follows raw file row order (not a business timestamp), so the
 // picker states that plainly next to the strategy select instead of letting the user
 // assume it means something like "most recent".
-const DEDUP_STRATEGY_NOTE = "「首条/末条」按当前文件行序保留,行序无业务含义时建议改用聚合或先按时间列排序后再拼接。";
+const DEDUP_STRATEGY_NOTE = "「首条/末条」按当前文件行序保留，行序无业务含义时建议改用聚合或先按时间列排序后再拼接。";
 
 function joinGateContext(context = {}) {
   return {
@@ -112,7 +112,7 @@ export async function submitC1Assignment(button, rawContext = {}) {
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
   if (form.dataset.c1Readonly === "true") {
-    setActionStatus("这是历史拼接角色结果,请使用最新待确认步骤确认。", "error");
+    setActionStatus("这是历史拼接角色结果，请使用最新待确认步骤确认。", "error");
     return;
   }
   const anchorIds = [];
@@ -228,7 +228,7 @@ export function renderDedupPicker(message, options = {}) {
     })
     .join("");
   return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-dedup-readonly="true"'}>
-    <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
+    <p class="dedup-note">以下特征表的拼接键不唯一（同键多行），请选择去重策略后再拼接:</p>
     <p class="dedup-strategy-note">${escapeHtml(DEDUP_STRATEGY_NOTE)}</p>
     <table class="dedup-table">
       <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
@@ -245,7 +245,7 @@ export async function submitDedupStrategies(button, rawContext = {}) {
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
   if (form.dataset.dedupReadonly === "true") {
-    setActionStatus("这是历史去重结果,请使用最新待确认步骤确认。", "error");
+    setActionStatus("这是历史去重结果，请使用最新待确认步骤确认。", "error");
     return;
   }
   const dedupStrategies = {};
@@ -255,7 +255,7 @@ export async function submitDedupStrategies(button, rawContext = {}) {
   }
   const expectedStepId = form.dataset.dedupGateStepId || "";
   if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
   button.disabled = true;
@@ -301,7 +301,7 @@ export async function submitDedupExclude(button, rawContext = {}) {
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
   if (form.dataset.dedupReadonly === "true") {
-    setActionStatus("这是历史去重结果,请使用最新待确认步骤确认。", "error");
+    setActionStatus("这是历史去重结果，请使用最新待确认步骤确认。", "error");
     return;
   }
   const featureId = button.getAttribute("data-dedup-exclude") || "";

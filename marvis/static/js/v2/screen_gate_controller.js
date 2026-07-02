@@ -326,8 +326,8 @@ export function renderScreenGateTable(message, options = {}) {
   const leakageKs = thresholds.leakage_ks ?? 0.4;
   const maxMissingRate = thresholds.max_missing_rate ?? 0.95;
   const note = interactive
-    ? `共筛 ${screen.n_screened ?? built.allRows.length} 列;泄漏阈值 KS≥${leakageKs}。勾选=入选,可硬选泄漏/疑似列;确认后用所选特征训练。`
-    : `共筛 ${screen.n_screened ?? built.allRows.length} 列;泄漏阈值 KS≥${leakageKs}。这是历史筛选结果,如需调整请使用最新待确认步骤。`;
+    ? `共筛 ${screen.n_screened ?? built.allRows.length} 列；泄漏阈值 KS≥${leakageKs}。勾选=入选，可硬选泄漏/疑似列；确认后用所选特征训练。`
+    : `共筛 ${screen.n_screened ?? built.allRows.length} 列；泄漏阈值 KS≥${leakageKs}。这是历史筛选结果，如需调整请使用最新待确认步骤。`;
   const thresholdControls = `<div class="screen-threshold-controls">
     <label>泄漏KS <input type="number" class="screen-threshold-input" data-screen-threshold="leakage_ks" min="0" max="1" step="0.01" value="${escapeHtml(String(leakageKs))}"${disabledAttr} required /></label>
     <label>最大缺失率 <input type="number" class="screen-threshold-input" data-screen-threshold="max_missing_rate" min="0" max="1" step="0.01" value="${escapeHtml(String(maxMissingRate))}"${disabledAttr} required /></label>
@@ -595,7 +595,7 @@ export async function submitScreenThresholdAdjust(button, rawContext = {}) {
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(rawContext);
   if (!wrap || !taskId || typeof api !== "function") return;
   if (wrap.dataset.screenReadonly === "true") {
-    setActionStatus("这是历史筛选结果,请使用最新待确认步骤调整。", "error");
+    setActionStatus("这是历史筛选结果，请使用最新待确认步骤调整。", "error");
     return;
   }
   const adjustParams = {};
@@ -617,7 +617,7 @@ export async function submitScreenThresholdAdjust(button, rawContext = {}) {
   if (!Object.keys(adjustParams).length) return;
   const expectedStepId = wrap.dataset.screenStepId || "";
   if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
   button.disabled = true;
@@ -650,7 +650,7 @@ export async function submitScreenSelection(button, rawContext = {}) {
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(rawContext);
   if (!wrap || !taskId || typeof api !== "function") return;
   if (wrap.dataset.screenReadonly === "true") {
-    setActionStatus("这是历史筛选结果,请使用最新待确认步骤确认。", "error");
+    setActionStatus("这是历史筛选结果，请使用最新待确认步骤确认。", "error");
     return;
   }
   const selection = [];
@@ -683,7 +683,7 @@ export async function submitScreenSelection(button, rawContext = {}) {
   }
   const expectedStepId = wrap.dataset.screenStepId || "";
   if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
   button.disabled = true;

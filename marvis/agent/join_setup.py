@@ -125,7 +125,7 @@ def discover_join_inputs(registry, task_id: str, source_dir) -> tuple[str, list[
         datasets = _data_datasets(registry, task_id)
     if len(datasets) < 2:
         raise JoinSetupError(
-            "数据拼接至少需要 2 个数据文件(1 个锚样本 + ≥1 个特征表),"
+            "数据拼接至少需要 2 个数据文件（1 个锚样本 + ≥1 个特征表），"
             f"当前只发现 {len(datasets)} 个:{source_dir}"
         )
     anchor, *features = propose_roles(datasets)

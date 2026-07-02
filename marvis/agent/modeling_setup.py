@@ -152,7 +152,7 @@ def build_modeling_proposal(
     join_feature_ids = [str(item_id) for item_id in (join_feature_ids or []) if str(item_id)]
     if anchor_id:
         if anchor_id not in by_id:
-            raise ModelingSetupError("选择的样本主表不存在;请重新确认文件角色。")
+            raise ModelingSetupError("选择的样本主表不存在；请重新确认文件角色。")
         dataset = by_id[anchor_id]
         join_feature_ids = [
             item_id for item_id in join_feature_ids if item_id in by_id and item_id != anchor_id
@@ -180,12 +180,12 @@ def build_modeling_proposal(
     for item in recipe_list:
         if item not in _SUPPORTED_RECIPES:
             raise ModelingSetupError(
-                f"不支持的算法 `{item}`;可选:{', '.join(_SUPPORTED_RECIPES)}。"
+                f"不支持的算法 `{item}`；可选:{', '.join(_SUPPORTED_RECIPES)}。"
             )
     derived_target_type = _derive_target_type(recipe_list)
     if requested_target_type and requested_target_type != derived_target_type:
         raise ModelingSetupError(
-            f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配;请重新选择同一目标类型的算法。"
+            f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配；请重新选择同一目标类型的算法。"
         )
     target_type = requested_target_type or derived_target_type
     setup = detect_setup(
@@ -197,10 +197,10 @@ def build_modeling_proposal(
     )
     if not setup.target_col:
         if target_type == "continuous":
-            raise ModelingSetupError("未能识别连续型目标列;请确认数据含数值目标列(如 income/amount)后重试。")
+            raise ModelingSetupError("未能识别连续型目标列；请确认数据含数值目标列（如 income/amount）后重试。")
         if target_type == "multiclass":
-            raise ModelingSetupError("未能识别多分类目标列;请指定 3-20 类的目标列(如 风险等级/评级)后重试。")
-        raise ModelingSetupError("未能识别 0/1 目标列;请确认数据含标签列后重试。")
+            raise ModelingSetupError("未能识别多分类目标列；请指定 3-20 类的目标列（如 风险等级/评级）后重试。")
+        raise ModelingSetupError("未能识别 0/1 目标列；请确认数据含标签列后重试。")
     # The tuner is lgb-specific, so the "primary" recipe (the one tuned) is lgb when
     # it is among the chosen recipes, else the first one (tuning is skipped for it).
     primary_recipe = "lgb" if "lgb" in recipe_list else recipe_list[0]
@@ -231,15 +231,15 @@ def build_modeling_proposal(
             raise ModelingSetupError(f"样本权重列 `{selected_weight_col}` 不可用:{reason}。")
         weight_diagnostics = _merge_weight_diagnostics(selected_diag, weight_diagnostics)
     if selected_weight_col:
-        notes.append(f"样本权重列:`{selected_weight_col}`(仅作为 sample_weight,不作为入模特征)。")
+        notes.append(f"样本权重列:`{selected_weight_col}`（仅作为 sample_weight，不作为入模特征）。")
         weight_candidates = _unique([selected_weight_col, *weight_candidates])
     elif weight_candidates:
         display = "/".join(f"`{col}`" for col in weight_candidates[:3])
-        notes.append(f"检测到样本权重候选列:{display};如需启用,请确认 sample_weight_col。")
+        notes.append(f"检测到样本权重候选列:{display}；如需启用，请确认 sample_weight_col。")
     if target_type == "continuous":
-        notes.append("回归任务（连续型目标）：指标用 RMSE/MAE/R2,不计算坏率/KS/AUC。")
+        notes.append("回归任务（连续型目标）：指标用 RMSE/MAE/R2，不计算坏率/KS/AUC。")
     elif target_type == "multiclass":
-        notes.append("多分类任务：指标用 macro-AUC/logloss/准确率,不计算坏率/KS。")
+        notes.append("多分类任务：指标用 macro-AUC/logloss/准确率，不计算坏率/KS。")
     auto_split_config: dict[str, object] = {}
     if setup.split_col:
         dataset_id = dataset.id
@@ -258,19 +258,19 @@ def build_modeling_proposal(
         # the same time-extrapolated-OOT default (SEL-1) applies here too, keeping the
         # single-file and joined paths consistent.
         auto_split_config = {"test_size": 0.25, "group_cols": group_cols}
-        grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
+        grouping = f"（按 `{group_cols[0]}` 分组防泄漏）" if group_cols else "（逐行随机）"
         time_col = business_columns.get("loan_month_col")
         if isinstance(time_col, str) and time_col:
             auto_split_config["oot_by_time"] = time_col
             auto_split_config["oot_size"] = DEFAULT_OOT_SIZE
             notes.append(
-                f"多文件建模将在拼接后按 `{time_col}` 时间外推 OOT(最近约 {int(DEFAULT_OOT_SIZE * 100)}% 时间跨度);"
+                f"多文件建模将在拼接后按 `{time_col}` 时间外推 OOT（最近约 {int(DEFAULT_OOT_SIZE * 100)}% 时间跨度）；"
                 f"其余按 75/25 分组随机切 train/test{grouping}。"
             )
         else:
             notes.append(
-                f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping};"
-                "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
+                f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping}；"
+                "未设 OOT（时间外推 OOT 需切分列或日期列），OOT 相关指标将显示 n/a。"
             )
     else:
         dataset_id, split_col, split_values, counts, note = _generate_split(
@@ -288,14 +288,14 @@ def build_modeling_proposal(
         )
         notes.append(note)
     if len(recipe_list) > 1:
-        notes.append(f"算法:{'/'.join(recipe_list)}(多算法训练后按 {_selection_metric_label(target_type)} 取最优)。")
+        notes.append(f"算法:{'/'.join(recipe_list)}（多算法训练后按 {_selection_metric_label(target_type)} 取最优）。")
     else:
-        notes.append(f"算法:`{recipe_list[0]}`(可选 {'/'.join(_SUPPORTED_RECIPES)})。")
+        notes.append(f"算法:`{recipe_list[0]}`（可选 {'/'.join(_SUPPORTED_RECIPES)}）。")
     feature_dictionary_id = _resolve_feature_dictionary_id(registry, task_id, source_dir)
     if business_columns:
-        notes.append("已识别建模报告业务列,将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
+        notes.append("已识别建模报告业务列，将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
     if feature_dictionary_id:
-        notes.append("已识别特征字典,将用于报告产品/厂商/类别解释。")
+        notes.append("已识别特征字典，将用于报告产品/厂商/类别解释。")
     oot = split_values.get("oot")
     return ModelingProposal(
         dataset_id=dataset_id,
@@ -410,7 +410,7 @@ def _derive_target_type(recipe_list: list[str]) -> str:
     family_count = sum(1 for flag in (has_binary, has_regression, has_multiclass) if flag)
     if family_count > 1:
         raise ModelingSetupError(
-            "二分类、回归与多分类算法不能在同一次训练混用(目标列形态不同);请分别建模。"
+            "二分类、回归与多分类算法不能在同一次训练混用（目标列形态不同）；请分别建模。"
         )
     if has_regression:
         return "continuous"
@@ -426,7 +426,7 @@ def _normalize_target_type(value: str | None) -> str | None:
     if not target_type:
         return None
     if target_type not in {"binary", "continuous", "multiclass"}:
-        raise ModelingSetupError(f"不支持的目标类型 `{target_type}`;可选:binary/continuous/multiclass。")
+        raise ModelingSetupError(f"不支持的目标类型 `{target_type}`；可选:binary/continuous/multiclass。")
     return target_type
 
 
@@ -521,7 +521,7 @@ def _normalize_sample_weight_col(value: str | None, *, available_columns: list[s
     if not column:
         return ""
     if column not in set(available_columns):
-        raise ModelingSetupError(f"样本权重列 `{column}` 不存在;请检查列名。")
+        raise ModelingSetupError(f"样本权重列 `{column}` 不存在；请检查列名。")
     return column
 
 
@@ -593,18 +593,18 @@ def _generate_split(
     split_series = frame["split"]
     counts = {str(key): int(value) for key, value in split_series.value_counts().items()}
     split_values = {role: role for role in counts}
-    grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
+    grouping = f"（按 `{group_cols[0]}` 分组防泄漏）" if group_cols else "（逐行随机）"
     if time_col and counts.get("oot"):
         oot_time = frame.loc[frame["split"] == "oot", time_col]
         window = f"{oot_time.min()}~{oot_time.max()}"
         note = (
-            f"未提供切分列,已按 `{time_col}` 时间外推 OOT(区间 {window},{counts['oot']} 行);"
+            f"未提供切分列，已按 `{time_col}` 时间外推 OOT（区间 {window}，{counts['oot']} 行）；"
             f"其余按 75/25 分组随机切 train/test{grouping}。"
         )
     else:
         note = (
-            f"未提供切分列,已自动 75/25 分组随机切 train/test{grouping};"
-            "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
+            f"未提供切分列，已自动 75/25 分组随机切 train/test{grouping}；"
+            "未设 OOT（时间外推 OOT 需切分列或日期列），OOT 相关指标将显示 n/a。"
         )
     return derived.id, "split", split_values, counts, note
 

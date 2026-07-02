@@ -166,7 +166,7 @@ export function renderModelingSetupPanel(message, options = {}) {
     <div class="modeling-weight-options" role="radiogroup" aria-label="样本权重列">${optionRows}</div>
     ${diagnosticsHtml ? `<div class="modeling-weight-diagnostics">${diagnosticsHtml}</div>` : ""}
     <div class="modeling-setup-foot">
-      <span>权重列不进入特征;目标/算法/调参调整会重算后续步骤。</span>
+      <span>权重列不进入特征；目标/算法/调参调整会重算后续步骤。</span>
       <button type="button" class="button compact secondary modeling-weight-adjust"${interactive ? ` data-modeling-weight-adjust="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用建模设置" : "历史规格"}</button>
     </div>
   </div>`;
@@ -181,7 +181,7 @@ export async function submitModelingWeightAdjust(button, context = {}) {
   const setActionStatus = context.setActionStatus || (() => {});
   if (!form || !taskId || typeof api !== "function") return;
   if (form.dataset.modelingReadonly === "true") {
-    setActionStatus("这是历史建模规格,请使用最新待确认步骤调整。", "error");
+    setActionStatus("这是历史建模规格，请使用最新待确认步骤调整。", "error");
     return;
   }
   const adjustParams = collectModelingSetupAdjustParams(form);
@@ -199,7 +199,7 @@ export async function submitModelingWeightAdjust(button, context = {}) {
   const selectedRecipes = selectedModelingRecipes(form);
   const mismatchedRecipe = selectedRecipes.find((recipe) => recipeFamily(recipe) !== targetType);
   if (mismatchedRecipe) {
-    setActionStatus(`目标类型 ${targetType} 与算法 ${mismatchedRecipe} 不匹配,请选择同一目标类型的算法。`, "error");
+    setActionStatus(`目标类型 ${targetType} 与算法 ${mismatchedRecipe} 不匹配，请选择同一目标类型的算法。`, "error");
     return;
   }
   if (structuralKeys.some((key) => Object.prototype.hasOwnProperty.call(adjustParams, key)) && reason.length < 4) {
@@ -208,7 +208,7 @@ export async function submitModelingWeightAdjust(button, context = {}) {
   }
   const expectedStepId = form.dataset.modelingGateStepId || "";
   if (!expectedStepId) {
-    setActionStatus("缺少待确认步骤校验信息,请刷新后重试。", "error");
+    setActionStatus("缺少待确认步骤校验信息，请刷新后重试。", "error");
     return;
   }
   button.disabled = true;
