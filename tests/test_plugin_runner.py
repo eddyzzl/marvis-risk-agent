@@ -5,8 +5,10 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from marvis.db import PluginRepository, init_db
@@ -14,7 +16,7 @@ from marvis.plugins.contracts import PROTOCOL_VERSION
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
-from marvis.plugins.runner import ToolContext, ToolRunner
+from marvis.plugins.runner import _WORKER_ENV_ALLOWLIST, ToolContext, ToolRunner
 
 
 def _runner(tmp_path):
@@ -1385,3 +1387,242 @@ def test_tool_runner_records_resource_usage_when_under_rss_limit(tmp_path):
     assert audits[-1]["outcome"] == "succeeded"
     assert audits[-1]["detail"]["resource_limits"]["memory_limit_applied"] in (True, False)
 
+
+@pytest.mark.slow
+def test_tool_runner_kills_process_tree_with_no_surviving_pids_on_rss_limit(tmp_path):
+    """TST-4a: real OOM. The worker allocates real memory past a lowered soft
+    RSS ceiling; assert the worker PID itself is gone from the OS process
+    table (via psutil), not just that ToolResult reports failure. Complements
+    the existing REL-3 test_tool_runner_kills_worker_when_rss_exceeds_soft_limit,
+    which checks the ToolResult/audit fields but never confirms the OS-level
+    process actually disappeared."""
+    runner, repo = _runtime(tmp_path)
+    runner._rss_memory_limit_mb = 200
+
+    audits_before = len(repo.list_audit(kind="tool.invoke"))
+
+    result = runner.invoke(
+        ToolRef("_sample", "memory_hog"),
+        {"megabytes": 600, "hold_seconds": 10},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "resource_limit"
+    assert result.resource_limits["memory_limit_mb"] == 200
+    assert result.resource_limits["peak_rss_mb"] > 200
+    assert result.resource_limits["memory_limit_exceeded"] is True
+    worker_pid = result.resource_limits["pid"]
+    assert worker_pid is not None
+
+    audits = repo.list_audit(kind="tool.invoke")
+    assert len(audits) == audits_before + 1
+    assert audits[-1]["detail"]["resource_limits"]["peak_rss_mb"] > 200
+
+    # INV-6: the worker PID does not survive the kill. Poll briefly -- SIGKILL
+    # delivery and psutil's view of the process table are not perfectly
+    # synchronous.
+    deadline = time.monotonic() + 5.0
+    alive = True
+    while time.monotonic() < deadline:
+        alive = psutil.pid_exists(worker_pid)
+        if not alive:
+            break
+        time.sleep(0.1)
+    assert not alive, f"worker pid {worker_pid} survived RSS kill"
+
+
+@pytest.mark.slow
+def test_tool_runner_kills_grandchild_process_on_timeout(tmp_path):
+    """TST-4b: real kill, process-tree semantics. The worker tool itself
+    spawns a grandchild subprocess (without start_new_session, so it stays in
+    the worker's process group) and sleeps past the tool timeout. The parent
+    ToolRunner kill path (_kill_worker_tree -> os.killpg) must reap the whole
+    group, not just the direct child -- assert the grandchild PID is also
+    gone, proving this isn't a single-process kill."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    plugin_root = tmp_path / "plugins"
+    package = plugin_root / "grandchildpack"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "import time\n"
+        "def run(inputs, ctx):\n"
+        "    grandchild_script = (\n"
+        "        'import os, time, pathlib; '\n"
+        "        'pathlib.Path(' + repr(inputs['pid_file']) + ').write_text(str(os.getpid())); '\n"
+        "        'time.sleep(60)'\n"
+        "    )\n"
+        "    grandchild_out = open(inputs['grandchild_log'], 'wb')\n"
+        "    subprocess.Popen(\n"
+        "        [sys.executable, '-c', grandchild_script],\n"
+        "        stdout=grandchild_out,\n"
+        "        stderr=grandchild_out,\n"
+        "    )\n"
+        "    time.sleep(60)\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    manifest = PluginManifest(
+        name="grandchildpack",
+        version="0.1.0",
+        display_name="Grandchild Pack",
+        description="Spawns a grandchild process and hangs past timeout",
+        module="grandchildpack.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="spawn_and_hang",
+                summary="Spawn a grandchild then hang",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "pid_file": {"type": "string"},
+                        "grandchild_log": {"type": "string"},
+                    },
+                    "required": ["pid_file", "grandchild_log"],
+                    "additionalProperties": False,
+                },
+                output_schema={
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=1,
+                failure_policy="fail",
+                side_effects=("process:spawn", "write:workspace"),
+                entrypoint="run",
+            ),
+        ),
+        permissions=("process:spawn", "write:workspace"),
+        builtin=False,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("grandchildpack", "spawn_and_hang")
+            return manifest, manifest.tools[0]
+
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        plugin_paths=[plugin_root],
+    )
+    pid_file = tmp_path / "workspace" / "tasks" / "task-1" / "grandchild.pid"
+    grandchild_log = tmp_path / "workspace" / "tasks" / "task-1" / "grandchild.log"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+
+    result = runner.invoke(
+        ToolRef("grandchildpack", "spawn_and_hang"),
+        {"pid_file": str(pid_file), "grandchild_log": str(grandchild_log)},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "timeout"
+
+    # Wait for the grandchild to have written its PID (it does so before
+    # sleeping); if it never got a chance to run at all there is nothing to
+    # verify, which would defeat the purpose of the test.
+    deadline = time.monotonic() + 5.0
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert pid_file.exists(), "grandchild never started; test setup is broken"
+    grandchild_pid = int(pid_file.read_text().strip())
+
+    # INV-6: process-tree kill semantics -- the grandchild must also be dead,
+    # not just the immediate worker child. Poll briefly for SIGKILL delivery.
+    deadline = time.monotonic() + 5.0
+    alive = True
+    while time.monotonic() < deadline:
+        alive = psutil.pid_exists(grandchild_pid)
+        if not alive:
+            break
+        time.sleep(0.1)
+    assert not alive, f"grandchild pid {grandchild_pid} survived process-tree kill"
+
+
+def test_tool_runner_worker_subprocess_only_sees_allowlisted_env_vars(tmp_path, monkeypatch):
+    """TST-4c: real isolation. Round-trip through a real worker subprocess
+    (no Popen mocking) that echoes back its own os.environ key set, proving
+    _WORKER_ENV_ALLOWLIST filtering actually takes effect inside the child --
+    not just that the parent's Popen call was passed a filtered dict."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PluginRepository(db_path)
+    plugin_root = tmp_path / "plugins"
+    package = plugin_root / "envpack"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "tools.py").write_text(
+        "import os\n"
+        "def run(inputs, ctx):\n"
+        "    return {'env_keys': sorted(os.environ.keys())}\n",
+        encoding="utf-8",
+    )
+    manifest = PluginManifest(
+        name="envpack",
+        version="0.1.0",
+        display_name="Env Pack",
+        description="Echoes visible environment variable keys",
+        module="envpack.tools",
+        python_requires="",
+        tools=(
+            ToolSpec(
+                name="echo_env",
+                summary="Echo visible env var keys",
+                input_schema={"type": "object", "additionalProperties": False},
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "env_keys": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["env_keys"],
+                    "additionalProperties": False,
+                },
+                determinism="deterministic",
+                timeout_seconds=10,
+                failure_policy="fail",
+                side_effects=(),
+                entrypoint="run",
+            ),
+        ),
+        permissions=(),
+        builtin=False,
+    )
+
+    class FakeTools:
+        def resolve_with_manifest(self, ref):
+            assert ref == ToolRef("envpack", "echo_env")
+            return manifest, manifest.tools[0]
+
+    monkeypatch.setenv("MARVIS_TEST_SECRET", "should-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", "/usr/bin"))
+
+    runner = ToolRunner(
+        FakeTools(),
+        repo,
+        python_executable=sys.executable,
+        datasets_root=tmp_path / "datasets",
+        workspace=tmp_path / "workspace",
+        plugin_paths=[plugin_root],
+    )
+
+    result = runner.invoke(ToolRef("envpack", "echo_env"), {}, task_id="task-1")
+
+    assert result.ok is True, result.error
+    visible = set(result.output["env_keys"])
+    assert "MARVIS_TEST_SECRET" not in visible
+    assert "OPENAI_API_KEY" not in visible
+    assert "PATH" in visible
+    assert visible <= (_WORKER_ENV_ALLOWLIST | {"PYTHONUNBUFFERED"})

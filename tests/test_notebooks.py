@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 import subprocess
+import threading
 import time
 
 import nbformat
+import psutil
 import pytest
 
 from marvis.notebook_cancellation import NotebookCancellationToken
@@ -956,6 +958,92 @@ def test_run_notebook_stops_kernel_when_rss_exceeds_limit(
     assert "NotebookResourceLimitExceeded" in log_text
     assert "memory_limit_mb=1" in log_text
     assert executed_path.exists()
+
+
+@pytest.mark.slow
+def test_run_notebook_isolated_cancel_kills_real_kernel_process_tree(tmp_path: Path):
+    """TST-4d: real kill, notebook isolation path. marvis/notebooks.py's
+    isolated=True subprocess mechanism (_run_notebook_in_subprocess /
+    _kill_process_tree) is a distinct code path from ToolRunner's worker kill
+    (different PID source: a Jupyter kernel launched by nbclient inside the
+    notebook worker process, not a direct Popen child). The existing coverage
+    for this branch
+    (test_run_notebook_isolated_returns_cancelled_when_token_is_cancelled)
+    mocks subprocess.Popen and _kill_process_tree entirely, so it never
+    proves an actual kernel process goes away.
+
+    The notebook cell busy-loops forever with a long nbclient timeout (so
+    nbclient's own cell-timeout never fires); a background thread cancels the
+    NotebookCancellationToken shortly after the kernel starts, which drives
+    _run_notebook_in_subprocess's NotebookCancelled branch and its real
+    os.killpg-based _kill_process_tree call. Assert both the isolated worker
+    process and the real Jupyter kernel process (the process tree's
+    grandchild from this test's point of view) are gone afterwards -- proving
+    the kill reaps the whole group, not just the immediate worker.
+    """
+    notebook_dir = tmp_path / "notebooks"
+    notebook_dir.mkdir()
+    notebook_path = notebook_dir / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    pid_file = notebook_dir / "kernel.pid"
+    notebook = nbformat.v4.new_notebook(
+        cells=[
+            nbformat.v4.new_code_cell(
+                "import os, pathlib\n"
+                f"pathlib.Path({pid_file.name!r}).write_text(str(os.getpid()))\n"
+                "while True:\n"
+                "    pass\n"
+            )
+        ],
+        metadata={"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+    )
+    nbformat.write(notebook, notebook_path)
+
+    cancellation_token = NotebookCancellationToken(task_id="task-1")
+
+    def _cancel_once_kernel_started() -> None:
+        deadline = time.monotonic() + 20.0
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        cancellation_token.cancel()
+
+    canceller = threading.Thread(target=_cancel_once_kernel_started, daemon=True)
+    canceller.start()
+
+    result = run_notebook(
+        notebook_path,
+        executed_path,
+        log_path,
+        timeout=60,
+        cancellation_token=cancellation_token,
+        isolated=True,
+    )
+    canceller.join(timeout=5.0)
+
+    assert result.succeeded is False
+    assert result.cancelled is True
+    assert result.error_name == "NotebookCancelled"
+    assert result.resource_usage is not None
+    worker_pid = result.resource_usage["worker_pid"]
+    assert worker_pid is not None
+    assert pid_file.exists(), "kernel never started; test setup is broken"
+    kernel_pid = int(pid_file.read_text().strip())
+
+    # INV-6: poll briefly for SIGKILL delivery, then require both the worker
+    # and the real kernel grandchild to be gone -- a process-tree-wide kill,
+    # not a single-process kill.
+    deadline = time.monotonic() + 5.0
+    worker_alive = True
+    kernel_alive = True
+    while time.monotonic() < deadline:
+        worker_alive = psutil.pid_exists(worker_pid)
+        kernel_alive = psutil.pid_exists(kernel_pid)
+        if not worker_alive and not kernel_alive:
+            break
+        time.sleep(0.1)
+    assert not worker_alive, f"isolated notebook worker pid {worker_pid} survived cancel kill"
+    assert not kernel_alive, f"kernel pid {kernel_pid} survived process-tree kill"
 
 
 def test_live_notebook_session_reuses_kernel_for_appended_cells(tmp_path: Path):
