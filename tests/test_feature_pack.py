@@ -1039,6 +1039,33 @@ def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_pat
     assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
 
 
+def test_screen_features_reports_suspected_categorical_numeric_codes(tmp_path):
+    """PREP-5: a numeric column that looks like a nominal code (low cardinality,
+    all-integer, code-like name) must be surfaced as suspected_categorical without
+    changing the selected/candidate set."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "region_code": [1, 2, 3, 1, 2, 3, 1, 2] * 4,
+        "amount": np.linspace(10.0, 100.0, 32),
+        "y": [0, 1] * 16,
+    })
+    path = tmp_path / "suspected_categorical.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": [], "target_col": "y"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    suspected = {item["column"]: item["cardinality"] for item in result.output["suspected_categorical"]}
+    assert suspected == {"region_code": 3}
+    # Informational only: region_code is still modeled as numeric (not dropped/changed).
+    assert "region_code" in result.output["selected"]
+
+
 def test_screen_features_reports_sentinel_columns_notice(tmp_path):
     """PREP-4: screen_features must surface a suspected sentinel/special-value column
     (isolated extreme peak, e.g. -999 "no hit") so the user can pass sentinel_values to
