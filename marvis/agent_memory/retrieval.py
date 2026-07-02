@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import re
 from typing import Any, Iterable
 
@@ -27,6 +28,10 @@ GENERAL_PAYLOAD_FIELDS = (
     "failure_kind",
 )
 LOW_CONFIDENCE_VALUES = {"low", "very_low", "rejected"}
+RECENCY_HALF_LIFE_DAYS = 90
+RECENCY_STALE_DAYS = 365
+RECENCY_RECENT_BONUS = 10
+RECENCY_STALE_PENALTY = -10
 MODEL_FAMILY_PATTERNS = (
     ("a_card", (r"\ba\s*card\b", r"a卡")),
     ("b_card", (r"\bb\s*card\b", r"b卡")),
@@ -218,6 +223,15 @@ class _MemoryRecord:
     def status(self) -> str:
         return str(self._get("status") or "active").strip().lower()
 
+    @property
+    def created_at(self) -> str | None:
+        value = self._get("created_at")
+        return str(value) if value not in (None, "") else None
+
+    @property
+    def age_days(self) -> int | None:
+        return _age_in_days(self.created_at)
+
     def _get(self, field_name: str) -> Any:
         if isinstance(self.entry, dict):
             return self.entry.get(field_name)
@@ -274,6 +288,11 @@ def _score_record(record: _MemoryRecord, query: MemoryQuery) -> tuple[int, list[
             score += 5
             reasons.append(f"keyword:{keyword}")
 
+    recency_delta, recency_reason = _recency_bonus(record.age_days)
+    score += recency_delta
+    if recency_reason:
+        reasons.append(recency_reason)
+
     return score, reasons
 
 
@@ -297,7 +316,39 @@ def _score_general_record(
     if query.channel and _text_contains(searchable, query.channel):
         score += 10
         reasons.append("channel keyword")
+
+    recency_delta, recency_reason = _recency_bonus(record.age_days)
+    score += recency_delta
+    if recency_reason:
+        reasons.append(recency_reason)
+
     return score, reasons
+
+
+def _age_in_days(created_at: str | None) -> int | None:
+    if not created_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - parsed
+    return max(0, delta.days)
+
+
+def _recency_bonus(age_days: int | None) -> tuple[int, str | None]:
+    # Deterministic recency term: entries observed within the half-life window
+    # get a small boost, entries older than the stale threshold get a small
+    # penalty, everything in between (and entries with unknown age) is neutral.
+    if age_days is None:
+        return 0, None
+    if age_days <= RECENCY_HALF_LIFE_DAYS:
+        return RECENCY_RECENT_BONUS, "recent"
+    if age_days > RECENCY_STALE_DAYS:
+        return RECENCY_STALE_PENALTY, "stale"
+    return 0, None
 
 
 def _score_confidence(score: int) -> str:
@@ -329,10 +380,13 @@ def _context_packet(
         "source_task_id": record.source_task_id,
         "confidence": confidence,
         "match_reason": match_reason,
+        "observed_at": record.created_at,
+        "age_days": record.age_days,
     }
 
 
 def _distillation_packet(distillation) -> dict[str, Any]:
+    observed_at = str(getattr(distillation, "updated_at", "") or "") or None
     return {
         "kind": "distillation",
         "id": distillation.id,
@@ -345,6 +399,8 @@ def _distillation_packet(distillation) -> dict[str, Any]:
         "source_memory_ids": list(distillation.source_memory_ids),
         "source_task_id": None,
         "match_reason": "distilled memory",
+        "observed_at": observed_at,
+        "age_days": _age_in_days(observed_at),
     }
 
 

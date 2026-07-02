@@ -145,6 +145,39 @@ def test_distillation_support_counts_distinct_tasks_not_entries(tmp_path):
     assert distilled.confidence == "low"
 
 
+def test_distillation_model_experience_carries_months_covered_range(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    for task_id, month in [("task-1", "202503"), ("task-2", "202601")]:
+        store.create(
+            MemoryCandidate(
+                memory_type="model_experience",
+                summary=f"模型经验 {task_id}",
+                payload={
+                    "model_name": "A卡",
+                    "model_version": "V1",
+                    "scope": "train",
+                    "channel": "app",
+                    "month": month,
+                    "ks": 0.31,
+                    "auc": 0.72,
+                    "psi": 0.08,
+                    "source_task_id": task_id,
+                    "important_feature_sources": ["征信"],
+                },
+                source_task_id=task_id,
+            )
+        )
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "model_experience"
+    )
+
+    assert len(distillations) == 1
+    assert distillations[0].structured["months_covered"] == {"min": "202503", "max": "202601"}
+
+
 class _BrokenLLM:
     def complete(self, **_kwargs):
         raise RuntimeError("unavailable")

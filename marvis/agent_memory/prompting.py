@@ -90,15 +90,23 @@ def add_memory_to_prompt_payload(
 
 
 def _memory_packet(memory: dict[str, Any]) -> dict[str, Any]:
+    summary_text = _truncate_text(memory.get("summary"), MEMORY_PROMPT_SUMMARY_MAX_CHARS)
+    age_days = memory.get("age_days")
+    if isinstance(age_days, int) and age_days >= 0:
+        summary_text = f"{summary_text}（{age_days} 天前）"
     packet = {
         "kind": memory.get("kind") or "raw",
         "id": str(memory.get("id")),
         "memory_type": memory.get("memory_type"),
-        "summary": _truncate_text(memory.get("summary"), MEMORY_PROMPT_SUMMARY_MAX_CHARS),
+        "summary": summary_text,
         "source_task_id": memory.get("source_task_id"),
         "confidence": memory.get("confidence") or "medium",
         "match_reason": memory.get("match_reason") or "",
     }
+    if age_days is not None:
+        packet["age_days"] = age_days
+    if memory.get("observed_at"):
+        packet["observed_at"] = memory["observed_at"]
     if memory.get("support_count") is not None:
         packet["support_count"] = int(memory.get("support_count") or 0)
     if isinstance(memory.get("source_memory_ids"), list):

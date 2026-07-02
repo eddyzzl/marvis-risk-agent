@@ -251,7 +251,8 @@ def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dic
         values = _numeric_metric_values(payloads, metric)
         if values:
             metrics[metric] = {"min": min(values), "max": max(values)}
-    return {
+    months = sorted({str(payload.get("month")) for payload in payloads if payload.get("month")})
+    result = {
         "model_name": _first_present(payloads, "model_name"),
         "scopes": sorted({str(payload.get("scope")) for payload in payloads if payload.get("scope")}),
         "channels": sorted({str(payload.get("channel")) for payload in payloads if payload.get("channel")}),
@@ -259,6 +260,9 @@ def _merge_model_experience(payloads: list[dict[str, Any]], support: int) -> dic
         "source_task_ids": sorted({str(payload.get("source_task_id")) for payload in payloads if payload.get("source_task_id")}),
         "support": support,
     }
+    if months:
+        result["months_covered"] = {"min": months[0], "max": months[-1]}
+    return result
 
 
 def _numeric_metric_values(payloads: list[dict[str, Any]], metric: str) -> list[float]:
