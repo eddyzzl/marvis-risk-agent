@@ -1781,6 +1781,104 @@
       "memory_limit_mb": 4096
     },
     {
+      "name": "segment_value_evaluation",
+      "summary": "Diagnose whether a candidate segment column looks worth building per-segment models for, by reporting an already-trained model's pooled vs per-segment KS/AUC breakdown (no new model is trained).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "artifact_id",
+          "dataset_id",
+          "segment_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "segment_col": {
+            "type": "string"
+          },
+          "split": {
+            "type": "string"
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer"
+          },
+          "pooled": {
+            "type": "object"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "segment_ks_spread": {
+            "type": "number"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "segment_col",
+          "split",
+          "split_value",
+          "min_group_rows",
+          "pooled",
+          "segments",
+          "segment_ks_spread",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_segment_value_evaluation",
+      "side_effects": [
+        "read:model",
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
       "name": "export_pmml",
       "summary": "Export an lr/lgb/xgb/scorecard modeling artifact to PMML for V1 validation handoff.",
       "input_schema": {

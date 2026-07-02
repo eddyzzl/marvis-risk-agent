@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import nbformat
+import numpy as np
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
@@ -110,6 +111,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "compare_experiments",
         "select_experiment",
         "calibrate_model",
+        "segment_value_evaluation",
         "export_pmml",
         "handoff_to_validation",
         "post_training_action",
@@ -696,6 +698,195 @@ def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
     artifact = ModelingRepository(settings.db_path).get_model_artifact(artifact_id)
     assert artifact.params == original_params
     assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.calibrate") == []
+
+
+def _register_segment_sample(registry, tmp_path, task_id: str):
+    """SEL-8 fixture: a channel column where channel B carries a much weaker
+    signal than channel A -- large per-segment KS/AUC spread is the expected,
+    checkable signal for segment_value_evaluation."""
+    rows = 1500
+    rng = np.random.RandomState(7)
+    channel = np.where(rng.rand(rows) < 0.7, "A", "B")
+    x1 = rng.rand(rows)
+    x2 = rng.rand(rows)
+    signal = np.where(channel == "A", x1, 0.05 * x1)
+    y = (rng.rand(rows) < (0.1 + 0.6 * signal)).astype(int)
+    split = np.array((["train"] * 900) + (["test"] * 400) + (["oot"] * 200))
+    frame = pd.DataFrame({"x1": x1, "x2": x2, "y": y, "split": split, "channel": channel})
+    path = tmp_path / "segment_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return registry.register_existing(path, task_id=task_id, role="modeling_sample")
+
+
+def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_path):
+    """SEL-8 (scoped-down diagnostic): segment_value_evaluation scores ONE
+    already-trained model (no new training) and reports pooled KS/AUC plus a
+    per-segment breakdown -- channel B's much weaker signal must show up as a
+    materially lower per-segment AUC than channel A, with a nonzero KS spread."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 20, "learning_rate": 0.1, "num_leaves": 8},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    evaluated = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+            "min_group_rows": 50,
+        },
+        task_id=task.id,
+    )
+
+    assert evaluated.ok is True, evaluated.error
+    out = evaluated.output
+    assert out["segment_col"] == "channel"
+    assert out["min_group_rows"] == 50
+    segments = {row["segment"]: row for row in out["segments"]}
+    assert set(segments) == {"A", "B"}
+    assert segments["A"]["sample_count"] + segments["B"]["sample_count"] == out["pooled"]["sample_count"]
+    # channel A carries the real signal -> its AUC should clearly beat channel B's.
+    assert segments["A"]["auc"] > segments["B"]["auc"] + 0.1
+    assert out["segment_ks_spread"] > 0.0
+    assert "不训练分群模型" in out["note"]
+
+    # deterministic: same inputs -> byte-identical numbers (no randomness in
+    # scoring/grouping/KS-AUC computation).
+    evaluated_again = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+            "min_group_rows": 50,
+        },
+        task_id=task.id,
+    )
+    assert evaluated_again.output["segments"] == out["segments"]
+    assert evaluated_again.output["pooled"] == out["pooled"]
+
+
+def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_path):
+    """SEL-8: any segment below min_group_rows is folded into __default__
+    rather than getting an unreliable few-row KS/AUC row of its own -- with the
+    tool's own default floor (500), channel B (a few hundred rows) merges away
+    and only __default__ remains."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 20, "learning_rate": 0.1, "num_leaves": 8},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+
+    evaluated = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+        },
+        task_id=task.id,
+    )
+
+    assert evaluated.ok is True, evaluated.error
+    segments = {row["segment"] for row in evaluated.output["segments"]}
+    assert segments == {"__default__"}
+    assert evaluated.output["segment_ks_spread"] == 0.0
+
+
+def test_segment_value_evaluation_requires_binary_target_and_known_segment_column(tmp_path):
+    """SEL-8: clear config errors instead of silent misbehaviour -- an unknown
+    segment_col and (separately) a non-binary target both raise."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+
+    missing_col = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "does_not_exist",
+        },
+        task_id=task.id,
+    )
+    assert missing_col.ok is False
+    assert "segment_col not found" in missing_col.error
 
 
 def test_select_features_supports_woe_space_on_train_split(tmp_path):

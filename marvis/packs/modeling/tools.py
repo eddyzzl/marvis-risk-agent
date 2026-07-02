@@ -23,7 +23,7 @@ from marvis.feature.candidates import (
     excluded_categorical_columns,
     suspected_categorical_columns,
 )
-from marvis.feature.metrics import feature_metrics
+from marvis.feature.metrics import feature_auc, feature_ks, feature_metrics
 from marvis.feature.encode import woe_encode
 from marvis.feature.screen import sentinel_screen_notice
 from marvis.feature.preprocessing import (
@@ -2040,6 +2040,144 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
     }
+
+
+#: SEL-8: a segment (after merging groups below the floor) must retain at
+#: least this many rows to get its own KS/AUC row -- otherwise the statistic is
+#: too noisy to act on and the group is folded into __default__.
+SEGMENT_MIN_GROUP_ROWS = 500
+
+#: SEL-8: label used for every row whose original segment fell below
+#: SEGMENT_MIN_GROUP_ROWS and was merged together.
+SEGMENT_DEFAULT_GROUP_LABEL = "__default__"
+
+
+def tool_segment_value_evaluation(inputs: dict, ctx) -> dict:
+    """SEL-8 (scoped-down): diagnose whether a candidate segment column looks
+    worth building separate per-segment models for, WITHOUT training any new
+    model. Scores an already-trained artifact once (its normal single champion
+    scorer) against the dataset, then reports the pooled KS/AUC alongside a
+    per-segment breakdown of the SAME model's KS/AUC -- large spread between
+    segments (a segment where the shared model performs far better/worse than
+    pooled) is the signal that a dedicated per-segment model could plausibly
+    help; a flat spread means segmentation is unlikely to pay for the added
+    complexity of maintaining N models.
+
+    Full per-segment model training/routing (the un-scoped SEL-8 spec) was
+    judged to exceed the ~600-line budget once artifact routing, scoring
+    replay, and report/monitoring plumbing for a genuinely new multi-model
+    artifact shape were accounted for (see recipes/ensemble.py's SEL-6 blast
+    radius as a lower-complexity precedent that alone ran ~600 lines) --
+    this diagnostic-only tool is the explicitly-sanctioned degraded scope.
+    Segments below SEGMENT_MIN_GROUP_ROWS rows are merged into
+    SEGMENT_DEFAULT_GROUP_LABEL before scoring (mirrors the floor the full
+    spec's per-segment training would have needed for the same reason: a
+    KS/AUC computed on a handful of rows is not a usable statistic).
+    """
+    runtime = _runtime(ctx)
+    artifact = _artifact(runtime, str(inputs["artifact_id"]))
+    experiment = runtime.experiments.get(artifact.experiment_id)
+    config = experiment.config
+    if getattr(config, "target_type", "binary") != "binary":
+        raise ModelingError("segment value evaluation is only supported for binary models")
+
+    segment_col = str(inputs.get("segment_col") or "").strip()
+    if not segment_col:
+        raise ModelingError("segment_col is required")
+    dataset_id = str(inputs.get("dataset_id") or config.dataset_id)
+    dataset = runtime.registry.get(dataset_id)
+    target_col = str(inputs.get("target_col") or config.target_col)
+    split_col = str(inputs.get("split_col") or config.split_col)
+    split_name = str(inputs.get("split") or "test")
+    split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+    min_group_rows = int(inputs.get("min_group_rows") or SEGMENT_MIN_GROUP_ROWS)
+    if min_group_rows < 1:
+        raise ModelingError("min_group_rows must be at least 1")
+
+    dataset_path = runtime.registry.resolve_path(dataset.id)
+    columns = _unique_columns([*artifact.feature_list, target_col, split_col, segment_col])
+    if segment_col not in runtime.backend.column_names(dataset_path):
+        raise ModelingError(f"segment_col not found in dataset: {segment_col}")
+    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    sample = frame[frame[split_col] == split_value].copy()
+    if sample.empty:
+        raise ModelingError(f"segment evaluation split has no rows: {split_col}={split_value}")
+
+    scorer = _ModelArtifactScorer(
+        artifact,
+        base_dir=_artifact_model_base_dir(runtime, artifact),
+        load_calibration=False,
+    )
+    scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
+    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
+    segment_values = sample[segment_col].astype("object").where(sample[segment_col].notna(), None)
+    scores = scores[valid]
+    labels = labels[valid].astype(int)
+    segment_labels = [
+        "(missing)" if value is None else str(value)
+        for value in segment_values.to_numpy()[valid]
+    ]
+    if labels.size < 2 or len(set(labels.tolist())) < 2:
+        raise ModelingError("segment evaluation sample must contain both positive and negative labels")
+
+    grouped_labels = _merge_small_segments(segment_labels, min_group_rows=min_group_rows)
+    pooled = {
+        "sample_count": int(labels.size),
+        "bad_rate": float(np.mean(labels)),
+        "ks": feature_ks(scores, labels.astype(float)),
+        "auc": feature_auc(scores, labels.astype(float)),
+    }
+    segment_rows = _segment_breakdown_rows(scores, labels, grouped_labels)
+    segment_kss = [row["ks"] for row in segment_rows if row["segment"] != SEGMENT_DEFAULT_GROUP_LABEL]
+    ks_spread = (max(segment_kss) - min(segment_kss)) if len(segment_kss) >= 2 else 0.0
+    return {
+        "artifact_id": artifact.id,
+        "segment_col": segment_col,
+        "split": split_name,
+        "split_value": split_value,
+        "min_group_rows": min_group_rows,
+        "pooled": _jsonable(pooled),
+        "segments": _jsonable(segment_rows),
+        "segment_ks_spread": _jsonable(ks_spread),
+        "note": (
+            "诊断口径:同一模型在各分群上的 KS/AUC 分布,不训练分群模型;"
+            "spread 越大越可能通过分群建模获益,仅供投入前评估参考。"
+        ),
+    }
+
+
+def _merge_small_segments(segment_labels: list[str], *, min_group_rows: int) -> list[str]:
+    """SEL-8: any segment label with fewer than min_group_rows rows is folded
+    into SEGMENT_DEFAULT_GROUP_LABEL -- deterministic (pure function of the
+    input labels + threshold, no randomness)."""
+    counts: dict[str, int] = {}
+    for label in segment_labels:
+        counts[label] = counts.get(label, 0) + 1
+    return [
+        label if counts[label] >= min_group_rows else SEGMENT_DEFAULT_GROUP_LABEL
+        for label in segment_labels
+    ]
+
+
+def _segment_breakdown_rows(
+    scores: np.ndarray, labels: np.ndarray, grouped_labels: list[str],
+) -> list[dict]:
+    grouped = np.asarray(grouped_labels)
+    rows = []
+    for segment in sorted(set(grouped_labels)):
+        mask = grouped == segment
+        segment_scores = scores[mask]
+        segment_labels_arr = labels[mask].astype(float)
+        has_both_classes = len(set(labels[mask].tolist())) >= 2
+        rows.append({
+            "segment": segment,
+            "sample_count": int(mask.sum()),
+            "bad_rate": float(np.mean(labels[mask])) if mask.sum() else None,
+            "ks": feature_ks(segment_scores, segment_labels_arr) if has_both_classes else None,
+            "auc": feature_auc(segment_scores, segment_labels_arr) if has_both_classes else None,
+        })
+    return rows
 
 
 def tool_export_pmml(inputs: dict, ctx) -> dict:
@@ -5204,6 +5342,7 @@ __all__ = [
     "tool_modeling_readiness",
     "tool_prepare_modeling_frame",
     "tool_reject_inference",
+    "tool_segment_value_evaluation",
     "tool_select_features",
     "tool_train_model",
 ]
