@@ -112,6 +112,11 @@ def reclaim_stale_running_tasks(
             task_ids=sorted(set(reclaimed_task_ids) | set(agent_task_ids)),
             cutoff=cutoff,
         )
+        if cursor.rowcount:
+            logger.info(
+                "startup recovery reclaimed %d stale running task(s) as failed",
+                cursor.rowcount,
+            )
         return cursor.rowcount
 
 
@@ -330,6 +335,8 @@ def reclaim_running_plans(
             logger.exception("failed to reclaim running plan %s", plan.id)
             continue
         reclaimed += 1
+    if reclaimed:
+        logger.info("startup recovery reclaimed %d running plan(s) as failed", reclaimed)
     return reclaimed
 
 

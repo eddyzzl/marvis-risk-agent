@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -19,6 +20,8 @@ from marvis.plugins.errors import SchemaValidationError
 from marvis.redaction import redact_text
 from marvis.safe_paths import assert_within
 from marvis.resource_monitor import ProcessTreeResourceMonitor
+
+logger = logging.getLogger(__name__)
 
 
 _WORKER_ENV_ALLOWLIST = frozenset({
@@ -102,6 +105,7 @@ class ToolRunner:
     ) -> ToolResult:
         started = time.monotonic()
         target_ref = ref.label()
+        logger.debug("tool invoke starting target_ref=%s task_id=%s", target_ref, task_id)
         try:
             manifest, tool = self._tools.resolve_with_manifest(ref)
             _require_tool_permissions(manifest, tool.side_effects)
@@ -523,6 +527,19 @@ class ToolRunner:
         kind: str = "tool.invoke",
         mode: str | None = None,
     ) -> ToolResult:
+        # Single choke point every invoke()/invoke_adhoc() branch (success or
+        # any of the failure kinds) funnels through -- logging here covers the
+        # whole call without needing a log line in each individual branch.
+        if result.ok:
+            logger.info(
+                "tool invoke ok target_ref=%s duration_ms=%d",
+                target_ref, int(result.duration_ms),
+            )
+        else:
+            logger.warning(
+                "tool invoke failed target_ref=%s error_kind=%s error=%s",
+                target_ref, result.error_kind, redact_text(result.error or ""),
+            )
         try:
             self._write_audit(target_ref, inputs, result, seed=seed, kind=kind, mode=mode)
         except Exception as exc:

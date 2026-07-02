@@ -4,11 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from http.client import HTTPException
 import json
+import logging
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from marvis.agent.json_reply import strip_thinking
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClientError(RuntimeError):
@@ -346,9 +349,22 @@ class OpenAICompatibleLLMClient:
         prompt_version: int | None = None,
         truncated: bool = False,
     ) -> None:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        # Single choke point every call path (success, retry-exhausted, and
+        # every typed failure kind) funnels through -- independent of whether
+        # an on_call_recorded callback happens to be wired for this caller.
+        if ok:
+            logger.debug(
+                "llm call ok caller=%s model=%s latency_ms=%d retry_count=%d",
+                caller, model_name, latency_ms, retry_count,
+            )
+        else:
+            logger.warning(
+                "llm call failed caller=%s model=%s error_kind=%s retry_count=%d",
+                caller, model_name, error_kind, retry_count,
+            )
         if on_call_recorded is None:
             return
-        latency_ms = int((time.monotonic() - started) * 1000)
         record = {
             "caller": caller,
             "model_id": (str(self.profile.get("model_id") or "") or None),

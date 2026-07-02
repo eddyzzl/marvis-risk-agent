@@ -207,8 +207,10 @@ def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
     from marvis.app import create_app
+    from marvis.logging_setup import configure_logging, uvicorn_log_config
 
     options = _resolve_serve_options(args)
+    log_path = configure_logging(options.workspace)
     app = create_app(options.workspace)
     if options.profile:
         print(
@@ -216,8 +218,14 @@ def _serve(args: argparse.Namespace) -> None:
             f" and port {options.port}."
         )
     print(f"MARVIS-Agent running at http://{options.host}:{options.port}")
+    print(f"Logs: {log_path}")
     print("If running behind JupyterHub, try the matching /proxy/<port>/ URL.")
-    uvicorn.run(app, host=options.host, port=options.port)
+    uvicorn.run(
+        app,
+        host=options.host,
+        port=options.port,
+        log_config=uvicorn_log_config(options.workspace),
+    )
 
 
 def _validate(args: argparse.Namespace) -> None:

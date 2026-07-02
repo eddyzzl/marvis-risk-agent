@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 from pathlib import Path
 import os
 import sys
@@ -79,6 +80,8 @@ from marvis.routers.validation_stages import router as validation_stages_router
 from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
+
+logger = logging.getLogger(__name__)
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _NAMED_LOCAL_HOSTS = {"localhost", "testclient"}
@@ -188,9 +191,22 @@ def _is_local_only_path(path: str) -> bool:
 
 def create_app(workspace: str | Path | Settings) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
+    logger.info("MARVIS starting up workspace=%s version=%s", settings.workspace, __version__)
     init_db(settings.db_path)
     reclaim_stale_running_tasks(settings.db_path, tasks_dir=settings.tasks_dir)
     artifact_recovery_report = reconcile_workspace_artifacts(settings)
+    _recovery_actions = (
+        artifact_recovery_report.removed_staging_dirs
+        + artifact_recovery_report.removed_backups
+        + artifact_recovery_report.restored_backups
+        + artifact_recovery_report.removed_orphan_dirs
+        + artifact_recovery_report.removed_orphan_tmp_files
+    )
+    if _recovery_actions or artifact_recovery_report.errors:
+        logger.info(
+            "startup artifact recovery: %d action(s), %d error(s)",
+            _recovery_actions, len(artifact_recovery_report.errors),
+        )
 
     app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
@@ -209,6 +225,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     job_watchdog = JobHeartbeatWatchdog(task_repo)
     job_watchdog.start()
     app.state.job_watchdog = job_watchdog
+    logger.info("MARVIS startup complete workspace=%s", settings.workspace)
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
