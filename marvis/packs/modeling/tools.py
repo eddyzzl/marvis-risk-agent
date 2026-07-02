@@ -533,7 +533,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     if sample_weight_col and sample_weight_col in features:
         features = [feature for feature in features if feature != sample_weight_col]
         warnings.append("样本权重列已从入模特征中移除。")
-    n_trials = int(inputs.get("n_trials") or 12)
+    n_trials = int(inputs.get("n_trials") or 40)
     if n_trials < 1:
         raise ModelingError("n_trials must be at least 1")
     params = _training_params(inputs)
@@ -567,7 +567,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
 def tool_configure_tuning(inputs: dict, ctx) -> dict:
     recipe = str(inputs.get("recipe") or "lgb")
     target_type = str(inputs.get("target_type") or "binary")
-    n_trials = int(inputs.get("n_trials") or 12)
+    n_trials = int(inputs.get("n_trials") or 40)
     if n_trials < 1:
         raise ModelingError("n_trials must be at least 1")
     sample_weight_col = str(inputs.get("sample_weight_col") or "").strip()

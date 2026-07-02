@@ -196,7 +196,7 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     split_ref = f"$ref:{make_split.id}.output.result_dataset_id"
     assert spec.inputs["features"] == f"$ref:{make_split.id}.output.feature_cols"
     assert spec.inputs["recipes"] == ["lgb"]
-    assert spec.inputs["n_trials"] == 12
+    assert spec.inputs["n_trials"] == 40
     assert screen.inputs["dataset_id"] == split_ref
     assert screen.inputs["features"] == f"$ref:{spec.id}.output.feature_cols"
     assert screen.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"

@@ -462,6 +462,128 @@ def test_tune_hyperparameters_gates_nan_train_label(tmp_path):
     assert result.best_metrics["test_ks"] is not None
 
 
+def _tune_fixture_frame(rows: int = 400) -> pd.DataFrame:
+    """A modestly-sized, deterministic frame for exercising the two-stage search."""
+    return pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "x3": [((i * 53) % 97) / 100 for i in range(rows)],
+        "y": [1 if (i * 37 + i * 17) % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * int(rows * 0.6) + ["test"] * int(rows * 0.3) + ["oot"] * (
+            rows - int(rows * 0.6) - int(rows * 0.3)
+        ),
+    })
+
+
+def _tune_kwargs(**overrides) -> dict:
+    base = dict(
+        features=["x1", "x2", "x3"],
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        n_trials=10,
+        seed=7,
+        early_stopping_rounds=5,
+        max_boost_round=50,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
+    """TUNE-2 regression (a): same seed -> identical trial sequence and results,
+    across the whole two-stage search (coarse + fine)."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_determinism.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    kwargs = _tune_kwargs()
+
+    first = tune_hyperparameters(backend, path, **kwargs)
+    second = tune_hyperparameters(backend, path, **kwargs)
+
+    assert first.n_trials == second.n_trials == 10
+    assert [t["search_stage"] for t in first.trials] == [t["search_stage"] for t in second.trials]
+    assert [t["params"] for t in first.trials] == [t["params"] for t in second.trials]
+    assert [t["score"] for t in first.trials] == pytest.approx([t["score"] for t in second.trials])
+    assert first.best_params == second.best_params
+    assert first.best_metrics == second.best_metrics
+
+
+def test_tune_hyperparameters_runs_two_search_stages_with_fine_near_best_coarse(tmp_path):
+    """TUNE-2 regression (b): trials carry a coarse/fine search_stage label, both
+    stages actually run under the default 60/40 split, and every fine-stage trial's
+    numeric params land inside the shrunk neighbourhood of the best coarse trial
+    (log-neighbourhood for log-scaled params, linear-neighbourhood for linear ones) —
+    proof the second stage is a genuine local refinement, not another full-space draw."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_two_stage.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=10))
+
+    stages = [t["search_stage"] for t in result.trials]
+    assert set(stages) == {"coarse", "fine"}
+    assert stages.count("coarse") == 6  # round(10 * 0.6)
+    assert stages.count("fine") == 4
+
+    coarse_trials = [t for t in result.trials if t["search_stage"] == "coarse"]
+    fine_trials = [t for t in result.trials if t["search_stage"] == "fine"]
+    best_coarse = max(coarse_trials, key=lambda t: t["score"])
+    anchor = best_coarse["params"]
+
+    from marvis.packs.modeling.tune import _FINE_LINEAR_SHRINK, _FINE_LOG_SHRINK, _LINEAR_SPACE_BOUNDS, _LOG_SPACE_BOUNDS
+
+    for trial in fine_trials:
+        params = trial["params"]
+        # categorical-ish params stay pinned to the coarse anchor
+        assert params["max_depth"] == anchor["max_depth"]
+        assert params["scale_pos_weight"] == anchor["scale_pos_weight"]
+        for name, (low, high) in _LOG_SPACE_BOUNDS.items():
+            log_low, log_high = np.log10(low), np.log10(high)
+            log_center = np.log10(max(anchor[name], low))
+            span = (log_high - log_low) * _FINE_LOG_SHRINK
+            lo_bound = max(log_low, log_center - span)
+            hi_bound = min(log_high, log_center + span)
+            assert lo_bound - 1e-9 <= np.log10(params[name]) <= hi_bound + 1e-9, (name, params[name])
+        for name, (low, high) in _LINEAR_SPACE_BOUNDS.items():
+            span = (high - low) * _FINE_LINEAR_SHRINK
+            lo_bound = max(low, anchor[name] - span)
+            hi_bound = min(high, anchor[name] + span)
+            assert lo_bound - 1e-9 <= params[name] <= hi_bound + 1e-9, (name, params[name])
+
+
+def test_tune_hyperparameters_lambda_sampling_spans_multiple_orders_of_magnitude(tmp_path):
+    """TUNE-2 regression (c): lambda_l1/lambda_l2 are drawn log-uniformly over
+    1e-8..10, not linearly over 0..20 — evidence is that repeated trials cover
+    several orders of magnitude instead of clustering in the >10 tail."""
+    import math
+
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_lambda_space.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=20, seed=3))
+
+    lambda_l1_values = [t["params"]["lambda_l1"] for t in result.trials]
+    lambda_l2_values = [t["params"]["lambda_l2"] for t in result.trials]
+
+    assert all(0.0 <= v <= 10.0 for v in lambda_l1_values + lambda_l2_values)
+    orders_seen = {math.floor(math.log10(v)) for v in lambda_l1_values + lambda_l2_values if v > 0}
+    assert len(orders_seen) >= 3, f"expected log-uniform spread across orders of magnitude, got {orders_seen}"
+
+    learning_rates = [t["params"]["learning_rate"] for t in result.trials]
+    assert all(0.01 <= lr <= 0.3 for lr in learning_rates)
+    assert max(learning_rates) > 0.08  # old space capped at ~0.08; new upper bound is 0.3
+
+
+def test_tune_hyperparameters_default_n_trials_is_40():
+    import inspect
+
+    sig = inspect.signature(tune_hyperparameters)
+    assert sig.parameters["n_trials"].default == 40
+
+
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
     rows = 160
     labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]
