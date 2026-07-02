@@ -255,6 +255,24 @@ def test_planner_generate_retries_after_invalid_json(tmp_path):
     assert "not json" in llm.calls[1]["user_prompt"]
 
 
+def test_planner_generate_accepts_plan_wrapped_in_json_fence(tmp_path):
+    """AGT-10: _parse_plan_json now goes through load_json_object, so a reply
+    wrapped in ```json fences parses on the FIRST attempt (no retry needed) —
+    unlike a bare json.loads, which would reject it outright."""
+    llm = FakeLLM([f"这是计划:\n```json\n{_generated_plan()}\n```\n"])
+
+    plan = _planner(tmp_path, llm).generate(
+        "echo once",
+        "task-1",
+        memory_context={},
+        task_context={},
+        max_retries=1,
+    )
+
+    assert plan.steps[0].title == "Echo"
+    assert len(llm.calls) == 1  # parsed on the first attempt, no retry consumed
+
+
 def test_planner_generate_retries_validator_failures_and_then_raises(tmp_path):
     llm = FakeLLM([
         _generated_plan({"plugin": "missing", "tool": "echo"}),
@@ -346,6 +364,34 @@ def test_planner_replan_replaces_remaining_steps_and_preserves_done(tmp_path):
     assert "decision_point" in llm.calls[0]["user_prompt"]
 
 
+def test_planner_replan_accepts_steps_wrapped_in_json_fence(tmp_path):
+    """AGT-10: replan's MAX_REPLAN_PARSE_RETRY=1 budget means a fence issue
+    appearing twice used to raise ReplanError outright; _parse_steps_json now
+    falls back to load_json_object, so a single fenced reply parses on the
+    first attempt with no retry consumed."""
+    llm = FakeLLM([])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+    done_id = plan.steps[0].id
+    plan.steps[0].status = StepStatus.DONE
+    llm.responses = [f"```json\n{_replanned_steps(ref_id=done_id)}\n```"]
+
+    replanned = planner.replan(
+        plan,
+        completed_summaries={done_id: {"echoed": "hello"}},
+        observation={"echoed": "hello"},
+        reason="decision_point",
+        tier=resolve_tier("balanced"),
+    )
+
+    assert [step.title for step in replanned.steps] == ["First Echo", "Revised Echo"]
+    assert len(llm.calls) == 1
+
+
 def test_planner_replan_retries_after_validator_failure(tmp_path):
     llm = FakeLLM([])
     planner = _planner(tmp_path, llm)
@@ -422,6 +468,34 @@ def test_planner_next_explore_segment_returns_valid_segment(tmp_path):
     assert segment[0].index == 2
     assert segment[0].depends_on == [done_id]
     assert "Two Step Echo" in llm.calls[0]["user_prompt"]
+
+
+def test_planner_next_explore_segment_accepts_steps_wrapped_in_json_fence(tmp_path):
+    """AGT-10: explore's first parse (_parse_json_object, for the {done: bool}
+    check) and its steps parse (_parse_steps_json) both tolerate a ```json
+    fenced reply on the first attempt."""
+    tier = resolve_tier("balanced")
+    llm = FakeLLM([])
+    planner = _planner(tmp_path, llm)
+    plan = planner.from_template(
+        _template(),
+        {"message": "hello"},
+        task_id="task-1",
+    )
+    done_id = plan.steps[0].id
+    plan.novel_mode = "explore"
+    plan.steps[0].status = StepStatus.DONE
+    llm.responses = [f"```json\n{_explore_response(ref_id=done_id)}\n```"]
+
+    segment, done = planner.next_explore_segment(
+        plan,
+        completed_summaries={done_id: {"echoed": "hello"}},
+        tier=tier,
+    )
+
+    assert done is False
+    assert len(segment) == 1
+    assert len(llm.calls) == 1
 
 
 def test_planner_next_explore_segment_done_and_budget_exhaustion(tmp_path):
