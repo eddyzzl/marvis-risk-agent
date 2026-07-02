@@ -1160,6 +1160,113 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["selection_metric"] == "test_ks(overfit-penalized)"
 
 
+def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_path):
+    """TUNE-4: select_experiment defaults refit_on_train_plus_test=True -- the
+    champion's frozen hyperparameters get retrained on train+test combined (test's
+    information is otherwise permanently wasted on the delivered artifact), OOT
+    stays untouched, and the tool reports the pre/post-refit OOT metrics side by
+    side so a caller can confirm the refit actually helped."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    pre_refit_artifact_id = trained.output["artifact_id"]
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": [trained.output["experiment_id"]],
+            "selected_experiment_id": trained.output["experiment_id"],
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+
+    assert selected.ok is True, selected.error
+    refit = selected.output["refit"]
+    assert refit["requested"] is True
+    assert refit["applied"] is True
+    # a new artifact/experiment was produced -- the pre-refit champion only ever
+    # saw train, the refit artifact additionally saw test.
+    assert selected.output["artifact_id"] != pre_refit_artifact_id
+    assert selected.output["selected_experiment_id"] != trained.output["experiment_id"]
+    assert "oot_ks_before_refit" in refit
+    assert "oot_ks_after_refit" in refit
+    assert set(refit["metrics_before_refit"]) & {"train_ks", "test_ks", "oot_ks"}
+    assert set(refit["metrics_after_refit"]) & {"train_ks", "test_ks", "oot_ks"}
+
+    from marvis.db import ModelingRepository
+
+    modeling_repo = ModelingRepository(settings.db_path)
+    refit_artifact = modeling_repo.get_model_artifact(selected.output["artifact_id"])
+    assert refit_artifact.params.get("refit_on_train_plus_test") is True
+    # trained on the same feature set as the pre-refit champion.
+    assert set(refit_artifact.feature_list) == {"x1", "x2"}
+
+
+def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champion(tmp_path):
+    """TUNE-4 escape hatch: refit_on_train_plus_test=False keeps the pre-refit
+    train-only champion exactly as select_experiment always returned it."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": [trained.output["experiment_id"]],
+            "selected_experiment_id": trained.output["experiment_id"],
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+
+    assert selected.ok is True, selected.error
+    assert selected.output["refit"] == {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
+    assert selected.output["artifact_id"] == trained.output["artifact_id"]
+    assert selected.output["selected_experiment_id"] == trained.output["experiment_id"]
+
+
 def test_multi_algorithm_pipeline_tunes_every_recipe_before_training(tmp_path):
     """TUNE-1/SEL-2 end-to-end: configure_tuning -> tune_hyperparameters(recipes=[...])
     -> train_models is a fair arena. Every recipe in the comparison gets its own
@@ -1355,6 +1462,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_ids": trained.output["experiment_ids"],
             "selected_experiment_id": lgb_experiment_id,
             "target_type": "binary",
+            "refit_on_train_plus_test": False,
         },
         task_id=task.id,
     )
@@ -1366,6 +1474,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_ids": trained.output["experiment_ids"],
             "selected_experiment_id": catboost_experiment_id,
             "target_type": "binary",
+            "refit_on_train_plus_test": False,
         },
         task_id=task.id,
     )
@@ -1381,6 +1490,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_ids": trained.output["experiment_ids"],
             "selected_experiment_id": catboost_experiment_id,
             "target_type": "binary",
+            "refit_on_train_plus_test": False,
             "selection_policy": {"require_pmml": True, "require_handoff": True},
         },
         task_id=task.id,
@@ -1395,6 +1505,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_ids": trained.output["experiment_ids"],
             "selected_experiment_id": catboost_experiment_id,
             "target_type": "binary",
+            "refit_on_train_plus_test": False,
             "selection_policy": {
                 "require_pmml": True,
                 "require_handoff": True,
@@ -1411,6 +1522,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
             "experiment_ids": trained.output["experiment_ids"],
             "selected_experiment_id": catboost_experiment_id,
             "target_type": "binary",
+            "refit_on_train_plus_test": False,
             "selection_policy": {
                 "require_pmml": True,
                 "require_handoff": True,

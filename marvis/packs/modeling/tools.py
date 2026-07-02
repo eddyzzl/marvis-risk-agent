@@ -60,6 +60,7 @@ from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
+from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
@@ -1122,20 +1123,86 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
     )
     runtime.experiments.set_status(selected_id, "selected")
+    pre_refit_metrics = {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None}
+    refit_requested = bool(inputs.get("refit_on_train_plus_test", True))
+    refit_info = _apply_champion_refit(
+        runtime,
+        experiment=experiment,
+        recipe=str(selected.get("recipe") or experiment.recipe_id),
+        requested=refit_requested,
+        pre_refit_metrics=pre_refit_metrics,
+    ) if target_type == "binary" else {"applied": False, "requested": refit_requested, "reason": "非二分类任务暂不支持全量重训。"}
+    final_artifact_id = refit_info.get("artifact_id") or artifact_id
+    final_experiment_id = refit_info.get("experiment_id") or selected_id
+    final_metrics = refit_info.get("metrics") or pre_refit_metrics
     return {
-        "selected_experiment_id": selected_id,
-        "artifact_id": artifact_id,
+        "selected_experiment_id": final_experiment_id,
+        "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,
         "target_type": target_type,
         "selection_metric": selection_metric,
         "selection_reason": selection_reason,
-        "metrics": {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None},
+        "metrics": final_metrics,
         "capabilities": capabilities,
         "policy_profile": selected.get("policy_profile") or {},
         "policy_decision": policy_decision,
         "scorecard_table": selected.get("scorecard_table") or [],
         "model_params": selected.get("model_params") or {},
         "experiments": rows,
+        "refit": refit_info,
+    }
+
+
+def _apply_champion_refit(
+    runtime: "_Runtime",
+    *,
+    experiment,
+    recipe: str,
+    requested: bool,
+    pre_refit_metrics: dict,
+) -> dict:
+    """select_experiment's post-selection refit step (TUNE-4, default enabled).
+
+    Retrains the champion's frozen hyperparameters on train+test combined (test's
+    information would otherwise be permanently wasted on the delivered artifact)
+    and registers the refit as a new experiment/artifact so it is comparable and
+    auditable like any other trained candidate. OOT is untouched by the refit;
+    this reports before/after OOT metrics side by side so the caller can confirm
+    the refit actually helped before relying on it. Returns
+    ``{"applied": bool, "requested": bool, "reason": str, ...}``; on success also
+    ``artifact_id``/``experiment_id`` (of the refit artifact) and ``metrics``
+    (the refit artifact's own metrics, becoming the tool's headline ``metrics``).
+    """
+    if not requested:
+        return {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
+    try:
+        refit = _refit_champion_on_train_plus_test(
+            runtime, task_id=experiment.task_id, experiment=experiment, recipe=recipe,
+        )
+    except Exception as exc:  # noqa: BLE001 - refit is an enhancement, never a hard blocker
+        return {"applied": False, "requested": True, "reason": f"全量重训失败,已保留原候选:{exc}"}
+    if refit is None:
+        return {"applied": False, "requested": True, "reason": "候选实验缺少可全量重训的切分信息,已保留原候选。"}
+    refit_config, result = refit
+    refit_experiment_id = runtime.experiments.create(experiment.task_id, recipe, refit_config)
+    runtime.experiments.attach_result(refit_experiment_id, result)
+    refit_experiment = runtime.experiments.get(refit_experiment_id)
+    refit_row = next(
+        (row for row in runtime.experiments.compare([refit_experiment_id])["experiments"] if row.get("id") == refit_experiment_id),
+        {},
+    )
+    post_metrics = {k: v for k, v in refit_row.items() if _is_metric_key(k) and v is not None}
+    return {
+        "applied": True,
+        "requested": True,
+        "reason": "已用冠军的定型超参在 train+test 全量重训,OOT 未参与训练,指标为重训后模型的 OOT/train 结果。",
+        "experiment_id": refit_experiment_id,
+        "artifact_id": refit_experiment.artifact_id,
+        "metrics": post_metrics,
+        "metrics_before_refit": pre_refit_metrics,
+        "metrics_after_refit": post_metrics,
+        "oot_ks_before_refit": pre_refit_metrics.get("oot_ks"),
+        "oot_ks_after_refit": post_metrics.get("oot_ks"),
     }
 
 
@@ -3520,6 +3587,108 @@ def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool
     except KeyError:
         return False
     return sidecar_path(dataset_path).exists()
+
+
+def _refit_champion_on_train_plus_test(
+    runtime: "_Runtime",
+    *,
+    task_id: str,
+    experiment,
+    recipe: str,
+) -> tuple[TrainConfig, TrainResult] | None:
+    """Retrain the champion's frozen hyperparameters on train+test combined (TUNE-4).
+
+    The champion selected by ``select_experiment`` only ever saw the train split
+    (~50-70% of labeled rows once test+OOT are carved out) -- test's information is
+    otherwise permanently wasted on the delivered artifact. This freezes the
+    champion's resolved params (incl. ``num_boost_round``/``iterations`` for tree
+    recipes, scaled by ``best_iteration * 1/(1 - test_fraction)`` so the combined
+    fit gets a comparable number of boosting rounds for its larger training set),
+    disables early stopping (there is no more held-out fold to watch), and refits
+    on train ∪ test. OOT is never touched -- it stays the pre-refit population,
+    scored fresh against the refit model, so before/after OOT metrics are
+    directly comparable.
+
+    Returns ``(refit_config, result)`` on success, or ``None`` when the recipe/
+    config isn't refittable this way (no ``dataset_id``/split_values on the
+    experiment's config, e.g. a very old record) rather than raising -- refit is
+    an enhancement, never a hard blocker.
+    """
+    config = experiment.config
+    dataset_id = getattr(config, "dataset_id", "") or ""
+    split_values = dict(getattr(config, "split_values", {}) or {})
+    if not dataset_id or "train" not in split_values or "test" not in split_values:
+        return None
+    try:
+        dataset_path = runtime.registry.resolve_path(dataset_id)
+    except KeyError:
+        return None
+    frame = runtime.backend.read_frame(dataset_path)
+    split_col = str(config.split_col)
+    if split_col not in frame.columns:
+        return None
+    train_mask = frame[split_col] == split_values["train"]
+    test_mask = frame[split_col] == split_values["test"]
+    n_train, n_test = int(train_mask.sum()), int(test_mask.sum())
+    if n_train == 0 or n_test == 0:
+        return None
+    test_fraction = n_test / (n_train + n_test)
+
+    # Combined rows become "train"; a small deterministic slice is carved back out
+    # to satisfy split_modeling_frame's non-empty-test contract (early stopping is
+    # off below, so this slice is never fit on and never reported -- only train/
+    # OOT metrics from this refit are surfaced).
+    combined_idx = frame.index[train_mask | test_mask]
+    rng = np.random.RandomState(int(config.seed))
+    shuffled = combined_idx.to_numpy().copy()
+    rng.shuffle(shuffled)
+    holdout_n = max(1, min(len(shuffled) - 1, round(len(shuffled) * 0.05)))
+    scratch = frame.copy()
+    scratch[split_col] = scratch[split_col].astype(object)
+    scratch.loc[combined_idx, split_col] = "__refit_train__"
+    scratch.loc[shuffled[:holdout_n], split_col] = "__refit_holdout__"
+    scratch_split_values = {
+        "train": "__refit_train__",
+        "test": "__refit_holdout__",
+        **({"oot": split_values["oot"]} if "oot" in split_values else {}),
+    }
+
+    frozen_params = dict(config.params)
+    resolved_artifact = runtime.modeling_repo.get_model_artifact(experiment.artifact_id)
+    if resolved_artifact is not None:
+        for key in ("num_boost_round", "iterations"):
+            raw = resolved_artifact.params.get(key)
+            if raw is None:
+                continue
+            scaled = max(1, round(int(raw) * (1.0 / max(1e-6, 1.0 - test_fraction))))
+            frozen_params[key] = scaled
+
+    scratch_dir = _artifact_base_dir(runtime.settings, task_id) / "_refit_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    scratch_path = scratch_dir / f"{uuid.uuid4().hex}.parquet"
+    try:
+        scratch.to_parquet(scratch_path, index=False)
+        refit_params = dict(frozen_params)
+        refit_params[REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY] = True
+        refit_config = TrainConfig(
+            dataset_id=dataset_id,
+            features=tuple(config.features),
+            target_col=str(config.target_col),
+            split_col=split_col,
+            split_values=scratch_split_values,
+            params=refit_params,
+            seed=int(config.seed),
+            early_stopping_rounds=None,
+            recipe_id=recipe,
+            target_type=getattr(config, "target_type", "binary"),
+            drop_nan_labels=bool(getattr(config, "drop_nan_labels", False)),
+        )
+        artifact_dir = _artifact_base_dir(runtime.settings, task_id)
+        result = _train_recipe(recipe, runtime.backend, scratch_path, refit_config, out_dir=artifact_dir)
+        return refit_config, result
+    finally:
+        scratch_path.unlink(missing_ok=True)
+
 
 def _train_recipe(
     recipe: str,

@@ -1540,6 +1540,9 @@
               }
             },
             "additionalProperties": false
+          },
+          "refit_on_train_plus_test": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -1588,6 +1591,9 @@
           },
           "experiments": {
             "type": "array"
+          },
+          "refit": {
+            "type": "object"
           }
         },
         "required": [

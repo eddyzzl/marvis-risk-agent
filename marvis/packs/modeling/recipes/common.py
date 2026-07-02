@@ -70,8 +70,15 @@ DEFAULT_EARLY_STOP_VALID_FRACTION = 0.15
 #: train/test/oot). Optional: falls back to per-row carving when absent or not in the frame.
 VALID_GROUP_COLS_PARAM_KEY = "valid_group_cols"
 
+#: Platform-only key marking an artifact as a post-selection champion refit on
+#: train+test combined (TUNE-4) -- never a real estimator hyperparameter, but
+#: kept in artifact_params()'s output (not stripped) so the model card / delivery
+#:口径 can tell a refit artifact apart from a train-only one.
+REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY = "refit_on_train_plus_test"
+
 _PLATFORM_ONLY_PARAM_KEYS = frozenset({
     PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY, VALID_GROUP_COLS_PARAM_KEY,
+    REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY,
 })
 
 
@@ -281,6 +288,8 @@ def artifact_params(params: dict, config: TrainConfig) -> dict:
         out[PREPROCESSING_STEPS_PARAM_KEY] = steps
     elif config.params.get(PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY) is False:
         out[PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY] = False
+    if config.params.get(REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY):
+        out[REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY] = True
     return out
 
 
@@ -693,6 +702,7 @@ def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, flo
 
 __all__ = [
     "DEFAULT_EARLY_STOP_VALID_FRACTION",
+    "REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY",
     "VALID_GROUP_COLS_PARAM_KEY",
     "artifact_params",
     "carve_early_stop_fold",
