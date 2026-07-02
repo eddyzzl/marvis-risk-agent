@@ -125,9 +125,9 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | S1a | 分数方向制度化（渐进式）：裸分数消费方加可选 `score_direction`+确定性自检门；规则求值消费方做算子一致性自检；迁移面全枚举（含跨包 reject_inference、ModelArtifact/model_meta.json） | — /4–6天 | 计划已过评审 |
-| ⬜ | DOM-2 | （被 S1a 吸收）tradeoff_view 与 reject_inference 分数方向自相矛盾 | High/M | ✅ |
-| ⬜ | NEW-2 | validation head/tail lift 不按相关方向自动翻转——并入 S1a 全平台分数方向专项统一裁决 | Low/S | — |
+| ✅ | S1a | 按 spec 四 commit 落地（`f4452461`/`d9e0399c`/`1caa5f26`/`a61e54dd`）：direction 原语+自检门、ModelArtifact 双方向字段（9 配方全接线+修 SELECT 漏列）、tradeoff/reject_inference 可选参数、build_strategy 决策感知算子自检；spec §6 五项开放问题落地选择已记录 | — | 163 tests |
+| ✅ | DOM-2 | （随 S1a 落地 `1caa5f26`）双工具带方向参数+corr 自检门+渲染层方向标注 | High/M | ✅ |
+| ✅ | NEW-2 | （随 S1a 落地 `a61e54dd`）改为委托 feature/metrics 方向自适应实现（validation→feature 依赖已有先例） | Low/S | — |
 | ⬜ | S1b | `score_dataset` + `monitor_run` 骨架 + 训练期分布快照随 experiment 落盘（基准已拍板） | — /2–4天 | — |
 | ⬜ | DOM-3 | （被 S1b 吸收）无打分工具、监控策略纸面 JSON 无执行路径 | High/M | ✅ |
 
