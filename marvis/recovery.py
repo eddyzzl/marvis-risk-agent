@@ -8,6 +8,12 @@ from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TaskStatus,
 )
+from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
+
+RECLAIM_SERVER_RESTART_MESSAGE = "reclaimed: server restart while running"
+METRICS_RECLAIM_RESUME_MESSAGE = (
+    METRICS_STAGE_FAILURE_PREFIX + "服务重启中断，可从指标阶段重试"
+)
 
 
 ORPHAN_RECLAIM_STATUSES = frozenset(
@@ -40,6 +46,7 @@ def last_completed_step(task_dir: Path) -> str | None:
 def reclaim_stale_running_tasks(
     db_path: Path,
     *,
+    tasks_dir: Path | None = None,
     stale_after_seconds: int = 0,
 ) -> int:
     cutoff = (
@@ -48,6 +55,9 @@ def reclaim_stale_running_tasks(
     orphan_placeholders = ",".join(["?"] * len(ORPHAN_RECLAIM_STATUSES))
     with connect(db_path) as conn:
         reclaimed_task_ids = _stale_task_ids(conn, orphan_placeholders, cutoff)
+        metrics_resumable_task_ids = _metrics_resumable_task_ids(
+            conn, cutoff, tasks_dir=tasks_dir
+        )
         agent_task_ids = _interrupted_agent_task_ids(
             conn, orphan_placeholders, cutoff
         )
@@ -63,13 +73,30 @@ def reclaim_stale_running_tasks(
             """,
             (
                 TaskStatus.FAILED.value,
-                "reclaimed: server restart while running",
+                RECLAIM_SERVER_RESTART_MESSAGE,
                 TASK_STATUS_REASON_SERVER_RESTART,
                 _now(),
                 cutoff,
                 *(status.value for status in ORPHAN_RECLAIM_STATUSES),
             ),
         )
+        if metrics_resumable_task_ids:
+            placeholders = ",".join(["?"] * len(metrics_resumable_task_ids))
+            conn.execute(
+                f"""
+                UPDATE tasks
+                   SET status_message = ?,
+                       updated_at = ?
+                 WHERE id IN ({placeholders})
+                   AND status = ?
+                """,
+                (
+                    METRICS_RECLAIM_RESUME_MESSAGE,
+                    _now(),
+                    *metrics_resumable_task_ids,
+                    TaskStatus.FAILED.value,
+                ),
+            )
         _finalize_interrupted_agent_messages(conn, agent_task_ids)
         _add_agent_restart_notices(conn, agent_task_ids)
         _fail_interrupted_jobs(
@@ -91,6 +118,34 @@ def _stale_task_ids(conn, orphan_placeholders: str, cutoff: str) -> list[str]:
         (cutoff, *(status.value for status in ORPHAN_RECLAIM_STATUSES)),
     ).fetchall()
     return [str(row[0]) for row in rows]
+
+
+def _metrics_resumable_task_ids(
+    conn,
+    cutoff: str,
+    *,
+    tasks_dir: Path | None,
+) -> list[str]:
+    """Tasks reclaimed out of COMPUTING_METRICS whose on-disk execution
+    artifacts already completed the notebook step. These should resume via
+    the metrics-only retry path instead of a full notebook re-run."""
+    if tasks_dir is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id
+          FROM tasks
+         WHERE updated_at <= ?
+           AND status = ?
+        """,
+        (cutoff, TaskStatus.COMPUTING_METRICS.value),
+    ).fetchall()
+    resumable = []
+    for row in rows:
+        task_id = str(row[0])
+        if last_completed_step(tasks_dir / task_id) == "notebook":
+            resumable.append(task_id)
+    return resumable
 
 
 def _interrupted_agent_task_ids(
