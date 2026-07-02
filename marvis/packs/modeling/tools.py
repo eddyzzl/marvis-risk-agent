@@ -59,7 +59,7 @@ from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
 from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import tune_hyperparameters
-from marvis.packs.modeling.errors import ModelingError
+from marvis.packs.modeling.errors import ModelingError, ReportScoreMissingError
 from marvis.settings import build_settings
 from marvis.validation.config import ValidationConfig
 from marvis.validation.stress_test import run_stress_test
@@ -3061,6 +3061,8 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         artifact,
         experiment.config,
         task_id=ctx.task_id,
+        experiment_id=experiment.id,
+        dataset_id=dataset.id,
     )
     report_runtime = _cached_dataset_runtime(runtime, report_dataset_path, frame=report_frame)
     low_pricing = None
@@ -4047,12 +4049,18 @@ def _report_scored_dataset(
     config: TrainConfig,
     *,
     task_id: str,
+    experiment_id: str,
+    dataset_id: str,
 ) -> tuple[Path, str, pd.DataFrame | None]:
     columns = runtime.backend.column_names(dataset_path)
     if "score" in columns:
         return dataset_path, "score", None
     if artifact is None:
-        return dataset_path, _report_score_col(runtime, dataset_path, artifact, config), None
+        # No trained artifact and no explicit `score` column: there is no real model
+        # score to report on. Previously this silently substituted the first feature
+        # column as a fake "score", producing a plausible-looking but semantically wrong
+        # formal report (DOM-10) — fail loudly instead.
+        raise ReportScoreMissingError(experiment_id=experiment_id, dataset_id=dataset_id)
 
     frame = runtime.backend.read_frame(dataset_path)
     scorer = _ModelArtifactScorer(artifact, base_dir=_artifact_model_base_dir(runtime, artifact))
@@ -4186,15 +4194,6 @@ class _ModelArtifactScorer:
         )
         scores = float(params["offset"]) - float(params["factor"]) * logits
         return [float(value) for value in scores]
-
-
-def _report_score_col(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> str:
-    columns = runtime.backend.column_names(dataset_path)
-    if "score" in columns:
-        return "score"
-    if artifact and artifact.feature_list:
-        return artifact.feature_list[0]
-    return config.features[0]
 
 
 def _report_bin_table(

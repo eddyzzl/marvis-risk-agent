@@ -20,6 +20,7 @@ from marvis.packs.modeling.report_compute import (
     stress_low_pricing,
 )
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling import tools as modeling_tools
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -925,3 +926,37 @@ def test_generate_model_reports_rejects_empty_experiment_ids(tmp_path):
 
     assert result.ok is False
     assert "experiment_ids" in str(result.error)
+
+
+def test_generate_model_report_fails_when_artifact_and_score_column_are_missing(tmp_path):
+    """DOM-10: an artifact-less experiment (e.g. a historical failed training run) must
+    not have generate_model_report silently impersonate the model score with the first
+    feature column — it must fail loudly with a typed error instead."""
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    store = ExperimentStore(settings.db_path)
+    experiment_id = store.create(
+        task.id,
+        "lr",
+        TrainConfig(
+            dataset_id=dataset.id,
+            features=("x1", "x2"),
+            target_col="y",
+            split_col="split",
+            split_values={"train": "train", "test": "test", "oot": "oot"},
+            params={},
+            seed=7,
+            early_stopping_rounds=None,
+        ),
+    )
+
+    result = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {"experiment_id": experiment_id, "dataset_id": dataset.id},
+        task_id=task.id,
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "report_score_missing"
+    assert result.error_detail["experiment_id"] == experiment_id
+    assert result.error_detail["dataset_id"] == dataset.id
+    assert "score" in str(result.error)
