@@ -55,7 +55,7 @@ def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_
     assert gate["metadata"]["kind"] == "gate"
     assert "策略候选已生成" in gate["content"]
     assert any(
-        table["title"] == "策略规则(按顺序命中)"
+        table["title"] == "策略规则（按顺序命中）"
         for table in gate["metadata"]["tables"]
     )
 

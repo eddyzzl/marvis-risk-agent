@@ -129,8 +129,8 @@
 | ✅ | S1a | 按 spec 四 commit 落地（`f4452461`/`d9e0399c`/`1caa5f26`/`a61e54dd`）：direction 原语+自检门、ModelArtifact 双方向字段（9 配方全接线+修 SELECT 漏列）、tradeoff/reject_inference 可选参数、build_strategy 决策感知算子自检；spec §6 五项开放问题落地选择已记录 | — | 163 tests |
 | ✅ | DOM-2 | （随 S1a 落地 `1caa5f26`）双工具带方向参数+corr 自检门+渲染层方向标注 | High/M | ✅ |
 | ✅ | NEW-2 | （随 S1a 落地 `a61e54dd`）改为委托 feature/metrics 方向自适应实现（validation→feature 依赖已有先例） | Low/S | — |
-| ⬜ | S1b | `score_dataset` + `monitor_run` 骨架 + 训练期分布快照随 experiment 落盘（基准已拍板） | — /2–4天 | — |
-| ⬜ | DOM-3 | （被 S1b 吸收）无打分工具、监控策略纸面 JSON 无执行路径 | High/M | ✅ |
+| ✅ | S1b | 三 commit 落地（`724c0f26`/`0b7742ce`/`aebc6cf6`）：训练期基准快照（分数等频分位+特征分位）随 artifact 落盘、score_dataset（预处理链重放+方向元数据+审计+衍生数据集登记）、monitor_run（PSI/CSI/有标签对比+green/amber/red 判级）+MONITORING_RUN 模板；六项回归含手算基准分箱、逐字节重放、漂移注入→red、无标签→n/a | — /2–4天 | ✅ |
+| ✅ | DOM-3 | （随 S1b 落地）打分与监控执行闭环完成，监控阈值不再是纸面 JSON | High/M | ✅ |
 
 ## 5. 阶段四：审查 Batch 2 —— 运行时脊柱（1.5–2.5 周）
 
@@ -236,7 +236,7 @@
 |---|---|---|---|---|
 | ✅ | GAP-1 | 编码 try 链（utf-8→sig→gbk→gb18030）+长数字列防截断读为字符串+摄取报告含 warnings（`ce39ec67`） | High/M | — |
 | ✅ | GAP-2 | purge_task 同事务清理全资产+引用计数保护+task.delete 审计+purge-preview 端点+删除框摘要（`caf21fe7`/`2988c155`） | High/M | — |
-| ⬜ | GAP-3 | 审计日志只写不读：无 API/UI/导出（+6-28 余项"审计恢复队列"顺带评估） | High/M | — |
+| ✅ | GAP-3 | 审计读取面落地（`b9dfcd3f`）：GET /api/audit 多维过滤+分页、CSV 流式导出、任务审计时间线端点、新索引 idx_audit_target_ref_at；15 个新测试 | High/M | — |
 | ⬜ | GAP-4 | 数据字典/列业务语义层在 V2 全链路缺位 | High/M | — |
 | ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
 | ⬜ | TST-3 | Playwright e2e 是假 e2e：喂 canned JSON 不走真 FastAPI 且 CI 跳过 | High/M | ✅ |
@@ -262,11 +262,11 @@
 | ⬜ | ARCH-9 | 11 个生产模板挤在 templates/sample.py（1096 行） | Med/S | — |
 | ⬜ | ARCH-10 | db_schema 迁移无版本号：只能加列式迁移 | Low/S | — |
 | ⬜ | ARCH-11 | app.js 6416 行前端 god file：状态所有权未定界（追踪器"TaskWorkspace 抽取"同一件事） | Med/L | — |
-| ⬜ | PERF-6 | 1 秒轮询 = N+1 查询 + 文件 stat + JSON 全量重读 + 每调用新连接 | Med/M | — |
-| ⬜ | PERF-9 | 静态缓存失效只覆盖 4 文件：36 个 ES module 无版本参数 | Med/S | — |
+| ✅ | PERF-6 | 轮询热路径收敛（`fe5180c4`）：GET /api/tasks 11 连接→2（与任务数无关）、evidence mtime/size 缓存、journal_mode PRAGMA 每库一次；查询计数断言守护 | Med/M | — |
+| ✅ | PERF-9 | 全量静态版本化（`a752660d`）：_static_asset_version rglob 全部 js/css、importmap 把裸相对导入重写为 ?v= URL、/static Cache-Control 分层（?v= immutable / 否则 no-cache）；真 Chromium smoke 验证 | Med/S | — |
 | ⬜ | PERF-10 | 多配方训练逐配方全帧 copy：宽表内存峰值成倍放大 | Med/S | — |
-| ⬜ | UX-8 | 8 个 v2 前端模块（~2200 行）线上死代码双 UI 栈（含 settings-ia 阶段5 残留清理） | Med/M | — |
-| ⬜ | VD-10 | join_review/plan_view/loop_progress/subagent_view 运行时零挂载 | Med/S | — |
+| ✅ | UX-8 | 8 个死代码模块删除（`caee3d9f`）：join_review/plan_view/plan_confirm/workflow_create/subagent_view/loop_progress/memory_manager/draft_manager，全部先复核零挂载；7 个专属测试文件同步清理 | Med/M | — |
+| ✅ | VD-10 | （随 UX-8 落地）零挂载模块已清除；join_review 的"中止去重"选项无在线等价物，按纯死代码删除不移植 | Med/S | — |
 | ⬜ | VD-11 | 设计 token 剩余缺口：radius 塌缩、spacing/type scale 为零（radius 调整须先出对比稿由用户拍板；含追踪器"legacy hex 清理"） | Med/L | — |
 | ✅ | LLM-4 | role_overrides 按 caller 分级路由（`20f5da11`）：planner/critic/router/gate/distill 可各指模型，默认不配=现状 | Med/M | — |
 | ✅ | LLM-5 | context_window/max_tokens 进 profile+预检预算+typed error（`049c6164`）；gate 内容/planner catalog/记忆注入三触点接截断 | Med/M | — |
