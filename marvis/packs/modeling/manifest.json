@@ -1402,6 +1402,10 @@
           },
           "drop_nan_labels": {
             "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1447,6 +1451,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "eval_metric": {
+            "type": "string"
           }
         },
         "required": [
@@ -1455,7 +1462,8 @@
           "best_experiment_id",
           "best_recipe",
           "target_type",
-          "selection_metric"
+          "selection_metric",
+          "eval_metric"
         ],
         "additionalProperties": false
       },
@@ -1487,6 +1495,10 @@
           },
           "target_type": {
             "type": "string"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1504,6 +1516,9 @@
             }
           },
           "ks_ci_note": {
+            "type": "string"
+          },
+          "eval_metric": {
             "type": "string"
           }
         },
@@ -1626,6 +1641,10 @@
           },
           "refit_on_train_plus_test": {
             "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1680,6 +1699,9 @@
           },
           "ks_ci_note": {
             "type": "string"
+          },
+          "eval_metric": {
+            "type": "string"
           }
         },
         "required": [
@@ -1688,7 +1710,8 @@
           "selection_metric",
           "selection_reason",
           "capabilities",
-          "policy_decision"
+          "policy_decision",
+          "eval_metric"
         ],
         "additionalProperties": false
       },
@@ -1744,6 +1767,10 @@
           "n_bins": {
             "type": "integer",
             "minimum": 2
+          },
+          "fit_split": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -1791,6 +1818,49 @@
             "items": {
               "type": "object"
             }
+          },
+          "fit_split": {
+            "type": "string"
+          },
+          "eval_split": {
+            "type": "string"
+          },
+          "evaluated_on": {
+            "type": "string"
+          },
+          "fit_sample_count": {
+            "type": "integer"
+          },
+          "per_split_metrics": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "sample_count": {
+                  "type": "integer"
+                },
+                "brier_raw": {
+                  "type": "number"
+                },
+                "brier_calibrated": {
+                  "type": "number"
+                },
+                "ece_raw": {
+                  "type": "number"
+                },
+                "ece_calibrated": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "sample_count",
+                "brier_raw",
+                "brier_calibrated",
+                "ece_raw",
+                "ece_calibrated"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -1805,7 +1875,12 @@
           "ece_raw",
           "ece_calibrated",
           "pmml_includes_calibration",
-          "reliability_curve"
+          "reliability_curve",
+          "fit_split",
+          "eval_split",
+          "evaluated_on",
+          "fit_sample_count",
+          "per_split_metrics"
         ],
         "additionalProperties": false
       },

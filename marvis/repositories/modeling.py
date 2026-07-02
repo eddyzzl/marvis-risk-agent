@@ -466,6 +466,16 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         oot_ks_ci_high=_optional_float(payload.get("oot_ks_ci_high")),
         oot_ks_ci_std=_optional_float(payload.get("oot_ks_ci_std")),
         ks_ci_n_boot=_optional_int(payload.get("ks_ci_n_boot")),
+        # DOM-6: head/tail lift on the model score -- absent on rows persisted
+        # before DOM-6, so these read as None on old rows rather than erroring.
+        test_lift_head_5=_optional_float(payload.get("test_lift_head_5")),
+        test_lift_tail_5=_optional_float(payload.get("test_lift_tail_5")),
+        test_lift_head_10=_optional_float(payload.get("test_lift_head_10")),
+        test_lift_tail_10=_optional_float(payload.get("test_lift_tail_10")),
+        oot_lift_head_5=_optional_float(payload.get("oot_lift_head_5")),
+        oot_lift_tail_5=_optional_float(payload.get("oot_lift_tail_5")),
+        oot_lift_head_10=_optional_float(payload.get("oot_lift_head_10")),
+        oot_lift_tail_10=_optional_float(payload.get("oot_lift_tail_10")),
     )
 
 

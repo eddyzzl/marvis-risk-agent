@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
 import hashlib
@@ -75,7 +76,10 @@ from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
-from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
+from marvis.packs.modeling.recipes.common import (
+    REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY,
+    carve_early_stop_fold,
+)
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
@@ -996,6 +1000,11 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     seed = int(inputs["seed"])
     drop_nan = bool(inputs.get("drop_nan_labels"))
     target_type = str(inputs.get("target_type", "binary"))
+    # DOM-6: an explicit eval_metric input (e.g. "response_lift" for a marketing/
+    # recall scenario) drives champion selection below; every experiment's own
+    # TrainConfig also records it so compare_experiments/select_experiment can
+    # recover it later without the caller having to repeat it.
+    eval_metric = str(inputs.get("eval_metric") or "ks_auc").strip() or "ks_auc"
     dataset_path = runtime.registry.resolve_path(dataset.id)
     training_dataset = TrainingDataset.load(runtime.backend, dataset_path)
     training_backend = training_dataset.backend_adapter(runtime.backend)
@@ -1034,6 +1043,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             early_stopping_rounds=early_stopping_rounds,
             recipe_id=recipe,
             target_type=target_type,
+            eval_metric=eval_metric,
             drop_nan_labels=drop_nan,
         )
         experiment_id = runtime.experiments.create(ctx.task_id, recipe, config)
@@ -1081,13 +1091,16 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         if last_exc is not None:
             raise last_exc
         raise ModelingError("all requested recipes failed to train")
-    best, selection_metric = _pick_best_experiment(experiments, target_type=target_type)
+    best, selection_metric = _pick_best_experiment(
+        experiments, target_type=target_type, eval_metric=eval_metric
+    )
     return {
         "experiments": experiments,
         "experiment_ids": [exp["experiment_id"] for exp in experiments],
         "best_experiment_id": best["experiment_id"],
         "best_recipe": best["recipe"],
         "target_type": target_type,
+        "eval_metric": eval_metric,
         "selection_metric": selection_metric,
         "failed": failed,
     }
@@ -1100,6 +1113,12 @@ _CHAMPION_OVERFIT_PENALTY = 0.5
 #: Binary champion selection metric name/basis: OOT is reported but never used to pick
 #: a winner (mirrors tune_hyperparameters' "OOT reports only" policy — DOM-9).
 BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
+
+#: DOM-6: champion selection metric name/basis when a scenario declares
+#: eval_metric="response_lift" (marketing/recall templates) -- test-only, no OOT
+#: peeking, matching BINARY_SELECTION_METRIC's DOM-9 policy. No train reading is
+#: computed for lift, so (unlike KS) there is no overfit penalty term to subtract.
+RESPONSE_LIFT_SELECTION_METRIC = "test_lift_head_10"
 
 
 def _overfit_penalized_test_ks(metrics: dict) -> float:
@@ -1129,11 +1148,39 @@ def _overfit_penalized_test_ks(metrics: dict) -> float:
     return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
 
 
-def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary") -> tuple[dict, str]:
+def _response_lift_score(metrics: dict) -> float:
+    """DOM-6: ``test_lift_head_10`` (top-decile response lift), ``-inf`` when missing.
+
+    Mirrors ``_overfit_penalized_test_ks``'s DOM-9 "test only, OOT reports but
+    never selects" policy -- head_tail_lift's OOT reading is still surfaced on the
+    comparison row for transparency, it just never drives the winner.
+    """
+    value = metrics.get("test_lift_head_10")
+    if not isinstance(value, (int, float)):
+        return float("-inf")
+    return float(value)
+
+
+def _binary_selection_score_and_metric(eval_metric: str) -> tuple[Callable[[dict], float], str]:
+    """DOM-6: resolve a binary target's champion-selection scoring function and its
+    metric label from the scenario's declared ``eval_metric`` -- ``response_lift``
+    (marketing/recall scenario templates) selects by top-decile test lift instead
+    of KS; every other value (including the default ``ks_auc``) keeps the
+    pre-existing overfit-penalized test KS behaviour unchanged."""
+    if str(eval_metric or "").strip() == "response_lift":
+        return _response_lift_score, RESPONSE_LIFT_SELECTION_METRIC
+    return _overfit_penalized_test_ks, BINARY_SELECTION_METRIC
+
+
+def _pick_best_experiment(
+    experiments: list[dict], *, target_type: str = "binary", eval_metric: str = "ks_auc"
+) -> tuple[dict, str]:
     """Pick the best experiment with the metric family that matches the target.
 
-    Binary maximizes the overfit-penalized test KS (OOT is reported, not selected on —
-    DOM-9); regression minimizes OOT/test RMSE; multiclass maximizes OOT/test macro-AUC,
+    Binary maximizes the overfit-penalized test KS by default (OOT is reported,
+    not selected on — DOM-9); when ``eval_metric="response_lift"`` (marketing/
+    recall scenario templates, DOM-6) it instead maximizes test top-decile lift.
+    Regression minimizes OOT/test RMSE; multiclass maximizes OOT/test macro-AUC,
     falling back to minimizing logloss.
     """
     target_type = str(target_type or "binary")
@@ -1167,15 +1214,39 @@ def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary
 
         return max(experiments, key=score), "oot_macro_auc"
 
-    def score(experiment: dict) -> float:
-        return _overfit_penalized_test_ks(experiment.get("metrics") or {})
+    metric_score, selection_metric = _binary_selection_score_and_metric(eval_metric)
 
-    return max(experiments, key=score), BINARY_SELECTION_METRIC
+    def score(experiment: dict) -> float:
+        return metric_score(experiment.get("metrics") or {})
+
+    return max(experiments, key=score), selection_metric
+
+
+def _resolve_scenario_eval_metric(runtime: _Runtime, experiment_ids: list[str], override: str) -> str:
+    """DOM-6: resolve the eval_metric that should drive champion selection for a set
+    of experiments. An explicit ``eval_metric`` tool input always wins; otherwise
+    read it off the first resolvable experiment's stored ``TrainConfig.eval_metric``
+    (populated by ``apply_scenario`` at train time, e.g. "response_lift" for the
+    marketing/recall scenario templates) -- every candidate compared/selected
+    together came from the same training run, so they share one scenario. Falls
+    back to the platform default ``"ks_auc"`` when neither is available."""
+    if override:
+        return override
+    for experiment_id in experiment_ids:
+        try:
+            experiment = runtime.experiments.get(experiment_id)
+        except KeyError:
+            continue
+        eval_metric = getattr(experiment.config, "eval_metric", None)
+        if eval_metric:
+            return str(eval_metric)
+    return "ks_auc"
 
 
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    compared = runtime.experiments.compare([str(item) for item in inputs["experiment_ids"]])
+    experiment_ids = [str(item) for item in inputs["experiment_ids"]]
+    compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
     _attach_policy_profile_to_comparison_rows(runtime, rows)
@@ -1184,15 +1255,21 @@ def tool_compare_experiments(inputs: dict, ctx) -> dict:
         first_id = str(rows[0].get("id") or "")
         if first_id:
             target_type = getattr(runtime.experiments.get(first_id).config, "target_type", "binary")
+    eval_metric = _resolve_scenario_eval_metric(
+        runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
+    )
     # SEL-5: surface the same "within sampling error" hint the gate text uses in
     # select_experiment, here against the metric-best row -- so a caller
     # comparing candidates (before ever calling select_experiment) sees the same
     # signal ahead of time.
     ks_ci_note = ""
     if rows and str(target_type or "binary") == "binary":
-        best_row, _metric = _pick_best_comparison_row(rows, target_type=target_type or "binary")
+        best_row, _metric = _pick_best_comparison_row(
+            rows, target_type=target_type or "binary", eval_metric=eval_metric
+        )
         ks_ci_note = _ks_ci_overlap_note(best_row, rows, target_type=target_type or "binary")
     compared["ks_ci_note"] = ks_ci_note
+    compared["eval_metric"] = eval_metric
     return _jsonable(compared)
 
 
@@ -1204,6 +1281,9 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     target_type = str(inputs.get("target_type") or "").strip()
     if not target_type:
         target_type = getattr(runtime.experiments.get(experiment_ids[0]).config, "target_type", "binary")
+    eval_metric = _resolve_scenario_eval_metric(
+        runtime, experiment_ids, str(inputs.get("eval_metric") or "").strip()
+    )
     compared = runtime.experiments.compare(experiment_ids)
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
@@ -1224,8 +1304,18 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
             rows,
             target_type=target_type,
             policy=selection_policy,
+            eval_metric=eval_metric,
         )
         selected_id = str(selected.get("id") or "")
+        # DOM-6: name the scenario's evaluation basis in the gate text whenever
+        # selection deviated from the platform default (ks_auc / overfit-penalized
+        # test KS) -- e.g. "本场景按 test_lift_head_10 选优" for a marketing/recall
+        # scenario, so the divergence from KS is explicit instead of silent.
+        scenario_note = (
+            f"本场景按 {eval_metric} 选优;实际选择指标 {selection_metric}。"
+            if eval_metric and eval_metric != "ks_auc"
+            else ""
+        )
         if _selection_policy_requested(selection_policy) and policy_decision["status"] == "accepted":
             selection_reason = f"按 {selection_metric} 在满足交付/审批策略的候选中自动选择。"
             if policy_decision.get("selected_by_preference"):
@@ -1236,6 +1326,8 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
             selection_reason = f"按 {selection_metric} 在 PMML/验证移交可用候选中自动选择。"
         else:
             selection_reason = f"按 {selection_metric} 自动选择。"
+        if scenario_note:
+            selection_reason = f"{selection_reason} {scenario_note}"
     artifact_id = str(selected.get("artifact_id") or "")
     if not artifact_id:
         raise ModelingError(f"selected experiment has no artifact: {selected_id}")
@@ -1266,6 +1358,7 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,
         "target_type": target_type,
+        "eval_metric": eval_metric,
         "selection_metric": selection_metric,
         "selection_reason": selection_reason,
         "metrics": final_metrics,
@@ -1381,10 +1474,11 @@ def _pick_best_comparison_row_with_policy(
     *,
     target_type: str,
     policy: dict,
+    eval_metric: str = "ks_auc",
 ) -> tuple[dict, str, dict]:
     policy = _normalize_selection_policy(policy)
     if not _selection_policy_requested(policy):
-        selected, metric = _pick_best_comparison_row(rows, target_type=target_type)
+        selected, metric = _pick_best_comparison_row(rows, target_type=target_type, eval_metric=eval_metric)
         return selected, metric, _selection_policy_decision(selected, policy, explicit=False)
 
     compliant = [row for row in rows if not _selection_policy_violations(row, policy)]
@@ -1405,7 +1499,7 @@ def _pick_best_comparison_row_with_policy(
             candidates = scorecard_candidates
             selected_by_preference = True
 
-    selected, metric = _pick_best_comparison_row(candidates, target_type=target_type)
+    selected, metric = _pick_best_comparison_row(candidates, target_type=target_type, eval_metric=eval_metric)
     decision = _selection_policy_decision(selected, policy, explicit=False)
     decision["evaluated_candidates"] = len(rows)
     decision["policy_candidate_count"] = len(compliant)
@@ -1415,9 +1509,14 @@ def _pick_best_comparison_row_with_policy(
     return selected, metric, decision
 
 
-def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
-    """Pick the best comparison row. Binary maximizes the overfit-penalized test KS —
-    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9).
+def _pick_best_comparison_row(
+    rows: list[dict], *, target_type: str, eval_metric: str = "ks_auc"
+) -> tuple[dict, str]:
+    """Pick the best comparison row. Binary maximizes the overfit-penalized test KS by
+    default — OOT is reported but not used for selection, matching
+    tune_hyperparameters (DOM-9). When ``eval_metric="response_lift"``
+    (marketing/recall scenario templates, DOM-6) binary instead maximizes test
+    top-decile lift.
 
     SEL-7: candidates excluded by the delivery-ready (PMML+handoff) pre-filter no
     longer vanish silently -- when the metric-best row overall is NOT
@@ -1430,7 +1529,7 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
     if not rows:
         raise ModelingError("experiment_ids must resolve to experiments")
     target_type = str(target_type or "binary")
-    metric_key, minimize = _selection_metric_basis(target_type)
+    metric_key, minimize = _selection_metric_basis(target_type, eval_metric=eval_metric)
     delivery_ready = [row for row in rows if _delivery_ready(row)]
     if delivery_ready and len(delivery_ready) < len(rows):
         raw_best = max(rows, key=lambda row: _score_first(row, (metric_key,), minimize=minimize))
@@ -1464,22 +1563,26 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
         if _score_first(auc_best, ("oot_macro_auc", "test_macro_auc")) != float("-inf"):
             return auc_best, "oot_macro_auc"
         return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
-    return max(rows, key=_overfit_penalized_test_ks), BINARY_SELECTION_METRIC
+    metric_score, selection_metric = _binary_selection_score_and_metric(eval_metric)
+    return max(rows, key=metric_score), selection_metric
 
 
-def _selection_metric_basis(target_type: str) -> tuple[str, bool]:
+def _selection_metric_basis(target_type: str, *, eval_metric: str = "ks_auc") -> tuple[str, bool]:
     """The single metric key (and min/max direction) used to detect whether the
     delivery-ready pre-filter actually excluded a better-scoring candidate
     (SEL-7). Mirrors each target type's primary ranking metric in
     ``_pick_best_comparison_row`` -- binary's real selection key is the
-    overfit-penalized test KS (not a plain column), so it is approximated here
-    by the raw test_ks column, which is what the pre-filter comparison cares
-    about (relative ranking, not the exact champion score)."""
+    overfit-penalized test KS (not a plain column) by default, so it is
+    approximated here by the raw test_ks column (DOM-6: test_lift_head_10 when
+    the scenario's eval_metric is "response_lift"), which is what the pre-filter
+    comparison cares about (relative ranking, not the exact champion score)."""
     target_type = str(target_type or "binary")
     if target_type == "continuous":
         return "oot_rmse", True
     if target_type == "multiclass":
         return "oot_macro_auc", False
+    if str(eval_metric or "").strip() == "response_lift":
+        return "test_lift_head_10", False
     return "test_ks", False
 
 
@@ -1918,7 +2021,52 @@ def _is_metric_key(key: str) -> bool:
     return key.startswith(("train_", "test_", "oot_", "psi_", "weighted_")) or key == "overfit_flag"
 
 
+def _calibration_fold_seed(seed: int) -> int:
+    """Deterministic seed derivation for the calibration-fitting fold, distinct from
+    the early-stopping valid-fold seed and the base training seed (same derivation
+    pattern as ``recipes.common._valid_fold_seed`` / ``_bootstrap_ci_seed``) so the
+    calibration fold draw doesn't collide with either RNG stream."""
+    digest = hashlib.sha256(f"{int(seed)}:calibration_fold".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
+
+
+#: DOM-4: default fraction of ``train`` carved out to fit the calibrator when the
+#: caller does not explicitly pick a fit split -- mirrors the early-stopping fold's
+#: default fraction (recipes.common.DEFAULT_EARLY_STOP_VALID_FRACTION).
+DEFAULT_CALIBRATION_FIT_FRACTION = 0.15
+
+
+def _calibration_valid_labeled_scores(
+    scorer: "_ModelArtifactScorer",
+    sample: pd.DataFrame,
+    target_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score ``sample`` and drop rows without a finite raw score or a clean binary
+    label -- shared filtering logic for every split calibrate_model touches."""
+    raw_scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
+    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(raw_scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
+    return raw_scores[valid], labels[valid].astype(int)
+
+
 def tool_calibrate_model(inputs: dict, ctx) -> dict:
+    """Fit a post-training binary probability calibrator and report Brier/ECE.
+
+    DOM-4: when the caller does not explicitly pick a ``split``/``fit_split`` to fit
+    on, the calibrator is fit on a held-out fold carved from ``train`` (same
+    deterministic carving paradigm as the early-stopping fold, TUNE-3/SEL-4, but its
+    own seed namespace so the draw never collides) instead of on ``test`` -- fitting
+    and immediately evaluating on the same set gives a mathematically-guaranteed-
+    optimistic ECE/Brier reading, especially for isotonic regression. Calibration
+    quality (Brier/ECE/reliability curve) is then reported on ``test`` (and ``oot``
+    when it carries labels), i.e. evaluated out of sample.
+
+    Back-compat: when the caller explicitly passes ``split`` (or ``fit_split``), the
+    calibrator fits AND is evaluated on that exact split, exactly like before --
+    existing callers/tests that pin ``split="test"`` see byte-identical output,
+    just with the metrics now additionally labelled ``evaluated_on:
+    "fit_sample(in-sample)"`` so the in-sample caveat is explicit instead of silent.
+    """
     runtime = _runtime(ctx)
     artifact = _artifact(runtime, str(inputs["artifact_id"]))
     experiment = runtime.experiments.get(artifact.experiment_id)
@@ -1940,43 +2088,115 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     dataset = runtime.registry.get(dataset_id)
     target_col = str(inputs.get("target_col") or config.target_col)
     split_col = str(inputs.get("split_col") or config.split_col)
-    split_name = str(inputs.get("split") or "test")
-    split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+    explicit_split = inputs.get("split") or inputs.get("fit_split")
     frame = runtime.backend.read_frame(
         runtime.registry.resolve_path(dataset.id),
         columns=_unique_columns([*artifact.feature_list, target_col, split_col]),
     )
-    sample = frame[frame[split_col] == split_value].copy()
-    if sample.empty:
-        raise ModelingError(f"calibration split has no rows: {split_col}={split_value}")
-
     scorer = _ModelArtifactScorer(
         artifact,
         base_dir=_artifact_model_base_dir(runtime, artifact),
         load_calibration=False,
     )
-    raw_scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
-    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
-    valid = np.isfinite(raw_scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
-    raw_scores = raw_scores[valid]
-    labels = labels[valid].astype(int)
-    if labels.size < min_samples:
-        raise ModelingError(
-            f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
-        )
-    if np.unique(labels).size < 2:
-        raise ModelingError("calibration sample must contain both positive and negative labels")
 
-    calibrator = _fit_calibrator(method, raw_scores, labels)
-    calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
-    raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
-    calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
-    reliability_curve = _calibration_curve_rows(
-        labels,
-        raw_scores,
-        calibrated_scores,
-        n_bins=n_bins,
-    )
+    if explicit_split:
+        # Back-compat path: fit and evaluate on the exact split the caller named --
+        # output shape/values are unchanged from before DOM-4, only the new
+        # `evaluated_on`/`fit_split`/`eval_split` fields are added.
+        split_name = str(explicit_split)
+        split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+        sample = frame[frame[split_col] == split_value].copy()
+        if sample.empty:
+            raise ModelingError(f"calibration split has no rows: {split_col}={split_value}")
+        raw_scores, labels = _calibration_valid_labeled_scores(scorer, sample, target_col)
+        if labels.size < min_samples:
+            raise ModelingError(
+                f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
+            )
+        if np.unique(labels).size < 2:
+            raise ModelingError("calibration sample must contain both positive and negative labels")
+
+        calibrator = _fit_calibrator(method, raw_scores, labels)
+        calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
+        raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
+        calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
+        reliability_curve = _calibration_curve_rows(labels, raw_scores, calibrated_scores, n_bins=n_bins)
+        eval_split_name = split_name
+        eval_sample_count = int(labels.size)
+        evaluated_on = "fit_sample(in-sample)"
+        per_split_metrics: dict[str, dict] = {}
+    else:
+        # DOM-4 default path: fit on a held-out fold carved from train, evaluate on
+        # test (and OOT when it carries labels) -- an independent labeled set the
+        # calibrator never saw during fitting.
+        train_value = config.split_values.get("train", "train")
+        train_frame = frame[frame[split_col] == train_value].copy()
+        if train_frame.empty:
+            raise ModelingError(f"calibration fit split has no rows: {split_col}={train_value}")
+        _fit_train, fit_fold = carve_early_stop_fold(
+            train_frame,
+            seed=_calibration_fold_seed(int(getattr(config, "seed", 0) or 0)),
+            valid_fraction=DEFAULT_CALIBRATION_FIT_FRACTION,
+        )
+        raw_scores, labels = _calibration_valid_labeled_scores(scorer, fit_fold, target_col)
+        if labels.size < min_samples:
+            raise ModelingError(
+                f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
+            )
+        if np.unique(labels).size < 2:
+            raise ModelingError("calibration sample must contain both positive and negative labels")
+
+        calibrator = _fit_calibrator(method, raw_scores, labels)
+        calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
+        # In-sample readings on the fitting fold itself -- reported but explicitly
+        # labelled, never the headline metric (DOM-4 fix item #2).
+        raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
+        calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
+        reliability_curve = _calibration_curve_rows(labels, raw_scores, calibrated_scores, n_bins=n_bins)
+        split_name = "train_calibration_fold"
+        split_value = train_value
+
+        per_split_metrics = {}
+        eval_split_name = None
+        eval_sample_count = 0
+        for candidate_split in ("test", "oot"):
+            candidate_value = config.split_values.get(candidate_split)
+            if candidate_value is None:
+                continue
+            candidate_frame = frame[frame[split_col] == candidate_value].copy()
+            if candidate_frame.empty:
+                continue
+            eval_scores, eval_labels = _calibration_valid_labeled_scores(scorer, candidate_frame, target_col)
+            if eval_labels.size < min_samples or np.unique(eval_labels).size < 2:
+                continue
+            eval_calibrated = _apply_calibrator(method, calibrator, eval_scores)
+            eval_raw_metrics = _calibration_metrics(eval_labels, eval_scores, n_bins=n_bins)
+            eval_calibrated_metrics = _calibration_metrics(eval_labels, eval_calibrated, n_bins=n_bins)
+            per_split_metrics[candidate_split] = {
+                "sample_count": int(eval_labels.size),
+                "brier_raw": eval_raw_metrics["brier"],
+                "brier_calibrated": eval_calibrated_metrics["brier"],
+                "ece_raw": eval_raw_metrics["ece"],
+                "ece_calibrated": eval_calibrated_metrics["ece"],
+            }
+            if eval_split_name is None:
+                # test is evaluated first in the loop order, so it is preferred as
+                # the headline out-of-sample reading; oot only fills in when test
+                # itself didn't have enough labeled rows.
+                eval_split_name = candidate_split
+                eval_sample_count = int(eval_labels.size)
+                raw_metrics = eval_raw_metrics
+                calibrated_metrics = eval_calibrated_metrics
+
+        if eval_split_name is not None:
+            evaluated_on = eval_split_name
+        else:
+            # No independent labeled split available (e.g. OOT unlabeled and no
+            # test split) -- fall back to the in-sample fitting-fold metrics
+            # already computed above, but say so explicitly.
+            evaluated_on = "fit_sample(in-sample)"
+            eval_split_name = split_name
+            eval_sample_count = int(labels.size)
 
     base_dir = _artifact_model_base_dir(runtime, artifact)
     calibration_path = f"{artifact.id}.calibration.{method}.joblib"
@@ -2000,13 +2220,18 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "split_col": split_col,
         "split": split_name,
         "split_value": split_value,
-        "sample_count": int(labels.size),
+        "fit_split": split_name,
+        "eval_split": eval_split_name,
+        "evaluated_on": evaluated_on,
+        "sample_count": eval_sample_count,
+        "fit_sample_count": int(labels.size),
         "positive_count": int(np.sum(labels == 1)),
         "negative_count": int(np.sum(labels == 0)),
         "brier_raw": raw_metrics["brier"],
         "brier_calibrated": calibrated_metrics["brier"],
         "ece_raw": raw_metrics["ece"],
         "ece_calibrated": calibrated_metrics["ece"],
+        "per_split_metrics": per_split_metrics,
         "n_bins": n_bins,
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
@@ -2025,7 +2250,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "detail": {
             "method": method,
             "dataset_id": dataset.id,
-            "sample_count": int(labels.size),
+            "sample_count": eval_sample_count,
             "calibration_path": calibration_path,
         },
     }
@@ -2054,11 +2279,16 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "calibration_path": str(base_dir / calibration_path),
         "split": split_name,
         "split_value": split_value,
-        "sample_count": int(labels.size),
+        "fit_split": split_name,
+        "eval_split": eval_split_name,
+        "evaluated_on": evaluated_on,
+        "sample_count": eval_sample_count,
+        "fit_sample_count": int(labels.size),
         "brier_raw": raw_metrics["brier"],
         "brier_calibrated": calibrated_metrics["brier"],
         "ece_raw": raw_metrics["ece"],
         "ece_calibrated": calibrated_metrics["ece"],
+        "per_split_metrics": per_split_metrics,
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
     }
@@ -4449,12 +4679,22 @@ def _artifact_calibration_rows(artifact: ModelArtifact | None) -> list[dict]:
     calibration = _artifact_calibration_metadata(artifact)
     if not calibration:
         return []
+    # DOM-4: fit_split/eval_split/evaluated_on annotate whether brier/ece below were
+    # computed on an independent out-of-sample split or (fallback) on the
+    # calibrator's own fitting sample -- absent on calibration payloads persisted
+    # before DOM-4, so these read as None on old artifacts rather than erroring.
+    fit_split = calibration.get("fit_split", calibration.get("split"))
+    eval_split = calibration.get("eval_split", calibration.get("split"))
+    evaluated_on = calibration.get("evaluated_on")
     rows = []
     rows.append({
         "score_type": "summary",
         "method": calibration.get("method"),
         "split": calibration.get("split"),
         "split_value": calibration.get("split_value"),
+        "fit_split": fit_split,
+        "eval_split": eval_split,
+        "evaluated_on": evaluated_on,
         "sample_count": calibration.get("sample_count"),
         "positive_count": calibration.get("positive_count"),
         "brier_raw": calibration.get("brier_raw"),
@@ -4478,6 +4718,9 @@ def _artifact_calibration_rows(artifact: ModelArtifact | None) -> list[dict]:
             "method": calibration.get("method"),
             "split": calibration.get("split"),
             "split_value": calibration.get("split_value"),
+            "fit_split": fit_split,
+            "eval_split": eval_split,
+            "evaluated_on": evaluated_on,
             "sample_count": row.get("sample_count"),
             "positive_count": row.get("positive_count"),
             "brier_raw": None,
