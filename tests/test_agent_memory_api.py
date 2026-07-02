@@ -2,7 +2,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from marvis.api import _agent_memory_context_from_store, _audit_agent_memory_use_from_store
+from marvis.agent_memory.api_support import (
+    agent_memory_context_from_store as _agent_memory_context_from_store,
+    audit_agent_memory_use_from_store as _audit_agent_memory_use_from_store,
+)
 from marvis.agent_memory.distillation import new_distillation
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.store import AgentMemoryStore

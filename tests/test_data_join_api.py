@@ -255,7 +255,7 @@ def test_data_join_double_confirm_second_request_gets_409_without_second_turn(
     idx_jobs_active_task guard *before* it reaches dispatch_plan_driver_turn a
     second time — not raced into a second PlanExecutor.run that could mis-flag
     the in-flight step as a restart orphan (REL-1) and clobber it with a 500."""
-    from marvis import api as marvis_api
+    from marvis.agent import validation_app_service as vas
 
     src = _join_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
@@ -267,7 +267,7 @@ def test_data_join_double_confirm_second_request_gets_409_without_second_turn(
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
 
     turn_calls: list[str] = []
-    real_dispatch = marvis_api.dispatch_plan_driver_turn
+    real_dispatch = vas.dispatch_plan_driver_turn
 
     def racing_dispatch(runtime, repo, task, **kwargs):
         turn_calls.append(task.id)
@@ -282,7 +282,7 @@ def test_data_join_double_confirm_second_request_gets_409_without_second_turn(
         assert second.json()["detail"] == "该任务正在执行上一步，请等待完成"
         return real_dispatch(runtime, repo, task, **kwargs)
 
-    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", racing_dispatch)
+    monkeypatch.setattr(vas, "dispatch_plan_driver_turn", racing_dispatch)
 
     first = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
 
@@ -302,7 +302,7 @@ def test_data_join_active_driver_job_reports_kind_driver_on_task_payload(
     active_job_kind == "driver" while a driver turn is executing, so the
     frontend's busy state / 1s polling can pick it up after a refresh or from
     any other entry point (UX-1)."""
-    from marvis import api as marvis_api
+    from marvis.agent import validation_app_service as vas
 
     src = _join_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
@@ -314,7 +314,7 @@ def test_data_join_active_driver_job_reports_kind_driver_on_task_payload(
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
 
     observed: dict[str, str | None] = {}
-    real_dispatch = marvis_api.dispatch_plan_driver_turn
+    real_dispatch = vas.dispatch_plan_driver_turn
 
     def observing_dispatch(runtime, repo, task, **kwargs):
         mid_turn = client.get(f"/api/tasks/{task_id}")
@@ -325,7 +325,7 @@ def test_data_join_active_driver_job_reports_kind_driver_on_task_payload(
         observed["listed"] = listed_task["active_job_kind"]
         return real_dispatch(runtime, repo, task, **kwargs)
 
-    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", observing_dispatch)
+    monkeypatch.setattr(vas, "dispatch_plan_driver_turn", observing_dispatch)
 
     resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     assert resp.status_code == 202, resp.text
@@ -344,7 +344,7 @@ def test_data_join_driver_turn_job_finishes_on_exception(
     except branch) even when the turn function raises an unexpected exception,
     so a single failed turn doesn't permanently lock the task behind the
     idx_jobs_active_task unique index."""
-    from marvis import api as marvis_api
+    from marvis.agent import validation_app_service as vas
     from marvis.app import create_app
     from marvis.db import TaskRepository
 
@@ -360,7 +360,7 @@ def test_data_join_driver_turn_job_finishes_on_exception(
     def boom(runtime, repo, task, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", boom)
+    monkeypatch.setattr(vas, "dispatch_plan_driver_turn", boom)
 
     # A fresh client sharing the same tmp_path-backed app/db, configured not to
     # re-raise the server exception, so the 500 can be asserted on the response
