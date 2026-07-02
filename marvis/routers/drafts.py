@@ -212,7 +212,6 @@ def reject(request: Request, draft_id: str, payload: dict) -> dict:
             draft,
             drafts=request.app.state.draft_registry,
             reason=str(payload.get("reason") or ""),
-            audit_repo=request.app.state.plugin_repo,
         )
     except DraftStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -102,12 +102,7 @@ class SubAgentDispatcher:
                 "tools": [ref.label() for ref in sub.granted_tools],
             },
         }
-        upsert_with_audit = getattr(self._repo, "upsert_sub_agent_with_audit", None)
-        if callable(upsert_with_audit):
-            upsert_with_audit(sub, audit=audit)
-        else:
-            self._repo.upsert_sub_agent(sub)
-            self._repo.write_audit(**audit)
+        self._repo.upsert_sub_agent_with_audit(sub, audit=audit)
         return sub
 
     def run(self, sub: SubAgent, *, goal_inputs: dict) -> ToolResult:
@@ -209,12 +204,7 @@ class SubAgentDispatcher:
         audit: dict,
         result_ref: str | None = None,
     ) -> None:
-        set_with_audit = getattr(self._repo, "set_sub_agent_status_with_audit", None)
-        if callable(set_with_audit):
-            set_with_audit(sub_id, status, result_ref=result_ref, audit=audit)
-        else:
-            self._repo.set_sub_agent_status(sub_id, status, result_ref=result_ref)
-            self._repo.write_audit(**audit)
+        self._repo.set_sub_agent_status_with_audit(sub_id, status, result_ref=result_ref, audit=audit)
 
 
 def _duration_ms(started: float) -> int:
