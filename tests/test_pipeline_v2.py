@@ -39,6 +39,7 @@ from marvis.pipeline import (
     run_notebook_stage,
     run_pipeline,
     run_report_stage,
+    run_staged_pipeline,
 )
 
 
@@ -2116,3 +2117,182 @@ def test_load_sample_supports_excel_files(tmp_path: Path):
     sample = _load_sample(sample_path)
 
     assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}
+
+
+def test_staged_pipeline_isolated_mode_executes_notebook_once(tmp_path: Path):
+    # PERF-3 regression: the default isolated-mode staged pipeline must run
+    # the user notebook exactly once. Before the fix, the metrics stage
+    # force-closed the (nonexistent, in isolated mode) live session and
+    # replayed the entire notebook from scratch, doubling wall-clock time.
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "sample.csv").write_text("placeholder\n1\n", encoding="utf-8")
+    shutil.copy(FIXTURES / "min_lr.pmml", project / "fr_final.pmml")
+    pd.DataFrame(
+        {
+            "特征名": ["x1", "x2"],
+            "类别": ["征信", "基础信息"],
+        }
+    ).to_csv(project / "data_dictionary.csv", index=False)
+    _write_live_sample_contract_notebook(project / "dev.ipynb")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "marvis.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+            target_col="y",
+            score_col="pred",
+            split_col="split",
+            time_col="apply_month",
+        )
+    )
+    settings = PipelineSettings(
+        workspace=workspace,
+        db_path=db_path,
+        report_template_path=_write_template(tmp_path / "template.docx"),
+        random_sample_size=12,
+    )
+    assert settings.notebook_isolated_execution is True
+
+    run_staged_pipeline(task_id=task.id, settings=settings)
+
+    final = repo.get_task(task.id)
+    assert final.status in {
+        TaskStatus.WRITING_ARTIFACTS,
+        TaskStatus.REVIEW_REQUIRED,
+        TaskStatus.SUCCEEDED,
+    }
+    assert (project / "notebook_run_count.txt").read_text(encoding="utf-8") == "1"
+    task_dir = workspace / "tasks" / task.id
+    assert (task_dir / "execution" / "model_meta.json").exists()
+    assert (task_dir / "outputs" / "validation_results.json").exists()
+    result_json = json.loads(
+        (task_dir / "outputs" / "validation_results.json").read_text(encoding="utf-8")
+    )
+    assert result_json["reproducibility"]["summary"]["status"] == "pass"
+
+
+def test_staged_pipeline_isolated_mode_merged_run_calls_notebook_step_once(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # Same guarantee as above, verified at the mock level: _notebook_step_v3
+    # (the isolated subprocess launcher) must be invoked exactly once for
+    # the default consecutive notebook+metrics path, with a combined
+    # extra_code_cells list covering both reproducibility and metrics cells.
+    project = tmp_path / "project"
+    project.mkdir()
+    notebook_path = project / "dev.ipynb"
+    sample_path = project / "sample.csv"
+    pmml_path = project / "fr_final.pmml"
+    dictionary_path = project / "data_dictionary.csv"
+    nbformat.write(nbformat.v4.new_notebook(cells=[]), notebook_path)
+    sample_path.write_text("x1,pred,y,split,apply_month\n1,0.1,0,train,202501\n")
+    pmml_path.write_text("<PMML/>", encoding="utf-8")
+    dictionary_path.write_text("特征名,类别\nx1,基础信息\n", encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    db_path = workspace / "marvis.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="A卡",
+            model_version="v1",
+            validator="qa",
+            source_dir=str(project),
+            algorithm="lgb",
+        )
+    )
+
+    call_count = {"value": 0}
+
+    def fake_notebook_step_v3(
+        *,
+        repo,
+        task,
+        contract_meta_path,
+        code_scores_path,
+        execution_dir,
+        extra_code_cells,
+        stage_claimed,
+        **kwargs,
+    ):
+        call_count["value"] += 1
+        assert kwargs["keep_alive"] is False
+        assert kwargs["isolated"] is True
+        kinds = [kind for kind, _source in extra_code_cells]
+        assert kinds[:2] == ["repro-pmml", "repro-compare"]
+        assert "metrics-prepare" in kinds
+        assert "metrics-output" in kinds
+        if not stage_claimed:
+            repo.update_status(
+                task.id,
+                TaskStatus.RUNNING,
+                message="notebook queued",
+                expected={
+                    TaskStatus.SCANNED,
+                    TaskStatus.RUNNING,
+                    TaskStatus.EXECUTED,
+                    TaskStatus.FAILED,
+                },
+            )
+        contract_meta_path.write_text(
+            json.dumps(
+                {
+                    "target_col": "y",
+                    "split_col": "split",
+                    "time_col": "apply_month",
+                    "pmml_output_field": "probability_1",
+                    "score_decimal_places": 6,
+                    "code_model_scores_path": str(code_scores_path),
+                    "feature_importance_path": None,
+                    "model_params_path": None,
+                    "algorithm": "lgb",
+                }
+            ),
+            encoding="utf-8",
+        )
+        code_scores_path.write_text("row_index,code_model_score\n0,0.1\n")
+        (execution_dir / "model_meta.json").write_text(
+            json.dumps({"algorithm": "lgb", "feature_importance": [], "hyperparameters": {}}),
+            encoding="utf-8",
+        )
+        outputs_dir = workspace / "tasks" / task.id / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / REPRODUCIBILITY_RESULT_JSON).write_text(
+            json.dumps({"summary": {"status": "pass"}, "rows": []}),
+            encoding="utf-8",
+        )
+        metrics_work_dir = outputs_dir / ".metrics-stage-work"
+        metrics_work_dir.mkdir(parents=True, exist_ok=True)
+        (metrics_work_dir / "validation_results.json").write_text("{}", encoding="utf-8")
+        (metrics_work_dir / "validation.xlsx").write_bytes(b"xlsx")
+
+    monkeypatch.setattr("marvis.pipeline._notebook_step_v3", fake_notebook_step_v3)
+
+    settings = PipelineSettings(
+        workspace=workspace,
+        db_path=db_path,
+        report_template_path=tmp_path / "template.docx",
+    )
+    run_notebook_stage(
+        task_id=task.id,
+        settings=settings,
+        also_prepare_metrics=True,
+    )
+    assert repo.get_task(task.id).status == TaskStatus.EXECUTED
+
+    run_metrics_stage(task_id=task.id, settings=settings)
+
+    assert call_count["value"] == 1
+    assert repo.get_task(task.id).status == TaskStatus.WRITING_ARTIFACTS
