@@ -46,6 +46,9 @@ class ExecutionEnvironmentRequest(BaseModel):
 class LLMSettingsRequest(BaseModel):
     default_model_id: str = ""
     capability_tier: str = ""
+    # LLM-4: caller-role -> model_id routing (e.g. {"planner": "model-a",
+    # "gate": "model-b"}); unmapped roles fall back to default_model_id.
+    role_overrides: dict[str, str] = Field(default_factory=dict)
     models: list[dict] = Field(default_factory=list)
 
 

@@ -316,7 +316,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     draft_sandbox = DraftSandbox(tool_runner, draft_registry, draft_repo)
     memory_store = AgentMemoryStore(settings.db_path)
     memory_consolidation_scheduler = ConsolidationScheduler(
-        DistillationEngine(memory_store, llm_factory=_llm_factory(settings)),
+        DistillationEngine(memory_store, llm_factory=_llm_factory(settings, role="distill")),
         EvolutionManager(memory_store),
         memory_store,
         auto_enabled=lambda: load_memory_policy(settings.workspace).auto_distill,
@@ -347,10 +347,16 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
         app.state.tool_registry,
         plan_validator,
     )
-    llm_factory = _llm_factory(settings)
-    intent_router = IntentRouter(llm_factory, app.state.tool_registry)
-    planner = Planner(app.state.tool_registry, llm_factory, plan_validator)
-    reviewer = Reviewer(llm_factory)
+    # LLM-4: each orchestrator role gets its own factory so a role_overrides
+    # entry (settings/llm.json) can route it to a smaller/larger model; with no
+    # override configured every factory still resolves to default_model_id,
+    # i.e. today's single-model behavior is preserved unchanged.
+    planner_llm_factory = _llm_factory(settings, role="planner")
+    reviewer_llm_factory = _llm_factory(settings, role="critic")
+    router_llm_factory = _llm_factory(settings, role="router_intent")
+    intent_router = IntentRouter(router_llm_factory, app.state.tool_registry)
+    planner = Planner(app.state.tool_registry, planner_llm_factory, plan_validator)
+    reviewer = Reviewer(reviewer_llm_factory)
     harness_state = HarnessState(plan_repo)
 
     def executor_factory(restricted_registry):
@@ -375,7 +381,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     def subagent_planner_factory(restricted_registry):
         return Planner(
             restricted_registry,
-            llm_factory,
+            planner_llm_factory,
             PlanValidator(restricted_registry),
         )
 
@@ -407,7 +413,15 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
     app.state.plan_executor = plan_executor
 
 
-def _llm_factory(settings: Settings):
+def _llm_factory(settings: Settings, *, role: str | None = None):
+    """Build an LLM client factory for one orchestrator role.
+
+    LLM-4: ``role`` is resolved against settings/llm.json's role_overrides
+    (falls back to default_model_id when unmapped — see
+    marvis.llm_settings.resolve_llm_model), so different components (planner,
+    critic, router_intent, distill, ...) can be routed to different models
+    without touching call sites beyond this assembly point.
+    """
     db_path = settings.db_path
 
     def _record(record: dict) -> None:
@@ -419,7 +433,7 @@ def _llm_factory(settings: Settings):
 
     def factory():
         return OpenAICompatibleLLMClient(
-            resolve_llm_model(settings.workspace),
+            resolve_llm_model(settings.workspace, role=role),
             on_call_recorded=_record,
         )
 
