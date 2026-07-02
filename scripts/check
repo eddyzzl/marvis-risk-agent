@@ -11,6 +11,7 @@ RUN_PYTEST=1
 RUN_RUFF=1
 RUN_NODE=1
 RUN_DIFF=1
+RUN_AUDIT=0
 FAST=0
 
 usage() {
@@ -25,6 +26,8 @@ Options:
   --skip-node     Skip JavaScript syntax checks.
   --skip-diff     Skip git diff whitespace checks.
   --fast          Run only the fast test tier (-m "not slow and not e2e").
+  --audit         Run pip-audit against the locked dependencies (skipped
+                   with a warning if pip-audit is not installed).
   -h, --help      Show this help.
 
 Environment:
@@ -55,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fast)
       FAST=1
+      shift
+      ;;
+    --audit)
+      RUN_AUDIT=1
       shift
       ;;
     -h|--help)
@@ -112,4 +119,13 @@ fi
 if [[ "$RUN_PYTEST" -eq 1 ]]; then
   echo "==> pytest ${PYTEST_ARGS[*]}"
   "$PYTHON_BIN" -m pytest "${PYTEST_ARGS[@]}"
+fi
+
+if [[ "$RUN_AUDIT" -eq 1 ]]; then
+  echo "==> pip-audit"
+  if "$PYTHON_BIN" -m pip_audit --version >/dev/null 2>&1; then
+    "$PYTHON_BIN" -m pip_audit
+  else
+    echo "skipping pip-audit: not installed (pip install pip-audit to enable --audit)"
+  fi
 fi

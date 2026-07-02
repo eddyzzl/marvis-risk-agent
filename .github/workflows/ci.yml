@@ -44,3 +44,34 @@ jobs:
         env:
           CHECK_DIFF_RANGE: ${{ github.event_name == 'pull_request' && format('{0}...HEAD', github.event.pull_request.base.sha) || 'HEAD~1..HEAD' }}
         run: uv run scripts/check
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Non-blocking for now: this job surfaces dependency CVEs and high-severity
+    # static-analysis findings without gating merges. Flip continue-on-error to
+    # false once the existing findings have been triaged.
+    continue-on-error: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+
+      - name: pip-audit (dependency CVE scan)
+        run: uv tool run pip-audit
+
+      - name: bandit (high-severity static security scan)
+        run: uv tool run bandit -r marvis -ll
