@@ -28,10 +28,45 @@ export function latestInteractiveScreenMessageId(messages = []) {
 // "tool, not conversation" section styling (no bubble/card shell) but still
 // needs to mark the one section that is genuinely awaiting confirmation, so
 // it gets the same tone bar language as the agent-mode gate card.
-function lastAssistantMessageId(messages = []) {
+export function lastAssistantMessageId(messages = []) {
   for (let index = messages.length - 1; index >= 0; index--) {
     if (messages[index]?.role === "assistant") return String(messages[index].id || "");
   }
+  return "";
+}
+
+// UX-2: does this gate message carry a structured widget payload at all
+// (screening table / dedup picker / modeling setup panel / C1 role form)?
+// Shared by both modes so the "does this gate need a widget" decision lives
+// in exactly one place.
+export function driverGateHasWidget(message) {
+  const meta = message?.metadata || {};
+  return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
+}
+
+// UX-2: mounts the FULL body (structured widget(s) + any accompanying
+// diagnostics tables) for a single gate message, exactly matching the
+// widget/table placement manual mode has always used per gate kind (tables
+// alongside modeling_setup/dedup, no separate tables for join_c1/screen since
+// their widgets already surface the relevant data). The widget components
+// themselves are mode-agnostic (they only read message.metadata and post
+// through the shared /agent/messages endpoint), so this is the ONE place that
+// decides which widget(s) a given gate message's metadata calls for. Both
+// manual mode (driverManualAnalysisHtml, below) and agent mode (app.js's
+// agentMessageHtml) call this instead of re-deciding the branch themselves,
+// so a gate always gets the same controls in both modes.
+export function driverGateBodyHtml(message, renderers = {}, options = {}) {
+  const renderC1Form = renderers.renderC1Form || emptyRenderer;
+  const renderDedupPicker = renderers.renderDedupPicker || emptyRenderer;
+  const renderModelingSetup = renderers.renderModelingSetup || emptyRenderer;
+  const renderScreenTable = renderers.renderScreenTable || emptyRenderer;
+  const renderTables = renderers.renderTables || emptyRenderer;
+  const meta = message?.metadata || {};
+  const interactive = options.interactive !== false;
+  if (meta.join_c1) return renderC1Form(message, { interactive });
+  if (meta.screen) return `${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}`;
+  if (meta.modeling_setup) return `${renderModelingSetup(message, { interactive })}${renderTables(message)}`;
+  if (meta.dedup) return `${renderTables(message)}${renderDedupPicker(message, { interactive })}`;
   return "";
 }
 
@@ -41,10 +76,6 @@ function lastAssistantMessageId(messages = []) {
 // so this module does not own individual gate UI implementations.
 export function driverManualAnalysisHtml(messages, renderers = {}) {
   const renderMarkdown = renderers.renderAgentMarkdown || markdownRenderer;
-  const renderC1Form = renderers.renderC1Form || emptyRenderer;
-  const renderDedupPicker = renderers.renderDedupPicker || emptyRenderer;
-  const renderModelingSetup = renderers.renderModelingSetup || emptyRenderer;
-  const renderScreenTable = renderers.renderScreenTable || emptyRenderer;
   const renderTables = renderers.renderTables || emptyRenderer;
   const renderModelDelivery = renderers.renderModelDelivery || emptyRenderer;
 
@@ -65,24 +96,23 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     }
     const intro = renderMarkdown(stripChatInstructions(message.content || ""));
     if (meta.join_c1) {
-      sections.push(`<section class="${sectionClass}">${intro}${renderC1Form(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers)}</section>`);
       continue;
     }
     if (meta.screen) {
       const interactive = String(message.id || "") === latestScreenMessageId;
       sections.push(
-        `<section class="${sectionClass}">${intro}${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}</section>`,
+        `<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`,
       );
       continue;
     }
     if (meta.modeling_setup) {
       const interactive = meta.kind === "gate";
-      sections.push(`<section class="${sectionClass}">${intro}${renderModelingSetup(message, { interactive })}${renderTables(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers, { interactive })}</section>`);
       continue;
     }
     if (meta.dedup) {
-      const diagTables = renderTables(message);
-      sections.push(`<section class="${sectionClass}">${intro}${diagTables}${renderDedupPicker(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${driverGateBodyHtml(message, renderers)}</section>`);
       continue;
     }
     if (meta.model_delivery) {

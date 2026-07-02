@@ -5587,8 +5587,14 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     assert "run_mode: selectedRunMode" in create_dialog_js
 
     assert "function selectedTaskIsAgentMode" in app_js
-    assert "renderDriverGateButton(message, { isAgentMode: selectedTaskIsAgentMode })" in app_js
-    assert 'message?.metadata?.kind !== "gate" || isAgentMode' in driver_confirm_js
+    # UX-2: the plain gate confirm button now renders in BOTH modes (it used to
+    # short-circuit on isAgentMode, forcing agent-mode gates with no structured
+    # widget through free-text routing only); it still steps aside whenever the
+    # gate carries a structured widget, since that widget owns the primary
+    # confirm action.
+    assert "renderDriverGateButton(message)" in app_js
+    assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
+    assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js
 
 
@@ -9207,6 +9213,190 @@ def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence()
     assert 'data-gate-tone="review"' in clean_html
     assert "gate-card-redflags" not in clean_html
 
+
+def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
+    """UX-2: the agent-mode chat timeline must mount the SAME structured gate
+    widgets manual mode uses (screening table / dedup picker / modeling setup
+    panel / C1 role form) instead of a bare text bubble + confirm button.
+
+    This drives the real agentMessageHtml() (via the full app.js module, same
+    harness as the reproducibility tests) so the assertions exercise actual
+    production wiring, not a hand-rolled stand-in. Three things are pinned:
+    1. The latest gate's widget renders WITH interactive controls (checkboxes /
+       selects not disabled), using the exact same class names/attributes the
+       manual-mode screen table renders (screen_gate_controller.js authors
+       them; this just confirms agent mode reaches the same renderer).
+    2. An OLDER (non-latest) gate message's widget renders read-only
+       (disabled inputs, data-screen-readonly="true") — the stale-gate guard.
+    3. The free-text composer contract is untouched: agentMessageHtml keeps
+       rendering the message content bubble regardless of the widget, so free
+       text remains a second channel alongside the structured controls.
+    """
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+
+    messages = [
+        {
+            "id": "old-screen",
+            "role": "assistant",
+            "stage": "chat",
+            "content": "第一次筛选完成。",
+            "metadata": {
+                "kind": "gate",
+                "step_id": "gate-old",
+                "screen": {"selected": ["x1"], "thresholds": {"leakage_ks": 0.4, "max_missing_rate": 0.95}},
+            },
+        },
+        {
+            "id": "latest-screen",
+            "role": "assistant",
+            "stage": "chat",
+            "content": "阈值调整后重新筛选完成。",
+            "metadata": {
+                "kind": "gate",
+                "step_id": "gate-new",
+                "screen": {"selected": ["x2"], "thresholds": {"leakage_ks": 0.35, "max_missing_rate": 0.9}},
+            },
+        },
+    ]
+
+    test_driver = "\n".join(
+        [
+            f"const messages = {json.dumps(messages)};",
+            "const oldHtml = agentMessageHtml(messages[0], 'chat', { isLatestGate: false });",
+            "const latestHtml = agentMessageHtml(messages[1], 'chat', { isLatestGate: true });",
+            "process.stdout.write(JSON.stringify({ oldHtml, latestHtml }));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    payload = _run_node_capture_json(script)
+    old_html = payload["oldHtml"]
+    latest_html = payload["latestHtml"]
+
+    # Both render the SAME structured screen-table control classes manual mode
+    # uses (screen_gate_controller.js) — no separate agent-only markup.
+    assert 'class="screen-table-wrap"' in old_html
+    assert 'class="screen-table-wrap"' in latest_html
+    assert 'class="screen-pick"' in old_html
+    assert 'class="screen-pick"' in latest_html
+
+    # The free-text bubble is still rendered alongside the widget in both
+    # cases — agent mode's free-text channel is not replaced by the widget.
+    assert "agent-message-content" in old_html
+    assert "agent-message-content" in latest_html
+    assert "第一次筛选完成" in old_html
+    assert "阈值调整后重新筛选完成" in latest_html
+
+    # Stale guard: only the LATEST gate is interactive; the older gate's
+    # widget renders as a disabled, read-only snapshot.
+    assert 'data-screen-readonly="true"' in old_html
+    assert 'data-screen-readonly="true"' not in latest_html
+    assert old_html.count(" disabled") > 0
+    assert 'data-screen-step-id="gate-new"' in latest_html
+    assert "screen-confirm" in latest_html
+    assert "历史结果" in old_html
+
+    # Gates with a structured widget do NOT also render the plain
+    # driver-gate-actions confirm button (the widget owns the primary action).
+    assert "driver-gate-actions" not in old_html
+    assert "driver-gate-actions" not in latest_html
+
+
+def test_agent_mode_gate_without_widget_still_renders_plain_confirm_button():
+    """UX-2: a gate message with no structured payload (no screen/dedup/
+    modeling_setup/join_c1 — e.g. a plain "上一步已完成，确认继续" step) must
+    still offer SOME one-click affordance in agent mode, not force free text
+    for what used to be the isAgentMode early-return case.
+    """
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+
+    message = {
+        "id": "plain-gate",
+        "role": "assistant",
+        "stage": "chat",
+        "content": "上一步已完成。",
+        "metadata": {"kind": "gate", "step_id": "gate-plain"},
+    }
+    test_driver = "\n".join(
+        [
+            f"const message = {json.dumps(message)};",
+            "const html = agentMessageHtml(message, 'chat', { isLatestGate: true });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    html = _run_node_capture_json(script)["html"]
+
+    assert "driver-gate-actions" in html
+    assert 'data-driver-confirm="1"' in html
+    assert 'data-expected-step-id="gate-plain"' in html
+
+
+def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
+    """UX-2: the agent-mode-mounted widget must post through the exact same
+    controller function manual mode uses (screenGateControllerContext /
+    submitScreenSelection), so the request payload shape (selection +
+    expected_step_id, mode-independent /agent/messages POST) is identical
+    regardless of which mode mounted the control — there is no agent-only
+    branch that could drift from the manual-mode contract.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "screen_gate_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderScreenGateTable, submitScreenSelection }} from {json.dumps(module_url)};",
+            "const message = {",
+            "  id: 'agent-screen-msg',",
+            "  metadata: {",
+            "    kind: 'gate',",
+            "    step_id: 'gate-agent',",
+            "    screen: { selected: ['x1', 'x2'], thresholds: { leakage_ks: 0.35, max_missing_rate: 0.9 } },",
+            "  },",
+            "};",
+            # This is the exact renderer app.js's agentMessageGateBodyHtml calls
+            # for a screen gate — proves the DOM the widget produces is postable
+            # through the same submit function manual mode uses.
+            "const html = renderScreenGateTable(message, { interactive: true });",
+            "const calls = [];",
+            "const wrap = {",
+            "  dataset: { screenReadonly: 'false', screenStepId: 'gate-agent' },",
+            "  querySelectorAll: (selector) => selector === '.screen-pick:checked' ? [",
+            "    { value: 'x1', disabled: false, closest: () => ({ classList: { contains: () => false } }) },",
+            "  ] : [],",
+            "};",
+            "const button = { disabled: false, closest: () => wrap };",
+            "const context = {",
+            "  selectedTaskId: 'task-agent',",
+            "  agentAcceptanceModeValue: () => 'manual',",
+            "  setActionStatus: () => {},",
+            "  setAgentMessages: () => {},",
+            "  renderAgentConversation: () => {},",
+            "  api: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return { messages: [] }; },",
+            "};",
+            "await submitScreenSelection(button, context);",
+            "process.stdout.write(JSON.stringify({ html, calls }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'class="screen-table-wrap"' in payload["html"]
+    assert payload["calls"], "submitScreenSelection did not POST"
+    url, body = payload["calls"][0]
+    assert url == "/api/tasks/task-agent/agent/messages"
+    # Same structured fields the review's fix step 2 calls out: selection +
+    # expected_step_id (the mode-independent contract validation_agent.py and
+    # gate_response_adapter.py already accept).
+    assert body["selection"] == ["x1"]
+    assert body["expected_step_id"] == "gate-agent"
+    assert "content" in body
 
 
 def test_skeleton_templates_render_block_rows_and_table_shapes():

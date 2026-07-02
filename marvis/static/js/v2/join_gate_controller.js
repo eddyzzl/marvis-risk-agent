@@ -43,15 +43,20 @@ function withDriverTurnBusyFeedback(taskId, context, run) {
   return run(pollAgentMessagesUntilSettled).finally(stopPlanRailTicker);
 }
 
-export function renderJoinC1Form(message) {
+export function renderJoinC1Form(message, options = {}) {
   const c1 = message?.metadata?.join_c1;
   if (!c1 || !Array.isArray(c1.files) || !c1.files.length) return "";
   const messageId = message?.id ? String(message.id) : "";
+  // UX-2: earlier C1 forms (superseded by a later gate) render read-only so a
+  // stale tab cannot re-submit role assignments against an already-advanced
+  // step — mirrors the screen/modeling-setup readonly convention.
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const roleSelect = (datasetId, selected) => {
     const opt = (value, label) =>
       `<option value="${value}"${selected === value ? " selected" : ""}>${label}</option>`;
     return (
-      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}">`
+      `<select class="c1-role" data-c1-dataset="${escapeHtml(datasetId)}"${disabledAttr}>`
       + opt("anchor", "样本主表")
       + opt("feature", "特征表")
       + opt("ignore", "忽略")
@@ -86,14 +91,14 @@ export function renderJoinC1Form(message) {
       ),
     )
     .join("");
-  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}">
+  return `<div class="c1-form" data-c1-form="${escapeHtml(messageId)}"${interactive ? "" : ' data-c1-readonly="true"'}>
     <table class="c1-form-table">
       <thead><tr><th>文件</th><th>行数</th><th>列数</th><th>含目标</th><th>角色</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="c1-form-foot">
-      <label class="c1-target-label">目标列 <select class="c1-target">${targetOptions}</select></label>
-      <button type="button" class="button compact primary c1-confirm" data-c1-confirm="${escapeHtml(messageId)}">确认角色</button>
+      <label class="c1-target-label">目标列 <select class="c1-target"${disabledAttr}>${targetOptions}</select></label>
+      <button type="button" class="button compact primary c1-confirm"${interactive ? ` data-c1-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "确认角色" : "历史结果"}</button>
     </div>
   </div>`;
 }
@@ -102,6 +107,10 @@ export async function submitC1Assignment(button, rawContext = {}) {
   const form = button.closest(".c1-form");
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
+  if (form.dataset.c1Readonly === "true") {
+    setActionStatus("这是历史拼接角色结果,请使用最新待确认步骤确认。", "error");
+    return;
+  }
   const anchorIds = [];
   const featureIds = [];
   for (const select of form.querySelectorAll(".c1-role")) {
@@ -149,11 +158,16 @@ export function handleC1ConfirmClick(event, context = {}) {
   return true;
 }
 
-export function renderDedupPicker(message) {
+export function renderDedupPicker(message, options = {}) {
   const dedup = message?.metadata?.dedup;
   if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
   const messageId = message?.id ? String(message.id) : "";
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
+  // UX-2: an earlier dedup gate (superseded by a later gate) renders read-only
+  // so a stale tab cannot re-submit strategies against an already-advanced
+  // step — mirrors the screen/modeling-setup readonly convention.
+  const interactive = options.interactive !== false;
+  const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
   const strategies = Array.isArray(dedup.strategies) && dedup.strategies.length ? dedup.strategies : ["first", "last"];
   const rows = dedup.features
     .map((feature) => {
@@ -168,18 +182,18 @@ export function renderDedupPicker(message) {
       return `<tr>
       <td class="dedup-feat">${escapeHtml(fid)}</td>
       <td>${escapeHtml(conflicts)}</td>
-      <td><select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}">${options}</select></td>
+      <td><select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}"${disabledAttr}>${options}</select></td>
     </tr>`;
     })
     .join("");
-  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}">
+  return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-dedup-readonly="true"'}>
     <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
     <table class="dedup-table">
       <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <div class="dedup-foot">
-      <button type="button" class="button compact primary dedup-confirm" data-dedup-confirm="${escapeHtml(messageId)}">应用去重并确认</button>
+      <button type="button" class="button compact primary dedup-confirm"${interactive ? ` data-dedup-confirm="${escapeHtml(messageId)}"` : disabledAttr}>${interactive ? "应用去重并确认" : "历史结果"}</button>
     </div>
   </div>`;
 }
@@ -188,6 +202,10 @@ export async function submitDedupStrategies(button, rawContext = {}) {
   const form = button.closest(".dedup-picker");
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
+  if (form.dataset.dedupReadonly === "true") {
+    setActionStatus("这是历史去重结果,请使用最新待确认步骤确认。", "error");
+    return;
+  }
   const dedupStrategies = {};
   for (const select of form.querySelectorAll(".dedup-strategy")) {
     const featureId = select.getAttribute("data-dedup-feature");

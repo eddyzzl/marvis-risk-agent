@@ -118,13 +118,20 @@ export function agentReportMessagesForDisplay(messages = []) {
 export function agentMessagesHtml(messages = [], labelStage, deps = {}) {
   const stageLabel = deps.agentStageLabel || (() => "Agent");
   const messageHtml = deps.agentMessageHtml || ((message) => String(message?.content || ""));
+  // UX-2: the ONE gate message eligible for interactive structured widgets is
+  // the latest assistant gate across the WHOLE timeline (not just this bucket
+  // — buckets split the timeline around stage sections/frozen snapshots), so
+  // the id is resolved once by the caller and threaded through here rather
+  // than recomputed per bucket.
+  const latestGateMessageId = deps.latestGateMessageId || "";
   let previousAssistantLabel = "";
   return messages.map((message) => {
     const resolvedLabelStage = labelStage === undefined ? message?.stage : labelStage;
     const label = message?.role === "user" ? "" : stageLabel(resolvedLabelStage);
     const hideMeta = Boolean(label && label === previousAssistantLabel);
     previousAssistantLabel = label || "";
-    return messageHtml(message, resolvedLabelStage, { hideMeta });
+    const isLatestGate = Boolean(latestGateMessageId) && String(message?.id || "") === latestGateMessageId;
+    return messageHtml(message, resolvedLabelStage, { hideMeta, isLatestGate });
   }).join("");
 }
 

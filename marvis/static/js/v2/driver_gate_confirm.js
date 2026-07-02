@@ -6,11 +6,25 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+// UX-2: manual mode never calls this (its plain-gate confirm lives in the step
+// rail, driven by the same data-driver-confirm handler — see
+// plan_rail_controller.js). Agent mode's chat timeline is the only caller
+// (agentMessageGateButtonHtml in app.js), and previously it short-circuited
+// here whenever isAgentMode was true, so a gate with no structured widget
+// (screen/dedup/modeling_setup/join_c1) rendered nothing but a chat bubble —
+// forcing the user through free-text routing even for a plain "确认 to
+// proceed" step. Gates that DO carry a structured widget already get their
+// own primary action button from that widget (screen-confirm / dedup-confirm
+// / modeling-weight-adjust / c1-confirm), so this plain button only renders
+// when no widget is mounted, in either mode.
+function gateHasStructuredWidget(message) {
+  const meta = message?.metadata || {};
+  return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
+}
+
 export function renderDriverGateButton(message, options = {}) {
-  const isAgentMode = typeof options.isAgentMode === "function"
-    ? options.isAgentMode()
-    : Boolean(options.isAgentMode);
-  if (message?.metadata?.kind !== "gate" || isAgentMode) return "";
+  if (message?.metadata?.kind !== "gate") return "";
+  if (gateHasStructuredWidget(message)) return "";
   const expectedStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
   const expectedAttr = expectedStepId
     ? ` data-expected-step-id="${escapeHtml(expectedStepId)}"`
