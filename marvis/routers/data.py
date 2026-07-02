@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, Response, UploadFile
 
 from marvis.api_data_payloads import (
     dataset_payload,
@@ -64,14 +64,6 @@ def _require_task(request: Request, task_id: str) -> None:
         raise HTTPException(status_code=404, detail="task not found") from exc
 
 
-async def _request_json_or_empty(request: Request) -> dict:
-    try:
-        payload = await request.json()
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def _join_async_requested(payload: dict) -> bool:
     return any(
         _coerce_bool(payload.get(key))
@@ -124,7 +116,7 @@ def list_task_datasets(task_id: str, request: Request) -> dict:
 
 
 @router.post("/tasks/{task_id}/datasets/upload", status_code=201)
-async def upload_task_dataset(
+def upload_task_dataset(
     task_id: str,
     request: Request,
     file: UploadFile = File(...),
@@ -139,7 +131,10 @@ async def upload_task_dataset(
     upload_dir.mkdir(parents=True, exist_ok=True)
     upload_uow = ArtifactUnitOfWork()
     upload_artifact = upload_uow.stage_file(upload_dir, _upload_artifact_name(file.filename))
-    upload_artifact.path.write_bytes(await file.read())
+    # Sync read of the underlying SpooledTemporaryFile: this endpoint is a plain `def`
+    # so FastAPI already runs it in a worker thread (PERF-1); `file.file` is the raw
+    # BinaryIO, no event loop needed.
+    upload_artifact.path.write_bytes(file.file.read())
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
@@ -238,9 +233,12 @@ def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
 
 
 @router.post("/tasks/{task_id}/joins/propose", status_code=201)
-async def propose_join(task_id: str, request: Request) -> dict:
+def propose_join(
+    task_id: str,
+    request: Request,
+    payload: dict = Body(default_factory=dict),
+) -> dict:
     _require_task(request, task_id)
-    payload = await request.json()
     anchor_id = str(payload.get("anchor_dataset_id") or payload.get("anchor_id") or "")
     feature_ids = [
         str(item)
@@ -278,8 +276,11 @@ def get_join_plan(join_plan_id: str, request: Request) -> dict:
 
 
 @router.post("/joins/{join_plan_id}/confirm")
-async def confirm_join_plan(join_plan_id: str, request: Request) -> dict:
-    payload = await request.json()
+def confirm_join_plan(
+    join_plan_id: str,
+    request: Request,
+    payload: dict = Body(default_factory=dict),
+) -> dict:
     feature_id = str(payload.get("feature_id") or payload.get("feature_dataset_id") or "")
     if not feature_id:
         raise HTTPException(status_code=422, detail="feature_id is required")
@@ -335,13 +336,13 @@ async def confirm_join_plan(join_plan_id: str, request: Request) -> dict:
 
 
 @router.post("/joins/{join_plan_id}/execute")
-async def execute_join_plan(
+def execute_join_plan(
     join_plan_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
     response: Response,
+    payload: dict = Body(default_factory=dict),
 ) -> dict:
-    payload = await _request_json_or_empty(request)
     repo_data, _backend, registry, join_engine = _data_runtime(request)
     try:
         plan = repo_data.load_join_plan(join_plan_id)
