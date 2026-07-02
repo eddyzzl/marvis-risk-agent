@@ -69,9 +69,13 @@ def test_screen_confirm_posts_edited_selection():
     # collects checked, non-disabled features and posts them as `selection`
     # with the rendered gate token so stale tabs cannot confirm a newer gate.
     assert ".screen-pick:checked" in module_js
-    assert '"content": "确认"' in module_js or 'content: "确认"' in module_js
+    assert '"确认"' in module_js
     assert "selection" in module_js
     assert "expected_step_id" in module_js
+    # UX-4: a leakage/suspected pick requires a written override reason, folded
+    # into the confirm content (no backend schema change) before submission.
+    assert "screen-leakage-reason-input" in module_js
+    assert "泄漏/疑似列覆盖理由" in module_js
     # a delegated document click handler drives it (mirrors the C1 form pattern)
     assert "handleScreenConfirmClick" in app_js
     # UX-1/REL-1: submission now shows immediate busy feedback and keeps the
@@ -879,6 +883,369 @@ def test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload():
         assert.equal(calls[0][1].acceptance_mode, "manual");
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_gains_search_sort_chips_bulk_pagination_wiring():
+    app_js = _read("app.js")
+    module_js = _read("js/v2/screen_gate_controller.js")
+    css = _read("css/v2-workbench.css")
+    # UX-4: search box, sortable headers, category chips, bulk ops, pagination.
+    assert "screen-search-input" in module_js
+    assert "data-screen-search" in module_js
+    assert "data-screen-sort" in module_js
+    assert "data-screen-chip" in module_js
+    assert "data-screen-bulk" in module_js
+    assert "data-screen-page-prev" in module_js
+    assert "data-screen-page-next" in module_js
+    assert "screen-selected-count" in module_js
+    assert "export function handleScreenSearchInput(event, context = {})" in module_js
+    assert "export function handleScreenSortClick(event, context = {})" in module_js
+    assert "export function handleScreenChipClick(event, context = {})" in module_js
+    assert "export function handleScreenPageClick(event, context = {})" in module_js
+    assert "export function handleScreenBulkClick(event, context = {})" in module_js
+    assert "export function handleScreenPickChange(event, context = {})" in module_js
+    # wired into the app shell via delegated document listeners
+    assert 'document.addEventListener("click", handleScreenSortClick)' in app_js
+    assert 'document.addEventListener("click", handleScreenChipClick)' in app_js
+    assert 'document.addEventListener("click", handleScreenPageClick)' in app_js
+    assert 'document.addEventListener("click", handleScreenBulkClick)' in app_js
+    assert 'document.addEventListener("input", handleScreenSearchInput)' in app_js
+    assert 'document.addEventListener("change", handleScreenPickChange)' in app_js
+    assert "getAgentMessages: () => agentMessages" in app_js
+    # CSS for the new toolbar/summary/bulk/pagination affordances
+    assert ".screen-toolbar" in css
+    assert ".screen-chip" in css
+    assert ".screen-summary" in css
+    assert ".screen-bulk-actions" in css
+    assert ".screen-pagination" in css
+    assert ".screen-sort-btn" in css
+
+
+def test_screen_table_search_filters_by_feature_name():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { handleScreenSearchInput } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        function makeScreen() {
+          const scores = {};
+          const selected = [];
+          for (let i = 0; i < 5; i++) {
+            const name = "alpha_feature_" + i;
+            selected.push(name);
+            scores[name] = { ks: 0.1 * i, iv: 0.05 * i };
+          }
+          selected.push("beta_other");
+          scores.beta_other = { ks: 0.2, iv: 0.1 };
+          return {
+            selected,
+            leakage: [],
+            suspected: [],
+            unusable: [],
+            scores,
+            n_screened: selected.length,
+            thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+          };
+        }
+        const message = { id: "search-msg", metadata: { step_id: "gate-search", screen: makeScreen() } };
+        let lastHtml = null;
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (wrap, html) => { lastHtml = html; },
+        };
+        const fakeInput = { value: "alpha" };
+        const fakeWrap = {
+          dataset: { screenForm: "search-msg", screenReadonly: "false" },
+          querySelector: (sel) => (sel === ".screen-search-input" ? fakeInput : null),
+          querySelectorAll: () => [],
+        };
+        fakeInput.closest = (sel) => (sel === "[data-screen-search]" ? fakeInput : fakeWrap);
+        const handled = handleScreenSearchInput({ target: fakeInput }, context);
+        assert.equal(handled, true);
+        assert.equal((lastHtml.match(/class="screen-row/g) || []).length, 5);
+        assert.equal(lastHtml.includes("beta_other"), false);
+        assert.equal(lastHtml.includes("alpha_feature_0"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_sort_toggles_direction_and_reorders_rows():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { handleScreenSortClick } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const screen = {
+          selected: ["low_ks", "mid_ks", "high_ks"],
+          leakage: [],
+          suspected: [],
+          unusable: [],
+          scores: {
+            low_ks: { ks: 0.1, iv: 0.02 },
+            mid_ks: { ks: 0.3, iv: 0.15 },
+            high_ks: { ks: 0.5, iv: 0.4 },
+          },
+          n_screened: 3,
+          thresholds: { leakage_ks: 0.6, max_missing_rate: 0.95 },
+        };
+        const message = { id: "sort-msg", metadata: { step_id: "gate-sort", screen } };
+        let lastHtml = null;
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (wrap, html) => { lastHtml = html; },
+        };
+        const wrap = {
+          dataset: { screenForm: "sort-msg", screenReadonly: "false" },
+          querySelectorAll: () => [],
+        };
+        const button = {
+          closest: (sel) => (sel === "[data-screen-sort]" ? button : wrap),
+          getAttribute: () => "ks",
+        };
+        handleScreenSortClick({ target: button, preventDefault: () => {} }, context);
+        // first click: descending by KS
+        let order = [...lastHtml.matchAll(/data-screen-feature="([^"]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(order, ["high_ks", "mid_ks", "low_ks"]);
+        assert.equal(lastHtml.includes("KS \\u25bc"), true);
+        // second click on the same column: flips to ascending
+        handleScreenSortClick({ target: button, preventDefault: () => {} }, context);
+        order = [...lastHtml.matchAll(/data-screen-feature="([^"]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(order, ["low_ks", "mid_ks", "high_ks"]);
+        assert.equal(lastHtml.includes("KS \\u25b2"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_category_chip_filters_rows():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { handleScreenChipClick } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const screen = {
+          selected: ["keep_a"],
+          leakage: [["leak_col", 0.81, "reason"]],
+          suspected: [["susp_col", 0.42, "reason"]],
+          unusable: [["dead_col", "reason"]],
+          scores: {
+            keep_a: { ks: 0.1, iv: 0.05, coverage: 0.9 },
+            leak_col: { ks: 0.81, iv: 0.9, coverage: 1 },
+            susp_col: { ks: 0.42, iv: 0.35, coverage: 0.2 },
+          },
+          n_screened: 4,
+          thresholds: { leakage_ks: 0.4, max_missing_rate: 0.95 },
+        };
+        const message = { id: "chip-msg", metadata: { step_id: "gate-chip", screen } };
+        let lastHtml = null;
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (wrap, html) => { lastHtml = html; },
+        };
+        function clickChip(chipKey) {
+          const wrap = {
+            dataset: { screenForm: "chip-msg", screenReadonly: "false" },
+            querySelectorAll: () => [],
+          };
+          const button = {
+            closest: (sel) => (sel === "[data-screen-chip]" ? button : wrap),
+            getAttribute: () => chipKey,
+          };
+          return handleScreenChipClick({ target: button, preventDefault: () => {} }, context);
+        }
+        assert.equal(clickChip("leakage"), true);
+        let rows = [...lastHtml.matchAll(/data-screen-feature="([^"]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(rows.sort(), ["leak_col", "susp_col"]);
+
+        assert.equal(clickChip("low_coverage"), true);
+        rows = [...lastHtml.matchAll(/data-screen-feature="([^"]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(rows, ["susp_col"]);
+
+        assert.equal(clickChip("all"), true);
+        rows = [...lastHtml.matchAll(/data-screen-feature="([^"]+)"/g)].map((m) => m[1]);
+        assert.deepEqual(rows.sort(), ["dead_col", "keep_a", "leak_col", "susp_col"]);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_bulk_select_clear_invert_visible():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { handleScreenBulkClick } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const screen = {
+          selected: [],
+          leakage: [],
+          suspected: [],
+          unusable: [],
+          scores: {
+            f1: { ks: 0.1, iv: 0.05 },
+            f2: { ks: 0.2, iv: 0.1 },
+            f3: { ks: 0.3, iv: 0.15 },
+          },
+          ranked: [["f1", 0.1], ["f2", 0.2], ["f3", 0.3]],
+          n_screened: 3,
+          thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+        };
+        // none of f1/f2/f3 are in `selected`, so build rows via the `keep` bucket
+        // by putting them in `selected` instead (bulk ops operate on whatever is
+        // rendered, category is not the point of this test).
+        screen.selected = ["f1", "f2", "f3"];
+        const message = { id: "bulk-msg", metadata: { step_id: "gate-bulk", screen } };
+        let lastHtml = null;
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (wrap, html) => { lastHtml = html; },
+        };
+        function clickBulk(action, checkboxState) {
+          const boxes = Object.entries(checkboxState).map(([value, checked]) => ({ value, checked, disabled: false }));
+          const wrap = {
+            dataset: { screenForm: "bulk-msg", screenReadonly: "false" },
+            querySelectorAll: (sel) => {
+              if (sel === ".screen-pick") return boxes;
+              if (sel.includes("screen-leakage") || sel.includes("screen-suspected")) return [];
+              return [];
+            },
+          };
+          const button = {
+            closest: (sel) => (sel === "[data-screen-bulk]" ? button : wrap),
+            getAttribute: () => action,
+          };
+          return handleScreenBulkClick({ target: button, preventDefault: () => {} }, context);
+        }
+        clickBulk("select_visible", { f1: false, f2: false, f3: false });
+        let checkedCount = (lastHtml.match(/class="screen-pick" value="f\\d" checked/g) || []).length;
+        assert.equal(checkedCount, 3);
+        assert.equal(lastHtml.includes("已选 3/3"), true);
+
+        clickBulk("clear_visible", { f1: true, f2: true, f3: true });
+        checkedCount = (lastHtml.match(/class="screen-pick" value="f\\d" checked/g) || []).length;
+        assert.equal(checkedCount, 0);
+        assert.equal(lastHtml.includes("已选 0/3"), true);
+
+        clickBulk("invert_visible", { f1: true, f2: false, f3: false });
+        checkedCount = (lastHtml.match(/class="screen-pick" value="f\\d" checked/g) || []).length;
+        assert.equal(checkedCount, 2);
+        assert.equal(lastHtml.includes("已选 2/3"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_paginates_at_fifty_rows_per_page():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderScreenGateTable, handleScreenPageClick } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const selected = [];
+        const scores = {};
+        for (let i = 0; i < 120; i++) {
+          const name = "f" + String(i).padStart(3, "0");
+          selected.push(name);
+          scores[name] = { ks: 0.01 * i, iv: 0.005 * i };
+        }
+        const screen = {
+          selected,
+          leakage: [],
+          suspected: [],
+          unusable: [],
+          scores,
+          n_screened: 120,
+          thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+        };
+        const message = { id: "page-msg", metadata: { step_id: "gate-page", screen } };
+        const firstPageHtml = renderScreenGateTable(message, { interactive: true });
+        assert.equal((firstPageHtml.match(/class="screen-row/g) || []).length, 50);
+        assert.equal(firstPageHtml.includes("第 1 / 3 页"), true);
+
+        let lastHtml = null;
+        const context = {
+          getAgentMessages: () => [message],
+          applyRerender: (wrap, html) => { lastHtml = html; },
+        };
+        const wrap = {
+          dataset: { screenForm: "page-msg", screenReadonly: "false" },
+          querySelectorAll: () => [],
+        };
+        const nextButton = {
+          closest: (sel) => {
+            if (sel === "[data-screen-page-next]") return nextButton;
+            if (sel === ".screen-table-wrap") return wrap;
+            return null;
+          },
+          getAttribute: () => "1",
+        };
+        handleScreenPageClick({ target: nextButton, preventDefault: () => {} }, context);
+        assert.equal((lastHtml.match(/class="screen-row/g) || []).length, 50);
+        assert.equal(lastHtml.includes("第 2 / 3 页"), true);
+        assert.equal(lastHtml.includes("f000"), false);
+        assert.equal(lastHtml.includes("f050"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_leakage_pick_requires_override_reason_before_confirm():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { submitScreenSelection } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        function makeWrap(reasonValue) {
+          const leakageRow = { classList: { contains: (c) => c === "screen-leakage" } };
+          const checkbox = {
+            value: "leak_col",
+            checked: true,
+            disabled: false,
+            closest: (sel) => (sel === ".screen-row" ? leakageRow : null),
+          };
+          return {
+            dataset: { screenForm: "leak-msg", screenReadonly: "false", screenStepId: "gate-leak" },
+            querySelectorAll: (sel) => (sel === ".screen-pick:checked" ? [checkbox] : []),
+            querySelector: (sel) => (sel === ".screen-leakage-reason-input" ? { value: reasonValue } : null),
+          };
+        }
+        const statuses = [];
+        const calls = [];
+        const context = {
+          getSelectedTaskId: () => "task-1",
+          agentAcceptanceModeValue: () => "manual",
+          setActionStatus: (message, kind) => statuses.push([message, kind]),
+          setAgentMessages: () => {},
+          renderAgentConversation: () => {},
+          api: async (url, options) => {
+            calls.push([url, JSON.parse(options.body)]);
+            return { messages: [] };
+          },
+        };
+        // empty reason: rejected, nothing posted
+        await submitScreenSelection({ disabled: false, closest: () => makeWrap("") }, context);
+        assert.equal(calls.length, 0);
+        assert.deepEqual(statuses.at(-1), ["勾选了泄漏/疑似列，请先填写覆盖理由（至少4个字）。", "error"]);
+
+        // too-short reason: also rejected
+        await submitScreenSelection({ disabled: false, closest: () => makeWrap("ok") }, context);
+        assert.equal(calls.length, 0);
+        assert.deepEqual(statuses.at(-1), ["勾选了泄漏/疑似列，请先填写覆盖理由（至少4个字）。", "error"]);
+
+        // sufficient reason: posts with the reason folded into content
+        await submitScreenSelection({ disabled: false, closest: () => makeWrap("已核实非未来信息") }, context);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0][1].content, "确认（泄漏/疑似列覆盖理由：已核实非未来信息）");
+        assert.deepEqual(calls[0][1].selection, ["leak_col"]);
         process.stdout.write("ok");
         """
     )

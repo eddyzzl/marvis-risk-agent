@@ -1772,8 +1772,85 @@
 .screen-table-wrap[data-screen-readonly="true"] .screen-table {
   opacity: 0.78;
 }
+/* UX-4: search + category-chip toolbar sits between the threshold controls and
+   the table so the table stays reviewable at hundreds of candidate columns. */
+.screen-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface);
+}
+.screen-search-input {
+  flex: 0 1 220px;
+  min-width: 140px;
+  height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.screen-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.screen-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.screen-chip b {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.screen-chip.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Selected-count summary + per-category counts stay pinned above the table so
+   the review state is legible without scrolling to the header/footer. */
+.screen-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-color);
+}
+.screen-summary-item {
+  font-variant-numeric: tabular-nums;
+}
+.screen-selected-count {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.screen-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-soft);
+}
 .screen-table-scroll {
-  max-height: 360px;
+  max-height: 480px;
   overflow: auto;
 }
 .screen-table {
@@ -1789,9 +1866,7 @@
   border-bottom: 1px solid var(--border-color);
   white-space: nowrap;
 }
-.screen-table th:nth-child(3),
-.screen-table th:nth-child(4),
-.screen-table th:nth-child(5),
+.screen-table th:nth-child(n+3):nth-child(-n+8),
 .screen-table td.screen-num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1802,6 +1877,23 @@
   background: var(--surface-subtle);
   font-weight: 600;
   z-index: 1;
+  padding: 0;
+}
+.screen-sort-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: inherit;
+  cursor: pointer;
+}
+.screen-sort-btn:hover,
+.screen-sort-btn:focus-visible {
+  color: var(--accent);
 }
 .screen-table .screen-feat {
   font-weight: 600;
@@ -1822,6 +1914,11 @@
 }
 .screen-row.screen-unusable {
   color: var(--text-muted);
+}
+.screen-empty-row td {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 18px 12px;
 }
 .screen-badge {
   display: inline-block;
@@ -1845,6 +1942,48 @@
 .screen-badge.unusable {
   background: var(--surface-subtle);
   color: var(--text-muted);
+}
+.screen-badge.watch {
+  background: var(--warning-subtle);
+  color: var(--warning);
+  margin-left: 4px;
+}
+.screen-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+.screen-page-status {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.screen-leakage-reason {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--danger-subtle);
+}
+.screen-leakage-reason label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.screen-leakage-reason-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  resize: vertical;
 }
 .screen-table-foot {
   display: flex;

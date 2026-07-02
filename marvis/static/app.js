@@ -75,7 +75,13 @@ import { createPlanRailController, taskUsesPlanRail } from "./js/v2/plan_rail_co
 import { renderPluginManager } from "./js/v2/plugin_manager.js";
 import {
   handleScreenAdjustClick as handleScreenAdjustClickController,
+  handleScreenBulkClick as handleScreenBulkClickController,
+  handleScreenChipClick as handleScreenChipClickController,
   handleScreenConfirmClick as handleScreenConfirmClickController,
+  handleScreenPageClick as handleScreenPageClickController,
+  handleScreenPickChange as handleScreenPickChangeController,
+  handleScreenSearchInput as handleScreenSearchInputController,
+  handleScreenSortClick as handleScreenSortClickController,
   renderScreenGateTable,
   submitScreenSelection as submitScreenSelectionController,
   submitScreenThresholdAdjust as submitScreenThresholdAdjustController,
@@ -5314,6 +5320,10 @@ function screenGateControllerContext() {
   const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
+    // UX-4: the search/sort/chip/page/bulk handlers re-render a gate message's
+    // table client-side (no backend round trip), so they need to look the
+    // message back up by id from the live conversation state.
+    getAgentMessages: () => agentMessages,
     api,
     agentAcceptanceModeValue,
     setActionStatus,
@@ -5330,9 +5340,33 @@ function screenGateControllerContext() {
     renderWorkflowStepper,
   };
 }
+function handleScreenSearchInput(event) {
+  return handleScreenSearchInputController(event, screenGateControllerContext());
+}
+function handleScreenSortClick(event) {
+  return handleScreenSortClickController(event, screenGateControllerContext());
+}
+function handleScreenChipClick(event) {
+  return handleScreenChipClickController(event, screenGateControllerContext());
+}
+function handleScreenPageClick(event) {
+  return handleScreenPageClickController(event, screenGateControllerContext());
+}
+function handleScreenBulkClick(event) {
+  return handleScreenBulkClickController(event, screenGateControllerContext());
+}
+function handleScreenPickChange(event) {
+  return handleScreenPickChangeController(event, screenGateControllerContext());
+}
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleScreenAdjustClick);
   document.addEventListener("click", handleScreenConfirmClick);
+  document.addEventListener("click", handleScreenSortClick);
+  document.addEventListener("click", handleScreenChipClick);
+  document.addEventListener("click", handleScreenPageClick);
+  document.addEventListener("click", handleScreenBulkClick);
+  document.addEventListener("input", handleScreenSearchInput);
+  document.addEventListener("change", handleScreenPickChange);
 }
 
 function agentMessageDedupPickerHtml(message) {

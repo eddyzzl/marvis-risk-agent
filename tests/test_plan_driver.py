@@ -340,6 +340,60 @@ def test_screen_gate_carries_structured_screen_payload(tmp_path):
     assert screen["thresholds"] == {"leakage_ks": 0.40, "max_missing_rate": 0.95}
 
 
+def test_screen_gate_carries_watch_bands_and_categorical_notes(tmp_path):
+    """UX-4/VD-7: the screen gate payload also passes through the watch-band
+    lists (leakage_watch/ks_decay_watch/psi_watch/split_shift) and the
+    categorical-column notes (sentinel_columns/excluded_categorical/
+    suspected_categorical) the screen tool already computes
+    (marvis/feature/screen.py, marvis/packs/modeling/tools.py), so the
+    frontend's watch/category-column chip filters have real data instead of
+    only the four hard-cut buckets."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_modeling_plan())
+    runner = FakeRunner([
+        {
+            "selected": ["sig1", "sig2"],
+            "leakage": [["leak_col", 0.55, 1]],
+            "suspected": [["score_x", 0.3, 1]],
+            "unusable": [],
+            "n_screened": 9,
+            "ranked": [],
+            "scores": {
+                "sig1": {"ks": 0.2, "iv": 0.1, "coverage": 0.4, "ks_decay": 0.6, "psi_split": 0.08},
+            },
+            "leakage_watch": [["watch_col", 0.28, "strong single-variable signal"]],
+            "ks_decay_watch": [["decay_col", 0.4, "decays out-of-sample"]],
+            "psi_watch": [["drift_col", 0.31, "elevated temporal drift"]],
+            "split_shift": [["shift_col", 0.2, "split shift"]],
+            "sentinel_columns": {"sentinel_col": [[-999.0, 0.05]]},
+            "excluded_categorical": [{"column": "city_code", "cardinality": 40}],
+            "suspected_categorical": [{"column": "zip_code", "cardinality": 12}],
+        },
+        {"best_params": {"num_leaves": 31}, "best_metrics": {"test_ks": 0.41}, "n_trials": 8},
+        {"experiment_id": "exp-1", "artifact_id": "art-1", "metrics": {"oot_ks": 0.39, "oot_auc": 0.72}, "feature_importance": [["sig1", 120.0]]},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    screen = turn.messages[0].metadata.get("screen")
+    assert screen is not None
+    assert [row[0] for row in screen["leakage_watch"]] == ["watch_col"]
+    assert [row[0] for row in screen["ks_decay_watch"]] == ["decay_col"]
+    assert [row[0] for row in screen["psi_watch"]] == ["drift_col"]
+    assert [row[0] for row in screen["split_shift"]] == ["shift_col"]
+    assert screen["sentinel_columns"] == {"sentinel_col": [[-999.0, 0.05]]}
+    assert screen["excluded_categorical"] == [{"column": "city_code", "cardinality": 40}]
+    assert screen["suspected_categorical"] == [{"column": "zip_code", "cardinality": 12}]
+    assert screen["scores"]["sig1"]["coverage"] == 0.4
+    assert screen["scores"]["sig1"]["ks_decay"] == 0.6
+    assert screen["scores"]["sig1"]["psi_split"] == 0.08
+
+
 def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
