@@ -2290,6 +2290,166 @@ def test_selection_policy_metric_thresholds_block_missing_or_weak_metrics():
     assert missing_metric["violations"][0]["metric"] == "oot_ks"
 
 
+def test_selection_policy_default_warns_on_overfit_gap_without_blocking():
+    """SEL-7: a candidate whose train-test KS gap exceeds the default warn
+    threshold (0.10) gets an overfit_warning even when NO selection_policy was
+    requested at all -- the guardrail is on by default, but it never blocks
+    (status stays "not_requested" / "accepted", not "blocked")."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "overfit-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.18,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2", "x3", "x4"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["status"] == "not_requested"
+    assert decision["violations"] == []
+    assert len(decision["warnings"]) == 1
+    assert decision["warnings"][0]["code"] == "overfit_warning"
+    assert "0.18" in decision["warnings"][0]["message"]
+
+
+def test_selection_policy_default_warns_on_low_feature_count():
+    """SEL-7: fewer than 3 input features triggers sanity_warning by default."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "sparse-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.01,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == [{
+        "code": "sanity_warning",
+        "message": "入模特征数为 2,低于建议下限 3,模型稳健性存疑(未阻断选择)。",
+    }]
+
+
+def test_selection_policy_disable_quality_warnings_opts_out():
+    """SEL-7: disable_quality_warnings=True is the explicit opt-out restoring the
+    historical PMML/handoff-only default behaviour (no warnings surfaced)."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "overfit-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.30,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1"],
+        },
+        {"disable_quality_warnings": True},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == []
+
+
+def test_selection_policy_clean_candidate_has_no_quality_warnings():
+    """SEL-7: a candidate within both default guardrails gets an empty warnings
+    list -- the checks are additive, not always-present noise."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "healthy-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.03,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2", "x3", "x4", "x5"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == []
+
+
+def test_pick_best_comparison_row_annotates_delivery_excluded_candidates():
+    """SEL-7: the delivery-ready (PMML+handoff) pre-filter used to silently drop
+    non-delivery-ready candidates from champion consideration. Now every
+    excluded row is annotated in place with delivery_excluded=True and a
+    delivery_excluded_reason explaining why it never competed -- including
+    whether it would have outscored every delivery-ready candidate."""
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "catboost-higher-ks",
+            "recipe": "catboost",
+            "test_ks": 0.50,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+        {
+            "id": "lgb-lower-ks",
+            "recipe": "lgb",
+            "test_ks": 0.40,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "mlp-lowest-ks",
+            "recipe": "mlp",
+            "test_ks": 0.10,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+    ]
+
+    best, metric = _pick_best_comparison_row(rows, target_type="binary")
+
+    assert best["id"] == "lgb-lower-ks"
+    assert metric == "test_ks(overfit-penalized)"
+
+    catboost_row = next(row for row in rows if row["id"] == "catboost-higher-ks")
+    mlp_row = next(row for row in rows if row["id"] == "mlp-lowest-ks")
+    lgb_row = next(row for row in rows if row["id"] == "lgb-lower-ks")
+
+    assert catboost_row["delivery_excluded"] is True
+    assert "优于所有交付可用候选" in catboost_row["delivery_excluded_reason"]
+    assert mlp_row["delivery_excluded"] is True
+    assert "非最优候选" in mlp_row["delivery_excluded_reason"]
+    assert "delivery_excluded" not in lgb_row
+
+
+def test_pick_best_comparison_row_no_annotation_when_delivery_ready_already_wins():
+    """SEL-7: when the metric-best row is already delivery-ready, the pre-filter
+    never actually changed the outcome -- no exclusion annotation is needed."""
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "lgb-best",
+            "recipe": "lgb",
+            "test_ks": 0.55,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "catboost-lower",
+            "recipe": "catboost",
+            "test_ks": 0.30,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+    ]
+
+    best, _metric = _pick_best_comparison_row(rows, target_type="binary")
+
+    assert best["id"] == "lgb-best"
+    catboost_row = next(row for row in rows if row["id"] == "catboost-lower")
+    assert "delivery_excluded" not in catboost_row
+
+
 def test_selection_policy_string_false_is_not_enabled():
     from marvis.packs.modeling.tools import _normalize_selection_policy
 

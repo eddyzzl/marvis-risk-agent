@@ -111,6 +111,15 @@ _POLICY_METRIC_THRESHOLD_SHORTCUTS = {
     "max_oot_logloss": ("oot_logloss", "max"),
     "max_test_logloss": ("test_logloss", "max"),
 }
+#: SEL-7 default quality guardrails (warn-only, never block): a candidate whose
+#: train-test KS gap exceeds this is flagged overfit_warning; the fail-level
+#: threshold in DEFAULT_MONITORING_THRESHOLDS (overfit_train_test_gap) is 0.12,
+#: this warn-level guardrail is intentionally a notch below it (0.10) so the
+#: selection-time hint fires before the post-selection monitoring gate would.
+DEFAULT_OVERFIT_GAP_WARN_THRESHOLD = 0.10
+#: SEL-7: a candidate with fewer than this many input features is flagged
+#: sanity_warning (too few features to plausibly be a robust credit model).
+DEFAULT_MIN_FEATURE_COUNT_WARNING = 3
 DEFAULT_MONITORING_THRESHOLDS = {
     "psi_test_vs_train": {
         "label": "Test PSI vs Train",
@@ -1381,13 +1390,46 @@ def _pick_best_comparison_row_with_policy(
 
 def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
     """Pick the best comparison row. Binary maximizes the overfit-penalized test KS —
-    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9)."""
+    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9).
+
+    SEL-7: candidates excluded by the delivery-ready (PMML+handoff) pre-filter no
+    longer vanish silently -- when the metric-best row overall is NOT
+    delivery-ready-eligible (i.e. it would have won on the raw metric but is
+    filtered out), every row this pre-filter drops is annotated in place with
+    ``delivery_excluded=True`` / ``delivery_excluded_reason`` so the comparison
+    table can display "excluded, would have scored higher" instead of the row
+    just disappearing from consideration.
+    """
     if not rows:
         raise ModelingError("experiment_ids must resolve to experiments")
+    target_type = str(target_type or "binary")
+    metric_key, minimize = _selection_metric_basis(target_type)
     delivery_ready = [row for row in rows if _delivery_ready(row)]
+    if delivery_ready and len(delivery_ready) < len(rows):
+        raw_best = max(rows, key=lambda row: _score_first(row, (metric_key,), minimize=minimize))
+        if not _delivery_ready(raw_best):
+            best_ready_score = (
+                _score_first(delivery_ready[0], (metric_key,), minimize=minimize)
+                if delivery_ready
+                else float("-inf")
+            )
+            for row in delivery_ready[1:]:
+                score = _score_first(row, (metric_key,), minimize=minimize)
+                if score > best_ready_score:
+                    best_ready_score = score
+            for row in rows:
+                if _delivery_ready(row):
+                    continue
+                row["delivery_excluded"] = True
+                row_score = _score_first(row, (metric_key,), minimize=minimize)
+                would_have_won = row_score > best_ready_score
+                suffix = "该候选按此指标优于所有交付可用候选" if would_have_won else "即便不排除也非最优候选"
+                row["delivery_excluded_reason"] = (
+                    "不支持 PMML 导出和/或验证移交,已在默认交付可用性预过滤中排除,"
+                    f"未参与冠军竞争({suffix})。"
+                )
     if delivery_ready:
         rows = delivery_ready
-    target_type = str(target_type or "binary")
     if target_type == "continuous":
         return max(rows, key=lambda row: _score_first(row, ("oot_rmse", "test_rmse"), minimize=True)), "oot_rmse"
     if target_type == "multiclass":
@@ -1396,6 +1438,22 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
             return auc_best, "oot_macro_auc"
         return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
     return max(rows, key=_overfit_penalized_test_ks), BINARY_SELECTION_METRIC
+
+
+def _selection_metric_basis(target_type: str) -> tuple[str, bool]:
+    """The single metric key (and min/max direction) used to detect whether the
+    delivery-ready pre-filter actually excluded a better-scoring candidate
+    (SEL-7). Mirrors each target type's primary ranking metric in
+    ``_pick_best_comparison_row`` -- binary's real selection key is the
+    overfit-penalized test KS (not a plain column), so it is approximated here
+    by the raw test_ks column, which is what the pre-filter comparison cares
+    about (relative ranking, not the exact champion score)."""
+    target_type = str(target_type or "binary")
+    if target_type == "continuous":
+        return "oot_rmse", True
+    if target_type == "multiclass":
+        return "oot_macro_auc", False
+    return "test_ks", False
 
 
 def _attach_capabilities_to_comparison_rows(runtime: _Runtime, rows: list[dict]) -> None:
@@ -1445,6 +1503,12 @@ def _normalize_selection_policy(raw) -> dict:
         "prefer_scorecard": _policy_bool(source.get("prefer_scorecard")),
         "allow_policy_override": _policy_bool(source.get("allow_policy_override")),
         "override_reason": str(source.get("override_reason") or "").strip(),
+        # SEL-7: default (non-opt-in) quality warnings -- overfit-gap and
+        # feature-sanity checks that fire even when the caller requested no
+        # other policy at all. Never block selection; disable_quality_warnings
+        # is the explicit opt-out for a caller that wants the historical
+        # PMML/handoff-only default behaviour back.
+        "disable_quality_warnings": _policy_bool(source.get("disable_quality_warnings")),
     }
     max_feature_count = _positive_int_or_none(source.get("max_feature_count"))
     if max_feature_count is not None:
@@ -1452,6 +1516,14 @@ def _normalize_selection_policy(raw) -> dict:
     max_oot_psi = _nonnegative_float_or_none(source.get("max_oot_psi"))
     if max_oot_psi is not None:
         policy["max_oot_psi"] = max_oot_psi
+    overfit_gap_warn = _nonnegative_float_or_none(source.get("overfit_gap_warn_threshold"))
+    policy["overfit_gap_warn_threshold"] = (
+        overfit_gap_warn if overfit_gap_warn is not None else DEFAULT_OVERFIT_GAP_WARN_THRESHOLD
+    )
+    min_feature_count_warn = _positive_int_or_none(source.get("min_feature_count_warning"))
+    policy["min_feature_count_warning"] = (
+        min_feature_count_warn if min_feature_count_warn is not None else DEFAULT_MIN_FEATURE_COUNT_WARNING
+    )
     metric_thresholds = _normalize_selection_policy_metric_thresholds(source)
     if metric_thresholds:
         policy["metric_thresholds"] = metric_thresholds
@@ -1524,8 +1596,48 @@ def _selection_policy_decision(row: dict, policy: dict, *, explicit: bool) -> di
         },
         "profile": profile,
         "violations": violations,
+        # SEL-7: non-blocking default quality guardrails -- never affect `status`.
+        "warnings": _selection_policy_quality_warnings(row, policy),
         "override_reason": policy.get("override_reason") if status == "overridden" else "",
     }
+
+
+def _selection_policy_quality_warnings(row: dict, policy: dict) -> list[dict]:
+    """SEL-7 default quality guardrails: warn (never block) when a candidate's
+    train-test KS gap looks like overfitting, or when it trained on
+    suspiciously few features. Unlike ``_selection_policy_violations`` these
+    fire by default (``disable_quality_warnings=True`` is the explicit opt-out)
+    regardless of whether any other selection_policy field was requested --
+    a caller who asked for nothing still gets these two sanity checks."""
+    if policy.get("disable_quality_warnings"):
+        return []
+    warnings: list[dict] = []
+    gap_threshold = policy.get("overfit_gap_warn_threshold", DEFAULT_OVERFIT_GAP_WARN_THRESHOLD)
+    gap = _finite_float_or_none(row.get("overfit_train_test_gap"))
+    if isinstance(gap_threshold, (int, float)) and gap is not None and gap > float(gap_threshold):
+        warnings.append({
+            "code": "overfit_warning",
+            "message": (
+                f"train-test KS 差距为 {_format_number_token(float(gap))},超过警戒阈值 "
+                f"{_format_number_token(float(gap_threshold))},存在过拟合风险(未阻断选择)。"
+            ),
+        })
+    min_feature_count = policy.get("min_feature_count_warning", DEFAULT_MIN_FEATURE_COUNT_WARNING)
+    profile = _row_policy_profile(row)
+    feature_count = profile.get("feature_count")
+    if (
+        isinstance(min_feature_count, int)
+        and isinstance(feature_count, int)
+        and feature_count < min_feature_count
+    ):
+        warnings.append({
+            "code": "sanity_warning",
+            "message": (
+                f"入模特征数为 {feature_count},低于建议下限 {min_feature_count},"
+                "模型稳健性存疑(未阻断选择)。"
+            ),
+        })
+    return warnings
 
 
 def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
