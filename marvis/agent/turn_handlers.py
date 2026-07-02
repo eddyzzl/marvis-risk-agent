@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 import json
 
 from marvis.agent.auto_drive import decide_gate
@@ -66,6 +67,44 @@ class DriverTurnRuntime:
     tier: str
 
 
+# ARCH-4: the five run_*_driver_turn entry points below share one skeleton
+# (log the user turn -> resume an active plan OR run type-specific setup and
+# driver.start -> map setup errors to a chat message). _TurnHandlerSpec pins
+# down every axis the five types actually differ on so that skeleton can live
+# once in _run_driver_turn while each per-type "shell" stays a one-line call.
+# Each axis below is copied verbatim from the pre-refactor function bodies —
+# see the commit message for a couple of cross-type inconsistencies spotted
+# along the way but deliberately left unchanged.
+@dataclass(frozen=True)
+class _TurnHandlerSpec:
+    # Metadata `intent` tag stamped on the logged user-turn message.
+    intent: str
+    # Exception type(s) from this type's *_setup module that map to a plain
+    # chat error message (as opposed to DriverError, which always re-raises).
+    setup_error_types: tuple[type[Exception], ...]
+    # Human label used in the generic `except Exception` fallback message,
+    # e.g. "数据拼接出错：{exc}".
+    error_label: str
+    # Setup callback run only when there is no active plan for the task. It
+    # performs this type's proposal-building (and, for join/modeling, the C1
+    # file-role gate sub-flow) and returns either:
+    #   - a dict: an early-exit turn response (a gate pause, a skip
+    #     confirmation, or a setup error) that should be returned as-is; or
+    #   - a tuple (template_id, slots, start_kwargs): the driver.start(...)
+    #     call to make once the pre-start assistant message has already been
+    #     appended by the callback itself.
+    run_setup: Callable[[DriverTurnRuntime, TaskRepository, TaskRecord, str | None], dict | tuple]
+    # join/modeling display "已确认文件角色与目标列。" instead of the raw
+    # [C1]-prefixed payload text when logging the user turn; the other three
+    # types always log user_text verbatim.
+    format_user_display: Callable[[str], str]
+    # join/modeling pass settings=/task= into append_driver_messages (so a
+    # terminal "done" message can trigger MEM-1 memory capture); the other
+    # three types never do (feature/strategy/vintage plans don't write
+    # memory anchors today).
+    pass_memory_kwargs: bool
+
+
 def run_join_driver_turn(
     runtime: DriverTurnRuntime,
     repo: TaskRepository,
@@ -77,67 +116,17 @@ def run_join_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
-    driver = _driver(runtime)
-    if user_text is not None:
-        display = "已确认文件角色与目标列。" if user_text.startswith("[C1]") else user_text
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=display, metadata={"intent": "data_join"}
-        )
-    try:
-        active = _active_plan(runtime.plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(
-                plan_id=active.id,
-                user_text=user_text or "",
-                selection=selection,
-                dedup_strategies=dedup_strategies,
-                adjust_params=adjust_params,
-                expected_step_id=expected_step_id,
-            )
-            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
-            return join_turn_response(repo, task.id)
-        conversation = repo.list_agent_messages(task.id)
-        c1_state = _latest_c1_state(conversation)
-        _, registry = _modeling_data_runtime(runtime.settings)
-        if c1_state is None:
-            proposal = build_join_proposal(registry, task.id, task.source_dir)
-            _append_c1_message(repo, task.id, proposal)
-            return join_turn_response(repo, task.id)
-        assignment = _parse_c1_reply(user_text, c1_state)
-        if assignment is None:
-            repo.add_agent_message(
-                task.id,
-                role="assistant",
-                stage="chat",
-                content="请确认文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
-                metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
-            )
-            return join_turn_response(repo, task.id)
-        if not assignment["anchor_id"]:
-            return append_join_error(repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。")
-        if not assignment["feature_ids"]:
-            repo.add_agent_message(
-                task.id,
-                role="assistant",
-                stage="chat",
-                content="已确认样本表与目标列。只有一张表，无需拼接（数据拼接阶段已跳过）。",
-                metadata={"join_skip": True},
-            )
-            return join_turn_response(repo, task.id)
-        turn = driver.start(
-            task_id=task.id,
-            template_id="data_join",
-            slots={"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
-            tier=runtime.tier,
-        )
-        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
-        return join_turn_response(repo, task.id)
-    except JoinSetupError as exc:
-        return append_join_error(repo, task.id, str(exc))
-    except DriverError:
-        raise
-    except Exception as exc:
-        return append_join_error(repo, task.id, f"数据拼接出错：{exc}")
+    return _run_driver_turn(
+        _JOIN_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
 
 
 def run_feature_driver_turn(
@@ -151,52 +140,17 @@ def run_feature_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
-    driver = _driver(runtime)
-    if user_text is not None:
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=user_text, metadata={"intent": "feature_analysis"}
-        )
-    try:
-        active = _active_plan(runtime.plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(
-                plan_id=active.id,
-                user_text=user_text or "",
-                selection=selection,
-                dedup_strategies=dedup_strategies,
-                adjust_params=adjust_params,
-                expected_step_id=expected_step_id,
-            )
-            append_driver_messages(repo, task.id, turn)
-            return join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(runtime.settings)
-        proposal = build_feature_proposal(
-            registry, backend, task.id, task.source_dir, metrics=_feature_metrics(task)
-        )
-        repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content=(
-                f"分析数据集 `{proposal.dataset_name}`（目标列 `{proposal.target_col}`，"
-                f"{len(proposal.features)} 个候选特征）:"
-            ),
-            metadata={"intent": "feature_analysis"},
-        )
-        turn = driver.start(
-            task_id=task.id,
-            template_id=proposal.template_id,
-            slots=proposal.template_slots(),
-            tier=runtime.tier,
-        )
-        append_driver_messages(repo, task.id, turn)
-        return join_turn_response(repo, task.id)
-    except FeatureSetupError as exc:
-        return append_join_error(repo, task.id, str(exc))
-    except DriverError:
-        raise
-    except Exception as exc:
-        return append_join_error(repo, task.id, f"特征分析出错：{exc}")
+    return _run_driver_turn(
+        _FEATURE_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
 
 
 def run_strategy_driver_turn(
@@ -210,60 +164,17 @@ def run_strategy_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
-    driver = _driver(runtime)
-    if user_text is not None:
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=user_text, metadata={"intent": "strategy"}
-        )
-    try:
-        active = _active_plan(runtime.plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(
-                plan_id=active.id,
-                user_text=user_text or "",
-                selection=selection,
-                dedup_strategies=dedup_strategies,
-                adjust_params=adjust_params,
-                expected_step_id=expected_step_id,
-            )
-            append_driver_messages(repo, task.id, turn)
-            return join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(runtime.settings)
-        proposal = build_strategy_proposal(
-            registry,
-            backend,
-            task.id,
-            task.source_dir,
-            target_col=getattr(task, "target_col", "") or None,
-            score_col=getattr(task, "score_col", "") or None,
-        )
-        note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
-        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
-        repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content=(
-                f"开始策略分析:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
-                f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
-                f"{note_text}"
-            ),
-            metadata={"intent": "strategy"},
-        )
-        turn = driver.start(
-            task_id=task.id,
-            template_id=proposal.template_id,
-            slots=proposal.template_slots(),
-            tier=runtime.tier,
-        )
-        append_driver_messages(repo, task.id, turn)
-        return join_turn_response(repo, task.id)
-    except StrategySetupError as exc:
-        return append_join_error(repo, task.id, str(exc))
-    except DriverError:
-        raise
-    except Exception as exc:
-        return append_join_error(repo, task.id, f"策略分析出错：{exc}")
+    return _run_driver_turn(
+        _STRATEGY_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
 
 
 def run_vintage_driver_turn(
@@ -277,57 +188,17 @@ def run_vintage_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
-    driver = _driver(runtime)
-    if user_text is not None:
-        repo.add_agent_message(
-            task.id, role="user", stage="chat", content=user_text, metadata={"intent": "vintage"}
-        )
-    try:
-        active = _active_plan(runtime.plan_repo, task.id)
-        if active is not None:
-            turn = driver.resume(
-                plan_id=active.id,
-                user_text=user_text or "",
-                selection=selection,
-                dedup_strategies=dedup_strategies,
-                adjust_params=adjust_params,
-                expected_step_id=expected_step_id,
-            )
-            append_driver_messages(repo, task.id, turn)
-            return join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(runtime.settings)
-        proposal = build_vintage_proposal(
-            registry,
-            backend,
-            task.id,
-            task.source_dir,
-            target_col=getattr(task, "target_col", "") or None,
-            time_col=getattr(task, "time_col", "") or None,
-        )
-        repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content=(
-                f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`，"
-                f"cohort `{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
-            ),
-            metadata={"intent": "vintage"},
-        )
-        turn = driver.start(
-            task_id=task.id,
-            template_id=proposal.template_id,
-            slots=proposal.template_slots(),
-            tier=runtime.tier,
-        )
-        append_driver_messages(repo, task.id, turn)
-        return join_turn_response(repo, task.id)
-    except VintageSetupError as exc:
-        return append_join_error(repo, task.id, str(exc))
-    except DriverError:
-        raise
-    except Exception as exc:
-        return append_join_error(repo, task.id, f"Vintage 风险分析出错：{exc}")
+    return _run_driver_turn(
+        _VINTAGE_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
 
 
 def run_modeling_driver_turn(
@@ -341,11 +212,39 @@ def run_modeling_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
+    return _run_driver_turn(
+        _MODELING_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
+
+
+def _run_driver_turn(
+    spec: _TurnHandlerSpec,
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+    selection: list | None,
+    dedup_strategies: dict | None,
+    adjust_params: dict | None,
+    expected_step_id: str | None,
+) -> dict:
     driver = _driver(runtime)
     if user_text is not None:
-        display = "已确认文件角色与目标列。" if user_text.startswith("[C1]") else user_text
         repo.add_agent_message(
-            task.id, role="user", stage="chat", content=display, metadata={"intent": "modeling"}
+            task.id,
+            role="user",
+            stage="chat",
+            content=spec.format_user_display(user_text),
+            metadata={"intent": spec.intent},
         )
     try:
         active = _active_plan(runtime.plan_repo, task.id)
@@ -358,78 +257,266 @@ def run_modeling_driver_turn(
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
             )
-            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
+            _append_spec_messages(spec, repo, task, turn, runtime)
             return join_turn_response(repo, task.id)
-        backend, registry = _modeling_data_runtime(runtime.settings)
-        conversation = repo.list_agent_messages(task.id)
-        c1_state = _latest_c1_state(conversation)
-        c1_assignment = None
-        c1_proposal = build_join_proposal(registry, task.id, task.source_dir)
-        if not c1_proposal.skip:
-            if c1_state is None:
-                _append_c1_message(repo, task.id, c1_proposal)
-                return join_turn_response(repo, task.id)
-            c1_assignment = _parse_c1_reply(user_text, c1_state)
-            if c1_assignment is None:
-                repo.add_agent_message(
-                    task.id,
-                    role="assistant",
-                    stage="chat",
-                    content="请先确认建模文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
-                    metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
-                )
-                return join_turn_response(repo, task.id)
-            if not c1_assignment["anchor_id"]:
-                return append_join_error(repo, task.id, "请先指定建模样本主表（通常是含目标列的那张），再确认。")
-        proposal = build_modeling_proposal(
-            registry,
-            backend,
-            task.id,
-            task.source_dir,
-            target_type=_modeling_target_type(task),
-            recipes=_modeling_recipes(task),
-            sample_weight_col=getattr(task, "sample_weight_col", "") or None,
-            anchor_id=(c1_assignment or {}).get("anchor_id"),
-            join_feature_ids=(c1_assignment or {}).get("feature_ids"),
-            target_col=(c1_assignment or {}).get("target_col"),
-            field_hints=fetch_field_convention_hints(
-                runtime.settings,
-                keywords=_modeling_field_hint_keywords(task, c1_proposal),
-            ),
-        )
-        counts = proposal.counts
-        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
-        note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
-        repo.add_agent_message(
-            task.id,
-            role="assistant",
-            stage="chat",
-            content=(
-                f"开始建模:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
-                f"切分 `{proposal.split_col}` train/test/oot="
-                f"{counts.get('train', 0)}/{counts.get('test', 0)}/{counts.get('oot', 0)}，"
-                f"候选特征 {len(proposal.feature_cols)} 个。先做泄漏感知特征筛选，随后请确认特征集。"
-                f"{note_text}"
-            ),
-            metadata={"intent": "modeling"},
-        )
-        slots = proposal.template_slots()
-        slots.setdefault("project_meta", _modeling_project_meta(task))
+        setup_result = spec.run_setup(runtime, repo, task, user_text)
+        if isinstance(setup_result, dict):
+            return setup_result
+        template_id, slots, start_kwargs = setup_result
         turn = driver.start(
             task_id=task.id,
-            template_id=proposal.template_id,
+            template_id=template_id,
             slots=slots,
             tier=runtime.tier,
-            success_criteria=_modeling_success_criteria(task),
+            **start_kwargs,
         )
-        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
+        _append_spec_messages(spec, repo, task, turn, runtime)
         return join_turn_response(repo, task.id)
-    except (JoinSetupError, ModelingSetupError) as exc:
+    except spec.setup_error_types as exc:
         return append_join_error(repo, task.id, str(exc))
     except DriverError:
         raise
     except Exception as exc:
-        return append_join_error(repo, task.id, f"建模出错：{exc}")
+        return append_join_error(repo, task.id, f"{spec.error_label}：{exc}")
+
+
+def _append_spec_messages(
+    spec: _TurnHandlerSpec, repo: TaskRepository, task: TaskRecord, turn, runtime: DriverTurnRuntime
+) -> None:
+    if spec.pass_memory_kwargs:
+        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
+    else:
+        append_driver_messages(repo, task.id, turn)
+
+
+def _c1_display_text(user_text: str) -> str:
+    return "已确认文件角色与目标列。" if user_text.startswith("[C1]") else user_text
+
+
+def _identity_display_text(user_text: str) -> str:
+    return user_text
+
+
+def _run_join_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    conversation = repo.list_agent_messages(task.id)
+    c1_state = _latest_c1_state(conversation)
+    _, registry = _modeling_data_runtime(runtime.settings)
+    if c1_state is None:
+        proposal = build_join_proposal(registry, task.id, task.source_dir)
+        _append_c1_message(repo, task.id, proposal)
+        return join_turn_response(repo, task.id)
+    assignment = _parse_c1_reply(user_text, c1_state)
+    if assignment is None:
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content="请确认文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
+            metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
+        )
+        return join_turn_response(repo, task.id)
+    if not assignment["anchor_id"]:
+        return append_join_error(repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。")
+    if not assignment["feature_ids"]:
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content="已确认样本表与目标列。只有一张表，无需拼接（数据拼接阶段已跳过）。",
+            metadata={"join_skip": True},
+        )
+        return join_turn_response(repo, task.id)
+    return (
+        "data_join",
+        {"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
+        {},
+    )
+
+
+def _run_feature_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    proposal = build_feature_proposal(
+        registry, backend, task.id, task.source_dir, metrics=_feature_metrics(task)
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"分析数据集 `{proposal.dataset_name}`（目标列 `{proposal.target_col}`，"
+            f"{len(proposal.features)} 个候选特征）:"
+        ),
+        metadata={"intent": "feature_analysis"},
+    )
+    return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _run_strategy_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    proposal = build_strategy_proposal(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=getattr(task, "target_col", "") or None,
+        score_col=getattr(task, "score_col", "") or None,
+    )
+    note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
+    bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"开始策略分析:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
+            f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
+            f"{note_text}"
+        ),
+        metadata={"intent": "strategy"},
+    )
+    return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _run_vintage_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    proposal = build_vintage_proposal(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=getattr(task, "target_col", "") or None,
+        time_col=getattr(task, "time_col", "") or None,
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`，"
+            f"cohort `{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
+        ),
+        metadata={"intent": "vintage"},
+    )
+    return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _run_modeling_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    conversation = repo.list_agent_messages(task.id)
+    c1_state = _latest_c1_state(conversation)
+    c1_assignment = None
+    c1_proposal = build_join_proposal(registry, task.id, task.source_dir)
+    if not c1_proposal.skip:
+        if c1_state is None:
+            _append_c1_message(repo, task.id, c1_proposal)
+            return join_turn_response(repo, task.id)
+        c1_assignment = _parse_c1_reply(user_text, c1_state)
+        if c1_assignment is None:
+            repo.add_agent_message(
+                task.id,
+                role="assistant",
+                stage="chat",
+                content="请先确认建模文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
+                metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
+            )
+            return join_turn_response(repo, task.id)
+        if not c1_assignment["anchor_id"]:
+            return append_join_error(repo, task.id, "请先指定建模样本主表（通常是含目标列的那张），再确认。")
+    proposal = build_modeling_proposal(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_type=_modeling_target_type(task),
+        recipes=_modeling_recipes(task),
+        sample_weight_col=getattr(task, "sample_weight_col", "") or None,
+        anchor_id=(c1_assignment or {}).get("anchor_id"),
+        join_feature_ids=(c1_assignment or {}).get("feature_ids"),
+        target_col=(c1_assignment or {}).get("target_col"),
+        field_hints=fetch_field_convention_hints(
+            runtime.settings,
+            keywords=_modeling_field_hint_keywords(task, c1_proposal),
+        ),
+    )
+    counts = proposal.counts
+    bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+    note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"开始建模:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
+            f"切分 `{proposal.split_col}` train/test/oot="
+            f"{counts.get('train', 0)}/{counts.get('test', 0)}/{counts.get('oot', 0)}，"
+            f"候选特征 {len(proposal.feature_cols)} 个。先做泄漏感知特征筛选，随后请确认特征集。"
+            f"{note_text}"
+        ),
+        metadata={"intent": "modeling"},
+    )
+    slots = proposal.template_slots()
+    slots.setdefault("project_meta", _modeling_project_meta(task))
+    return (
+        proposal.template_id,
+        slots,
+        {"success_criteria": _modeling_success_criteria(task)},
+    )
+
+
+_JOIN_SPEC = _TurnHandlerSpec(
+    intent="data_join",
+    setup_error_types=(JoinSetupError,),
+    error_label="数据拼接出错",
+    run_setup=_run_join_setup,
+    format_user_display=_c1_display_text,
+    pass_memory_kwargs=True,
+)
+
+_FEATURE_SPEC = _TurnHandlerSpec(
+    intent="feature_analysis",
+    setup_error_types=(FeatureSetupError,),
+    error_label="特征分析出错",
+    run_setup=_run_feature_setup,
+    format_user_display=_identity_display_text,
+    pass_memory_kwargs=False,
+)
+
+_STRATEGY_SPEC = _TurnHandlerSpec(
+    intent="strategy",
+    setup_error_types=(StrategySetupError,),
+    error_label="策略分析出错",
+    run_setup=_run_strategy_setup,
+    format_user_display=_identity_display_text,
+    pass_memory_kwargs=False,
+)
+
+_VINTAGE_SPEC = _TurnHandlerSpec(
+    intent="vintage",
+    setup_error_types=(VintageSetupError,),
+    error_label="Vintage 风险分析出错",
+    run_setup=_run_vintage_setup,
+    format_user_display=_identity_display_text,
+    pass_memory_kwargs=False,
+)
+
+_MODELING_SPEC = _TurnHandlerSpec(
+    intent="modeling",
+    setup_error_types=(JoinSetupError, ModelingSetupError),
+    error_label="建模出错",
+    run_setup=_run_modeling_setup,
+    format_user_display=_c1_display_text,
+    pass_memory_kwargs=True,
+)
 
 
 DRIVER_TURN_FUNCS = {
