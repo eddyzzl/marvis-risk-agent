@@ -219,6 +219,34 @@ class PlanDriver:
                     return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
 
+    def replan_structured(
+        self,
+        *,
+        plan_id,
+        goal: str,
+        expected_step_id=None,
+        run_seq=0,
+    ) -> DriverTurn:
+        """Structural replan driven by an already-decided goal (AGT-8).
+
+        Unlike ``resume(user_text=...)``, this does NOT feed ``goal`` back through
+        ``is_confirm``/``route_instruction`` — it goes straight to
+        ``GateExecutionAdapter.apply_replan`` (the same structured path
+        ``_handle_instruction``'s ``action == "replan"`` branch already uses for a
+        user-typed instruction). This is for callers that already hold a
+        *structured* replan decision (AUTO's ``decide_gate``) and would otherwise
+        have to round-trip it back through the free-text router — risking
+        ``is_confirm`` misreading a phrase like "……并继续调参" as a plain confirm,
+        or a second LLM classification pass misjudging it as ``clarify`` and
+        silently dropping the replan intent (both routes never reach
+        ``apply_replan`` in that case).
+        """
+        plan = self._repo.load_plan(plan_id)
+        gate = None if plan.status == PlanStatus.VALIDATED else self._awaiting_step(plan)
+        if expected_step_id and (gate is None or gate.id != str(expected_step_id)):
+            raise DriverError("当前待确认步骤已变化,请刷新后重试。")
+        return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
+
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
         agent mode classifies the instruction into confirm / adjust / replan / clarify

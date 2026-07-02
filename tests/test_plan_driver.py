@@ -1816,6 +1816,64 @@ def test_driver_replan_success_at_overview_shows_new_plan_and_stays_validated(tm
     assert any("重规划" in message.content for message in turn.messages)
 
 
+def test_driver_replan_structured_bypasses_text_router(tmp_path):
+    """AGT-8: replan_structured drives GateExecutionAdapter.apply_replan directly
+    from an already-decided goal — no is_confirm/route_instruction hop. Passing
+    an llm_client that would raise if consulted proves the router is never
+    called."""
+
+    class _ExplodingLLM:
+        def complete(self, **kwargs):
+            raise AssertionError("replan_structured must not consult the instruction router")
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_modeling_plan())
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        # the replanned segment's new-a step (screen_features, not a confirmation
+        # gate) runs immediately, so it needs its own canned output too.
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    planner = _FakeReplanPlanner()
+    executor = PlanExecutor(
+        repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo), planner=planner
+    )
+    driver = PlanDriver(repo, executor, llm_client=_ExplodingLLM())
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at the tune gate ("tune")
+
+    turn = driver.replan_structured(plan_id="plan-1", goal="……并继续调参", expected_step_id="tune")
+
+    assert planner.last_instruction == "……并继续调参"
+    loaded = repo.load_plan("plan-1")
+    assert "new-a" in [step.id for step in loaded.steps]  # the replanned remaining segment
+    assert any("重规划" in message.content for message in turn.messages)
+
+
+def test_driver_replan_structured_rejects_stale_gate_token(tmp_path):
+    """A replan_structured call bound to a gate id that no longer matches the
+    plan's current awaiting step raises DriverError instead of silently
+    replanning against the wrong point."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_modeling_plan())
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor, llm_client=FakeRouterLLM("{}"))
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at the tune gate ("tune")
+
+    with pytest.raises(DriverError):
+        driver.replan_structured(plan_id="plan-1", goal="改流程", expected_step_id="stale-step")
+
+
 def test_is_confirm_matches_common_phrasings():
     assert is_confirm("确认")
     assert is_confirm("ok 继续")

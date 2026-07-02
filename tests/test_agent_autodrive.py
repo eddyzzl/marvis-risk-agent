@@ -194,8 +194,7 @@ def test_agent_mode_autodrives_join_to_completion(client: TestClient, tmp_path: 
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
 
-@pytest.mark.parametrize("action", ["confirm", "replan"])
-def test_agent_autodrive_binds_gate_step_token_to_confirming_actions(monkeypatch, action):
+def test_agent_autodrive_binds_gate_step_token_to_confirm_action(monkeypatch):
     calls = []
 
     def fake_turn(runtime, repo, task, **kwargs):
@@ -205,15 +204,42 @@ def test_agent_autodrive_binds_gate_step_token_to_confirming_actions(monkeypatch
     monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
     repo = _TokenRepo()
     task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
-    client = (
-        _SequencedLLM([json.dumps({"action": "replan", "reason": "继续", "replan_goal": "重规划当前步骤"})])
-        if action == "replan"
-        else _FakeLLM(action=action, reason="继续")
-    )
+    client = _FakeLLM(action="confirm", reason="继续")
 
     agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
 
     assert calls
+    assert calls[0]["expected_step_id"] == "gate-1"
+
+
+def test_agent_autodrive_replan_goes_through_structured_driver_path(monkeypatch):
+    """AGT-8: a replan decision must NOT be fed back as free-text user_text
+    (turn_fn) — it goes straight to PlanDriver.replan_structured, bound to the
+    same gate-step token as confirm/adjust."""
+    calls = []
+
+    class _FakeDriver:
+        def replan_structured(self, *, plan_id, goal, expected_step_id=None, run_seq=0):
+            calls.append({"plan_id": plan_id, "goal": goal, "expected_step_id": expected_step_id})
+            from marvis.agent.driver_turn import DriverMessage, DriverTurn
+            return DriverTurn(plan_id, "confirmed", [DriverMessage("chat", "已重规划。", {})])
+
+    monkeypatch.setattr("marvis.agent.turn_handlers._driver", lambda runtime: _FakeDriver())
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        raise AssertionError("replan must not fall back to text-loopback turn_fn")
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    repo.messages[0]["metadata"]["plan_id"] = "plan-9"
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    client = _SequencedLLM([json.dumps({"action": "replan", "reason": "继续", "replan_goal": "重规划当前步骤"})])
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=client)
+
+    assert calls
+    assert calls[0]["plan_id"] == "plan-9"
+    assert calls[0]["goal"] == "重规划当前步骤"
     assert calls[0]["expected_step_id"] == "gate-1"
 
 

@@ -558,13 +558,25 @@ def agent_autodrive_turn(
             )
             continue
         if action == "replan":
-            turn_fn(
-                runtime,
-                repo,
-                task,
-                user_text=decision.get("replan_goal") or decision["reason"],
-                expected_step_id=gate_step_id,
-            )
+            # AGT-8: go straight to the driver's structured replan path instead of
+            # feeding replan_goal back as free-text user_text. Text loopback risked
+            # (a) is_confirm misreading a phrase like "……并继续调参" as a plain
+            # confirm and confirming the very gate that was supposed to be
+            # restructured (same root cause as AGT-1), and (b) an extra LLM
+            # round-trip re-classifying a decision that was already structured,
+            # which could misjudge it as clarify and silently drop the replan.
+            goal = decision.get("replan_goal") or decision["reason"]
+            plan_id = gate_meta.get("plan_id")
+            if not plan_id:
+                return
+            driver = _driver(runtime)
+            try:
+                turn = driver.replan_structured(
+                    plan_id=plan_id, goal=goal, expected_step_id=gate_step_id
+                )
+            except DriverError:
+                return
+            append_driver_messages(repo, task.id, turn, settings=getattr(runtime, "settings", None), task=task)
             continue
         return
     # AGT-7: the budget ran out with a gate STILL open (every iteration matched a
