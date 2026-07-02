@@ -254,13 +254,13 @@
 | ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
 | ✅ | TST-8 | CI security job（pip-audit+bandit -ll，continue-on-error 观察期，`22299d71`）；首扫：pip-audit 零漏洞、bandit 42 中危（40×B608 f-string SQL 等）**留待 FIN-2 审查裁决** | Med/S | — |
 | ✅ | TST-9 | 并发测试落地（`ecb2506e`）并挖出 3 个真 bug（confirm_step 无双确认守卫、start_job TOCTOU 裸 IntegrityError、DuckDB 全局连接并发上传竞态），已以 xfail 复现入库，修复分支 fix/concurrency-bugs 进行中 | Med/M | ✅ |
-| ⬜ | ARCH-4 | 五个 run_*_driver_turn 成片复制粘贴（~330 行同构） | Med/M | — |
-| ⬜ | ARCH-5 | 插件 worker 协议无版本握手；子进程反向 import 拖入 DB 链 | Med/M | — |
+| ✅ | ARCH-4 | 五 handler 收敛为 _TurnHandlerSpec 参数化核心（`ca0c156c`），差异轴显式表格化，共享尾部 diff 字节等价验证；**发现真缺口：feature/strategy/vintage 从不传 settings/task→MEM-1 捕获只对 join/modeling 生效，修复归入 S2 记忆接线 commit** | Med/M | ✅ |
+| ✅ | ARCH-5 | worker 协议 protocol_version 握手（`74fa5c7`）：不匹配→typed error+审计；入口 import 轻量护栏保持绿 | Med/M | — |
 | ✅ | ARCH-6 | pipeline 拆四模块（`6a411a3`：errors/cellgen/io/memory，门面保 monkeypatch 命名空间语义）+ 阶段边界/重试点/异常路径结构化日志；auto_distill 门控（INV-4）原样 | Med/M | ✅ |
 | ⬜ | ARCH-7 | 错误分类学散乱：132 处手写 HTTPException、error_kind 裸字符串 | Med/M | — |
 | ⬜ | ARCH-8 | 四个 pack 的 _Runtime 复制粘贴，pack SDK 公共层缺位 | Med/S | — |
 | ✅ | ARCH-9 | 模板按域拆八模块（`aa064cce`：_shared/sample_echo/validation/modeling/join/feature/strategy/monitoring），sample.py 缩为 36 行注册门面；拆分前后 WorkflowTemplate 输出 SHA256 字节等价验证 | Med/S | ✅ |
-| ⬜ | ARCH-10 | db_schema 迁移无版本号：只能加列式迁移 | Low/S | — |
+| ✅ | ARCH-10 | schema_version 落 PRAGMA user_version（`51a3130`）：编号迁移清单、旧库无损升级测试、重复 init 幂等 | Low/S | ✅ |
 | ⬜ | ARCH-11 | app.js 6416 行前端 god file：状态所有权未定界（追踪器"TaskWorkspace 抽取"同一件事） | Med/L | — |
 | ✅ | PERF-6 | 轮询热路径收敛（`fe5180c4`）：GET /api/tasks 11 连接→2（与任务数无关）、evidence mtime/size 缓存、journal_mode PRAGMA 每库一次；查询计数断言守护 | Med/M | — |
 | ✅ | PERF-9 | 全量静态版本化（`a752660d`）：_static_asset_version rglob 全部 js/css、importmap 把裸相对导入重写为 ?v= URL、/static Cache-Control 分层（?v= immutable / 否则 no-cache）；真 Chromium smoke 验证 | Med/S | — |
