@@ -1,6 +1,9 @@
+import sqlite3
+
 import pytest
 
 import marvis.db as db_module
+import marvis.db_schema as db_schema_module
 import marvis.repositories.tasks as task_repo_module
 from marvis.db import (
     DatasetRepository,
@@ -911,3 +914,158 @@ def test_purge_task_does_not_report_dataset_file_shared_with_another_task(tmp_pa
         ).fetchone()[0]
     assert remaining == 1  # the owner task's dataset row survives
 
+
+
+
+def test_get_active_job_kinds_for_tasks_matches_per_task_lookup(tmp_path):
+    """PERF-6: the batched lookup used by the task-list polling endpoint must
+    return exactly what get_active_job_kind would return per task, including
+    tasks with no active job (absent from the dict, same as None from the
+    per-task method) and tasks with multiple historical jobs (only the most
+    recent queued/running one wins)."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    running_task = repo.create_task(_task_create(model_name="running"))
+    idle_task = repo.create_task(_task_create(model_name="idle"))
+    finished_task = repo.create_task(_task_create(model_name="finished"))
+
+    repo.start_job(running_task.id, "notebook")
+    old_job_id = repo.start_job(finished_task.id, "metrics")
+    repo.finish_job(old_job_id, status="succeeded")
+
+    expected = {
+        task.id: repo.get_active_job_kind(task.id)
+        for task in (running_task, idle_task, finished_task)
+    }
+    batched = repo.get_active_job_kinds_for_tasks(
+        [running_task.id, idle_task.id, finished_task.id]
+    )
+
+    assert expected[running_task.id] == "notebook"
+    assert expected[idle_task.id] is None
+    assert expected[finished_task.id] is None
+    # the batched dict omits tasks with no active job rather than mapping them to
+    # None -- .get(task_id) on the result reproduces get_active_job_kind's None.
+    assert batched.get(running_task.id) == expected[running_task.id]
+    assert batched.get(idle_task.id) == expected[idle_task.id]
+    assert batched.get(finished_task.id) == expected[finished_task.id]
+    assert running_task.id in batched
+    assert idle_task.id not in batched
+    assert finished_task.id not in batched
+
+
+def test_get_active_job_kinds_for_tasks_uses_single_connection(tmp_path):
+    """PERF-6: proves the N+1 fix at the sqlite3.connect level -- listing active
+    job kinds for many tasks must open exactly one connection, not one per task."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    tasks = [repo.create_task(_task_create(model_name=f"m{i}")) for i in range(6)]
+    for task in tasks[:3]:
+        repo.start_job(task.id, "notebook")
+
+    connect_calls = {"n": 0}
+    original_connect = sqlite3.connect
+
+    def counting_connect(*args, **kwargs):
+        connect_calls["n"] += 1
+        return original_connect(*args, **kwargs)
+
+    original = sqlite3.connect
+    sqlite3.connect = counting_connect
+    try:
+        result = repo.get_active_job_kinds_for_tasks([task.id for task in tasks])
+    finally:
+        sqlite3.connect = original
+
+    assert connect_calls["n"] == 1
+    assert len(result) == 3
+
+
+def test_get_active_job_kinds_for_tasks_empty_input_opens_no_connection(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    connect_calls = {"n": 0}
+    original_connect = sqlite3.connect
+
+    def counting_connect(*args, **kwargs):
+        connect_calls["n"] += 1
+        return original_connect(*args, **kwargs)
+
+    sqlite3.connect = counting_connect
+    try:
+        result = repo.get_active_job_kinds_for_tasks([])
+    finally:
+        sqlite3.connect = original_connect
+
+    assert result == {}
+    assert connect_calls["n"] == 0
+
+
+def test_connect_skips_redundant_journal_mode_pragma_after_first_confirmation(tmp_path):
+    """PERF-6: PRAGMA journal_mode=WAL is a database-file-level setting in SQLite
+    (persists across connections), unlike synchronous/busy_timeout/foreign_keys/
+    temp_store which reset to defaults per-connection. Once a db file's WAL mode
+    has been confirmed by one connect(), later connects to the same file must not
+    re-issue that pragma -- while still verifying the DB's actual runtime state
+    is unaffected (WAL still active, foreign keys still enforced)."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)  # first connect() already confirmed WAL for this path
+
+    traced_journal_mode_statements = []
+    original_connect = sqlite3.connect
+
+    def tracing_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: traced_journal_mode_statements.append(sql)
+            if "journal_mode" in sql
+            else None
+        )
+        return conn
+
+    sqlite3.connect = tracing_connect
+    try:
+        with connect(db_path) as conn:
+            conn.execute("SELECT 1")
+        with connect(db_path) as conn:
+            conn.execute("SELECT 1")
+    finally:
+        sqlite3.connect = original_connect
+
+    assert traced_journal_mode_statements == []
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_connect_reissues_journal_mode_pragma_for_a_fresh_db_path(tmp_path):
+    """The skip cache is keyed per db_path -- a different (unconfirmed) db file
+    must still get the pragma on its first connect()."""
+    db_schema_module._WAL_CONFIRMED_PATHS.discard(str((tmp_path / "fresh.sqlite").resolve()))
+    fresh_path = tmp_path / "fresh.sqlite"
+
+    traced_journal_mode_statements = []
+    original_connect = sqlite3.connect
+
+    def tracing_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: traced_journal_mode_statements.append(sql)
+            if "journal_mode" in sql
+            else None
+        )
+        return conn
+
+    sqlite3.connect = tracing_connect
+    try:
+        init_db(fresh_path)
+    finally:
+        sqlite3.connect = original_connect
+
+    assert any("journal_mode=WAL" in sql for sql in traced_journal_mode_statements)

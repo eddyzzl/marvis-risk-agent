@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from pathlib import Path
+import threading
 
 from fastapi import APIRouter, Request
 
@@ -12,6 +13,16 @@ from marvis.execution_environment import load_execution_environment
 
 
 router = APIRouter(prefix="/api", tags=["evidence"])
+
+# PERF-6: the 1s polling loop re-reads and json.loads these files on every tick.
+# Cache the parsed result per absolute path, keyed by (mtime_ns, size) so a cache
+# hit skips both the read_text() and json.loads() calls; any change to the file
+# (including truncation/rewrite with the same mtime granularity but a different
+# size) invalidates the entry. Process-local and unbounded by task count is fine
+# here -- entries are small parsed JSON dicts, one per (task, file) pair actually
+# polled, not per task in existence.
+_JSON_CACHE_LOCK = threading.Lock()
+_JSON_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
 
 
 def _repo(request: Request) -> TaskRepository:
@@ -50,10 +61,23 @@ def get_task_evidence(task_id: str, request: Request) -> dict:
 
 
 def _read_json(path: Path) -> dict:
-    if not path.exists():
+    cache_key = str(path)
+    try:
+        stat_result = path.stat()
+    except OSError:
+        with _JSON_CACHE_LOCK:
+            _JSON_CACHE.pop(cache_key, None)
         return {}
+    fingerprint = (stat_result.st_mtime_ns, stat_result.st_size)
+    with _JSON_CACHE_LOCK:
+        cached = _JSON_CACHE.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    parsed = payload if isinstance(payload, dict) else {}
+    with _JSON_CACHE_LOCK:
+        _JSON_CACHE[cache_key] = (fingerprint, parsed)
+    return parsed

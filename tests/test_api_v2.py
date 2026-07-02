@@ -133,6 +133,14 @@ class FakeTaskRepository:
                 return job["kind"]
         return None
 
+    def get_active_job_kinds_for_tasks(self, task_ids: list[str]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        task_id_set = set(task_ids)
+        for job in self.jobs.values():
+            if job["task_id"] in task_id_set and job["status"] in {"queued", "running"}:
+                result[job["task_id"]] = job["kind"]
+        return result
+
     def get_latest_failed_job_kind(self, task_id: str) -> str | None:
         self.get_task(task_id)
         for job in reversed(list(self.jobs.values())):
@@ -1474,6 +1482,59 @@ def test_task_evidence_endpoint_reads_execution_artifacts(tmp_path: Path, monkey
     assert payload["notebook_steps"][0]["title"] == "模型训练"
     assert payload["contract"]["target_col"] == "y"
     assert payload["reproducibility"]["summary"]["status"] == "pass"
+
+
+def test_task_evidence_endpoint_caches_parsed_json_until_file_changes(
+    tmp_path: Path, monkeypatch
+):
+    """PERF-6: the 1s polling loop must not re-read+re-parse the 5 evidence JSON
+    files when nothing on disk changed between polls. Proves the mtime/size cache
+    in marvis.routers.evidence both (a) skips the parse on a cache hit and
+    (b) picks up real content changes when the file is rewritten."""
+    import marvis.routers.evidence as evidence_module
+
+    evidence_module._JSON_CACHE.clear()
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    execution_dir = tmp_path / "tasks" / task_id / "execution"
+    execution_dir.mkdir(parents=True)
+    contract_path = execution_dir / "runtime_contract.json"
+    contract_path.write_text(json.dumps({"target_col": "y"}), encoding="utf-8")
+
+    first = client.get(f"/api/tasks/{task_id}/evidence")
+    assert first.status_code == 200
+    assert first.json()["contract"]["target_col"] == "y"
+
+    read_calls = {"n": 0}
+    original_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == contract_path:
+            read_calls["n"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    second = client.get(f"/api/tasks/{task_id}/evidence")
+    assert second.status_code == 200
+    assert second.json()["contract"]["target_col"] == "y"
+    assert read_calls["n"] == 0, "unchanged file must be served from cache, not re-read"
+
+    # Rewrite with different content/size -- must bust the cache.
+    contract_path.write_text(
+        json.dumps({"target_col": "y", "score_decimal_places": 4}), encoding="utf-8"
+    )
+    third = client.get(f"/api/tasks/{task_id}/evidence")
+    assert third.status_code == 200
+    assert third.json()["contract"]["score_decimal_places"] == 4
+    assert read_calls["n"] == 1, "changed file must be re-read exactly once"
 
 
 def test_task_evidence_endpoint_reads_notebook_stage_reproducibility_artifact(

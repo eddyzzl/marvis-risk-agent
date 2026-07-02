@@ -596,6 +596,36 @@ class TaskRepository:
             ).fetchone()
         return None if row is None else str(row["kind"])
 
+    def get_active_job_kinds_for_tasks(self, task_ids: list[str]) -> dict[str, str]:
+        """Batched form of get_active_job_kind for the polling task-list endpoint
+        (PERF-6): one connection + one query for N tasks instead of N connections,
+        via a window function that keeps only the most-recent active job per task.
+        Semantics match get_active_job_kind exactly (same status filter, same
+        "most recent by created_at" tie-break); an empty task_ids list short-circuits
+        without opening a connection."""
+        if not task_ids:
+            return {}
+        placeholders = ",".join("?" for _ in task_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id, kind
+                  FROM (
+                        SELECT task_id, kind,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY task_id
+                                   ORDER BY created_at DESC
+                               ) AS rn
+                          FROM jobs
+                         WHERE task_id IN ({placeholders})
+                           AND status IN ('queued', 'running')
+                       )
+                 WHERE rn = 1
+                """,
+                tuple(task_ids),
+            ).fetchall()
+        return {str(row["task_id"]): str(row["kind"]) for row in rows}
+
     def get_latest_failed_job_kind(self, task_id: str) -> str | None:
         with connect(self.db_path) as conn:
             row = conn.execute(

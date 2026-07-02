@@ -11,21 +11,55 @@ from marvis.domain import (
 )
 from marvis.safe_paths import safe_filename_component
 
+_UNSET = object()
+
 
 def task_payload(
     repo: TaskRepository,
     task: TaskRecord,
     tasks_dir: Path | None = None,
+    *,
+    active_job_kind: str | None | object = _UNSET,
 ) -> dict:
+    """``active_job_kind`` defaults to a sentinel so callers can distinguish "not
+    supplied, look it up" from "supplied, and it really is None" (PERF-6: batch
+    callers like list_task_payloads precompute active job kinds for every task in
+    one query and pass the result through here instead of letting each payload
+    open its own connection via repo.get_active_job_kind)."""
+    resolved_active_job_kind = (
+        repo.get_active_job_kind(task.id)
+        if active_job_kind is _UNSET
+        else active_job_kind
+    )
     return {
         **task_to_dict(task),
-        "active_job_kind": repo.get_active_job_kind(task.id),
+        "active_job_kind": resolved_active_job_kind,
         "failure_stage": task_failure_stage(repo, task),
         "failure_reason_code": task_failure_reason_code(task),
         "stop_reason_code": task_stop_reason_code(repo, task),
         "stopped": task_stopped(repo, task),
         "report_available": task_report_available(tasks_dir, task.id),
     }
+
+
+def list_task_payloads(
+    repo: TaskRepository,
+    tasks: list[TaskRecord],
+    tasks_dir: Path | None = None,
+) -> list[dict]:
+    """Batched task_payload for the polling task-list endpoint (PERF-6): resolves
+    active_job_kind for all tasks with a single query instead of one connection
+    per task, then reuses task_payload's per-task field derivation unchanged."""
+    active_job_kinds = repo.get_active_job_kinds_for_tasks([task.id for task in tasks])
+    return [
+        task_payload(
+            repo,
+            task,
+            tasks_dir,
+            active_job_kind=active_job_kinds.get(task.id),
+        )
+        for task in tasks
+    ]
 
 
 def task_to_dict(task: TaskRecord) -> dict:
