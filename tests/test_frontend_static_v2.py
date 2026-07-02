@@ -4101,7 +4101,7 @@ def test_appearance_setting_supports_light_dark_and_system_modes():
     assert 'document.body.dataset.theme = resolvedTheme;' in index_html
     assert '<meta id="appThemeColor" name="theme-color" content="#ffffff" />' in index_html
     assert 'document.getElementById("appThemeColor")?.setAttribute("content", isDark ? "#181818" : "#ffffff");' in index_html
-    assert index_html.index('<body class="app-booting" data-theme="light">') < index_html.index('localStorage.getItem("marvis_theme")')
+    assert index_html.index('<body class="app-booting" data-theme="light"') < index_html.index('localStorage.getItem("marvis_theme")')
     assert index_html.index('localStorage.getItem("marvis_theme")') < index_html.index('id="taskDialog"')
 
 

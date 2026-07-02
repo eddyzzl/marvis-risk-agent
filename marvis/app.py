@@ -1,3 +1,5 @@
+import hmac
+from html import escape
 import ipaddress
 import logging
 from pathlib import Path
@@ -88,6 +90,8 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _NAMED_LOCAL_HOSTS = {"localhost", "testclient"}
 _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
 _TRUSTED_PROXY_ENV = "MARVIS_TRUSTED_PROXY_HOSTS"
+_LOCAL_TOKEN_ENV = "MARVIS_LOCAL_TOKEN"
+_LOCAL_TOKEN_HEADER = "x-marvis-token"
 _FORWARDED_CLIENT_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 _STATIC_VERSION_FILES = (
     "app.js",
@@ -157,6 +161,22 @@ def _effective_client_host(request) -> str | None:
 
 def _remote_read_enabled() -> bool:
     return os.environ.get(_REMOTE_READ_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configured_local_token() -> str:
+    """GAP-5: optional shared-host hardening. `_is_local_client` treats any
+    loopback peer as trusted, which is correct for a single-user laptop but
+    wrong on a shared JupyterHub-style host where any other logged-in user's
+    process can also reach 127.0.0.1 and would otherwise inherit full write
+    access (including installing plugins = arbitrary code execution). When
+    MARVIS_LOCAL_TOKEN is set, non-safe requests must also present it via the
+    X-Marvis-Token header; when unset (the default), behavior is unchanged."""
+    return os.environ.get(_LOCAL_TOKEN_ENV, "").strip()
+
+
+def _request_has_valid_local_token(request, expected_token: str) -> bool:
+    presented = request.headers.get(_LOCAL_TOKEN_HEADER, "")
+    return hmac.compare_digest(presented, expected_token)
 
 
 def _is_public_read_path(path: str) -> bool:
@@ -249,6 +269,19 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
                     status_code=403,
                     content={"detail": "API access is limited to local clients"},
                 )
+        # GAP-5: on a shared host, "local" alone does not mean "the owning
+        # user" -- any other logged-in user's process is also a loopback
+        # peer. When MARVIS_LOCAL_TOKEN is configured, every non-safe request
+        # (local or remote) must present it, tightening the trust boundary
+        # from "any loopback peer" to "whoever holds the token". Left
+        # unconfigured (the default), this check is a no-op.
+        local_token = _configured_local_token()
+        if local_token and method not in _SAFE_METHODS:
+            if not _request_has_valid_local_token(request, local_token):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "missing or invalid X-Marvis-Token"},
+                )
         return await call_next(request)
 
     app.include_router(api_router)
@@ -318,9 +351,18 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     def index(request: Request) -> HTMLResponse:
         index_html = (static_dir / "index.html").read_text(encoding="utf-8")
         index_html = index_html.replace("__MARVIS_STATIC_VERSION__", _static_asset_version(static_dir))
+        is_local = _is_local_client(_effective_client_host(request))
         branding = load_branding(settings.workspace)
-        if not _is_local_client(_effective_client_host(request)):
+        if not is_local:
             branding = dict(DEFAULT_BRANDING)
+        # GAP-5: hand the local UI its MARVIS_LOCAL_TOKEN so api.js can echo
+        # it back via X-Marvis-Token on non-GET requests. Never embedded for
+        # a remote client (even with MARVIS_ALLOW_REMOTE_READ on) -- leaking
+        # the token to a remote reader would let it mint itself write access.
+        local_token = _configured_local_token() if is_local else ""
+        index_html = index_html.replace(
+            "__MARVIS_LOCAL_TOKEN__", escape(local_token, quote=True)
+        )
         return HTMLResponse(
             render_branded_index_html(index_html, branding)
         )
