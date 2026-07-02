@@ -169,17 +169,17 @@
 | ⬜ | MEM-1 | 记忆与 V2 三阶段 driver 双向断链：实验不写入、gate 不读取、compare_model_experience 零调用（AGT-2 同一件事，合并） | Critical/M | ✅ |
 | ✅ | AGT-3 | metric-aware 摘要（深度2/20键/600字符）+goal 带 slots 摘要+LLM 意见降权为 goal_doubt→REVIEW（`5ada60a2`） | High/M | ✅ |
 | ✅ | AGT-4 | build_plan 支持 success_criteria+任务级 oot_ks_min 可选控件（不写死数值）→未达标走既有 replan 环（`a0f5c19c`） | High/M | ✅ |
-| ⬜ | MEM-2 | 蒸馏 LLM 摘要因 llm_factory 未接线永久休眠 | High/S | ✅ |
-| ⬜ | MEM-3 | 记忆捕获无幂等去重：重跑灌水 support/confidence 并主导检索排序 | High/S | ✅ |
+| ✅ | MEM-2 | 两处构造点接通 llm_factory（`70eded8d`），失败回退模板句 | High/S | ✅ |
+| ✅ | MEM-3 | (type,task,指纹) 幂等去重+support 按独立 task 计（`db996264`） | High/S | ✅ |
 | ⬜ | MEM-4 | field_convention 口径记忆没喂给 V2 槽位探测：目标列/切分列每次从零猜 | High/M | ✅ |
-| ⬜ | LLM-1 | 结构化输出停留在 json_object 弱约束，未接 json_schema/guided decoding | High/M | ✅ |
-| ⬜ | LLM-2 | 模型评测框架无法对真实模型运行：run_eval_case 无生产实现 | High/M | ✅ |
-| ⬜ | LLM-3 | LLM 调用零可观测性：token/延迟/成败不落任何地方 | High/M | ✅ |
-| ⬜ | TST-1 | 弱模型 LLM 触点无评测集：只用完美 JSON 的 FakeLLM 测过（与 LLM-2 + 追踪器"领域 eval fixtures"合成完整评测故事） | High/M | ⚠️ |
-| ⬜ | MEM-5 | 检索打分无时间维度：无 recency 衰减/过期/age 标注 | Med/S | — |
-| ⬜ | MEM-6 | 原始记忆召回天花板：只扫最近 200 条且不按类型定向 | Med/S | — |
+| ✅ | LLM-1 | json_schema 约束解码+能力探测+json_object 回退（`ed09e819`），gate/router/planner/reviewer/intent 全接 schema，抽取重试兜底保留 | High/M | ✅ |
+| 🔄 | LLM-2 | （B3e 在飞：可运行 eval cases + CLI） | High/M | ✅ |
+| ✅ | LLM-3 | llm_calls 表+7 类 caller 标签+GET /api/llm/usage 报表（`399d3b8d`） | High/M | ✅ |
+| 🔄 | TST-1 | （B3e 在飞：退化输出评测集六形态×四触点） | High/M | ⚠️ |
+| ✅ | MEM-5 | recency 加减分+age_days+"(N 天前)"标注（`ef56b2e7`） | Med/S | — |
+| ✅ | MEM-6 | 按 kind 定向查询+各类上限（`42731506`） | Med/S | — |
 | ⬜ | MEM-7 | 记忆质量无负反馈闭环 | Med/M | — |
-| ⬜ | MEM-8 | 低置信噪声直进 prompt：raw 侧无过滤与蒸馏侧不对称 | Med/S | — |
+| ✅ | MEM-8 | raw 侧 low 过滤+raw_quota 保底名额（`d3729dd0`） | Med/S | — |
 | ⬜ | AGT-5 | route_instruction 上下文只有 gate 标题：抽参数盲猜 | Med/S | — |
 | ✅ | AGT-6 | 无 LLM→status=skipped 不渲染警告；触发面收窄到 decision/confirm/带指标步骤（`b53254cd`） | Med/M | — |
 | ⬜ | AGT-7 | AUTO 8 门预算对 ≥9 门流程必然静默耗尽；confidence 从未使用 | Med/S | — |
@@ -187,8 +187,8 @@
 | ⬜ | AGT-9 | 门决策红旗 checklist 不覆盖建模门（调参/选实验） | Med/S | — |
 | ⬜ | AGT-10 | planner generate/replan/explore 仍用严格 json.loads 未剥围栏 | Low/S | — |
 | ⬜ | MEM-9 | 用户偏好捕获入口过窄且子串一票否决静默丢弃 | Low/S | — |
-| ⬜ | MEM-10 | memory.after_save 从未发射 + 蒸馏静默吞错 | Low/S | — |
-| ⬜ | MEM-11 | 蒸馏 payload 无预算直灌 prompt | Low/S | — |
+| ✅ | MEM-10 | 触发器接通+吞错改记录+consolidate 返回错误计数（`bdc10ede`） | Low/S | — |
+| ✅ | MEM-11 | ids 截断计数+3 样本、3000 字符总预算、审计保全量（`96d4f409`） | Low/S | — |
 
 ## 8. 阶段七：S4/S5/S6（12–19 天）
 
@@ -269,10 +269,10 @@
 | ⬜ | VD-11 | 设计 token 剩余缺口：radius 塌缩、spacing/type scale 为零（radius 调整须先出对比稿由用户拍板；含追踪器"legacy hex 清理"） | Med/L | — |
 | ⬜ | LLM-4 | 多模型配置只有存储没有路由 | Med/M | — |
 | ⬜ | LLM-5 | 无上下文窗口预算防线 | Med/M | — |
-| ⬜ | LLM-6 | thinking 模型 <think> 输出无处理 | Med/M | — |
-| ⬜ | LLM-7 | 传输层零重试：一次超时终止整轮 AUTO/规划 | Med/S | — |
-| ⬜ | LLM-8 | draft 授权是最难生成任务却唯一无 JSON 容错/重试 | Med/S | — |
-| ⬜ | LLM-9 | 流式回答每 delta 全量 SQLite UPDATE：O(n²) 写放大 | Med/S | — |
+| ✅ | LLM-6 | 终文剥离 <think> 段后再抽 JSON（`572c6e33`，流式期直通、落库剥离） | Med/M | — |
+| ✅ | LLM-7 | 超时/连接错误指数退避重试一次（`367aa13f`），审计记 retry | Med/S | — |
+| ✅ | LLM-8 | draft 授权接 JSON 抽取+错误回灌重试（`b642a308`） | Med/S | — |
+| ✅ | LLM-9 | 落库节流 ≥500ms/≥512 字符+终稿完整落库（`91d3b1e1`） | Med/S | — |
 | ⬜ | LLM-10 | 系统提示词散落 13 模块无版本标识 | Low/M | — |
 
 ## 12. 长线追踪（不阻塞完全体 v1；⏸️ 需写明理由）
