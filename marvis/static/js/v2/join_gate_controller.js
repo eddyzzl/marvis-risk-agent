@@ -76,15 +76,19 @@ export async function submitC1Assignment(button, context = {}) {
   const form = button.closest(".c1-form");
   const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(context);
   if (!form || !taskId || typeof api !== "function") return;
-  let anchorId = "";
+  const anchorIds = [];
   const featureIds = [];
   for (const select of form.querySelectorAll(".c1-role")) {
     const datasetId = select.getAttribute("data-c1-dataset");
-    if (select.value === "anchor" && !anchorId) anchorId = datasetId;
+    if (select.value === "anchor") anchorIds.push(datasetId);
     else if (select.value === "feature") featureIds.push(datasetId);
   }
-  if (!anchorId) {
+  if (!anchorIds.length) {
     setActionStatus("请先把一张表选为「样本主表」。", "error");
+    return;
+  }
+  if (anchorIds.length > 1) {
+    setActionStatus("只能有一张样本主表，请把其余表改为「特征表」或「忽略」。", "error");
     return;
   }
   const targetCol = form.querySelector(".c1-target")?.value || "";
@@ -93,7 +97,7 @@ export async function submitC1Assignment(button, context = {}) {
     const result = await api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
       body: JSON.stringify({
-        content: "[C1]" + JSON.stringify({ anchor_id: anchorId, feature_ids: featureIds, target_col: targetCol }),
+        content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
         acceptance_mode: acceptanceMode,
       }),
     });

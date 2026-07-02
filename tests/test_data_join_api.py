@@ -197,6 +197,39 @@ def test_data_join_c1_form_assignment_drives_the_join(client: TestClient, tmp_pa
     assert "拼接诊断完成" in gate["content"]
 
 
+def test_data_join_c1_form_rejects_duplicate_sample_primary_role(client: TestClient, tmp_path: Path):
+    """UX-7: the C1 form must reject a payload that marks two datasets as the
+    sample anchor table with a typed, explicit error rather than silently
+    dropping the second dataset from the join (join_setup.JoinSetupError)."""
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "拼接双主表", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    c1 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    state = c1["metadata"]["join_c1"]
+    anchor = state["anchor_id"]
+    other = state["feature_ids"][0]
+    payload = json.dumps({
+        "anchor_id": anchor,
+        "anchor_ids": [anchor, other],
+        "feature_ids": [],
+        "target_col": state["target_col"],
+    })
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": f"[C1]{payload}"})
+    assert resp.status_code == 202, resp.text
+    error = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert error["metadata"].get("error") is True
+    assert "样本主表只能有一个" in error["content"]
+    assert "特征表" in error["content"] or "忽略" in error["content"]
+
+    # the gate must still be the same C1 form (not silently advanced) so the
+    # user can correct the roles and resubmit.
+    still_open = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert still_open["metadata"].get("error") is True
+
+
 def test_data_join_single_file_confirms_then_skips(client: TestClient, tmp_path: Path):
     src = tmp_path / "single_material"
     src.mkdir()
