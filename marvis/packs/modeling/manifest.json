@@ -151,6 +151,16 @@
           "reject_weight": {
             "type": "number",
             "exclusiveMinimum": 0
+          },
+          "score_direction": {
+            "type": "string",
+            "enum": [
+              "higher_is_riskier",
+              "higher_is_better"
+            ]
+          },
+          "confirm_direction_conflict": {
+            "type": "boolean"
           }
         },
         "required": [

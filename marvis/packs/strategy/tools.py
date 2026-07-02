@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.data.backend import DataBackend
+from marvis.data.direction import check_score_direction, normalize_score_direction
 from marvis.data.labels import resolve_labeled_frame
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, StrategyRepository
@@ -172,14 +173,20 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
+    score_col = str(inputs["score_col"])
+    target_col = str(inputs["target_col"])
+    score_direction = normalize_score_direction(_optional_str(inputs.get("score_direction")))
+    effective_direction = score_direction or "higher_is_better"
     points = tradeoff_view(
         frame,
-        score_col=str(inputs["score_col"]),
-        target_col=str(inputs["target_col"]),
+        score_col=score_col,
+        target_col=target_col,
         cutoffs=[float(item) for item in inputs["cutoffs"]] if inputs.get("cutoffs") is not None else None,
         profit_params=_optional_profit_params(inputs.get("profit_params")),
         ead_col=_optional_str(inputs.get("ead_col")),
         pd_col=_optional_str(inputs.get("pd_col")),
+        score_direction=score_direction,
+        confirm_direction_conflict=bool(inputs.get("confirm_direction_conflict")),
     )
     recommended = None
     if points:
@@ -188,11 +195,20 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
             objective=str(inputs.get("objective") or "max_profit"),
             max_bad_rate=_optional_float(inputs.get("max_bad_rate")),
         )
-    return {
+    direction_check = check_score_direction(
+        pd.to_numeric(frame[score_col], errors="raise").to_numpy(dtype=float),
+        pd.to_numeric(frame[target_col], errors="raise").to_numpy(dtype=float),
+        declared_direction=effective_direction,
+    )
+    result = {
         "points": [_jsonable(point) for point in points],
         "recommended": _jsonable(recommended),
         "nan_labels_dropped": nan_labels_dropped,
+        "score_direction": effective_direction,
     }
+    if direction_check.status != "skipped":
+        result["direction_diagnostics"] = _jsonable(direction_check)
+    return result
 
 
 class _Runtime:

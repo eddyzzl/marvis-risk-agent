@@ -6,6 +6,8 @@ import math
 import numpy as np
 import pandas as pd
 
+from marvis.data.direction import ScoreDirection, check_score_direction
+from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.modeling.errors import ModelingError
 
 
@@ -13,6 +15,10 @@ INFERRED_TARGET_COL = "__reject_inference_target__"
 SAMPLE_WEIGHT_COL = "__reject_inference_weight__"
 SOURCE_COL = "__reject_inference_source__"
 METHOD_COL = "__reject_inference_method__"
+
+# S1a: default matches the pre-existing hard-coded behavior (_risk_order's
+# argsort(-safe_scores) treats high score as high risk -> priority to be labeled bad).
+_DEFAULT_REJECT_INFERENCE_DIRECTION: ScoreDirection = "higher_is_riskier"
 
 _APPROVED_VALUES = frozenset({"1", "true", "yes", "y", "approved", "approve", "accepted", "pass", "通过", "同意"})
 _REJECTED_VALUES = frozenset({"0", "false", "no", "n", "rejected", "reject", "declined", "deny", "拒绝", "未通过"})
@@ -37,6 +43,8 @@ def reject_inference(
     reject_weight: float = 1.0,
     output_target_col: str = INFERRED_TARGET_COL,
     output_weight_col: str = SAMPLE_WEIGHT_COL,
+    score_direction: ScoreDirection | None = None,
+    confirm_direction_conflict: bool = False,
 ) -> RejectInferenceResult:
     """Controlled reject-inference MVP.
 
@@ -83,6 +91,26 @@ def reject_inference(
     accepted[SOURCE_COL] = "accepted_observed"
     accepted[METHOD_COL] = method
 
+    effective_direction = score_direction or _DEFAULT_REJECT_INFERENCE_DIRECTION
+    direction_diagnostics = None
+    if score_col:
+        direction_diagnostics = _direction_self_check(
+            accepted,
+            score_col=score_col,
+            output_target_col=output_target_col,
+            declared_direction=effective_direction,
+        )
+        if direction_diagnostics.status == "conflict" and not confirm_direction_conflict:
+            raise ScoreDirectionConflictError(
+                tool="reject_inference",
+                score_col=score_col,
+                target_col=target_col,
+                declared_direction=effective_direction,
+                implied_direction=direction_diagnostics.implied_direction,
+                corr=direction_diagnostics.corr,
+                n_labeled=direction_diagnostics.n,
+            )
+
     if method == "parceling":
         inferred = _parcel_rejected(
             rejected,
@@ -91,6 +119,7 @@ def reject_inference(
             weight=reject_weight,
             output_target_col=output_target_col,
             output_weight_col=output_weight_col,
+            score_direction=effective_direction,
         )
     else:
         inferred = _fuzzy_augment_rejected(
@@ -114,11 +143,20 @@ def reject_inference(
         "score_col": score_col,
         "target_col": output_target_col,
         "sample_weight_col": output_weight_col,
+        "score_direction": effective_direction,
         "assumption": (
             "Rejected labels are inferred from a configured bad-rate assumption; "
             "use sensitivity analysis before business sign-off."
         ),
     }
+    if direction_diagnostics is not None:
+        diagnostics["direction_diagnostics"] = {
+            "status": direction_diagnostics.status,
+            "n": direction_diagnostics.n,
+            "corr": direction_diagnostics.corr,
+            "reason": direction_diagnostics.reason,
+            "implied_direction": direction_diagnostics.implied_direction,
+        }
     return RejectInferenceResult(
         frame=result,
         diagnostics=diagnostics,
@@ -157,9 +195,10 @@ def _parcel_rejected(
     weight: float,
     output_target_col: str,
     output_weight_col: str,
+    score_direction: ScoreDirection | None = None,
 ) -> pd.DataFrame:
     out = frame.copy()
-    order = _risk_order(out, score_col)
+    order = _risk_order(out, score_col, score_direction)
     bad_count = int(round(out.shape[0] * bad_rate))
     labels = np.zeros(out.shape[0], dtype=int)
     if bad_count > 0:
@@ -196,12 +235,33 @@ def _fuzzy_augment_rejected(
     return pd.concat(parts, ignore_index=True, sort=False)
 
 
-def _risk_order(frame: pd.DataFrame, score_col: str | None) -> np.ndarray:
+def _risk_order(
+    frame: pd.DataFrame,
+    score_col: str | None,
+    score_direction: ScoreDirection | None = None,
+) -> np.ndarray:
     if not score_col:
         return np.arange(frame.shape[0])
+    effective_direction = score_direction or _DEFAULT_REJECT_INFERENCE_DIRECTION
     scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
-    safe_scores = np.where(np.isfinite(scores), scores, -math.inf)
-    return np.argsort(-safe_scores, kind="mergesort")
+    if effective_direction == "higher_is_riskier":
+        safe_scores = np.where(np.isfinite(scores), scores, -math.inf)
+        return np.argsort(-safe_scores, kind="mergesort")  # current behavior, unchanged
+    # higher_is_better -> low score is high risk, prioritize low scores for bad labels
+    safe_scores = np.where(np.isfinite(scores), scores, math.inf)
+    return np.argsort(safe_scores, kind="mergesort")
+
+
+def _direction_self_check(
+    accepted: pd.DataFrame,
+    *,
+    score_col: str,
+    output_target_col: str,
+    declared_direction: ScoreDirection,
+):
+    scores = pd.to_numeric(accepted[score_col], errors="coerce").to_numpy(dtype=float)
+    target = accepted[output_target_col].to_numpy(dtype=float)
+    return check_score_direction(scores, target, declared_direction=declared_direction)
 
 
 __all__ = [

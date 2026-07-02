@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 import marvis.packs.strategy as strategy_pack
+from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.strategy import (
     ProfitParams,
     TradeoffPoint,
@@ -71,3 +72,76 @@ def test_recommend_operating_point_respects_objective_and_bad_rate_constraint():
 def test_strategy_package_exports_tradeoff_surface():
     assert strategy_pack.tradeoff_view is tradeoff_view
     assert strategy_pack.recommend_operating_point is recommend_operating_point
+
+
+def _direction_conflict_frame(n: int = 60) -> pd.DataFrame:
+    """score positively correlates with bad -> implied direction higher_is_riskier."""
+    scores = [float(i) for i in range(n)]
+    bad = [1 if i >= n // 2 else 0 for i in range(n)]
+    return pd.DataFrame({"score": scores, "bad": bad})
+
+
+def _direction_consistent_frame(n: int = 60) -> pd.DataFrame:
+    """score negatively correlates with bad -> implied direction higher_is_better."""
+    scores = [float(i) for i in range(n)]
+    bad = [1 if i < n // 2 else 0 for i in range(n)]
+    return pd.DataFrame({"score": scores, "bad": bad})
+
+
+def test_tradeoff_view_score_direction_default_matches_legacy_behavior():
+    frame = pd.DataFrame({"score": [500, 620, 730, 760], "bad": [1, 0, 0, 1]})
+
+    default_points = tradeoff_view(frame, score_col="score", target_col="bad", cutoffs=[550, 650, 750])
+    explicit_points = tradeoff_view(
+        frame,
+        score_col="score",
+        target_col="bad",
+        cutoffs=[550, 650, 750],
+        score_direction="higher_is_better",
+    )
+
+    assert default_points == explicit_points
+
+
+def test_tradeoff_view_score_direction_higher_is_riskier_flips_approval():
+    frame = pd.DataFrame({"score": [500, 620, 730, 760], "bad": [1, 0, 0, 1]})
+
+    points = tradeoff_view(
+        frame,
+        score_col="score",
+        target_col="bad",
+        cutoffs=[650],
+        score_direction="higher_is_riskier",
+    )
+
+    # higher_is_riskier -> approved means score < cutoff (low score = low risk).
+    assert points[0].approval_rate == pytest.approx(0.5)
+
+
+def test_tradeoff_view_raises_on_direction_conflict():
+    frame = _direction_conflict_frame()
+
+    with pytest.raises(ScoreDirectionConflictError):
+        tradeoff_view(frame, score_col="score", target_col="bad", score_direction="higher_is_better")
+
+
+def test_tradeoff_view_confirm_direction_conflict_bypasses_gate():
+    frame = _direction_conflict_frame()
+
+    points = tradeoff_view(
+        frame,
+        score_col="score",
+        target_col="bad",
+        score_direction="higher_is_better",
+        confirm_direction_conflict=True,
+    )
+
+    assert points  # did not raise, proceeded with declared direction
+
+
+def test_tradeoff_view_does_not_raise_when_declared_direction_matches_data():
+    frame = _direction_consistent_frame()
+
+    points = tradeoff_view(frame, score_col="score", target_col="bad", score_direction="higher_is_better")
+
+    assert points
