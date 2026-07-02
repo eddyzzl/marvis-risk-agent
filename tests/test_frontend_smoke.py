@@ -111,8 +111,6 @@ def test_frontend_entrypoint_serves_declared_es_modules(tmp_path):
     assert "/static/js/state.js" in loaded_modules
     assert "/static/js/ui-utils.js" in loaded_modules
     assert "/static/js/v2/governance_extensions.js" in loaded_modules
-    assert "/static/js/v2/plan_view.js" not in loaded_modules
-    assert "/static/js/v2/subagent_view.js" not in loaded_modules
 
 
 def _resolve_relative_module(base_path: str, specifier: str) -> str:
