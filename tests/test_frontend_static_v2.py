@@ -5491,8 +5491,11 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     assert "border-color: color-mix(in srgb, var(--border) 58%, transparent);" in dark_hero_rule
     assert "border-color: transparent;" not in dark_hero_rule
     assert "0 16px 42px" not in dark_hero_rule
-    assert "rgba(0, 0, 0" not in dark_hero_rule
-    assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
+    # VD-8: the dark task-hero now sources its glass edge from the shared
+    # --glass-edge token (raised into the 0.14-0.18 highlight range with an
+    # added bottom inner shadow for real depth) instead of a hardcoded
+    # near-invisible 0.08 highlight.
+    assert "box-shadow: var(--glass-edge);" in dark_hero_rule
 
     assert 'id="resultScrollContent"' in index_html
     assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html

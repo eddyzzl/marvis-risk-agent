@@ -883,6 +883,22 @@
                     <option value="auditbot-pixel">MARVIS Pixel</option>
                   </select>
                 </div>
+                <div class="settings-row" data-settings-row="mascot-glow">
+                  <label for="settingsMascotGlowSelect" class="settings-row-title">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <circle cx="12" cy="12" r="4.2"></circle>
+                      <path d="M12 3.4v2.4"></path>
+                      <path d="M12 18.2v2.4"></path>
+                      <path d="M4.6 12h2.4"></path>
+                      <path d="M17 12h2.4"></path>
+                    </svg>
+                    <span>宠物发光（试验）</span>
+                  </label>
+                  <select id="settingsMascotGlowSelect" class="settings-select">
+                    <option value="off">关闭</option>
+                    <option value="on">开启</option>
+                  </select>
+                </div>
               </section>
               <button id="openGovernanceSettingsButton" class="settings-system-row" type="button" data-settings-row="system">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1311,6 +1327,16 @@
             aria-hidden="true"
           ></div>
         </div>
+        <!-- VD-5: real-logo glow loop, layered behind the sticker. Off by
+             default (mascot_glow setting) until the user turns it on in
+             settings; opacity/animation speed react to data-pet-mood via
+             CSS only (see .pet-glow rules in styles.css). -->
+        <div
+          id="petGlow"
+          class="pet-glow"
+          style='background-image: url("static/brand/glow/marvis-glow-loop.webp")'
+          aria-hidden="true"
+        ></div>
       </div>
       <script>
         (() => {

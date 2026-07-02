@@ -1646,6 +1646,76 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-delivery-status[data-signal-kind="error"] {
   border-color: var(--model-signal-error, var(--danger));
 }
+
+/* VD-6: dual-encode signal state with a tonal fill + inline-SVG glyph, not
+   border color alone — color-blind users cannot distinguish ready/warning/
+   error by hue on a 1px border, and a bare color swap scans poorly even for
+   sighted users. Fills reuse the existing --model-signal-* tokens via
+   color-mix so light/dark both stay on the established palette. */
+.model-delivery-readiness-card[data-readiness-kind="ready"],
+.model-delivery-business-card[data-signal-kind="ready"],
+.model-delivery-policy-card[data-signal-kind="ready"] {
+  background: color-mix(in srgb, var(--model-signal-ready, var(--success)) 8%, var(--model-panel-surface, var(--surface)));
+}
+.model-delivery-readiness-card[data-readiness-kind="warning"],
+.model-delivery-business-card[data-signal-kind="warning"],
+.model-delivery-policy-card[data-signal-kind="warning"] {
+  background: color-mix(in srgb, var(--model-signal-warning, var(--warning)) 9%, var(--model-panel-surface, var(--surface)));
+}
+.model-delivery-readiness-card[data-readiness-kind="error"],
+.model-delivery-business-card[data-signal-kind="error"],
+.model-delivery-policy-card[data-signal-kind="error"] {
+  background: color-mix(in srgb, var(--model-signal-error, var(--danger)) 9%, var(--model-panel-surface, var(--surface)));
+}
+
+.model-delivery-readiness-card .signal-glyph,
+.model-delivery-business-card .signal-glyph,
+.model-delivery-policy-card .signal-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  flex: none;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+.model-delivery-status .signal-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 11px;
+  height: 11px;
+  flex: none;
+}
+.model-delivery-readiness-card .signal-glyph svg,
+.model-delivery-business-card .signal-glyph svg,
+.model-delivery-policy-card .signal-glyph svg,
+.model-delivery-status .signal-glyph svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+[data-readiness-kind="ready"] .signal-glyph,
+[data-signal-kind="ready"] .signal-glyph {
+  color: var(--model-signal-ready, var(--success));
+}
+[data-readiness-kind="warning"] .signal-glyph,
+[data-signal-kind="warning"] .signal-glyph {
+  color: var(--model-signal-warning, var(--warning));
+}
+[data-readiness-kind="error"] .signal-glyph,
+[data-signal-kind="error"] .signal-glyph {
+  color: var(--model-signal-error, var(--danger));
+}
+[data-readiness-kind="neutral"] .signal-glyph,
+[data-signal-kind="neutral"] .signal-glyph {
+  color: var(--model-panel-text-muted, var(--text-muted));
+}
 .model-delivery-policy {
   padding-top: 10px;
 }
@@ -1715,6 +1785,21 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   border-radius: 999px;
   font-size: 11px;
   color: var(--model-panel-text-muted, var(--text-muted));
+}
+.model-delivery-status[data-readiness-kind="ready"],
+.model-delivery-status[data-signal-kind="ready"] {
+  background: color-mix(in srgb, var(--model-signal-ready, var(--success)) 12%, var(--model-panel-surface, var(--surface)));
+  color: var(--model-signal-ready, var(--success));
+}
+.model-delivery-status[data-readiness-kind="warning"],
+.model-delivery-status[data-signal-kind="warning"] {
+  background: color-mix(in srgb, var(--model-signal-warning, var(--warning)) 14%, var(--model-panel-surface, var(--surface)));
+  color: var(--model-signal-warning, var(--warning));
+}
+.model-delivery-status[data-readiness-kind="error"],
+.model-delivery-status[data-signal-kind="error"] {
+  background: color-mix(in srgb, var(--model-signal-error, var(--danger)) 14%, var(--model-panel-surface, var(--surface)));
+  color: var(--model-signal-error, var(--danger));
 }
 .model-delivery-artifacts {
   display: grid;

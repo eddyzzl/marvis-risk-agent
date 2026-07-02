@@ -1,5 +1,20 @@
 import { escapeHtml } from "../ui-utils.js";
 
+// VD-6: dual-encode signal state (shape, not just color) so ready/warning/
+// error/neutral read clearly for color-blind users scanning the delivery
+// panel. Semantic shapes: check / triangle-exclaim / cross / open circle.
+const SIGNAL_GLYPH_PATHS = {
+  ready: '<path d="M4 8.5 L6.7 11 L12 4.5" />',
+  warning: '<path d="M8 3 L14 13 L2 13 Z" /><path d="M8 6.5 V9.5" /><circle cx="8" cy="11.3" r="0.6" fill="currentColor" stroke="none" />',
+  error: '<path d="M4 4 L12 12" /><path d="M12 4 L4 12" />',
+  neutral: '<circle cx="8" cy="8" r="5" />',
+};
+
+function signalGlyph(kind) {
+  const path = SIGNAL_GLYPH_PATHS[kind] || SIGNAL_GLYPH_PATHS.neutral;
+  return `<span class="signal-glyph" aria-hidden="true"><svg viewBox="0 0 16 16">${path}</svg></span>`;
+}
+
 const METRIC_ORDER = [
   "oot_ks",
   "test_ks",
@@ -81,9 +96,10 @@ function readinessCards(items) {
     const status = String(item.status || "");
     const artifact = String(item.artifact || "");
     const reason = String(item.reason || "");
-    return `<div class="model-delivery-readiness-card" data-readiness-kind="${escapeHtml(statusKind(status))}">
+    const kind = statusKind(status);
+    return `<div class="model-delivery-readiness-card" data-readiness-kind="${escapeHtml(kind)}">
       <span>${escapeHtml(String(item.label || item.id || "交付项"))}</span>
-      <strong>${escapeHtml(statusLabel(status))}</strong>
+      <strong>${signalGlyph(kind)}${escapeHtml(statusLabel(status))}</strong>
       ${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : ""}
       ${reason ? `<small>${escapeHtml(reason)}</small>` : ""}
     </div>`;
@@ -123,12 +139,12 @@ function candidateTable(candidates) {
           <td>${escapeHtml(String(row.recipe || "-"))}${selected ? ' <span class="model-delivery-selected">已选</span>' : ""}</td>
           <td><code>${escapeHtml(String(row.id || "-"))}</code></td>
           ${metricKeys.map((key) => `<td class="model-delivery-num">${escapeHtml(formatMetric(metrics[key]))}</td>`).join("")}
-          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(signals.stability))}">${escapeHtml(String(signals.stability || "-"))}</span></td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(signals.stability))}">${signalGlyph(signalKind(signals.stability))}${escapeHtml(String(signals.stability || "-"))}</span></td>
           <td class="model-delivery-num">${escapeHtml(formatMetric(signals.feature_count))}</td>
           <td>${escapeHtml(String(signals.calibration || "-"))}</td>
           <td>${escapeHtml(String(signals.delivery || (caps.pmml_supported && caps.handoff_supported ? "可移交" : "仅原生")))}</td>
-          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.monotonicity_status || policy.monotonicity))}">${escapeHtml(String(policy.monotonicity || "-"))}</span></td>
-          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.approval_status || policy.approval))}">${escapeHtml(String(policy.approval || "-"))}</span></td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.monotonicity_status || policy.monotonicity))}">${signalGlyph(signalKind(policy.monotonicity_status || policy.monotonicity))}${escapeHtml(String(policy.monotonicity || "-"))}</span></td>
+          <td><span class="model-delivery-status" data-signal-kind="${escapeHtml(signalKind(policy.approval_status || policy.approval))}">${signalGlyph(signalKind(policy.approval_status || policy.approval))}${escapeHtml(String(policy.approval || "-"))}</span></td>
         </tr>`;
       }).join("")}</tbody>
     </table>
@@ -146,7 +162,7 @@ function businessSignalSummary(signals) {
   return `<div class="model-delivery-business-grid">${items.map(([label, value, kind]) => (
     `<div class="model-delivery-business-card" data-signal-kind="${escapeHtml(kind)}">
       <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(String(value))}</strong>
+      <strong>${signalGlyph(kind)}${escapeHtml(String(value))}</strong>
     </div>`
   )).join("")}</div>`;
 }
@@ -167,7 +183,7 @@ function policySignalSummary(signals) {
     <div class="model-delivery-policy-grid">${items.map(([label, value, kind]) => (
       `<div class="model-delivery-policy-card" data-signal-kind="${escapeHtml(kind)}">
         <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(String(value))}</strong>
+        <strong>${signalGlyph(kind)}${escapeHtml(String(value))}</strong>
       </div>`
     )).join("")}</div>
     ${reasons.length ? `<div class="model-delivery-policy-reasons">${reasons.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -202,7 +218,7 @@ function policyDecisionSummary(decision) {
     <div class="model-delivery-policy-grid">${items.map(([label, value, kind]) => (
       `<div class="model-delivery-policy-card" data-signal-kind="${escapeHtml(kind)}">
         <span>${escapeHtml(label)}</span>
-        <strong>${escapeHtml(String(value))}</strong>
+        <strong>${signalGlyph(kind)}${escapeHtml(String(value))}</strong>
       </div>`
     )).join("")}</div>
     ${enabledRules.length ? `<div class="model-delivery-policy-reasons">${enabledRules.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
@@ -229,7 +245,7 @@ function actionTable(actions) {
         );
         return `<tr>
           <td>${escapeHtml(actionLabel(row.action))}</td>
-          <td><span class="model-delivery-status" data-readiness-kind="${escapeHtml(statusKind(row.status))}">${escapeHtml(statusLabel(row.status))}</span></td>
+          <td><span class="model-delivery-status" data-readiness-kind="${escapeHtml(statusKind(row.status))}">${signalGlyph(statusKind(row.status))}${escapeHtml(statusLabel(row.status))}</span></td>
           <td>${artifact ? `<code>${escapeHtml(shortArtifact(artifact))}</code>` : "-"}</td>
           <td>${escapeHtml(String(row.reason || ""))}</td>
         </tr>`;

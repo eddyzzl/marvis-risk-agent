@@ -235,7 +235,7 @@ body[data-theme="dark"] {
   --shadow-lift: 0 1px 3px rgba(0, 0, 0, 0.45);
   --settings-menu-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
   --progress-rail-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.35);
   --switch-on: #30d158;
   --button-secondary-shadow:
     0 1px 1px rgba(0, 0, 0, 0.18),
@@ -1703,12 +1703,75 @@ body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
 }
 
 .pet-sticker {
+  position: relative;
+  z-index: 1;
   width: 102px;
   height: 112px;
   display: grid;
   place-items: center;
   transform-origin: 50% 100%;
   animation: none;
+}
+
+/* VD-5: real-logo glow loop, layered behind the sticker via z-index (no
+   stacking context needed since .pet-companion doesn't set one). Hidden
+   entirely unless the mascot_glow setting is on; opacity/speed react to
+   the existing V2-aware data-pet-mood value set by renderPetState(). */
+.pet-glow {
+  position: absolute;
+  inset: -30% -30% -18% -30%;
+  z-index: 0;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+}
+.pet-companion[data-mascot-glow="on"] .pet-glow {
+  opacity: 0.85;
+}
+/* 门等待 = breathe (gentle pulse, matches the review mood already used for
+   an open, unresolved gate). */
+.pet-companion[data-mascot-glow="on"][data-pet-mood="review"] .pet-glow {
+  animation: pet-glow-breathe 3.2s ease-in-out infinite;
+}
+/* 执行中 = steady/constant glow (no pulse) at a higher level than idle -
+   work is actively happening, not waiting on anyone; a slow full-loop hue
+   cycle keeps it visibly "alive" without breathing in/out like the wait
+   state. */
+.pet-companion[data-mascot-glow="on"][data-pet-mood="running"] .pet-glow {
+  opacity: 0.75;
+  animation: pet-glow-steady 2.4s linear infinite;
+}
+/* 失败 = dim (a red flag / failure should read as subdued, not celebratory). */
+.pet-companion[data-mascot-glow="on"][data-pet-mood="failed"] .pet-glow {
+  opacity: 0.22;
+  filter: saturate(0.4);
+  animation: none;
+}
+/* 完成 = a single bright flash, then settle back down. */
+.pet-companion[data-mascot-glow="on"][data-pet-mood="success"] .pet-glow,
+.pet-companion[data-mascot-glow="on"][data-pet-mood="complete"] .pet-glow {
+  animation: pet-glow-flash 1.1s ease-out 1;
+}
+@keyframes pet-glow-breathe {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+@keyframes pet-glow-steady {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.12); }
+}
+@keyframes pet-glow-flash {
+  0% { opacity: 0.4; }
+  35% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-glow {
+    animation: none !important;
+  }
 }
 
 .pet-image {
@@ -4387,12 +4450,26 @@ body[data-theme="dark"] .task-hero {
   border-color: color-mix(in srgb, var(--border) 58%, transparent);
   background: linear-gradient(
     135deg,
-    color-mix(in srgb, var(--surface) 68%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 82%, transparent) 0%,
     color-mix(in srgb, var(--surface-soft) 46%, transparent) 100%
   );
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  box-shadow: var(--glass-edge);
 }
+
+body[data-theme="dark"] .task-hero.is-glass-active {
+  border-color: color-mix(in srgb, var(--border) 66%, transparent);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 74%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 50%, transparent) 100%
+  );
+  box-shadow: var(--glass-edge);
+}
+
+body[data-theme="dark"] .task-hero[data-tone="fail"] { --hero-glow: rgba(255, 123, 114, 0.16); }
+body[data-theme="dark"] .task-hero[data-tone="run"] { --hero-glow: rgba(10, 132, 255, 0.16); }
+body[data-theme="dark"] .task-hero[data-tone="ok"] { --hero-glow: rgba(99, 217, 131, 0.16); }
+body[data-theme="dark"] .task-hero[data-tone="review"] { --hero-glow: rgba(255, 209, 102, 0.18); }
 
 .progress-rail,
 .progress-panel {
@@ -5793,6 +5870,22 @@ dialog.draft-tools-dialog,
   -webkit-backdrop-filter: blur(12px) saturate(1.4);
   backdrop-filter: blur(12px) saturate(1.4);
   box-shadow: var(--glass-edge);
+  /* VD-9: gate cards are appended once per driver turn and never rebuilt
+     in place (the timeline only re-renders on real structural change), so
+     a one-shot entry animation here is always safe - no replay-on-poll
+     risk like the databar/KPI-bar animations above. */
+  animation: gate-card-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes gate-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .gate-card[data-gate-tone="review"] {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -5872,7 +5965,8 @@ dialog.draft-tools-dialog,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gate-card-pill::before {
+  .gate-card-pill::before,
+  .gate-card {
     animation: none;
   }
 }
@@ -6838,6 +6932,19 @@ body[data-theme="dark"] .metric-table-section {
   background: var(--bar-color, var(--accent));
   opacity: 0.85;
   transition: width .35s ease-out;
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+/* VD-9: skip the entry animation on rebuilds where the wrapping metric
+   table isn't rendering for the first time (polling redraws with the same
+   or newer data must not keep replaying the grow-in). */
+.metric-table-wrap[data-animation="none"] .databar-fill {
+  animation: none;
+}
+@keyframes bar-grow-x {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 0.85; }
 }
 .databar-label {
   position: relative;
@@ -7061,7 +7168,26 @@ body[data-theme="dark"] .period-text {
   margin-bottom: 10px;
 }
 .kpi-card-primary-label { font-size: 11px; color: var(--metric-text-muted); }
-.kpi-card-primary-value { font-size: 28px; font-weight: 700; color: var(--metric-text-strong); }
+.kpi-card-primary-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--metric-text-strong);
+  animation: kpi-value-reveal 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: 80ms;
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-value {
+  animation: none;
+}
+@keyframes kpi-value-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 .kpi-card-primary-bar {
   flex: 1;
   position: relative;
@@ -7070,7 +7196,18 @@ body[data-theme="dark"] .period-text {
   border-radius: 4px;
   overflow: hidden;
 }
-.kpi-card-primary-bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); width: calc(var(--fraction, 0) * 100%); }
+.kpi-card-primary-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-bar > i {
+  animation: none;
+}
 .kpi-card-rule { height: 1px; background: var(--metric-border); margin: 6px 0 8px; }
 .kpi-card-row {
   display: grid;
@@ -7093,6 +7230,20 @@ body[data-theme="dark"] .period-text {
   inset: 0 auto 0 0;
   background: var(--bar-color, var(--accent));
   width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-row-bar > i {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .databar-fill,
+  .kpi-card-primary-bar > i,
+  .kpi-card-row-bar > i,
+  .kpi-card-primary-value {
+    animation: none;
+  }
 }
 .kpi-card-row-value { text-align: right; font-weight: 700; color: var(--metric-text-strong); }
 .kpi-card-footer {
