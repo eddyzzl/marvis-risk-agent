@@ -253,7 +253,7 @@
 | ⬜ | TST-6 | redaction 过度/漏 masking；会话转录整体不脱敏 | Med/M | — |
 | ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
 | ✅ | TST-8 | CI security job（pip-audit+bandit -ll，continue-on-error 观察期，`22299d71`）；首扫：pip-audit 零漏洞、bandit 42 中危（40×B608 f-string SQL 等）**留待 FIN-2 审查裁决** | Med/S | — |
-| ✅ | TST-9 | 并发测试落地（`ecb2506e`）并挖出 3 个真 bug（confirm_step 无双确认守卫、start_job TOCTOU 裸 IntegrityError、DuckDB 全局连接并发上传竞态），已以 xfail 复现入库，修复分支 fix/concurrency-bugs 进行中 | Med/M | ✅ |
+| ✅ | TST-9 | 并发测试落地（`ecb2506e`）挖出 3 个真 bug 并已全修（`cabe409c` confirm_step 单发 CAS、`0b849f6e` start_job UNIQUE→ConflictError 只剩 202/409、`91ffc3da` DuckDB 每操作独立连接×12 调用点+PERF-8 配置保持）；xfail 全部转正为回归守卫，HTTP 双确认五连跑稳定 | Med/M | ✅ |
 | ✅ | ARCH-4 | 五 handler 收敛为 _TurnHandlerSpec 参数化核心（`ca0c156c`），差异轴显式表格化，共享尾部 diff 字节等价验证；**发现真缺口：feature/strategy/vintage 从不传 settings/task→MEM-1 捕获只对 join/modeling 生效，修复归入 S2 记忆接线 commit** | Med/M | ✅ |
 | ✅ | ARCH-5 | worker 协议 protocol_version 握手（`74fa5c7`）：不匹配→typed error+审计；入口 import 轻量护栏保持绿 | Med/M | — |
 | ✅ | ARCH-6 | pipeline 拆四模块（`6a411a3`：errors/cellgen/io/memory，门面保 monkeypatch 命名空间语义）+ 阶段边界/重试点/异常路径结构化日志；auto_distill 门控（INV-4）原样 | Med/M | ✅ |
