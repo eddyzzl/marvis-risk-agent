@@ -48,16 +48,17 @@
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ✅ | AGT-1 | is_confirm 已加疑问句守卫 + 整串锚定（`bfd075b2`，4 个误判串回归覆盖；PR-6 的手动文本确认面同步收紧） | High/S | ✅ |
-| ⬜ | DOM-1 | 复发/未修净：tune_hyperparameters 仍在 NaN 标签上静默调参，NaN 确认门在调参路径完全缺失 | High/S | ✅ |
+| ✅ | DOM-1 | tune 已接 NaN 门（`60e48bb9`）：resolve_modeling_splits + typed error + nan_labels_dropped 上报 + 全无标签 OOT 转 scoring-only | High/S | ✅ |
 | ✅ | PERF-2 | 唯一性/去重已改在变换键空间计算（`57d25038`，DuckDB+pandas 双路径，exact_lower/date/hash 三场景回归；复现脚本验证修复） | High/M | ✅ |
 | ✅ | NEW-1 | vintage 内核已真累计（`95863f0b`）：cohort 固定基数（max sample_count/balance_sum）+ 单调不减 + 超 1 clip 并出 data_quality_warnings；report_compute 快照口径已识别防双重累计；S3/B1/B5 前置解除 | High/S | ✅ |
 | ✅ | ARCH-3 | 全部软探测已收口（`2785fa0a`，11 文件 -184 行）：直调审计方法+删 fallback；仅剩 JoinEngine 构造器 3 处有意硬失败守卫；测试替身补齐 *_with_audit | High/S | ⚠️ |
 | ✅ | UX-3 | 四个门控件 context 工厂已捕获发起时 taskId，写回前校验未切换（`36097f54`，含行为级回归） | High/S | ✅ |
 | ✅ | UX-7 | C1 双主表前后端双重校验：前端即时拦截+后端 typed JoinSetupError 点名多余表（`12801be5`） | Med/S | — |
-| ⬜ | DOM-9 | 多配方冠军按 OOT KS 选择，与 tune "OOT 只报告不参与选择"方针自相矛盾（与 §3 TUNE-5/SEL-7 合并成一份"冠军选择标准" spec） | Med/S | — |
-| ⬜ | DOM-10 | 报告评分列静默回退：artifact 缺失时用第一个特征列冒充模型分生成正式报告 | Med/S | — |
+| ✅ | DOM-9 | 冠军改按防过拟合 test KS（`c92fdf00`，test_ks−0.5·max(0,train−test)），OOT 只报告；selection_policy 显式配置优先（TUNE-5/SEL-7 的加权/阈值维度留 §3） | Med/S | — |
+| ✅ | DOM-10 | 报告评分列缺失改抛 ReportScoreMissingError（`ce15d0ab`），删除首特征列冒充回退 | Med/S | — |
 | ✅ | REL-9 | execute_join_plan 同步分支已加与 async 对称的 job 守卫（`4ed8e44e`，并发二次调用 409） | Low/S | — |
 | ✅ | REL-8 | execution_environment.json 已改原子写（write_json_atomic）+ 损坏自愈回退默认（`e71cf3c0`） | Low/S | — |
+| ✅ | NEW-3 | smoke 发现的新 bug 当场修复（`70716027`）：join+无切分列建模在 C1 确认后 409（modeling_setup 留空 split_col 但模板 schema 要求非空）——改为 split_config 自动切分（含 group_cols 防泄漏）贯通 make_split，端到端回归覆盖 | High/S | ✅ |
 
 ## 3. 阶段二：建模方法学极致专项（EXC）——高影响 8 条约 2–3 周；全部 37 条约 4–6 周
 

@@ -18,11 +18,12 @@ Key hardening landed since the 2026-06-28 reviews (verified fixed by the 2026-07
 
 Single source of truth for all remaining work: [`docs/plans/v2-master-backlog.md`](../plans/v2-master-backlog.md) (179 items, staged; DoD for "V2 complete" in its §0). Highest-priority open items:
 
-1. **Three incomplete fixes from earlier reviews** (adversarially confirmed): `is_confirm` still treats questions as confirmation and short-circuits before LLM routing (AGT-1); `tune_hyperparameters` still tunes silently on NaN labels (DOM-1); JOIN uniqueness/dedup computed in raw key space vs matching in transformed key space (PERF-2, reproduced).
-2. **Four criticals**: concurrent `PlanExecutor.run` via double-confirm/second tab mis-fails running steps (REL-1); heavy sync work inside `async def` endpoints freezes the service during big-table ops (PERF-1); manual-mode gate confirm runs long turns with zero feedback and no stop (UX-1); memory ↔ V2 fully disconnected (MEM-1).
-3. **Modeling methodology gaps vs "same sample, same label → KS ceiling" bar** (8 confirmed-high, backlog §3): default flow has no multivariate feature selection; only LGB is tuned (12 random trials); default split builds no OOT (`oot_by_time` is dead code); FEATURE-stage fit-transforms lack train-only discipline; preprocessors are not persisted for scoring replay; categorical features silently dropped.
-4. **Known limitation recorded per DoD-7**: raw typed manual replies have no browser-side stale-token; fix scheduled with AGT-1 (backlog PR-6).
-5. `cum_bad_rate` in `marvis/validation/vintage.py` is per-MOB, not cumulative (NEW-1; known since 06-21, scheduled in backlog stage 1).
+**Landed after the gate run above (backlog stage 1, all merged with targeted regressions):** the three recurrence fixes (AGT-1 question-guarded anchored `is_confirm`; DOM-1 NaN-label gate in tuning; PERF-2 transformed-key-space uniqueness/dedup), the long-standing fake-cumulative `cum_bad_rate` (NEW-1), audit soft-probe removal (ARCH-3), cross-task message bleed guard (UX-3), duplicate sample-primary rejection (UX-7), champion-by-test-KS (DOM-9), report score-column hard error (DOM-10), atomic env config + sync join guard (REL-8/9), and a smoke-discovered join+no-split-column 409 (NEW-3). A follow-up full `scripts/check` on the merged tree is the stage-1 exit gate.
+
+Still open (highest priority):
+
+1. **Four criticals**: concurrent `PlanExecutor.run` via double-confirm/second tab mis-fails running steps (REL-1); heavy sync work inside `async def` endpoints freezes the service during big-table ops (PERF-1); manual-mode gate confirm runs long turns with zero feedback and no stop (UX-1); memory ↔ V2 fully disconnected (MEM-1).
+2. **Modeling methodology gaps vs "same sample, same label → KS ceiling" bar** (backlog §3): default flow has no multivariate feature selection; only LGB is tuned (12 random trials); default split builds no OOT (`oot_by_time` is dead code — corroborated live by the smoke run); FEATURE-stage fit-transforms lack train-only discipline; preprocessors are not persisted for scoring replay; categorical features silently dropped.
 
 Open decisions resolved for v1 (backlog §1 PR-5): AUTO stays bounded low-risk; subprocess sandbox is the v1 endstate (OS-level containment tracked long-line); `.pkl` is the source of truth with `.pmml` as compatibility artifact; visual work proceeds via token consolidation, taste-level changes gated on user-approved mockups.
 
