@@ -7,10 +7,17 @@ from typing import Any
 from marvis.agent.auto_drive import decide_gate
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
 from marvis.agent.join_setup import JoinSetupError, build_join_proposal
+from marvis.agent.memory_bridge import (
+    build_memory_anchor,
+    capture_agent_memory_for_driver_done,
+    fetch_field_convention_hints,
+)
 from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
 from marvis.agent.plan_driver import DriverError, PlanDriver, is_confirm
 from marvis.agent.strategy_setup import StrategySetupError, build_strategy_proposal
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
+from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
+from marvis.agent_memory.store import AgentMemoryStore
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, TaskRepository
@@ -78,7 +85,7 @@ def run_join_driver_turn(
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
             )
-            append_driver_messages(repo, task.id, turn)
+            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
             return join_turn_response(repo, task.id)
         conversation = repo.list_agent_messages(task.id)
         c1_state = _latest_c1_state(conversation)
@@ -114,7 +121,7 @@ def run_join_driver_turn(
             slots={"anchor_id": assignment["anchor_id"], "feature_ids": assignment["feature_ids"]},
             tier=runtime.tier,
         )
-        append_driver_messages(repo, task.id, turn)
+        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
         return join_turn_response(repo, task.id)
     except JoinSetupError as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -342,7 +349,7 @@ def run_modeling_driver_turn(
                 adjust_params=adjust_params,
                 expected_step_id=expected_step_id,
             )
-            append_driver_messages(repo, task.id, turn)
+            append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
             return join_turn_response(repo, task.id)
         backend, registry = _modeling_data_runtime(runtime.settings)
         conversation = repo.list_agent_messages(task.id)
@@ -376,6 +383,10 @@ def run_modeling_driver_turn(
             anchor_id=(c1_assignment or {}).get("anchor_id"),
             join_feature_ids=(c1_assignment or {}).get("feature_ids"),
             target_col=(c1_assignment or {}).get("target_col"),
+            field_hints=fetch_field_convention_hints(
+                runtime.settings,
+                keywords=_modeling_field_hint_keywords(task, c1_proposal),
+            ),
         )
         counts = proposal.counts
         bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""
@@ -402,7 +413,7 @@ def run_modeling_driver_turn(
             tier=runtime.tier,
             success_criteria=_modeling_success_criteria(task),
         )
-        append_driver_messages(repo, task.id, turn)
+        append_driver_messages(repo, task.id, turn, settings=runtime.settings, task=task)
         return join_turn_response(repo, task.id)
     except (JoinSetupError, ModelingSetupError) as exc:
         return append_join_error(repo, task.id, str(exc))
@@ -458,6 +469,25 @@ def agent_autodrive_turn(
         gate = latest_open_gate(repo.list_agent_messages(task.id))
         if gate is None:
             return
+        # MEM-1 read side: attach a read-only 【历史同类实验】 anchor to the gate
+        # metadata (rendered by auto_drive._format_gate) before the LLM sees it.
+        # build_memory_anchor is a strict no-op (returns None) unless this is a
+        # modeling select-experiment/tuning gate with comparable history and the
+        # reference_cross_task policy is on, so every other gate/task type is
+        # completely unaffected.
+        memory_anchor = None
+        driver_settings = getattr(runtime, "settings", None)
+        if driver_settings is not None:
+            memory_anchor = build_memory_anchor(
+                driver_settings,
+                task,
+                gate_metadata=gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {},
+            )
+        if memory_anchor is not None:
+            gate = dict(gate)
+            gate_metadata = dict(gate.get("metadata") or {})
+            gate_metadata["memory_anchor"] = memory_anchor["lines"]
+            gate["metadata"] = gate_metadata
         try:
             decision = decide_gate(client, gate=gate)
         except LLMClientError as exc:
@@ -481,13 +511,24 @@ def agent_autodrive_turn(
         ):
             if key in decision:
                 decision_meta[key] = decision[key]
-        repo.add_agent_message(
+        if memory_anchor is not None:
+            decision_meta["memory_references"] = memory_anchor["references"]
+        decision_message = repo.add_agent_message(
             task.id,
             role="assistant",
             stage="chat",
             content=_auto_decision_content(decision),
             metadata=decision_meta,
         )
+        if memory_anchor is not None and driver_settings is not None:
+            try:
+                audit_agent_memory_use_from_store(
+                    AgentMemoryStore(driver_settings.db_path),
+                    decision_message,
+                    task_id=task.id,
+                )
+            except Exception:
+                pass
         gate_meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
         gate_step_id = gate_meta.get("step_id")
         if action == "confirm":
@@ -522,7 +563,14 @@ def agent_autodrive_turn(
         return
 
 
-def append_driver_messages(repo: TaskRepository, task_id: str, turn) -> None:
+def append_driver_messages(
+    repo: TaskRepository,
+    task_id: str,
+    turn,
+    *,
+    settings=None,
+    task: TaskRecord | None = None,
+) -> None:
     for message in turn.messages:
         repo.add_agent_message(
             task_id,
@@ -531,6 +579,18 @@ def append_driver_messages(repo: TaskRepository, task_id: str, turn) -> None:
             content=message.content,
             metadata=dict(message.metadata),
         )
+        # MEM-1 write side: once a V2 modeling/data_join plan reaches its terminal
+        # "done" message, capture the champion result into agent memory so future
+        # same-kind tasks get a historical anchor. Optional settings/task keep this
+        # a no-op for every other driver-turn call site (feature/strategy/vintage,
+        # and the mid-plan gate messages of modeling/data_join itself).
+        if settings is not None and task is not None and message.stage == "done":
+            capture_agent_memory_for_driver_done(
+                settings,
+                task,
+                done_message_content=message.content,
+                done_message_metadata=dict(message.metadata),
+            )
 
 
 def join_turn_response(repo: TaskRepository, task_id: str) -> dict:
@@ -730,6 +790,17 @@ def _modeling_success_criteria(task: TaskRecord) -> list[dict] | None:
             "target_type": "binary",
         }
     ]
+
+
+def _modeling_field_hint_keywords(task: TaskRecord, c1_proposal) -> tuple[str, ...]:
+    # MEM-4: scope the field_convention lookup to this task's own dataset file
+    # names (+ model name) so a hint only ever comes from prior tasks that look
+    # like they touched the same data, never an unrelated model's column names.
+    values = [getattr(task, "model_name", None)]
+    values.extend(getattr(item, "name", None) for item in getattr(c1_proposal, "files", None) or ())
+    return tuple(
+        dict.fromkeys(str(value).strip() for value in values if str(value or "").strip())
+    )
 
 
 def _modeling_project_meta(task: TaskRecord) -> dict[str, str]:

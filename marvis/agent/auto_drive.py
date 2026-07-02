@@ -157,6 +157,14 @@ def _format_gate(gate: dict) -> str:
         lines.append("以下异常由平台工具确定性产出,请重点复核;若不能解释清楚,优先 halt:")
         for flag in red_flags[:12]:
             lines.append(f"- {flag}")
+    memory_anchor = meta.get("memory_anchor")
+    anchor_lines = [str(item) for item in memory_anchor] if isinstance(memory_anchor, list) else []
+    if anchor_lines:
+        lines.append("")
+        lines.append("【历史同类实验(只读参照)】")
+        lines.append("以下来自 agent memory 的历史同类实验,仅供参考,不得替代平台实测指标:")
+        for line in anchor_lines:
+            lines.append(f"- {line}")
     modeling_setup = meta.get("modeling_setup") if isinstance(meta.get("modeling_setup"), dict) else {}
     envelope = extract_gate_envelope(gate)
     if envelope.risk_flags:
