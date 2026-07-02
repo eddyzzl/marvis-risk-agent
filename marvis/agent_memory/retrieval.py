@@ -97,6 +97,12 @@ def retrieve_relevant_memories(
             continue
 
         confidence = _score_confidence(score)
+        if confidence == "low":
+            # Symmetric with the distillation-side policy (retrieve_with_distillations
+            # already skips confidence == 'low' distillations): a single generic
+            # keyword hit is not enough signal to spend a weak model's limited
+            # prompt budget on an otherwise-unrelated raw memory.
+            continue
         packet = _context_packet(record, confidence, ", ".join(reasons))
         results.append(
             MemorySearchResult(
@@ -116,19 +122,23 @@ def retrieve_with_distillations(
     query_context: dict[str, Any] | MemoryQuery,
     *,
     limit: int = 6,
+    raw_quota: int | None = None,
 ) -> list[dict[str, Any]]:
     query = _query_from_context(query_context)
     context = _query_context_dict(query)
     packets: list[dict[str, Any]] = []
+    distillation_limit = limit if raw_quota is None else max(0, limit - raw_quota)
     distillations = store.search_distillations(context, active_only=True, limit=limit)
     for distillation in distillations:
         if distillation.confidence == "low":
             continue
         packets.append(_distillation_packet(distillation))
-        if len(packets) >= limit:
-            return packets[:limit]
+        if len(packets) >= distillation_limit:
+            break
 
     remaining = limit - len(packets)
+    if raw_quota is not None:
+        remaining = min(remaining, raw_quota)
     if remaining <= 0:
         return packets[:limit]
     raw_results = retrieve_relevant_memories(_recall_raw_entries(store), query, limit=remaining)

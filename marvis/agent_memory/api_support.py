@@ -151,7 +151,9 @@ def agent_memory_context_from_store(
     if not load_memory_policy(workspace).reference_cross_task:
         return None
     query = agent_memory_query(task, user_message=user_message, evidence=evidence)
-    packets = retrieve_with_distillations(store, query, limit=6)
+    # Separate quotas so high-scoring distillations cannot squeeze precise
+    # single-task raw experience entirely out of the limit=6 prompt budget.
+    packets = retrieve_with_distillations(store, query, limit=6, raw_quota=3)
     if not packets:
         return None
     raw_packets: list[tuple[str, dict]] = []

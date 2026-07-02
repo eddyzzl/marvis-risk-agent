@@ -54,6 +54,51 @@ def test_retrieve_with_distillations_prefers_high_confidence_and_backfills_raw(t
     assert packets[1]["source_task_id"] == "task-raw"
 
 
+def test_retrieve_with_distillations_raw_quota_reserves_slots_for_raw_entries(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="A卡验证里坏样本字段常用 bad_flag。",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-raw",
+            confidence="high",
+        )
+    )
+    # Six independent high-confidence distillations -- without a raw quota,
+    # these alone would fill the whole limit=6 budget and squeeze the precise
+    # single-task raw entry above out entirely.
+    for i in range(6):
+        store.create_distillation(
+            new_distillation(
+                category="field_convention",
+                scope_key=f"field_convention:col_{i}",
+                distilled_summary=f"字段口径经验 {i}：bad_flag 相关取值。",
+                structured={"fields": {f"col_{i}": ["v"]}},
+                source_memory_ids=(f"mem-{i}-1", f"mem-{i}-2", f"mem-{i}-3", f"mem-{i}-4"),
+                support_count=4,
+            )
+        )
+
+    packets = retrieve_with_distillations(
+        store,
+        {"keywords": ["bad_flag"], "scope": "A卡"},
+        limit=6,
+        raw_quota=3,
+    )
+
+    # limit=6, raw_quota=3 reserves 3 slots for raw entries and caps
+    # distillations at limit-raw_quota=3, even though 6 distillations exist and
+    # would otherwise fill the whole budget on their own.
+    assert len(packets) == 4
+    raw_packets = [packet for packet in packets if packet["kind"] == "raw"]
+    assert len(raw_packets) == 1
+    assert raw_packets[0]["source_task_id"] == "task-raw"
+    assert sum(1 for packet in packets if packet["kind"] == "distillation") == 3
+
+
 def test_distillation_prompt_packet_preserves_audit_fields():
     context = {
         "memories": [

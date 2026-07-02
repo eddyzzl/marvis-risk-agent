@@ -134,7 +134,7 @@ def test_retrieval_supports_field_convention_and_task_experience_categories():
         {
             "id": "task-1",
             "memory_type": "task_experience",
-            "summary": "Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
+            "summary": "A卡模型 Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
             "payload": {"status": "failed"},
             "source_task_id": "task-pitfall",
             "confidence": "medium",
@@ -150,6 +150,29 @@ def test_retrieval_supports_field_convention_and_task_experience_categories():
         "target_col": "bad_flag",
         "time_col": "apply_month",
     }
+
+
+def test_low_confidence_single_keyword_hit_is_excluded_from_raw_results():
+    # A generic keyword hit alone (score=15, below the medium threshold of 25)
+    # must not reach the caller: it is exactly the "unrelated task experience
+    # fished out because your message happened to mention a keyword" noise
+    # that would otherwise waste a weak model's prompt budget (MEM-8).
+    entries = [
+        {
+            "id": "task-1",
+            "memory_type": "task_experience",
+            "summary": "Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
+            "payload": {"status": "failed"},
+            "source_task_id": "task-pitfall",
+            "confidence": "medium",
+            "status": "active",
+        },
+    ]
+    query = MemoryQuery(model_name="A卡模型", keywords=("RMC_SAMPLE_DF",))
+
+    results = retrieve_relevant_memories(entries, query)
+
+    assert results == []
 
 
 def test_low_confidence_candidates_are_excluded_from_comparison_context():
