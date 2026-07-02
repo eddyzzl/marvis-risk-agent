@@ -256,10 +256,10 @@
 | ✅ | TST-9 | 并发测试落地（`ecb2506e`）并挖出 3 个真 bug（confirm_step 无双确认守卫、start_job TOCTOU 裸 IntegrityError、DuckDB 全局连接并发上传竞态），已以 xfail 复现入库，修复分支 fix/concurrency-bugs 进行中 | Med/M | ✅ |
 | ⬜ | ARCH-4 | 五个 run_*_driver_turn 成片复制粘贴（~330 行同构） | Med/M | — |
 | ⬜ | ARCH-5 | 插件 worker 协议无版本握手；子进程反向 import 拖入 DB 链 | Med/M | — |
-| ⬜ | ARCH-6 | pipeline.py 2090 行 god file 且 0 条日志 | Med/M | — |
+| ✅ | ARCH-6 | pipeline 拆四模块（`6a411a3`：errors/cellgen/io/memory，门面保 monkeypatch 命名空间语义）+ 阶段边界/重试点/异常路径结构化日志；auto_distill 门控（INV-4）原样 | Med/M | ✅ |
 | ⬜ | ARCH-7 | 错误分类学散乱：132 处手写 HTTPException、error_kind 裸字符串 | Med/M | — |
 | ⬜ | ARCH-8 | 四个 pack 的 _Runtime 复制粘贴，pack SDK 公共层缺位 | Med/S | — |
-| ⬜ | ARCH-9 | 11 个生产模板挤在 templates/sample.py（1096 行） | Med/S | — |
+| ✅ | ARCH-9 | 模板按域拆八模块（`aa064cce`：_shared/sample_echo/validation/modeling/join/feature/strategy/monitoring），sample.py 缩为 36 行注册门面；拆分前后 WorkflowTemplate 输出 SHA256 字节等价验证 | Med/S | ✅ |
 | ⬜ | ARCH-10 | db_schema 迁移无版本号：只能加列式迁移 | Low/S | — |
 | ⬜ | ARCH-11 | app.js 6416 行前端 god file：状态所有权未定界（追踪器"TaskWorkspace 抽取"同一件事） | Med/L | — |
 | ✅ | PERF-6 | 轮询热路径收敛（`fe5180c4`）：GET /api/tasks 11 连接→2（与任务数无关）、evidence mtime/size 缓存、journal_mode PRAGMA 每库一次；查询计数断言守护 | Med/M | — |
