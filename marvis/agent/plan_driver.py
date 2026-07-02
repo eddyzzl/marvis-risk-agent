@@ -21,6 +21,7 @@ import re
 
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
+from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
@@ -218,6 +219,34 @@ class PlanDriver:
                     return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
 
+    def replan_structured(
+        self,
+        *,
+        plan_id,
+        goal: str,
+        expected_step_id=None,
+        run_seq=0,
+    ) -> DriverTurn:
+        """Structural replan driven by an already-decided goal (AGT-8).
+
+        Unlike ``resume(user_text=...)``, this does NOT feed ``goal`` back through
+        ``is_confirm``/``route_instruction`` — it goes straight to
+        ``GateExecutionAdapter.apply_replan`` (the same structured path
+        ``_handle_instruction``'s ``action == "replan"`` branch already uses for a
+        user-typed instruction). This is for callers that already hold a
+        *structured* replan decision (AUTO's ``decide_gate``) and would otherwise
+        have to round-trip it back through the free-text router — risking
+        ``is_confirm`` misreading a phrase like "……并继续调参" as a plain confirm,
+        or a second LLM classification pass misjudging it as ``clarify`` and
+        silently dropping the replan intent (both routes never reach
+        ``apply_replan`` in that case).
+        """
+        plan = self._repo.load_plan(plan_id)
+        gate = None if plan.status == PlanStatus.VALIDATED else self._awaiting_step(plan)
+        if expected_step_id and (gate is None or gate.id != str(expected_step_id)):
+            raise DriverError("当前待确认步骤已变化,请刷新后重试。")
+        return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
+
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
         """Route a non-confirm reply. Manual mode (no LLM) shows the canned hint;
         agent mode classifies the instruction into confirm / adjust / replan / clarify
@@ -225,7 +254,14 @@ class PlanDriver:
         if self._llm is None:
             return self._adjust_placeholder(plan.id, gate, run_seq)
         context = gate.title if gate is not None else "计划总览(尚未开始执行)"
-        route = route_instruction(self._llm, gate_context=context, instruction=user_text)
+        # AGT-5: tell the router which parameters this gate's dependency step(s)
+        # actually declare (name/type/current value/bounds) instead of leaving it
+        # to blind-guess key names from free text — a wrong guess previously only
+        # surfaced as "没有识别到可调整的参数" after apply_adjust already failed.
+        param_schema = gate_param_schema(plan, gate)
+        route = route_instruction(
+            self._llm, gate_context=context, instruction=user_text, param_schema=param_schema
+        )
         action = route["action"]
         if action == "confirm":
             if plan.status == PlanStatus.VALIDATED:

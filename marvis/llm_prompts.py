@@ -108,13 +108,17 @@ GATE_SYSTEM_TEMPLATE = PromptSpec(
 # --- marvis.agent.instruction_router ----------------------------------------------
 GATE_INSTRUCTION_ROUTER_SYS = PromptSpec(
     name="GATE_INSTRUCTION_ROUTER_SYS",
-    version=1,
+    # v2 (AGT-5): the user prompt now carries a 【可调参数】 schema section, so the
+    # system prompt instructs the model to pick param keys only from that list.
+    version=2,
     text=(
         "你是信贷风控建模 Agent。用户在一个需要确认的节点没有直接确认,而是提了一条指令。"
         "判断该指令属于哪类并抽取要素:\n"
         "- confirm:其实是同意继续(如\"可以\"\"没问题\")。\n"
         "- adjust:调整刚算出这一步的参数后重算(如\"n_trials 调到 20\"\"阈值放宽到 0.1\")。"
-        "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。\n"
+        "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。"
+        "params 的键只能取自下方【可调参数】列表中的参数名,不要自己编造参数名;"
+        "取值要落在给出的取值范围内。\n"
         "- replan:结构性改动(加/删步骤、换算法、换流程),把诉求写进 constraint。\n"
         "- clarify:看不懂或信息不足。\n"
         '严格只返回 JSON:'

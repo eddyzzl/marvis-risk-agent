@@ -67,6 +67,11 @@ AUTO_HIGH_RISK_RESET_SCOPES = frozenset({
     "wide",
 })
 AUTO_MAX_AUTO_RESET_STEPS = 2
+# AGT-7: decide_gate already parses a confidence score out of the LLM's JSON
+# reply, but nothing consumed it — a confirm at confidence=0.3 and one at 0.95
+# were treated identically. Below this threshold a confirm/adjust/replan is
+# downgraded to halt so a low-confidence AUTO decision always reaches a human.
+AUTO_MIN_CONFIDENCE = 0.6
 
 # LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
 # constant so existing imports of _SYSTEM_TEMPLATE from here keep working unchanged.
@@ -264,6 +269,14 @@ def _extract_red_flags(gate: dict) -> list[str]:
     flags: list[str] = []
     meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
     content = str(gate.get("content") or "")
+
+    # AGT-9: prefer the composer-computed deterministic red flags (modeling
+    # tuning-config / select-experiment gates, and any future gate that starts
+    # populating meta['red_flags']) over parsing table strings — this is a
+    # structured, INV-1-safe source, not a legacy fallback.
+    structured = [str(item) for item in meta.get("red_flags") or [] if str(item).strip()]
+    flags.extend(structured)
+
     if "行数发生变化" in content or ("膨胀" in content and "⚠" in content):
         flags.append("拼接执行后行数发生变化或存在膨胀提示")
 
@@ -404,6 +417,11 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
         gate_risk = _gate_risk_reason(envelope)
         if gate_risk:
             return _policy_halt(gate_risk)
+        confidence = decision.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < AUTO_MIN_CONFIDENCE:
+            return _policy_halt(
+                f"AUTO 决策置信度 {confidence:.2f} 低于阈值 {AUTO_MIN_CONFIDENCE},不足以自动{action}。"
+            )
     if action == "adjust":
         allowed_controls = {str(control.id) for control in getattr(envelope, "controls", ())}
         params = _object_or_empty(decision.get("params"))

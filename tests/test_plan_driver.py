@@ -1245,6 +1245,59 @@ def test_plan_overview_message_carries_gate_envelope():
     assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "replan", "clarify", "halt"]
 
 
+def test_gate_message_attaches_deterministic_select_experiment_red_flags():
+    """AGT-9: a gate whose dependencies include tune_hyperparameters/train_models
+    outputs gets meta['red_flags'] computed deterministically (train-test
+    overfit gap, thin champion/runner-up margin, any failed candidate) —
+    without the LLM ever having to do that arithmetic itself."""
+    outputs = {
+        "tune": {"trials": [{"train_ks": 0.55, "test_ks": 0.40}]},
+        "train": {
+            "experiments": [
+                {"recipe": "lgb", "metrics": {"test_ks": 0.400}},
+                {"recipe": "xgb", "metrics": {"test_ks": 0.399}},
+            ],
+            "failed": [{"recipe": "catboost", "error": "boom"}],
+        },
+    }
+    plan = Plan(
+        id="plan-1", task_id="task-1", goal="modeling", source="template",
+        template_id="modeling", autonomy_level=1,
+        steps=[
+            _step("tune", index=0, tool="tune_hyperparameters"),
+            _step("train", index=1, tool="train_models", depends_on=["tune"]),
+            _step(
+                "select", index=2, tool="select_experiment",
+                depends_on=["tune", "train"], needs_confirmation=True,
+            ),
+        ],
+    )
+    composer = PlanMessageComposer(load_output=lambda step_id: outputs.get(step_id))
+
+    msg = composer.gate_message(plan, plan.steps[2], run_seq=0)
+
+    red_flags = msg.metadata.get("red_flags") or []
+    assert any("过拟合迹象" in flag for flag in red_flags)
+    assert any("冠军与亚军" in flag for flag in red_flags)
+    assert any("候选算法失败" in flag and "catboost" in flag for flag in red_flags)
+
+
+def test_gate_message_omits_red_flags_key_when_nothing_trips():
+    plan = Plan(
+        id="plan-1", task_id="task-1", goal="modeling", source="template",
+        template_id="modeling", autonomy_level=1,
+        steps=[_step("screen", index=0, tool="screen_features", needs_confirmation=True)],
+    )
+    composer = PlanMessageComposer(load_output=lambda _step_id: {
+        "selected": ["sig1"], "leakage": [], "suspected": [], "unusable": [],
+        "ranked": [], "scores": {}, "n_screened": 1,
+    })
+
+    msg = composer.gate_message(plan, plan.steps[0], run_seq=0)
+
+    assert "red_flags" not in msg.metadata
+
+
 def test_render_screen_shows_metric_columns_and_buckets():
     """Enriched screen render: per-feature KS/IV/missing columns + leakage/suspected/
     unusable buckets with reasons (not just a list of feature names)."""
@@ -1446,6 +1499,35 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     assert runner.calls[1][1].get("leakage_ks") == 0.3  # the declared override reached the tool
     assert "保留 **3** 个" in turn.messages[-1].content  # the recomputed screen output is shown
     assert any("调整参数" in m.content for m in turn.messages)
+
+
+def test_driver_handle_instruction_passes_gate_param_schema_to_router(tmp_path):
+    """AGT-5: _handle_instruction assembles the gate's dependency-step inputs into
+    a param_schema and passes it to route_instruction, so the router prompt carries
+    real parameter names/current values instead of just the gate title."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    llm = FakeRouterLLM('{"action":"clarify","params":{},"constraint":"","reason":"请说明具体参数"}')
+    driver = PlanDriver(repo, executor, llm_client=llm)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # screen runs once, pause at the tune gate
+
+    driver.resume(plan_id="plan-1", user_text="调一下", run_seq=1)
+
+    assert llm.calls
+    prompt = llm.calls[0]["user_prompt"]
+    assert "【可调参数】" in prompt
+    assert "leakage_ks" in prompt
+    assert "当前值=0.4" in prompt
 
 
 def test_driver_manual_adjust_params_reruns_without_llm_router(tmp_path):
@@ -1785,6 +1867,64 @@ def test_driver_replan_success_at_overview_shows_new_plan_and_stays_validated(tm
     assert [step.id for step in loaded.steps] == ["new-a"]  # remaining steps replaced
     assert loaded.status == PlanStatus.VALIDATED
     assert any("重规划" in message.content for message in turn.messages)
+
+
+def test_driver_replan_structured_bypasses_text_router(tmp_path):
+    """AGT-8: replan_structured drives GateExecutionAdapter.apply_replan directly
+    from an already-decided goal — no is_confirm/route_instruction hop. Passing
+    an llm_client that would raise if consulted proves the router is never
+    called."""
+
+    class _ExplodingLLM:
+        def complete(self, **kwargs):
+            raise AssertionError("replan_structured must not consult the instruction router")
+
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_modeling_plan())
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        # the replanned segment's new-a step (screen_features, not a confirmation
+        # gate) runs immediately, so it needs its own canned output too.
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    planner = _FakeReplanPlanner()
+    executor = PlanExecutor(
+        repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo), planner=planner
+    )
+    driver = PlanDriver(repo, executor, llm_client=_ExplodingLLM())
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at the tune gate ("tune")
+
+    turn = driver.replan_structured(plan_id="plan-1", goal="……并继续调参", expected_step_id="tune")
+
+    assert planner.last_instruction == "……并继续调参"
+    loaded = repo.load_plan("plan-1")
+    assert "new-a" in [step.id for step in loaded.steps]  # the replanned remaining segment
+    assert any("重规划" in message.content for message in turn.messages)
+
+
+def test_driver_replan_structured_rejects_stale_gate_token(tmp_path):
+    """A replan_structured call bound to a gate id that no longer matches the
+    plan's current awaiting step raises DriverError instead of silently
+    replanning against the wrong point."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_modeling_plan())
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor, llm_client=FakeRouterLLM("{}"))
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at the tune gate ("tune")
+
+    with pytest.raises(DriverError):
+        driver.replan_structured(plan_id="plan-1", goal="改流程", expected_step_id="stale-step")
 
 
 def test_is_confirm_matches_common_phrasings():

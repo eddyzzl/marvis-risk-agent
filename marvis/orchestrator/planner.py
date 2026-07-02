@@ -4,6 +4,7 @@ import json
 from typing import Any
 import uuid
 
+from marvis.agent.json_reply import load_json_object
 from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
 from marvis.llm_prompts import EXPLORE_SYS as _EXPLORE_SYS_SPEC
 from marvis.llm_prompts import PLAN_SYS as _PLAN_SYS_SPEC
@@ -332,12 +333,12 @@ class Planner:
         novel_mode: str,
         max_steps: int,
     ) -> Plan:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise PlanningError(f"not json: {exc}") from exc
-        if not isinstance(data, dict):
-            raise PlanningError("plan JSON must be an object")
+        # AGT-10: load_json_object tolerates ```json fences and leading/trailing
+        # explanatory text that a bare json.loads would reject outright, matching
+        # the fence-tolerant parsing already used by decide_gate/route_instruction.
+        data, error = load_json_object(raw)
+        if data is None:
+            raise PlanningError(f"not json: {error}")
         raw_steps = data.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
             raise PlanningError("plan JSON must include non-empty steps")
@@ -559,10 +560,17 @@ def _parse_steps_json(
     start_index: int,
     max_steps: int,
 ) -> list[PlanStep]:
+    # AGT-10: the top-level payload here may legitimately be a bare JSON list
+    # (not just {"steps": [...]}), which load_json_object never returns (it only
+    # extracts objects) -- so try a strict parse first for that shape, and only
+    # fall back to load_json_object's ```json fence/prefix-tolerant object
+    # extraction when the strict parse fails (e.g. a fenced or prefixed reply).
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise PlanningError(f"not json: {exc}") from exc
+    except (TypeError, ValueError):
+        data, error = load_json_object(raw)
+        if data is None:
+            raise PlanningError(f"not json: {error}") from None
     raw_steps = data.get("steps") if isinstance(data, dict) else data
     if not isinstance(raw_steps, list) or not raw_steps:
         raise PlanningError("replan JSON must include non-empty steps")
@@ -573,12 +581,10 @@ def _parse_steps_json(
 
 
 def _parse_json_object(raw: str, *, label: str) -> dict:
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise PlanningError(f"not json: {exc}") from exc
-    if not isinstance(data, dict):
-        raise PlanningError(f"{label} must be an object")
+    # AGT-10: fence/prefix-tolerant like the other two parse sites.
+    data, error = load_json_object(raw)
+    if data is None:
+        raise PlanningError(f"{label} not json: {error}")
     return data
 
 

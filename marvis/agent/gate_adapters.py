@@ -17,6 +17,7 @@ from marvis.agent.gate_payloads import (
     build_modeling_setup_payload,
     build_screen_payload,
 )
+from marvis.agent.modeling_red_flags import select_experiment_red_flags, tuning_setup_red_flags
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep
 
@@ -30,6 +31,11 @@ class GateRenderResult:
     dedup: dict | None = None
     modeling_setup: dict | None = None
     model_delivery: dict | None = None
+    # AGT-9: deterministic red flags for the tuning-config / select-experiment
+    # gates, computed straight from those gates' dependency outputs (never from
+    # the rendered table strings). Empty list when nothing tripped, or when
+    # neither red-flag family's inputs are present at this gate.
+    red_flags: list[str] = field(default_factory=list)
 
 
 def render_gate_dependencies(
@@ -47,6 +53,8 @@ def render_gate_dependencies(
     model_delivery_step: PlanStep | None = None
     report_o: dict | None = None
     report_step: PlanStep | None = None
+    tune_o: dict | None = None
+    train_models_o: dict | None = None
     for dep_id in gate.depends_on if gate else []:
         dep = _find_step(plan, dep_id)
         if dep is None:
@@ -77,6 +85,10 @@ def render_gate_dependencies(
         elif dep.tool_ref.tool == "generate_model_report":
             report_o = output if isinstance(output, dict) else None
             report_step = dep
+        elif dep.tool_ref.tool == "tune_hyperparameters" and isinstance(output, dict):
+            tune_o = output
+        elif dep.tool_ref.tool == "train_models" and isinstance(output, dict):
+            train_models_o = output
     if modeling_spec_o is not None and modeling_spec_step is not None:
         result.modeling_setup = build_modeling_setup_payload(
             modeling_spec_o,
@@ -91,6 +103,10 @@ def render_gate_dependencies(
             report_step=report_step,
         )
     result.dedup = build_dedup_payload(confirm_join_o, propose_join_o)
+    result.red_flags = [
+        *tuning_setup_red_flags(split_output=split_o, modeling_spec_output=modeling_spec_o),
+        *select_experiment_red_flags(tune_output=tune_o, train_models_output=train_models_o),
+    ]
     return result
 
 
