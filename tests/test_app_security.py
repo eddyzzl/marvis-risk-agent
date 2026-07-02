@@ -109,6 +109,41 @@ def test_remote_client_can_read_health_check(tmp_path):
     assert isinstance(payload["sqlite_busy_timeout_ms"], int)
 
 
+def test_health_check_reports_llm_configured_false_when_unset(tmp_path):
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["llm_configured"] is False
+
+
+def test_health_check_reports_llm_configured_true_when_enabled_model_saved(tmp_path):
+    from marvis.llm_settings import save_llm_settings
+
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                }
+            ],
+        },
+    )
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["llm_configured"] is True
+
+
 def test_health_check_surfaces_duckdb_runtime_config(tmp_path):
     """PERF-8: /api/health must expose the DuckDB memory_limit / threads /
     temp_directory actually applied, so an operator can confirm the JOIN engine

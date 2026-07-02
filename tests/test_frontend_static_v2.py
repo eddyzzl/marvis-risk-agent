@@ -6046,6 +6046,23 @@ def test_llm_settings_panel_and_agent_model_selector_exist():
     assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in llm_cancel_hover_rule
 
 
+
+# --- GAP-8: LLM connection preflight (test-connection button) ---------------
+
+
+def test_llm_engine_edit_dialog_has_test_connection_button():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="testLLMEngineConnectionButton"' in index_html
+    assert 'id="llmEngineTestResult"' in index_html
+
+    assert "async function testLLMEngineConnection()" in app_js
+    assert '$("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;' in app_js
+    assert "/api/settings/llm/test" in app_js
+    assert "setLLMEngineTestResult" in app_js
+
+
 def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")

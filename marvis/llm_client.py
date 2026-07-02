@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.client import HTTPException
 import json
 import time
@@ -12,6 +13,127 @@ from marvis.agent.json_reply import strip_thinking
 
 class LLMClientError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LLMConnectionTestResult:
+    ok: bool
+    latency_ms: int
+    model_echo: str | None
+    error_kind: str | None
+    error_detail: str | None
+
+
+# GAP-8: actionable Chinese hints per failure kind, shown directly by the
+# settings-panel "test connection" button so a first-run user can tell "wrong
+# port" apart from "wrong model name" apart from "never configured at all".
+_CONNECTION_TEST_HINTS: dict[str, str] = {
+    "connection": "无法连接到该地址，请检查服务是否已启动、地址与端口是否正确。",
+    "timeout": "连接超时，请检查服务是否已启动、网络是否可达，或适当增加超时时间。",
+    "http_404": "接口返回 404，请检查 API 地址（Base URL）是否正确。",
+    "http_401": "认证失败（401），请检查 API 密钥是否正确。",
+    "http_403": "认证被拒绝（403），请检查 API 密钥是否有效。",
+    "model_not_found": "模型未找到，请检查模型名称是否正确。",
+    "http_4xx": "请求被拒绝，请检查 API 地址、模型名称与密钥是否正确。",
+    "http_5xx": "服务端返回错误，请检查服务是否正常运行。",
+    "invalid_response": "服务返回内容无法解析，请检查地址是否指向兼容 OpenAI 协议的服务。",
+    "incomplete_profile": "请先填写 API 地址、模型名称与密钥。",
+}
+
+
+def test_llm_connection(profile: dict, *, timeout_seconds: float = 5.0) -> LLMConnectionTestResult:
+    """Cheapest-possible preflight: send a 1-token ping and report latency/model/error.
+
+    Deliberately independent of OpenAICompatibleLLMClient.complete() -- this is a
+    fixed-shape, non-streaming, no-retry, short-timeout probe used only to answer
+    "is this reachable at all", not a real call site.
+    """
+    api_base_url = str(profile.get("api_base_url") or "").rstrip("/")
+    model_name = str(profile.get("model_name") or "")
+    api_key = str(profile.get("api_key") or "")
+    if not api_base_url or not model_name or not api_key:
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=0, model_echo=None,
+            error_kind="incomplete_profile",
+            error_detail=_CONNECTION_TEST_HINTS["incomplete_profile"],
+        )
+    if not api_base_url.startswith(("http://", "https://")):
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=0, model_echo=None,
+            error_kind="invalid_url",
+            error_detail="api_base_url must start with http:// or https://",
+        )
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": False,
+        "max_tokens": 8,
+        "temperature": 0,
+    }
+    request = Request(
+        f"{api_base_url}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        error_kind = _connection_test_http_error_kind(exc)
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=latency_ms, model_echo=None,
+            error_kind=error_kind,
+            error_detail=_CONNECTION_TEST_HINTS.get(error_kind, f"LLM HTTP {exc.code} {exc.reason}"),
+        )
+    except TimeoutError:
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=int((time.monotonic() - started) * 1000), model_echo=None,
+            error_kind="timeout", error_detail=_CONNECTION_TEST_HINTS["timeout"],
+        )
+    except URLError as exc:
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=int((time.monotonic() - started) * 1000), model_echo=None,
+            error_kind="connection",
+            error_detail=f"{_CONNECTION_TEST_HINTS['connection']}（{exc.reason}）",
+        )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    try:
+        data = json.loads(raw)
+        content = str(data["choices"][0]["message"]["content"] or "")
+        echoed_model = str(data.get("model") or model_name)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return LLMConnectionTestResult(
+            ok=False, latency_ms=latency_ms, model_echo=None,
+            error_kind="invalid_response", error_detail=_CONNECTION_TEST_HINTS["invalid_response"],
+        )
+    del content  # only used to prove the round trip parsed; not surfaced.
+    return LLMConnectionTestResult(
+        ok=True, latency_ms=latency_ms, model_echo=echoed_model,
+        error_kind=None, error_detail=None,
+    )
+
+
+def _connection_test_http_error_kind(exc: HTTPError) -> str:
+    try:
+        body = json.loads(exc.read().decode("utf-8", errors="replace"))
+        message = str((body.get("error") or {}).get("message") or "").lower()
+        if "model" in message and ("not found" in message or "does not exist" in message):
+            return "model_not_found"
+    except Exception:
+        pass
+    if exc.code == 404:
+        return "http_404"
+    if exc.code == 401:
+        return "http_401"
+    if exc.code == 403:
+        return "http_403"
+    return _http_error_kind(exc.code)
 
 
 class OpenAICompatibleLLMClient:

@@ -1987,6 +1987,53 @@ function setLLMEngineEditStatus(message, kind = "info") {
   status.className = `status ${kind}`.trim();
 }
 
+// GAP-8: LLM configuration preflight -- lets the user confirm base_url/model
+// name/api_key actually connect before saving, instead of only discovering a
+// typo once the agent silently degrades mid-conversation.
+function setLLMEngineTestResult(message, kind = "info") {
+  const status = $("llmEngineTestResult");
+  if (!status) return;
+  status.textContent = message;
+  status.className = `status ${kind}`.trim();
+}
+
+async function testLLMEngineConnection() {
+  const editing = llmEditingIndex !== null ? (llmSettings.models[llmEditingIndex] || {}) : null;
+  const apiKey = $("llmEngineApiKey").value.trim();
+  const payload = {
+    api_base_url: $("llmEngineBaseUrl").value.trim(),
+    model_name: $("llmEngineModelName").value.trim(),
+    api_key: apiKey,
+  };
+  if (!payload.api_base_url || !payload.model_name) {
+    return setLLMEngineTestResult("请先填写 API 地址与模型名称。", "error");
+  }
+  if (!apiKey && editing && editing.has_api_key && editing.model_id) {
+    // Key left blank on an edit -- test the already-saved model_id so the
+    // stored (masked) api_key is used instead of an empty string.
+    payload.model_id = editing.model_id;
+  } else if (!apiKey) {
+    return setLLMEngineTestResult("请先填写 API 密钥。", "error");
+  }
+  setLLMEngineTestResult("正在测试连接...");
+  try {
+    const result = await api("/api/settings/llm/test", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (result.ok) {
+      setLLMEngineTestResult(
+        `连接成功（${result.latency_ms}ms，模型：${result.model_echo || "-"}）。`,
+        "success",
+      );
+    } else {
+      setLLMEngineTestResult(result.error_detail || "连接失败。", "error");
+    }
+  } catch (error) {
+    setLLMEngineTestResult(error.message || "连接测试失败。", "error");
+  }
+}
+
 function normalizeLLMSettings(payload = {}) {
   return {
     default_model_id: payload.default_model_id || "",
@@ -2273,6 +2320,7 @@ function openLLMEngineEdit(index) {
   keyInput.value = "";
   keyInput.placeholder = model.has_api_key ? "留空保持不变" : "sk-...";
   setLLMEngineEditStatus("");
+  setLLMEngineTestResult("");
   $("llmEngineEditDialog").showModal();
   $("llmEngineDisplayName").focus();
 }
@@ -6450,6 +6498,7 @@ $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("saveLLMEngineEditButton").onclick = () =>
   runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型..." });
+$("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;
 $("sidebarCollapseButton").onclick = toggleSidebarCollapsed;
 $("sidebarBrandTrigger").onclick = expandSidebarFromBrand;
 $("sidebarBrandTrigger").onkeydown = handleSidebarBrandKeydown;

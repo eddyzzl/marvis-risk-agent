@@ -37,7 +37,7 @@ from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
-from marvis.llm_settings import resolve_llm_model
+from marvis.llm_settings import load_llm_settings, resolve_llm_model
 from marvis.memory_policy import load_memory_policy
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
@@ -91,6 +91,19 @@ _STATIC_VERSION_FILES = (
     "css/welcome.css",
     "css/v2-workbench.css",
 )
+
+
+def _has_configured_llm(workspace: Path) -> bool:
+    """GAP-8: True if at least one enabled model with a resolvable api_key is
+    saved -- a pure settings-file read, no network call."""
+    try:
+        settings_payload = load_llm_settings(workspace)
+    except Exception:
+        return False
+    return any(
+        model.get("enabled") and model.get("has_api_key")
+        for model in settings_payload.get("enabled_models", [])
+    )
 
 
 def _is_local_client(host: str | None) -> bool:
@@ -262,9 +275,15 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         stuck_jobs = task_repo.count_heartbeat_stale_running_jobs(
             older_than_seconds=heartbeat_timeout_seconds()
         )
+        # GAP-8: llm_configured is a cheap "at least one enabled model with an
+        # api_key is saved" check -- it deliberately does NOT make a live LLM
+        # call (that belongs to POST /api/settings/llm/test); it only answers
+        # "has the user configured anything at all" so the frontend can
+        # distinguish "never configured" from "configured but the model is dumb".
         return {
             "status": "ok",
             "stuck_jobs": stuck_jobs,
+            "llm_configured": _has_configured_llm(settings.workspace),
             **sqlite_health(settings.db_path),
             **duckdb_health(),
         }

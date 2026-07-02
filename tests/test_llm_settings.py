@@ -1,3 +1,8 @@
+import json
+
+from fastapi.testclient import TestClient
+
+from marvis.app import create_app
 from marvis.llm_settings import (
     load_llm_settings,
     resolve_llm_model,
@@ -366,3 +371,108 @@ def test_context_window_and_max_output_tokens_defaults_and_bounds(tmp_path):
     resolved = resolve_llm_model(tmp_path, "model-b")
     assert resolved["context_window"] == 8192
     assert resolved["max_output_tokens"] == 512
+
+
+# --- GAP-8: LLM connection preflight endpoint --------------------------------
+
+
+def test_llm_test_endpoint_pings_inline_candidate_profile(tmp_path, monkeypatch):
+    def fake_urlopen(request, timeout):
+        class _Response:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc_info):
+                return False
+
+            def read(self_inner):
+                return json.dumps(
+                    {"model": "gpt-test", "choices": [{"message": {"content": "pong"}}]}
+                ).encode("utf-8")
+
+        return _Response()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/settings/llm/test",
+        json={
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "gpt-test",
+            "api_key": "secret",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["model_echo"] == "gpt-test"
+    assert body["error_kind"] is None
+
+
+def test_llm_test_endpoint_tests_saved_model_by_id(tmp_path, monkeypatch):
+    def fake_urlopen(request, timeout):
+        class _Response:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc_info):
+                return False
+
+            def read(self_inner):
+                return json.dumps(
+                    {"model": "saved-model", "choices": [{"message": {"content": "pong"}}]}
+                ).encode("utf-8")
+
+        return _Response()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://api.example.com/v1",
+                    "model_name": "saved-model",
+                    "api_key": "secret",
+                }
+            ],
+        },
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/settings/llm/test", json={"model_id": "model-a"})
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+
+def test_llm_test_endpoint_returns_incomplete_profile_error_without_network_call(tmp_path, monkeypatch):
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("should not attempt a network call")
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fail_urlopen)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/settings/llm/test", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error_kind"] == "incomplete_profile"
+
+
+def test_llm_test_endpoint_404s_for_unknown_saved_model(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/settings/llm/test", json={"model_id": "does-not-exist"})
+
+    assert response.status_code == 404
