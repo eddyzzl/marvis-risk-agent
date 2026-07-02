@@ -241,7 +241,7 @@
 | ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
 | ✅ | TST-3 | 真 e2e 落地（`1978319c`）：真 `marvis serve` 子进程全旅程（JOIN→standard_modeling 全门→PMML），三连跑确定性验证（~30s/次，e2e marker） | High/M | ✅ |
 | ⬜ | TST-4 | 隔离/资源护栏测试全是 mock 断言：真杀/真 OOM 零验证（INV-6） | High/M | ✅ |
-| ⬜ | ARCH-1 | api.py 拆分停在"搬家"：legacy_api 反向调用 36 处私有函数 | High/M | ⚠️ |
+| ✅ | ARCH-1 | legacy shim 拆除（`e3a7d6f5`/`4f6b845e`）：36 处私有 seam 迁入新 agent/validation_app_service.py 公有面，routers 直连、_agent_api()/legacy_api 服务定位器删除、api.py 955→184 行、DriverTurnRuntime 全类型化；routers/ 内 legacy_api 引用归零 | High/M | ✅ |
 | ⬜ | ARCH-2 | packs/modeling/tools.py 4386 行新 god file | High/M | ⚠️ |
 | ⬜ | GAP-5 | 共享主机 loopback 全信任（装插件=任意代码执行） | Med/S | — |
 | ✅ | GAP-6 | 只读注册表 API（跨任务列表/详情/分页，`fc4e737f`）；前端面板按预授权降级（进 UX 后续） | Med/M | — |
