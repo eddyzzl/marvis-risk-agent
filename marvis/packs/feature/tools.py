@@ -764,7 +764,7 @@ def _resolve_feature_cols(
     target_col: str,
     split_col: str | None = None,
 ) -> list[str]:
-    provided = [str(item) for item in (features or []) if str(item).strip()]
+    provided = _flatten_feature_cols(features)
     if provided:
         return provided
     dataset = runtime.registry.get(str(dataset_id))
@@ -777,6 +777,22 @@ def _resolve_feature_cols(
     if not inferred:
         raise FeatureError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
     return inferred
+
+
+def _flatten_feature_cols(features) -> list[str]:
+    """Flatten a features input that may be a union of lists (FS-5): a workflow can pass
+    ``features=[<base cols>, <$ref new_columns>]`` which resolves to nested lists; screen
+    them together as one de-duplicated flat set (input order preserved)."""
+    flat: list[str] = []
+    seen: set[str] = set()
+    for item in (features or []):
+        candidates = item if isinstance(item, (list, tuple)) else [item]
+        for candidate in candidates:
+            name = str(candidate).strip()
+            if name and name not in seen:
+                seen.add(name)
+                flat.append(name)
+    return flat
 
 
 def _read_frame(
