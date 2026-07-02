@@ -147,12 +147,32 @@ def run_notebook_stage(
     task_id: str,
     settings: PipelineSettings,
     stage_claimed: bool = False,
+    also_prepare_metrics: bool = False,
 ) -> None:
+    """Run the notebook (reproducibility) stage.
+
+    `also_prepare_metrics` is purely additive and defaults to False, which
+    preserves this function's existing behavior exactly. When True (used
+    only by `run_staged_pipeline`'s default isolated-mode path), the metrics
+    injected cells are appended to the SAME isolated subprocess run as the
+    reproducibility cells, and their outputs are written straight into
+    `outputs/.metrics-stage-work`. This avoids a second full notebook
+    execution (PERF-3): `run_metrics_stage`, invoked right after, detects
+    those pre-populated outputs and skips its own notebook re-run. A
+    metrics-cell failure in this merged run is still attributed with
+    METRICS_STAGE_FAILURE_PREFIX (not the notebook prefix) by checking
+    whether the notebook's own execution artifacts already completed.
+    """
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
     task_dir = settings.workspace / "tasks" / task_id
     execution_dir = task_dir / "execution"
     execution_dir.mkdir(parents=True, exist_ok=True)
+    merge_metrics = (
+        also_prepare_metrics
+        and settings.notebook_isolated_execution
+        and not stage_claimed
+    )
     try:
         artifacts = _scan_artifacts(task) if stage_claimed else _scan_step(repo, task)
         _clear_generated_artifacts(task_dir, stage="notebook")
@@ -171,6 +191,39 @@ def run_notebook_stage(
         try:
             close_live_notebook_session(task_id)
             if settings.notebook_isolated_execution:
+                outputs_dir = task_dir / "outputs"
+                metrics_work_dir = outputs_dir / ".metrics-stage-work"
+                extra_code_cells = _build_reproducibility_cell_sources(
+                    package_root=_package_root_for_notebook(),
+                    task=task,
+                    settings=settings,
+                    input_pmml_path=input_pmml_path,
+                    contract_meta_path=execution_dir / "runtime_contract.json",
+                    output_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
+                )
+                if merge_metrics:
+                    dictionary_path = _required_path(
+                        task,
+                        artifacts,
+                        FileRole.DATA_DICTIONARY,
+                        "data dictionary",
+                        "dictionary_path",
+                    )
+                    _remove_dir_if_exists(metrics_work_dir)
+                    metrics_work_dir.mkdir(parents=True, exist_ok=True)
+                    extra_code_cells = extra_code_cells + _build_metrics_cell_sources(
+                        package_root=_package_root_for_notebook(),
+                        task=task,
+                        settings=settings,
+                        dictionary_path=dictionary_path,
+                        input_pmml_path=input_pmml_path,
+                        contract_meta_path=execution_dir / "runtime_contract.json",
+                        model_meta_path=execution_dir / "model_meta.json",
+                        reproducibility_json_path=outputs_dir
+                        / REPRODUCIBILITY_RESULT_JSON,
+                        results_json_path=metrics_work_dir / "validation_results.json",
+                        excel_path=metrics_work_dir / "validation.xlsx",
+                    )
                 _notebook_step_v3(
                     repo=repo,
                     task=task,
@@ -189,24 +242,19 @@ def run_notebook_stage(
                     keep_alive=False,
                     isolated=True,
                     mark_executed=False,
-                    extra_code_cells=_build_reproducibility_cell_sources(
-                        package_root=_package_root_for_notebook(),
-                        task=task,
-                        settings=settings,
-                        input_pmml_path=input_pmml_path,
-                        contract_meta_path=execution_dir / "runtime_contract.json",
-                        output_path=task_dir / "outputs" / REPRODUCIBILITY_RESULT_JSON,
-                    ),
+                    extra_code_cells=extra_code_cells,
                 )
                 if repo.get_task(task_id).status != TaskStatus.RUNNING:
                     return
                 contract = load_runtime_contract(execution_dir / "runtime_contract.json")
                 _sync_task_algorithm(repo, task, contract.algorithm)
-                output_path = task_dir / "outputs" / REPRODUCIBILITY_RESULT_JSON
+                output_path = outputs_dir / REPRODUCIBILITY_RESULT_JSON
                 if not output_path.exists():
                     raise PipelineError(
                         "notebook reproducibility evidence did not produce output"
                     )
+                if merge_metrics:
+                    _require_metrics_outputs(metrics_work_dir)
                 repo.update_status(
                     task_id,
                     TaskStatus.EXECUTED,
@@ -267,28 +315,57 @@ def run_notebook_stage(
         _mark_cancelled(repo, task_id, exc.resume_status, str(exc))
         return
     except PipelineError as exc:
-        message = _stage_failure_message(NOTEBOOK_STAGE_FAILURE_PREFIX, str(exc))
+        failure_prefix = _notebook_stage_failure_prefix(merge_metrics, execution_dir)
+        message = _stage_failure_message(failure_prefix, str(exc))
         _mark_failed(repo, task_id, message)
         _capture_agent_memory_for_failure(
             repo=repo,
             task_id=task_id,
-            failure_kind=_memory_failure_kind(str(exc), default="notebook"),
+            failure_kind=_memory_failure_kind(
+                str(exc),
+                default="notebook" if failure_prefix == NOTEBOOK_STAGE_FAILURE_PREFIX else "execution",
+            ),
             message=message,
         )
         raise
     except Exception as exc:
+        failure_prefix = _notebook_stage_failure_prefix(merge_metrics, execution_dir)
         message = _stage_failure_message(
-            NOTEBOOK_STAGE_FAILURE_PREFIX,
+            failure_prefix,
             f"{exc.__class__.__name__}: {exc}",
         )
         _mark_failed(repo, task_id, message)
         _capture_agent_memory_for_failure(
             repo=repo,
             task_id=task_id,
-            failure_kind=_memory_failure_kind(str(exc), default="notebook"),
+            failure_kind=_memory_failure_kind(
+                str(exc),
+                default="notebook" if failure_prefix == NOTEBOOK_STAGE_FAILURE_PREFIX else "execution",
+            ),
             message=message,
         )
         raise
+
+
+def _notebook_stage_failure_prefix(merge_metrics: bool, execution_dir: Path) -> str:
+    """When notebook+metrics cells ran in one merged subprocess call
+    (PERF-3), a failure after the notebook's own contract/scores/model_meta
+    artifacts are already complete on disk must have happened in a metrics
+    cell (those run after the tail cell writes those artifacts), so it
+    should be attributed as a metrics failure, not a notebook failure -
+    otherwise is_metrics_failure() would not recognize it as resumable via
+    the metrics-only retry path."""
+    if merge_metrics and _notebook_execution_artifacts_complete(execution_dir):
+        return METRICS_STAGE_FAILURE_PREFIX
+    return NOTEBOOK_STAGE_FAILURE_PREFIX
+
+
+def _notebook_execution_artifacts_complete(execution_dir: Path) -> bool:
+    return (
+        (execution_dir / "code_model_scores.csv").exists()
+        and (execution_dir / "runtime_contract.json").exists()
+        and (execution_dir / "model_meta.json").exists()
+    )
 
 
 def run_metrics_stage(
@@ -344,81 +421,94 @@ def run_metrics_stage(
                     "live notebook kernel is not available; rerun notebook stage before metrics"
                 )
             _unlink_if_exists(_metrics_cancel_marker_path(task_dir))
-            _remove_dir_if_exists(metrics_work_dir)
-            metrics_work_dir.mkdir(parents=True, exist_ok=True)
-            contract = load_runtime_contract(execution_dir / "runtime_contract.json")
-            task = _sync_task_algorithm(repo, task, contract.algorithm)
-            metrics_uow = ArtifactUnitOfWork()
-            model_meta_path = _stage_model_meta_from_contract(
-                metrics_uow,
-                contract,
-                execution_dir,
-            )
-            if live_session is None:
-                notebook_path = _required_path(
-                    task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
-                )
-                sample_path = _required_path(
-                    task, artifacts, FileRole.SAMPLE, "sample", "sample_path"
-                )
-                _notebook_step_v3(
-                    repo=repo,
-                    task=task,
-                    source_notebook=notebook_path,
-                    sample_path=sample_path,
-                    execution_dir=execution_dir,
-                    contract_meta_path=execution_dir / "runtime_contract.json",
-                    code_scores_path=execution_dir / "code_model_scores.csv",
-                    feature_importance_path=execution_dir / "feature_importance.csv",
-                    model_params_path=execution_dir / "model_params.json",
-                    notebook_steps_path=execution_dir / "notebook_steps.json",
-                    kernel_name=_execution_kernel_name(settings),
-                    notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
-                    stage_claimed=True,
-                    cancellation_token=cancellation_token,
-                    keep_alive=False,
-                    isolated=True,
-                    mark_executed=False,
-                    cancel_message="metrics cancelled",
-                    cancel_resume_status=TaskStatus.EXECUTED,
-                    extra_code_cells=_build_metrics_cell_sources(
-                        package_root=_package_root_for_notebook(),
-                        task=task,
-                        settings=settings,
-                        dictionary_path=dictionary_path,
-                        input_pmml_path=input_pmml_path,
-                        contract=contract,
-                        model_meta_path=model_meta_path,
-                        reproducibility_json_path=outputs_dir
-                        / REPRODUCIBILITY_RESULT_JSON,
-                        results_json_path=metrics_work_dir / "validation_results.json",
-                        excel_path=metrics_work_dir / "validation.xlsx",
-                    ),
-                )
-                if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
-                    _rollback_artifact_uow(metrics_uow)
-                    return
-                _require_metrics_outputs(metrics_work_dir)
+            if settings.notebook_isolated_execution and _metrics_work_dir_prepared(
+                metrics_work_dir
+            ):
+                # PERF-3: the notebook stage of run_staged_pipeline's default
+                # consecutive path already executed the metrics cells in the
+                # same isolated subprocess run as the reproducibility cells
+                # (see run_notebook_stage's also_prepare_metrics) and left
+                # valid outputs here. Skip re-running the notebook entirely
+                # and fall through to the shared finalization below.
+                contract = load_runtime_contract(execution_dir / "runtime_contract.json")
+                task = _sync_task_algorithm(repo, task, contract.algorithm)
+                metrics_uow = ArtifactUnitOfWork()
             else:
-                previous_token = getattr(live_session, "cancellation_token", None)
-                setattr(live_session, "cancellation_token", cancellation_token)
-                live_client = getattr(live_session, "client", None)
-                if live_client is not None:
-                    cancellation_token.bind_client(live_client)
-                try:
-                    _write_metrics_results_in_session(
-                        session=live_session,
-                        task=task,
-                        settings=settings,
-                        dictionary_path=dictionary_path,
-                        input_pmml_path=input_pmml_path,
-                        contract=contract,
-                        model_meta_path=model_meta_path,
-                        outputs_dir=metrics_work_dir,
-                        reproducibility_json_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
+                _remove_dir_if_exists(metrics_work_dir)
+                metrics_work_dir.mkdir(parents=True, exist_ok=True)
+                contract = load_runtime_contract(execution_dir / "runtime_contract.json")
+                task = _sync_task_algorithm(repo, task, contract.algorithm)
+                metrics_uow = ArtifactUnitOfWork()
+                model_meta_path = _stage_model_meta_from_contract(
+                    metrics_uow,
+                    contract,
+                    execution_dir,
+                )
+                if live_session is None:
+                    notebook_path = _required_path(
+                        task, artifacts, FileRole.NOTEBOOK, "notebook", "notebook_path"
                     )
-                finally:
-                    setattr(live_session, "cancellation_token", previous_token)
+                    sample_path = _required_path(
+                        task, artifacts, FileRole.SAMPLE, "sample", "sample_path"
+                    )
+                    _notebook_step_v3(
+                        repo=repo,
+                        task=task,
+                        source_notebook=notebook_path,
+                        sample_path=sample_path,
+                        execution_dir=execution_dir,
+                        contract_meta_path=execution_dir / "runtime_contract.json",
+                        code_scores_path=execution_dir / "code_model_scores.csv",
+                        feature_importance_path=execution_dir / "feature_importance.csv",
+                        model_params_path=execution_dir / "model_params.json",
+                        notebook_steps_path=execution_dir / "notebook_steps.json",
+                        kernel_name=_execution_kernel_name(settings),
+                        notebook_memory_limit_mb=settings.notebook_memory_limit_mb,
+                        stage_claimed=True,
+                        cancellation_token=cancellation_token,
+                        keep_alive=False,
+                        isolated=True,
+                        mark_executed=False,
+                        cancel_message="metrics cancelled",
+                        cancel_resume_status=TaskStatus.EXECUTED,
+                        extra_code_cells=_build_metrics_cell_sources(
+                            package_root=_package_root_for_notebook(),
+                            task=task,
+                            settings=settings,
+                            dictionary_path=dictionary_path,
+                            input_pmml_path=input_pmml_path,
+                            contract=contract,
+                            model_meta_path=model_meta_path,
+                            reproducibility_json_path=outputs_dir
+                            / REPRODUCIBILITY_RESULT_JSON,
+                            results_json_path=metrics_work_dir / "validation_results.json",
+                            excel_path=metrics_work_dir / "validation.xlsx",
+                        ),
+                    )
+                    if repo.get_task(task_id).status != TaskStatus.COMPUTING_METRICS:
+                        _rollback_artifact_uow(metrics_uow)
+                        return
+                    _require_metrics_outputs(metrics_work_dir)
+                else:
+                    previous_token = getattr(live_session, "cancellation_token", None)
+                    setattr(live_session, "cancellation_token", cancellation_token)
+                    live_client = getattr(live_session, "client", None)
+                    if live_client is not None:
+                        cancellation_token.bind_client(live_client)
+                    try:
+                        _write_metrics_results_in_session(
+                            session=live_session,
+                            task=task,
+                            settings=settings,
+                            dictionary_path=dictionary_path,
+                            input_pmml_path=input_pmml_path,
+                            contract=contract,
+                            model_meta_path=model_meta_path,
+                            outputs_dir=metrics_work_dir,
+                            reproducibility_json_path=outputs_dir / REPRODUCIBILITY_RESULT_JSON,
+                        )
+                    finally:
+                        setattr(live_session, "cancellation_token", previous_token)
         finally:
             unregister_notebook_cancellation(task_id, cancellation_token)
         close_live_notebook_session(task_id)
@@ -731,6 +821,17 @@ def _require_metrics_outputs(outputs_dir: Path) -> None:
         raise PipelineError("notebook metrics did not produce: " + ", ".join(missing))
 
 
+def _metrics_work_dir_prepared(metrics_work_dir: Path) -> bool:
+    """True when a prior merged notebook+metrics subprocess run (PERF-3,
+    see run_notebook_stage's also_prepare_metrics) already wrote valid
+    metrics outputs here, so run_metrics_stage can skip re-executing the
+    notebook."""
+    return (
+        (metrics_work_dir / "validation_results.json").exists()
+        and (metrics_work_dir / "validation.xlsx").exists()
+    )
+
+
 def _append_injected_cells(
     session: NotebookExecutionSession,
     cell_sources: list[tuple[str, str]],
@@ -969,6 +1070,59 @@ def _build_metrics_cell_source(
     )
 
 
+def _build_deferred_contract_resolution_lines() -> list[str]:
+    """Injected-cell source that resolves the metrics payload's
+    contract-derived fields from `contract_meta_path` on disk (written by the
+    contract tail cell earlier in the same kernel run) and writes
+    model_meta.json, mirroring `load_runtime_contract` +
+    `_write_model_meta_from_contract` for the case where no `RuntimeContract`
+    Python object is available at cell-build time.
+    """
+    return [
+        "# Injected by marvis v3 (metrics contract resolution).",
+        "_rmc_contract = _rmc_json.loads(",
+        "    _RmcPath(_rmc_payload['contract_meta_path']).read_text(encoding='utf-8')",
+        ")",
+        "_rmc_payload['algorithm'] = _rmc_normalize_algorithm(_rmc_contract.get('algorithm'))",
+        "_rmc_payload['target_col'] = str(_rmc_contract['target_col'])",
+        "_rmc_payload['split_col'] = (",
+        "    _rmc_contract.get('split_col') or _rmc_payload['fallback_split_col']",
+        ")",
+        "_rmc_payload['time_col'] = (",
+        "    _rmc_contract.get('time_col') or _rmc_payload['fallback_time_col']",
+        ")",
+        "_rmc_payload['pmml_output_field'] = str(_rmc_contract.get('pmml_output_field') or 'probability_1')",
+        "_rmc_payload['score_decimal_places'] = int(_rmc_contract.get('score_decimal_places') or 6)",
+        "_rmc_payload['code_scores_path'] = str(_rmc_contract['code_model_scores_path'])",
+        "_rmc_feature_importance_meta = []",
+        "_rmc_importance_meta_path = _rmc_contract.get('feature_importance_path')",
+        "if _rmc_importance_meta_path and _RmcPath(_rmc_importance_meta_path).exists():",
+        "    _rmc_feature_importance_meta = _rmc_pd.read_csv(",
+        "        _RmcPath(_rmc_importance_meta_path)",
+        "    ).to_dict(orient='records')",
+        "_rmc_hyperparameters_meta = {}",
+        "_rmc_params_meta_path = _rmc_contract.get('model_params_path')",
+        "if _rmc_params_meta_path and _RmcPath(_rmc_params_meta_path).exists():",
+        "    _rmc_hyperparameters_meta = _rmc_json.loads(",
+        "        _RmcPath(_rmc_params_meta_path).read_text(encoding='utf-8')",
+        "    )",
+        "_rmc_model_meta_out_path = _RmcPath(_rmc_payload['model_meta_path'])",
+        "_rmc_model_meta_out_path.parent.mkdir(parents=True, exist_ok=True)",
+        "_rmc_model_meta_out_path.write_text(",
+        "    _rmc_json.dumps(",
+        "        {",
+        "            'algorithm': _rmc_payload['algorithm'],",
+        "            'feature_importance': _rmc_feature_importance_meta,",
+        "            'hyperparameters': _rmc_hyperparameters_meta,",
+        "        },",
+        "        ensure_ascii=False,",
+        "        indent=2,",
+        "    ),",
+        "    encoding='utf-8',",
+        ")",
+    ]
+
+
 def _build_metrics_cell_sources(
     *,
     package_root: Path,
@@ -976,16 +1130,36 @@ def _build_metrics_cell_sources(
     settings: PipelineSettings,
     dictionary_path: Path,
     input_pmml_path: Path,
-    contract: RuntimeContract,
+    contract: RuntimeContract | None = None,
+    contract_meta_path: Path | None = None,
     model_meta_path: Path,
     reproducibility_json_path: Path,
     results_json_path: Path,
     excel_path: Path,
 ) -> list[tuple[str, str]]:
+    """Build the metrics injected-cell sources.
+
+    Either `contract` (already loaded, e.g. from a live session or a
+    standalone metrics-stage run where runtime_contract.json already exists
+    on disk before cell-build time) or `contract_meta_path` must be given.
+
+    `contract_meta_path` defers contract resolution AND model_meta.json
+    writing into the injected cell itself, mirroring the pattern already
+    used by `_build_reproducibility_cell_sources` for `contract_meta_path`.
+    This is required when notebook-stage and metrics-stage cells are merged
+    into a single isolated subprocess run: runtime_contract.json does not
+    exist yet at cell-build time in that case, since it is itself produced
+    by the contract tail cell during that same run.
+    """
+    if (contract is None) == (contract_meta_path is None):
+        raise ValueError(
+            "exactly one of contract or contract_meta_path must be provided"
+        )
+    deferred_contract = contract is None
     payload = {
         "model_name": task.model_name,
         "model_version": task.model_version,
-        "algorithm": _algorithm(contract.algorithm),
+        "algorithm": "" if deferred_contract else _algorithm(contract.algorithm),
         "dictionary_path": str(dictionary_path),
         "input_pmml_path": str(input_pmml_path),
         "model_meta_path": str(model_meta_path),
@@ -993,18 +1167,22 @@ def _build_metrics_cell_sources(
         "results_json_path": str(results_json_path),
         "excel_path": str(excel_path),
         "metrics_cancel_path": str(_metrics_cancel_marker_path(results_json_path.parent.parent)),
-        "target_col": contract.target_col,
-        "split_col": contract.split_col or task.split_col or "",
-        "time_col": contract.time_col or task.time_col or "",
-        "pmml_output_field": contract.pmml_output_field,
-        "score_decimal_places": contract.score_decimal_places,
-        "code_scores_path": str(contract.code_model_scores_path),
+        "target_col": "" if deferred_contract else contract.target_col,
+        "split_col": "" if deferred_contract else (contract.split_col or task.split_col or ""),
+        "time_col": "" if deferred_contract else (contract.time_col or task.time_col or ""),
+        "pmml_output_field": "" if deferred_contract else contract.pmml_output_field,
+        "score_decimal_places": 0 if deferred_contract else contract.score_decimal_places,
+        "code_scores_path": "" if deferred_contract else str(contract.code_model_scores_path),
         "bin_count": settings.bin_count,
         "random_sample_size": settings.random_sample_size,
         "random_seed": settings.random_seed,
         "data_dict_feature_col": settings.data_dict_feature_col,
         "data_dict_category_col": settings.data_dict_category_col,
     }
+    if deferred_contract:
+        payload["contract_meta_path"] = str(contract_meta_path)
+        payload["fallback_split_col"] = task.split_col or ""
+        payload["fallback_time_col"] = task.time_col or ""
     prepare_lines = [
         "# Injected by marvis v3 (metrics).",
         *_notebook_package_prelude(package_root),
@@ -1035,7 +1213,9 @@ def _build_metrics_cell_sources(
         "from marvis.validation.sample_stats import run_basic_info as _rmc_run_basic_info",
         "from marvis.validation.stress_test import load_feature_categories as _rmc_load_feature_categories",
         "from marvis.validation.stress_test import run_stress_test as _rmc_run_stress_test",
+        "from marvis.model_algorithms import normalize_algorithm as _rmc_normalize_algorithm",
         f"_rmc_payload = {_json_literal(payload)}",
+        *(_build_deferred_contract_resolution_lines() if deferred_contract else []),
         "def _rmc_load_dictionary(path_value):",
         "    path = _RmcPath(path_value)",
         "    suffix = path.suffix.lower()",
@@ -1266,7 +1446,17 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
             f"task already {task.status.value}; reset task before rerunning pipeline"
         )
 
-    run_notebook_stage(task_id=task_id, settings=settings)
+    # PERF-3: in isolated mode, run the metrics cells in the same subprocess
+    # call as the notebook stage so the user notebook executes once instead
+    # of twice. run_metrics_stage below then detects the pre-populated
+    # outputs and skips its own notebook re-run. This only applies to this
+    # default consecutive path; standalone notebook/metrics retries via the
+    # API are unaffected (also_prepare_metrics defaults to False there).
+    run_notebook_stage(
+        task_id=task_id,
+        settings=settings,
+        also_prepare_metrics=settings.notebook_isolated_execution,
+    )
     task = repo.get_task(task_id)
     if task.status is not TaskStatus.EXECUTED:
         return

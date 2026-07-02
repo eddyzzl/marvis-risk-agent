@@ -1,11 +1,13 @@
 import sqlite3
 
+from marvis.agent.orchestrator import is_metrics_failure
 from marvis.db import TaskRepository, init_db
 from marvis.domain import (
     TASK_STATUS_REASON_SERVER_RESTART,
     TaskCreate,
     TaskStatus,
 )
+from marvis.pipeline import METRICS_STAGE_FAILURE_PREFIX
 from marvis.recovery import last_completed_step, reclaim_stale_running_tasks
 
 
@@ -356,3 +358,120 @@ def test_reclaim_stale_running_tasks_adds_agent_restart_notice(tmp_path):
     assert messages[-1]["stage"] == "failure"
     assert messages[-1]["metadata"]["interrupted_by_restart"] is True
     assert "服务器重启" in messages[-1]["content"]
+
+
+def test_reclaim_computing_metrics_with_complete_execution_resumes_via_metrics(tmp_path):
+    # REL-2: a restart during COMPUTING_METRICS with intact execution/ artifacts
+    # (runtime_contract.json + code_model_scores.csv + model_meta.json already
+    # written by the notebook stage) must reclaim into a metrics-specific
+    # failure so retry goes through the cheap metrics-only path instead of a
+    # full notebook re-run.
+    db_path = tmp_path / "app.sqlite"
+    workspace = tmp_path / "workspace"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="模型",
+            model_version="v1",
+            validator="验证人员",
+            source_dir=str(tmp_path),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
+    repo.update_status(task.id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED)
+    repo.update_status(task.id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING)
+    repo.update_status(
+        task.id,
+        TaskStatus.COMPUTING_METRICS,
+        "computing",
+        expected=TaskStatus.EXECUTED,
+    )
+    execution_dir = workspace / "tasks" / task.id / "execution"
+    execution_dir.mkdir(parents=True)
+    (execution_dir / "model_meta.json").write_text("{}", encoding="utf-8")
+    (execution_dir / "code_model_scores.csv").write_text(
+        "row_index,code_model_score\n0,0.1\n",
+        encoding="utf-8",
+    )
+    (execution_dir / "runtime_contract.json").write_text("{}", encoding="utf-8")
+
+    reclaimed = reclaim_stale_running_tasks(db_path, tasks_dir=workspace / "tasks")
+
+    loaded = repo.get_task(task.id)
+    assert reclaimed == 1
+    assert loaded.status == TaskStatus.FAILED
+    assert loaded.status_message.startswith(METRICS_STAGE_FAILURE_PREFIX)
+    assert loaded.status_reason_code == TASK_STATUS_REASON_SERVER_RESTART
+    assert is_metrics_failure(loaded) is True
+
+
+def test_reclaim_computing_metrics_without_execution_artifacts_keeps_generic_message(tmp_path):
+    # A restart during COMPUTING_METRICS whose execution/ artifacts are NOT
+    # intact (e.g. crashed mid-notebook before contract files were written)
+    # must NOT be misrouted into the metrics-only retry path; it keeps the
+    # generic reclaim message so the user reruns from the notebook stage.
+    db_path = tmp_path / "app.sqlite"
+    workspace = tmp_path / "workspace"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="模型",
+            model_version="v1",
+            validator="验证人员",
+            source_dir=str(tmp_path),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
+    repo.update_status(task.id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED)
+    repo.update_status(task.id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING)
+    repo.update_status(
+        task.id,
+        TaskStatus.COMPUTING_METRICS,
+        "computing",
+        expected=TaskStatus.EXECUTED,
+    )
+    execution_dir = workspace / "tasks" / task.id / "execution"
+    execution_dir.mkdir(parents=True)
+    # incomplete: missing runtime_contract.json / model_meta.json
+
+    reclaimed = reclaim_stale_running_tasks(db_path, tasks_dir=workspace / "tasks")
+
+    loaded = repo.get_task(task.id)
+    assert reclaimed == 1
+    assert loaded.status == TaskStatus.FAILED
+    assert loaded.status_message == "reclaimed: server restart while running"
+    assert is_metrics_failure(loaded) is False
+
+
+def test_reclaim_without_tasks_dir_keeps_generic_message_for_computing_metrics(tmp_path):
+    # Backward compatibility: callers that do not pass tasks_dir (or pass
+    # None) must keep today's behavior exactly.
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(
+        TaskCreate(
+            model_name="模型",
+            model_version="v1",
+            validator="验证人员",
+            source_dir=str(tmp_path),
+        )
+    )
+    repo.update_status(task.id, TaskStatus.SCANNED, "scanned", expected=TaskStatus.CREATED)
+    repo.update_status(task.id, TaskStatus.RUNNING, "running", expected=TaskStatus.SCANNED)
+    repo.update_status(task.id, TaskStatus.EXECUTED, "executed", expected=TaskStatus.RUNNING)
+    repo.update_status(
+        task.id,
+        TaskStatus.COMPUTING_METRICS,
+        "computing",
+        expected=TaskStatus.EXECUTED,
+    )
+
+    reclaimed = reclaim_stale_running_tasks(db_path)
+
+    loaded = repo.get_task(task.id)
+    assert reclaimed == 1
+    assert loaded.status == TaskStatus.FAILED
+    assert loaded.status_message == "reclaimed: server restart while running"

@@ -162,7 +162,7 @@ def _is_local_only_path(path: str) -> bool:
 def create_app(workspace: str | Path | Settings) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
     init_db(settings.db_path)
-    reclaim_stale_running_tasks(settings.db_path)
+    reclaim_stale_running_tasks(settings.db_path, tasks_dir=settings.tasks_dir)
     artifact_recovery_report = reconcile_workspace_artifacts(settings)
 
     app = FastAPI(title="MARVIS-Agent")
