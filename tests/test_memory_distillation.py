@@ -106,6 +106,45 @@ def test_distillation_engine_skips_non_numeric_model_metrics_instead_of_dropping
     assert metric_ranges["auc"] == {"min": 0.72, "max": 0.72}
 
 
+def test_distillation_support_counts_distinct_tasks_not_entries(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    payload = {
+        "model_name": "A卡",
+        "model_version": "V1",
+        "scope": "train",
+        "channel": "app",
+        "month": "202601",
+        "ks": 0.31,
+        "auc": 0.72,
+        "psi": 0.08,
+        "source_task_id": "task-1",
+        "important_feature_sources": ["征信"],
+    }
+    for _ in range(4):
+        store.create(
+            MemoryCandidate(
+                memory_type="model_experience",
+                summary="模型经验 task-1",
+                payload=dict(payload),
+                source_task_id="task-1",
+            )
+        )
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "model_experience"
+    )
+
+    assert len(distillations) == 1
+    distilled = distillations[0]
+    # Rerunning the same task 4 times deduplicates at capture time (MEM-3), so
+    # only one entry exists to distill; support/confidence must reflect the
+    # single independent data point, not 4 duplicate rows.
+    assert distilled.support_count == 1
+    assert distilled.confidence == "low"
+
+
 class _BrokenLLM:
     def complete(self, **_kwargs):
         raise RuntimeError("unavailable")

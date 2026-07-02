@@ -157,7 +157,7 @@ class DistillationEngine:
         members: list[Any],
     ) -> MemoryDistillation | None:
         structured = self._merge_structured(category, members)
-        support = len(members)
+        support = _distinct_task_support(members)
         summary = self._summarize(category, scope_key, members, structured)
         summary = summary[:MAX_DISTILLED_SUMMARY_CHARS]
         verdict = (
@@ -195,7 +195,7 @@ class DistillationEngine:
                 "support": len(members),
             }
         if category == "model_experience":
-            return _merge_model_experience(payloads, len(members))
+            return _merge_model_experience(payloads, _distinct_task_support(members))
         if category == "user_preference":
             return {
                 "statements": sorted({str(payload.get("preference")) for payload in payloads if payload.get("preference")}),
@@ -206,7 +206,7 @@ class DistillationEngine:
             for payload in payloads:
                 tag = str(payload.get("status") or payload.get("failure_type") or payload.get("package") or "general")
                 counts[tag] = counts.get(tag, 0) + 1
-            return {"outcome_tags": counts, "support": len(members)}
+            return {"outcome_tags": counts, "support": _distinct_task_support(members)}
         return {"support": len(members)}
 
     def _summarize(
@@ -304,6 +304,18 @@ def _first_present(payloads: list[dict[str, Any]], key: str) -> Any:
 
 def _entry_id(entry: Any) -> str:
     return str(entry.get("id") if isinstance(entry, dict) else getattr(entry, "id"))
+
+
+def _entry_source_task_id(entry: Any) -> str | None:
+    value = entry.get("source_task_id") if isinstance(entry, dict) else getattr(entry, "source_task_id", None)
+    return str(value) if value not in (None, "") else None
+
+
+def _distinct_task_support(members: list[Any]) -> int:
+    """Count independent data points backing a distillation: distinct source
+    task ids where available, falling back to the entry id for entries with
+    no source_task_id (each such entry is its own independent point)."""
+    return len({_entry_source_task_id(member) or _entry_id(member) for member in members})
 
 
 def _entry_category(entry: Any) -> str:

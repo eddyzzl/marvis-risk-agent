@@ -67,7 +67,6 @@ class AgentMemoryStore:
         decision = classify_memory_candidate(candidate)
         if not decision.allowed:
             return self.reject(candidate, decision, task_id=task_id)
-        entry_id = uuid.uuid4().hex
         now = _now()
         safe_summary = redact_text(candidate.summary)
         safe_payload = redact_value(candidate.payload)
@@ -78,7 +77,34 @@ class AgentMemoryStore:
             + int(safe_reason != candidate.reason)
         )
         payload_json = _dump_json_object(safe_payload.value)
+        dedup_key = _dedup_fingerprint(safe_summary, safe_payload.value)
         with connect(self.db_path) as conn:
+            duplicate_id = self._find_duplicate_entry(
+                conn,
+                memory_type=candidate.memory_type,
+                source_task_id=candidate.source_task_id,
+                dedup_key=dedup_key,
+            )
+            if duplicate_id is not None:
+                conn.execute(
+                    "UPDATE agent_memory_entries SET updated_at = ? WHERE id = ?",
+                    (now, duplicate_id),
+                )
+                self._append_event(
+                    conn,
+                    duplicate_id,
+                    "create",
+                    task_id=task_id or candidate.source_task_id,
+                    message_id=candidate.source_message_id,
+                    details={
+                        "memory_type": candidate.memory_type,
+                        "redacted_count": redacted_count,
+                        "dedup": True,
+                    },
+                )
+                row = self._select_entry(conn, duplicate_id, include_deleted=True)
+                return _row_to_entry(row)
+            entry_id = uuid.uuid4().hex
             conn.execute(
                 """
                 INSERT INTO agent_memory_entries
@@ -112,6 +138,30 @@ class AgentMemoryStore:
             )
             row = self._select_entry(conn, entry_id, include_deleted=True)
         return _row_to_entry(row)
+
+    def _find_duplicate_entry(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        memory_type: str,
+        source_task_id: str | None,
+        dedup_key: str,
+    ) -> str | None:
+        rows = conn.execute(
+            """
+            SELECT id, summary, payload_json
+              FROM agent_memory_entries
+             WHERE status = 'active'
+               AND memory_type = ?
+               AND source_task_id IS ?
+            """,
+            (memory_type, source_task_id),
+        ).fetchall()
+        for row in rows:
+            existing_key = _dedup_fingerprint(row["summary"], _load_json_object(row["payload_json"]))
+            if existing_key == dedup_key:
+                return str(row["id"])
+        return None
 
     def reject(
         self,
@@ -1062,6 +1112,15 @@ def _row_to_distillation_event(row: sqlite3.Row) -> dict[str, Any]:
 
 def _dump_json_object(values: dict[str, Any]) -> str:
     return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def _dedup_fingerprint(summary: str, payload: dict[str, Any]) -> str:
+    return json.dumps(
+        {"summary": summary, "payload": payload},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _load_json_object(raw: str | None) -> dict[str, Any]:
