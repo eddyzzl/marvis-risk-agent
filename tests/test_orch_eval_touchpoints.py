@@ -175,4 +175,6 @@ def test_expected_failure_count_matches_reported_unsafe_touchpoints():
     # Locks the count so silently adding/removing a documented gap is a
     # visible diff, not something that drifts unnoticed.
     unsafe = [case.id for case in ALL_TOUCHPOINT_CASES if case.expected_failure]
-    assert len(unsafe) == 11, unsafe
+    # 11 documented at authoring time; the three think-tag cases flipped to safe
+    # once LLM-6's client-side <think> stripping landed.
+    assert len(unsafe) == 8, unsafe
