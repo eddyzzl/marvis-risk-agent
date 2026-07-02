@@ -83,7 +83,7 @@
 #### 特征筛选深度
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | FS-1 | V2 默认建模流没有任何多变量精筛环节：screen 把全部干净列直通模型，无 IV 底线/去冗余/迭代剪枝（select_features 只挂在 legacy 模板；吸收 roadmap-1d"重要性选择"） | High/M | ✅ |
+| ✅ | FS-1 | 两模板已插入"精选特征"漏斗步（`c00032fe`）：IV≥0.02 → 相关去冗余 0.95（高 IV 胜出）→ 可选 VIF；门内 adjust 可调阈值；screen 加 top_k=200 兜底；含 2 强+3 噪声+1 冗余端到端回归（迭代剪枝/null-importance 归 roadmap-1d 长线备注） | High/M | ✅ |
 | ✅ | FS-2 | select_features 默认排除 test+oot、自动识别 SPLIT_COLUMN、typed error 兜底（`bc537dba`）；legacy 模板筛选步已接 split_col | Med/S | — |
 | ⬜ | FS-3 | 类别型特征被静默排除且无防泄漏类别编码（→ 与 PREP-3 合并执行） | Med/M | — |
 | ⬜ | FS-4 | 泄漏检测只有'合并样本单变量强度'一条线：无按 split 突变检测、无时间维度审计 | Med/M | — |
@@ -98,7 +98,7 @@
 #### 调参与训练方法学
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | TUNE-1 | 调参器只为 LGB 一家服务：挑战者全部以硬编码弱默认参赛（xgb 20 棵/catboost 50 轮），scorecard 零调参（吸收 roadmap-1c"lgb 真实默认参数"） | High/L | ✅ |
+| ✅ | TUNE-1 | 两阶段搜索已泛化到全配方家族（`5e30ab4e`）：lgb/xgb/catboost 各 40 trial 带早停，lr/scorecard/mlp 各 12 trial 小空间；per-recipe sha256 确定性 seed；lgb 单配方路径字节级向后兼容 | High/L | ✅ |
 | ✅ | TUNE-2 | 确定性两阶段搜索已落地（`5909edba`）：60/40 粗搜+邻域细搜、lambda log-uniform、lr 0.01–0.3 与轮数反比联动、默认 40 轮、gate 文案改按规模建议；无新依赖；全量 2012 passed | High/M | ✅ |
 | ⬜ | TUNE-3 | 单一 train/test 切分调参：无 CV/重复切分，早停/选参/校准三用同一 test | Med/M | — |
 | ⬜ | TUNE-4 | 超参定型后无'全量在时样本重训'：冠军只见过 ~50-70% 标注样本 | Med/S | — |
@@ -111,7 +111,7 @@
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | SEL-1 | 默认切分不建 OOT，时间外推 OOT（oot_by_time）是全仓从未被调用的死代码 | High/M | ✅ |
-| ⬜ | SEL-2 | 多算法对比系统性不公平：只有 lgb 被调参，其余无早停裸默认参赛 | High/M | ✅ |
+| ✅ | SEL-2 | 公平竞技场已落地（`babd61fe`）：每配方先调参再参赛、树模型统一早停、同切分同特征断言进回归；门文案含"总预算=Σ配方预算"与耗时提示 | High/M | ✅ |
 | ⬜ | SEL-3 | LR 配方零预处理 + 单配方失败连坐终止整批（→ 与 PREP-6/TUNE-8 合并执行） | Med/S | — |
 | ⬜ | SEL-4 | 无独立验证集：test 兼任早停/调参选择/对比口径三重职责 | Med/M | — |
 | ⬜ | SEL-5 | KS 抽样误差零量化：无 bootstrap 置信区间/多 seed，冠军由千分位差决出 | Med/M | — |
