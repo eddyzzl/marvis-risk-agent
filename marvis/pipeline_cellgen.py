@@ -1,0 +1,574 @@
+"""Notebook injected-cell source builders for the validation pipeline.
+
+Pure string-building helpers that assemble the Python source injected into
+the user's validation notebook kernel (reproducibility + metrics cells).
+Extracted from marvis/pipeline.py (ARCH-6) -- no behavior change; these
+functions are never monkeypatched by name in tests, only called, so moving
+them here is safe.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from marvis.domain import TaskRecord
+from marvis.notebook_contract import RuntimeContract
+from marvis.pipeline_io import _algorithm, _metrics_cancel_marker_path
+
+if TYPE_CHECKING:
+    from marvis.pipeline import PipelineSettings
+
+RMC_PMML_SCORE_COL = "__rmc_submitted_pmml_score__"
+REPRODUCIBILITY_RESULT_JSON = "reproducibility_result.json"
+
+
+def _package_root_for_notebook() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _notebook_package_prelude(package_root: Path) -> list[str]:
+    package_root_text = Path(package_root).as_posix()
+    return [
+        "import sys as _rmc_sys",
+        f"_rmc_package_root = {package_root_text!r}",
+        "if _rmc_package_root not in _rmc_sys.path:",
+        "    _rmc_sys.path.insert(0, _rmc_package_root)",
+    ]
+
+
+def _build_reproducibility_cell_sources(
+    *,
+    package_root: Path,
+    task: TaskRecord,
+    settings: PipelineSettings,
+    input_pmml_path: Path,
+    contract_meta_path: Path,
+    output_path: Path,
+) -> list[tuple[str, str]]:
+    payload = {
+        "input_pmml_path": str(input_pmml_path),
+        "contract_meta_path": str(contract_meta_path),
+        "output_path": str(output_path),
+        "random_sample_size": settings.random_sample_size,
+        "random_seed": settings.random_seed,
+        "bin_count": settings.bin_count,
+        "fallback_split_col": task.split_col,
+        "fallback_time_col": task.time_col,
+    }
+    pmml_lines = [
+        "# Injected by marvis v3 (reproducibility evidence).",
+        *_notebook_package_prelude(package_root),
+        "import json as _rmc_json",
+        "from pathlib import Path as _RmcPath",
+        "import pandas as _rmc_pd",
+        "from marvis.validation.config import ValidationConfig as _RmcValidationConfig",
+        "from marvis.validation.in_memory_scores import load_code_model_scores as _rmc_load_code_model_scores",
+        "from marvis.validation.pmml_scoring import load_pmml_scorer as _rmc_load_pmml_scorer",
+        "from marvis.validation.reproducibility import _code_scores_by_row_index as _rmc_code_scores_by_row_index",
+        f"_rmc_payload = {_json_literal(payload)}",
+        "if 'RMC_SAMPLE_DF' not in globals() or not isinstance(RMC_SAMPLE_DF, _rmc_pd.DataFrame):",
+        "    raise NameError('RMC_SAMPLE_DF must be defined as a pandas DataFrame before reproducibility evidence')",
+        "_rmc_contract = _rmc_json.loads(_RmcPath(_rmc_payload['contract_meta_path']).read_text(encoding='utf-8'))",
+        "_rmc_config = _RmcValidationConfig(",
+        "    target_col=str(_rmc_contract['target_col']),",
+        f"    score_col={RMC_PMML_SCORE_COL!r},",
+        "    split_col=_rmc_contract.get('split_col') or _rmc_payload['fallback_split_col'],",
+        "    time_col=_rmc_contract.get('time_col') or _rmc_payload['fallback_time_col'],",
+        "    feature_columns=[],",
+        "    bin_count=int(_rmc_payload['bin_count']),",
+        "    random_sample_size=int(_rmc_payload['random_sample_size']),",
+        "    random_seed=int(_rmc_payload['random_seed']),",
+        "    score_decimal_places=int(_rmc_contract.get('score_decimal_places') or 6),",
+        ")",
+        "_rmc_repro_sample = RMC_SAMPLE_DF.copy().reset_index(drop=True)",
+        "_rmc_repro_take = min(_rmc_config.random_sample_size, len(_rmc_repro_sample))",
+        "_rmc_repro_drawn = _rmc_repro_sample.sample(",
+        "    n=_rmc_repro_take,",
+        "    random_state=_rmc_config.random_seed,",
+        ")",
+        "_rmc_repro_code_scores = _rmc_code_scores_by_row_index(",
+        "    _rmc_load_code_model_scores(_RmcPath(_rmc_contract['code_model_scores_path']))",
+        ")",
+        "_rmc_repro_missing_indexes = [",
+        "    idx for idx in _rmc_repro_drawn.index",
+        "    if idx not in _rmc_repro_code_scores.index",
+        "]",
+        "if _rmc_repro_missing_indexes:",
+        "    _rmc_preview = ', '.join(str(idx) for idx in _rmc_repro_missing_indexes[:10])",
+        "    raise ValueError(f'missing code-model scores for sampled rows: {_rmc_preview}')",
+        "_rmc_repro_scores_code = _rmc_repro_code_scores.loc[_rmc_repro_drawn.index].astype(float).tolist()",
+        "_rmc_repro_pmml_scorer = _rmc_load_pmml_scorer(",
+        "    _RmcPath(_rmc_payload['input_pmml_path']),",
+        "    positive_output_field=str(_rmc_contract.get('pmml_output_field') or 'probability_1'),",
+        ")",
+        "_rmc_repro_scores_pmml = _rmc_repro_pmml_scorer.score(_rmc_repro_drawn.copy())",
+        "if len(_rmc_repro_scores_pmml) != len(_rmc_repro_drawn):",
+        "    raise ValueError(",
+        "        f'submitted PMML scorer returned {len(_rmc_repro_scores_pmml)} scores for {len(_rmc_repro_drawn)} rows'",
+        "    )",
+    ]
+    compare_lines = [
+        "# Injected by marvis v3 (reproducibility compare).",
+        *_notebook_package_prelude(package_root),
+        "import json as _rmc_json",
+        "from dataclasses import asdict as _rmc_asdict",
+        "from pathlib import Path as _RmcPath",
+        "from marvis.validation.reproducibility import _nullable_score as _rmc_nullable_score",
+        "from marvis.validation.reproducibility import scores_match_at_precision as _rmc_scores_match_at_precision",
+        "from marvis.validation.results import ConsistencyStatus as _RmcConsistencyStatus",
+        "from marvis.validation.results import ConsistencySummary as _RmcConsistencySummary",
+        "from marvis.validation.results import ReproducibilityResult as _RmcReproducibilityResult",
+        "from marvis.validation.results import ScoreCompareRow as _RmcScoreCompareRow",
+        f"_rmc_payload = {_json_literal(payload)}",
+        "_rmc_rows = []",
+        "_rmc_match_count = 0",
+        "_rmc_mismatch_count = 0",
+        "_rmc_max_abs_diff = 0.0",
+        "for _rmc_row_index, _rmc_code_score, _rmc_pmml_score in zip(",
+        "    _rmc_repro_drawn.index,",
+        "    _rmc_repro_scores_code,",
+        "    _rmc_repro_scores_pmml,",
+        "):",
+        "    _rmc_code_score_float = float(_rmc_code_score)",
+        "    _rmc_pmml_score_float = _rmc_nullable_score(_rmc_pmml_score)",
+        "    _rmc_abs_diff = None if _rmc_pmml_score_float is None else abs(_rmc_code_score_float - _rmc_pmml_score_float)",
+        "    _rmc_matched = False if _rmc_pmml_score_float is None else _rmc_scores_match_at_precision(",
+        "        _rmc_code_score_float,",
+        "        _rmc_pmml_score_float,",
+        "        _rmc_config.score_decimal_places,",
+        "    )",
+        "    _rmc_rows.append(_RmcScoreCompareRow(",
+        "        row_index=_rmc_row_index,",
+        "        score_code_model=_rmc_code_score_float,",
+        "        score_submitted_pmml=_rmc_pmml_score_float,",
+        "        abs_diff=_rmc_abs_diff,",
+        "        matched=_rmc_matched,",
+        "    ))",
+        "    if _rmc_abs_diff is not None:",
+        "        _rmc_max_abs_diff = max(_rmc_max_abs_diff, _rmc_abs_diff)",
+        "    if _rmc_matched:",
+        "        _rmc_match_count += 1",
+        "    else:",
+        "        _rmc_mismatch_count += 1",
+        "_rmc_result = _RmcReproducibilityResult(",
+        "    sample_size=_rmc_repro_take,",
+        "    seed=_rmc_config.random_seed,",
+        "    rows=_rmc_rows,",
+        "    summary=_RmcConsistencySummary(",
+        "        match_count=_rmc_match_count,",
+        "        mismatch_count=_rmc_mismatch_count,",
+        "        max_abs_diff=float(_rmc_max_abs_diff),",
+        "        status=_RmcConsistencyStatus.PASS if _rmc_mismatch_count == 0 else _RmcConsistencyStatus.FAIL,",
+        "    ),",
+        ")",
+        "_rmc_output_path = _RmcPath(_rmc_payload['output_path'])",
+        "_rmc_output_path.parent.mkdir(parents=True, exist_ok=True)",
+        "_rmc_output_path.write_text(",
+        "    _rmc_json.dumps(_rmc_asdict(_rmc_result), ensure_ascii=False, indent=2),",
+        "    encoding='utf-8',",
+        ")",
+    ]
+    return [
+        ("repro-pmml", "\n".join(pmml_lines)),
+        ("repro-compare", "\n".join(compare_lines)),
+    ]
+
+
+def _build_metrics_cell_source(
+    *,
+    package_root: Path,
+    task: TaskRecord,
+    settings: PipelineSettings,
+    dictionary_path: Path,
+    input_pmml_path: Path,
+    contract: RuntimeContract,
+    model_meta_path: Path,
+    reproducibility_json_path: Path,
+    results_json_path: Path,
+    excel_path: Path,
+) -> str:
+    return "\n\n".join(
+        source
+        for _, source in _build_metrics_cell_sources(
+            package_root=package_root,
+            task=task,
+            settings=settings,
+            dictionary_path=dictionary_path,
+            input_pmml_path=input_pmml_path,
+            contract=contract,
+            model_meta_path=model_meta_path,
+            reproducibility_json_path=reproducibility_json_path,
+            results_json_path=results_json_path,
+            excel_path=excel_path,
+        )
+    )
+
+
+def _build_deferred_contract_resolution_lines() -> list[str]:
+    """Injected-cell source that resolves the metrics payload's
+    contract-derived fields from `contract_meta_path` on disk (written by the
+    contract tail cell earlier in the same kernel run) and writes
+    model_meta.json, mirroring `load_runtime_contract` +
+    `_write_model_meta_from_contract` for the case where no `RuntimeContract`
+    Python object is available at cell-build time.
+    """
+    return [
+        "# Injected by marvis v3 (metrics contract resolution).",
+        "_rmc_contract = _rmc_json.loads(",
+        "    _RmcPath(_rmc_payload['contract_meta_path']).read_text(encoding='utf-8')",
+        ")",
+        "_rmc_payload['algorithm'] = _rmc_normalize_algorithm(_rmc_contract.get('algorithm'))",
+        "_rmc_payload['target_col'] = str(_rmc_contract['target_col'])",
+        "_rmc_payload['split_col'] = (",
+        "    _rmc_contract.get('split_col') or _rmc_payload['fallback_split_col']",
+        ")",
+        "_rmc_payload['time_col'] = (",
+        "    _rmc_contract.get('time_col') or _rmc_payload['fallback_time_col']",
+        ")",
+        "_rmc_payload['pmml_output_field'] = str(_rmc_contract.get('pmml_output_field') or 'probability_1')",
+        "_rmc_payload['score_decimal_places'] = int(_rmc_contract.get('score_decimal_places') or 6)",
+        "_rmc_payload['code_scores_path'] = str(_rmc_contract['code_model_scores_path'])",
+        "_rmc_feature_importance_meta = []",
+        "_rmc_importance_meta_path = _rmc_contract.get('feature_importance_path')",
+        "if _rmc_importance_meta_path and _RmcPath(_rmc_importance_meta_path).exists():",
+        "    _rmc_feature_importance_meta = _rmc_pd.read_csv(",
+        "        _RmcPath(_rmc_importance_meta_path)",
+        "    ).to_dict(orient='records')",
+        "_rmc_hyperparameters_meta = {}",
+        "_rmc_params_meta_path = _rmc_contract.get('model_params_path')",
+        "if _rmc_params_meta_path and _RmcPath(_rmc_params_meta_path).exists():",
+        "    _rmc_hyperparameters_meta = _rmc_json.loads(",
+        "        _RmcPath(_rmc_params_meta_path).read_text(encoding='utf-8')",
+        "    )",
+        "_rmc_model_meta_out_path = _RmcPath(_rmc_payload['model_meta_path'])",
+        "_rmc_model_meta_out_path.parent.mkdir(parents=True, exist_ok=True)",
+        "_rmc_model_meta_out_path.write_text(",
+        "    _rmc_json.dumps(",
+        "        {",
+        "            'algorithm': _rmc_payload['algorithm'],",
+        "            'feature_importance': _rmc_feature_importance_meta,",
+        "            'hyperparameters': _rmc_hyperparameters_meta,",
+        "        },",
+        "        ensure_ascii=False,",
+        "        indent=2,",
+        "    ),",
+        "    encoding='utf-8',",
+        ")",
+    ]
+
+
+def _build_metrics_cell_sources(
+    *,
+    package_root: Path,
+    task: TaskRecord,
+    settings: PipelineSettings,
+    dictionary_path: Path,
+    input_pmml_path: Path,
+    contract: RuntimeContract | None = None,
+    contract_meta_path: Path | None = None,
+    model_meta_path: Path,
+    reproducibility_json_path: Path,
+    results_json_path: Path,
+    excel_path: Path,
+) -> list[tuple[str, str]]:
+    """Build the metrics injected-cell sources.
+
+    Either `contract` (already loaded, e.g. from a live session or a
+    standalone metrics-stage run where runtime_contract.json already exists
+    on disk before cell-build time) or `contract_meta_path` must be given.
+
+    `contract_meta_path` defers contract resolution AND model_meta.json
+    writing into the injected cell itself, mirroring the pattern already
+    used by `_build_reproducibility_cell_sources` for `contract_meta_path`.
+    This is required when notebook-stage and metrics-stage cells are merged
+    into a single isolated subprocess run: runtime_contract.json does not
+    exist yet at cell-build time in that case, since it is itself produced
+    by the contract tail cell during that same run.
+    """
+    if (contract is None) == (contract_meta_path is None):
+        raise ValueError(
+            "exactly one of contract or contract_meta_path must be provided"
+        )
+    deferred_contract = contract is None
+    payload = {
+        "model_name": task.model_name,
+        "model_version": task.model_version,
+        "algorithm": "" if deferred_contract else _algorithm(contract.algorithm),
+        "dictionary_path": str(dictionary_path),
+        "input_pmml_path": str(input_pmml_path),
+        "model_meta_path": str(model_meta_path),
+        "reproducibility_json_path": str(reproducibility_json_path),
+        "results_json_path": str(results_json_path),
+        "excel_path": str(excel_path),
+        "metrics_cancel_path": str(_metrics_cancel_marker_path(results_json_path.parent.parent)),
+        "target_col": "" if deferred_contract else contract.target_col,
+        "split_col": "" if deferred_contract else (contract.split_col or task.split_col or ""),
+        "time_col": "" if deferred_contract else (contract.time_col or task.time_col or ""),
+        "pmml_output_field": "" if deferred_contract else contract.pmml_output_field,
+        "score_decimal_places": 0 if deferred_contract else contract.score_decimal_places,
+        "code_scores_path": "" if deferred_contract else str(contract.code_model_scores_path),
+        "bin_count": settings.bin_count,
+        "random_sample_size": settings.random_sample_size,
+        "random_seed": settings.random_seed,
+        "data_dict_feature_col": settings.data_dict_feature_col,
+        "data_dict_category_col": settings.data_dict_category_col,
+    }
+    if deferred_contract:
+        payload["contract_meta_path"] = str(contract_meta_path)
+        payload["fallback_split_col"] = task.split_col or ""
+        payload["fallback_time_col"] = task.time_col or ""
+    prepare_lines = [
+        "# Injected by marvis v3 (metrics).",
+        *_notebook_package_prelude(package_root),
+        "import json as _rmc_json",
+        "from dataclasses import asdict as _rmc_asdict",
+        "from pathlib import Path as _RmcPath",
+        "import pandas as _rmc_pd",
+        "from marvis.output.excel import write_validation_excel as _rmc_write_validation_excel",
+        "from marvis.validation.checks import finite_score_series as _rmc_finite_score_series",
+        "from marvis.validation.config import ValidationConfig as _RmcValidationConfig",
+        "from marvis.validation.effectiveness import build_effectiveness_result as _rmc_build_effectiveness_result",
+        "from marvis.validation.effectiveness import compute_bin_tables as _rmc_compute_bin_tables",
+        "from marvis.validation.effectiveness import compute_monthly_ks as _rmc_compute_monthly_ks",
+        "from marvis.validation.effectiveness import compute_monthly_psi as _rmc_compute_monthly_psi",
+        "from marvis.validation.effectiveness import compute_overall_ks as _rmc_compute_overall_ks",
+        "from marvis.validation.effectiveness import compute_overall_psi as _rmc_compute_overall_psi",
+        "from marvis.validation.effectiveness import compute_psi_stability_table as _rmc_compute_psi_stability_table",
+        "from marvis.validation.effectiveness import compute_roc_ks_curves as _rmc_compute_roc_ks_curves",
+        "from marvis.validation.effectiveness import prepare_effectiveness_context as _rmc_prepare_effectiveness_context",
+        "from marvis.validation.engine import _filter_feature_categories as _rmc_filter_feature_categories",
+        "from marvis.validation.engine import _model_features as _rmc_model_features",
+        "from marvis.validation.in_memory_scores import load_code_model_scores as _rmc_load_code_model_scores",
+        "from marvis.validation.results import ValidationResults as _RmcValidationResults",
+        "from marvis.validation.results import ConsistencyStatus as _RmcConsistencyStatus",
+        "from marvis.validation.results import ConsistencySummary as _RmcConsistencySummary",
+        "from marvis.validation.results import ReproducibilityResult as _RmcReproducibilityResult",
+        "from marvis.validation.results import ScoreCompareRow as _RmcScoreCompareRow",
+        "from marvis.validation.sample_stats import run_basic_info as _rmc_run_basic_info",
+        "from marvis.validation.stress_test import load_feature_categories as _rmc_load_feature_categories",
+        "from marvis.validation.stress_test import run_stress_test as _rmc_run_stress_test",
+        "from marvis.model_algorithms import normalize_algorithm as _rmc_normalize_algorithm",
+        f"_rmc_payload = {_json_literal(payload)}",
+        *(_build_deferred_contract_resolution_lines() if deferred_contract else []),
+        "def _rmc_load_dictionary(path_value):",
+        "    path = _RmcPath(path_value)",
+        "    suffix = path.suffix.lower()",
+        "    if suffix == '.csv':",
+        "        return _rmc_pd.read_csv(path)",
+        "    if suffix == '.xlsx':",
+        "        return _rmc_pd.read_excel(path)",
+        "    raise ValueError(f'unsupported data dictionary format: {suffix}')",
+        "def _rmc_reproducibility_from_json(path_value):",
+        "    payload = _rmc_json.loads(_RmcPath(path_value).read_text(encoding='utf-8'))",
+        "    summary = payload['summary']",
+        "    return _RmcReproducibilityResult(",
+        "        sample_size=int(payload['sample_size']),",
+        "        seed=int(payload['seed']),",
+        "        rows=[",
+        "            _RmcScoreCompareRow(",
+        "                row_index=row.get('row_index', 0),",
+        "                score_code_model=row.get('score_code_model'),",
+        "                score_submitted_pmml=row.get('score_submitted_pmml'),",
+        "                abs_diff=row.get('abs_diff'),",
+        "                matched=bool(row.get('matched')),",
+        "            )",
+        "            for row in payload.get('rows', [])",
+        "        ],",
+        "        summary=_RmcConsistencySummary(",
+        "            match_count=int(summary['match_count']),",
+        "            mismatch_count=int(summary['mismatch_count']),",
+        "            max_abs_diff=float(summary['max_abs_diff']),",
+        "            status=_RmcConsistencyStatus(summary['status']),",
+        "        ),",
+        "    )",
+        "def _rmc_raise_if_metrics_cancelled():",
+        "    if _RmcPath(_rmc_payload['metrics_cancel_path']).exists():",
+        "        raise KeyboardInterrupt('metrics cancelled')",
+        "if 'RMC_SAMPLE_DF' not in globals() or not isinstance(RMC_SAMPLE_DF, _rmc_pd.DataFrame):",
+        "    raise NameError('RMC_SAMPLE_DF must be defined as a pandas DataFrame before metrics')",
+        "_rmc_sample = RMC_SAMPLE_DF.copy()",
+        "_rmc_missing_cols = [",
+        "    f\"{label}='{column}'\"",
+        "    for label, column in {",
+        "        'target_col': _rmc_payload['target_col'],",
+        "        'split_col': _rmc_payload['split_col'],",
+        "        'time_col': _rmc_payload['time_col'],",
+        "    }.items()",
+        "    if column and column not in _rmc_sample.columns",
+        "]",
+        "if _rmc_missing_cols:",
+        "    raise ValueError('sample column check failed: ' + ', '.join(_rmc_missing_cols))",
+        "_rmc_dictionary = _rmc_load_dictionary(_rmc_payload['dictionary_path'])",
+        "_rmc_missing_dict_cols = [",
+        "    col for col in (",
+        "        _rmc_payload['data_dict_feature_col'],",
+        "        _rmc_payload['data_dict_category_col'],",
+        "    )",
+        "    if col not in _rmc_dictionary.columns",
+        "]",
+        "if _rmc_missing_dict_cols:",
+        "    raise ValueError('data dictionary missing columns: ' + ', '.join(sorted(_rmc_missing_dict_cols)))",
+        "_rmc_config = _RmcValidationConfig(",
+        "    target_col=_rmc_payload['target_col'],",
+        f"    score_col={RMC_PMML_SCORE_COL!r},",
+        "    split_col=_rmc_payload['split_col'],",
+        "    time_col=_rmc_payload['time_col'],",
+        "    feature_columns=[],",
+        "    bin_count=int(_rmc_payload['bin_count']),",
+        "    random_sample_size=int(_rmc_payload['random_sample_size']),",
+        "    random_seed=int(_rmc_payload['random_seed']),",
+        "    score_decimal_places=int(_rmc_payload['score_decimal_places']),",
+        "    data_dict_feature_col=_rmc_payload['data_dict_feature_col'],",
+        "    data_dict_category_col=_rmc_payload['data_dict_category_col'],",
+        ")",
+        "_rmc_code_scores = _rmc_load_code_model_scores(_RmcPath(_rmc_payload['code_scores_path']))",
+        "_rmc_reproducibility = _rmc_reproducibility_from_json(_rmc_payload['reproducibility_json_path'])",
+    ]
+    score_lines = [
+        "# Injected by marvis v3 (metrics score).",
+        "def _rmc_score_with_notebook(dataframe):",
+        "    if 'RMC_SCORE_FN' not in globals() or not callable(RMC_SCORE_FN):",
+        "        raise NameError('RMC_SCORE_FN must be defined before metrics')",
+        "    values = RMC_SCORE_FN(dataframe.copy())",
+        "    if isinstance(values, _rmc_pd.DataFrame):",
+        "        if len(values.columns) != 1:",
+        "            raise ValueError('RMC_SCORE_FN must return one score column')",
+        "        values = values.iloc[:, 0]",
+        "    if isinstance(values, _rmc_pd.Series):",
+        "        scores = values.astype(float).tolist()",
+        "    else:",
+        "        scores = _rmc_pd.Series(values).astype(float).tolist()",
+        "    if len(scores) != len(dataframe):",
+        "        raise ValueError(f'RMC_SCORE_FN returned {len(scores)} scores for {len(dataframe)} rows')",
+        "    return _rmc_finite_score_series(scores, index=dataframe.index, label='RMC_SCORE_FN').tolist()",
+        "_rmc_model_scores = _rmc_score_with_notebook(_rmc_sample)",
+        "_rmc_sample_scored = _rmc_sample.copy()",
+        "_rmc_sample_scored[_rmc_config.score_col] = _rmc_pd.Series(_rmc_model_scores, index=_rmc_sample_scored.index, dtype=float)",
+        "class _RmcNotebookScorer:",
+        "    def score(self, dataframe):",
+        "        if len(dataframe) == len(_rmc_sample) and dataframe.index.equals(_rmc_sample.index):",
+        "            return list(_rmc_model_scores)",
+        "        return _rmc_score_with_notebook(dataframe)",
+    ]
+    basic_lines = [
+        "# Injected by marvis v3 (metrics basic info).",
+        "_rmc_basic_info = _rmc_run_basic_info(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        "    model_meta_path=_RmcPath(_rmc_payload['model_meta_path']),",
+        ")",
+    ]
+    ks_lines = [
+        "# Injected by marvis v3 (metrics KS).",
+        "_rmc_effectiveness_context = _rmc_prepare_effectiveness_context(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
+        "_rmc_effectiveness_overall = _rmc_compute_overall_ks(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
+        "_rmc_monthly_ks = _rmc_compute_monthly_ks(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
+        "_rmc_roc_ks_curves = _rmc_compute_roc_ks_curves(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
+    ]
+    psi_lines = [
+        "# Injected by marvis v3 (metrics PSI).",
+        "_rmc_effectiveness_overall = _rmc_compute_overall_psi(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        "    context=_rmc_effectiveness_context,",
+        "    overall=_rmc_effectiveness_overall,",
+        ")",
+        "_rmc_monthly_psi = _rmc_compute_monthly_psi(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        "    context=_rmc_effectiveness_context,",
+        ")",
+        "_rmc_psi_stability_table = _rmc_compute_psi_stability_table(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        ")",
+    ]
+    binning_lines = [
+        "# Injected by marvis v3 (metrics binning).",
+        "_rmc_bin_tables = _rmc_compute_bin_tables(",
+        "    sample=_rmc_sample_scored,",
+        "    config=_rmc_config,",
+        "    context=_rmc_effectiveness_context,",
+        ")",
+        "_rmc_effectiveness = _rmc_build_effectiveness_result(",
+        "    overall=_rmc_effectiveness_overall,",
+        "    bin_tables=_rmc_bin_tables,",
+        "    monthly_ks=_rmc_monthly_ks,",
+        "    monthly_psi=_rmc_monthly_psi,",
+        "    psi_stability_table=_rmc_psi_stability_table,",
+        "    roc_ks_curves=_rmc_roc_ks_curves,",
+        ")",
+    ]
+    stress_lines = [
+        "# Injected by marvis v3 (metrics stress).",
+        "_rmc_feature_categories = _rmc_load_feature_categories(",
+        "    _rmc_dictionary,",
+        "    feature_col=_rmc_config.data_dict_feature_col,",
+        "    category_col=_rmc_config.data_dict_category_col,",
+        ")",
+        "_rmc_feature_categories = _rmc_filter_feature_categories(",
+        "    _rmc_feature_categories,",
+        "    model_features=_rmc_model_features(_rmc_config, _rmc_basic_info.feature_importance),",
+        ")",
+        "if not _rmc_config.split_col:",
+        "    raise ValueError(",
+        "        'split_col is not configured; set RMC_SPLIT_COL in the notebook or '",
+        "        'configure the task split column before running metrics'",
+        "    )",
+        "_rmc_oot_sample = _rmc_sample[_rmc_sample[_rmc_config.split_col] == _rmc_config.split_values['oot']]",
+        "_rmc_stress_test = _rmc_run_stress_test(",
+        "    oot_sample=_rmc_oot_sample,",
+        "    config=_rmc_config,",
+        "    feature_categories=_rmc_feature_categories,",
+        "    input_scorer=_RmcNotebookScorer(),",
+        "    cancellation_check=_rmc_raise_if_metrics_cancelled,",
+        ")",
+    ]
+    output_lines = [
+        "# Injected by marvis v3 (metrics output).",
+        "_rmc_results = _RmcValidationResults(",
+        "    model_name=_rmc_payload['model_name'],",
+        "    model_version=_rmc_payload['model_version'],",
+        "    algorithm=_rmc_payload['algorithm'],",
+        "    target_type='binary',",
+        "    reproducibility=_rmc_reproducibility,",
+        "    basic_info=_rmc_basic_info,",
+        "    effectiveness=_rmc_effectiveness,",
+        "    stress_test=_rmc_stress_test,",
+        ")",
+        "_rmc_results_json_path = _RmcPath(_rmc_payload['results_json_path'])",
+        "_rmc_results_json_path.parent.mkdir(parents=True, exist_ok=True)",
+        "_rmc_results_json_path.write_text(",
+        "    _rmc_json.dumps(_rmc_asdict(_rmc_results), ensure_ascii=False, indent=2),",
+        "    encoding='utf-8',",
+        ")",
+        "_rmc_write_validation_excel(_rmc_results, _RmcPath(_rmc_payload['excel_path']))",
+    ]
+    return [
+        ("metrics-prepare", "\n".join(prepare_lines)),
+        ("metrics-score", "\n".join(score_lines)),
+        ("metrics-basic", "\n".join(basic_lines)),
+        ("metrics-ks", "\n".join(ks_lines)),
+        ("metrics-psi", "\n".join(psi_lines)),
+        ("metrics-binning", "\n".join(binning_lines)),
+        ("metrics-stress", "\n".join(stress_lines)),
+        ("metrics-output", "\n".join(output_lines)),
+    ]
+
+
+def _json_literal(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
