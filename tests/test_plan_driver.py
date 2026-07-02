@@ -1577,6 +1577,26 @@ def test_is_confirm_rejects_negated_or_contrasting_confirm_phrases():
     assert is_confirm("没问题，继续")
 
 
+def test_is_confirm_rejects_questions_and_embedded_affirmatives():
+    # AGT-1 (H4 recurrence): questions and mixed/negative sentences that merely
+    # contain an affirmative-looking substring must not be read as confirmation,
+    # since resume() checks is_confirm before route_instruction and a false
+    # positive silently releases a side-effect gate (execute_join, model handoff, ...).
+    assert not is_confirm("这样可以吗？")
+    assert not is_confirm("结果不是很好的")
+    assert not is_confirm("对不起，这个结果有问题")
+    assert not is_confirm("KS高吗，可以到0.3吗")
+
+
+def test_is_confirm_accepts_short_full_string_affirmatives():
+    assert is_confirm("确认")
+    assert is_confirm("好的")
+    assert is_confirm("ok 继续")
+    assert is_confirm("没问题，继续")
+    assert not is_confirm("不要")
+    assert not is_confirm("不可以")
+
+
 def test_render_registry_has_modeling_renderers_and_generic_fallback():
     text, tables = render_tool_output("screen_features", {"selected": ["a"], "leakage": [], "suspected": [], "n_screened": 3})
     assert "特征筛选完成" in text

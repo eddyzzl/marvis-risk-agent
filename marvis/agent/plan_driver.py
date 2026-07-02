@@ -28,9 +28,19 @@ from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
 
-# A reply counts as confirmation of the current gate.
-_CONFIRM = re.compile(
-    r"(确认|确定|没问题|可以|就这样|同意|好的|继续|开始|对的?|ok|yes|go|proceed|looks good|sounds good)",
+# A reply counts as confirmation of the current gate only when, after stripping
+# whitespace/punctuation, the *entire* remaining text is made up of short affirmative
+# tokens (see _CONFIRM_TOKEN below). This full-string anchoring — rather than a
+# substring `.search` over the raw reply — is what stops questions (“这样可以吗？”)
+# and embedded/contrasting affirmatives (“结果不是很好的”, “好的地方是命中率，但…”)
+# from being misread as confirmation (AGT-1 / H4).
+_CONFIRM_TOKEN = r"(?:好的|好|可以|确认|确定|没问题|同意|就这样|继续|开始|对的|对|行|ok|okay|yes|y|go|proceed)"
+_CONFIRM_FULLMATCH = re.compile(rf"(?:{_CONFIRM_TOKEN})+", re.IGNORECASE)
+# Interrogative guard: any question mark, or a trailing/whole-string question particle,
+# disqualifies a reply from being read as confirmation even if it also contains an
+# affirmative token (e.g. “这样可以吗？”, “KS高吗，可以到0.3吗”, “行不行”).
+_QUESTION = re.compile(
+    r"[?？]|吗|吧$|行不行|可不可以|能不能|好不好|对不对|是不是|呢$",
     re.IGNORECASE,
 )
 _NEGATED_CONFIRM = re.compile(
@@ -38,14 +48,24 @@ _NEGATED_CONFIRM = re.compile(
     r"不开始|不确认|不可以|hold on|do\s*not|don't|dont|not\s+(start|continue|proceed|go)|stop|cancel|wait)",
     re.IGNORECASE,
 )
+_STRIP_PUNCT = re.compile(
+    "[\\s" + "，。.!！~～、·；;:：" + chr(39) + chr(34)
+    + "“”‘’()（）" + "\\-]+"
+)
+
+
 def is_confirm(text: str) -> bool:
     raw = text or ""
+    if _QUESTION.search(raw):
+        return False
     if _NEGATED_CONFIRM.search(raw):
         return False
-    if not _CONFIRM.search(raw):
+    compact = _STRIP_PUNCT.sub("", raw)
+    if not compact:
         return False
-    compact = re.sub(r"\s+", "", raw)
-    return not _NEGATED_CONFIRM.search(compact)
+    if _NEGATED_CONFIRM.search(compact):
+        return False
+    return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
 
 
 def _parse_dedup_instruction(text: str) -> str | None:
