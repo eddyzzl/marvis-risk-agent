@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from marvis.db import PluginRepository
+from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
 from marvis.plugins.manifest import PluginManifest, ToolRef
 from marvis.plugins.registry import ToolRegistry
 from marvis.plugins.schema_validation import validate_against_schema
@@ -38,17 +39,6 @@ _WORKER_ENV_ALLOWLIST = frozenset({
     "TMP",
     "TMPDIR",
 })
-
-
-@dataclass(frozen=True)
-class ToolContext:
-    task_id: str
-    seed: int | None
-    datasets_root: Path
-    workspace: Path
-
-    def load_dataset_path(self, dataset_id: str) -> Path:
-        return assert_within(self.datasets_root, self.datasets_root / dataset_id)
 
 
 @dataclass
