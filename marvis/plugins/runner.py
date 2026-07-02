@@ -18,6 +18,7 @@ from marvis.plugins.schema_validation import validate_against_schema
 from marvis.plugins.errors import SchemaValidationError
 from marvis.redaction import redact_text
 from marvis.safe_paths import assert_within
+from marvis.resource_monitor import ProcessTreeResourceMonitor
 
 
 _WORKER_ENV_ALLOWLIST = frozenset({
@@ -39,6 +40,23 @@ _WORKER_ENV_ALLOWLIST = frozenset({
     "TMP",
     "TMPDIR",
 })
+
+
+# Default soft RSS ceiling (MB) for tool worker process trees when the host
+# does not configure execution_environment.rss_memory_limit_mb explicitly.
+# setrlimit (subprocess_worker._apply_resource_limits) remains the first
+# layer of defense in depth; this psutil-based monitor is the second layer,
+# effective on platforms (notably macOS) where the kernel does not enforce
+# RLIMIT_AS/RLIMIT_DATA.
+DEFAULT_RSS_MEMORY_LIMIT_MB = 4096
+
+
+class WorkerResourceLimitExceeded(Exception):
+    """Raised when a tool worker process tree's RSS exceeds the soft limit."""
+
+    def __init__(self, resource_usage: dict[str, Any]) -> None:
+        self.resource_usage = resource_usage
+        super().__init__(_resource_limit_message(resource_usage))
 
 
 @dataclass
@@ -64,6 +82,7 @@ class ToolRunner:
         datasets_root: Path,
         workspace: Path,
         plugin_paths: list[Path] | None = None,
+        rss_memory_limit_mb: int | None = DEFAULT_RSS_MEMORY_LIMIT_MB,
     ):
         self._tools = tool_registry
         self._repo = repo
@@ -71,6 +90,7 @@ class ToolRunner:
         self._datasets_root = datasets_root
         self._workspace = workspace
         self._plugin_paths = tuple(Path(path) for path in (plugin_paths or ()))
+        self._rss_memory_limit_mb = rss_memory_limit_mb
 
     def invoke(
         self,
@@ -129,6 +149,7 @@ class ToolRunner:
                 self._python_executable,
                 job,
                 timeout=tool.timeout_seconds,
+                rss_limit_mb=self._rss_memory_limit_mb,
             )
         except subprocess.TimeoutExpired as exc:
             result = _failed_result(
@@ -137,6 +158,20 @@ class ToolRunner:
                 f"tool {target_ref} timed out after {tool.timeout_seconds}s",
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
+        except WorkerResourceLimitExceeded as exc:
+            result = _failed_result(
+                started,
+                "resource_limit",
+                str(exc),
+                resource_limits=exc.resource_usage,
             )
             return self._finalize_audited_result(
                 started,
@@ -305,6 +340,7 @@ class ToolRunner:
                 self._python_executable,
                 job,
                 timeout=int(timeout_seconds),
+                rss_limit_mb=self._rss_memory_limit_mb,
             )
         except subprocess.TimeoutExpired as exc:
             result = _failed_result(
@@ -313,6 +349,22 @@ class ToolRunner:
                 f"tool {target_ref} timed out after {timeout_seconds}s",
                 stdout_tail=_tail(exc.stdout),
                 stderr_tail=_tail(exc.stderr),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
+        except WorkerResourceLimitExceeded as exc:
+            result = _failed_result(
+                started,
+                "resource_limit",
+                str(exc),
+                resource_limits=exc.resource_usage,
             )
             return self._finalize_audited_result(
                 started,
@@ -623,7 +675,13 @@ def _audit_failure_result(
     )
 
 
-def _run_worker(python_executable: str, job: dict, *, timeout: int) -> subprocess.CompletedProcess:
+def _run_worker(
+    python_executable: str,
+    job: dict,
+    *,
+    timeout: int,
+    rss_limit_mb: int | None = None,
+) -> subprocess.CompletedProcess:
     args = [python_executable, "-m", "marvis.plugins.subprocess_worker"]
     process = subprocess.Popen(
         args,
@@ -635,12 +693,22 @@ def _run_worker(python_executable: str, job: dict, *, timeout: int) -> subproces
         env=_worker_env(),
         start_new_session=(os.name != "nt"),
     )
+    monitor = ProcessTreeResourceMonitor(
+        pid_getter=lambda: process.pid,
+        memory_limit_mb=rss_limit_mb,
+        on_limit=lambda: _kill_worker_tree(process),
+    )
     try:
-        stdout, stderr = process.communicate(json.dumps(job, ensure_ascii=False), timeout=int(timeout))
+        with monitor:
+            stdout, stderr = process.communicate(json.dumps(job, ensure_ascii=False), timeout=int(timeout))
     except subprocess.TimeoutExpired as exc:
         _kill_worker_tree(process)
         stdout, stderr = process.communicate()
+        if monitor.memory_limit_exceeded:
+            raise WorkerResourceLimitExceeded(monitor.snapshot()) from exc
         raise subprocess.TimeoutExpired(args, int(timeout), output=stdout, stderr=stderr) from exc
+    if monitor.memory_limit_exceeded:
+        raise WorkerResourceLimitExceeded(monitor.snapshot())
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
@@ -690,6 +758,14 @@ def _parse_worker_result(stdout: str) -> dict[str, Any] | None:
 def _protocol_resource_limits(protocol: dict) -> dict | None:
     value = protocol.get("resource_limits")
     return value if isinstance(value, dict) else None
+
+
+def _resource_limit_message(resource_usage: dict[str, Any]) -> str:
+    limit = resource_usage.get("memory_limit_mb")
+    peak = resource_usage.get("peak_rss_mb")
+    if peak is None:
+        return f"tool worker RSS exceeded memory limit {limit} MB"
+    return f"tool worker RSS {peak} MB exceeded memory limit {limit} MB"
 
 
 def _tail(value: str | bytes | None, *, limit: int = 4000) -> str:
