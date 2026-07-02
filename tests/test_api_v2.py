@@ -37,6 +37,18 @@ class FakeTaskRepository:
     report_values: dict[str, tuple[dict[str, str], int]] = {}
     jobs: dict[str, dict[str, str]] = {}
     audits: list[dict] = []
+    purge_summary: dict = {
+        "datasets": 0,
+        "datasets_shared_with_other_tasks": 0,
+        "joins": 0,
+        "plans": 0,
+        "plan_steps": 0,
+        "experiments": 0,
+        "model_artifacts": 0,
+        "strategies": 0,
+        "backtests": 0,
+        "sub_agents": 0,
+    }
 
     def __init__(self, _db_path: Path):
         pass
@@ -156,6 +168,26 @@ class FakeTaskRepository:
         self.deleted.append(task_id)
         del self.tasks[task_id]
 
+    def purge_preview(self, task_id: str) -> dict:
+        self.get_task(task_id)
+        return dict(self.purge_summary)
+
+    def purge_task(self, task_id: str, *, actor: str = "system") -> dict:
+        self.get_task(task_id)
+        self.deleted.append(task_id)
+        del self.tasks[task_id]
+        summary = {**self.purge_summary, "dataset_source_paths": []}
+        self.audits.append(
+            {
+                "kind": "task.delete",
+                "target_ref": task_id,
+                "actor": actor,
+                "outcome": "succeeded",
+                "detail": {"purge_summary": self.purge_summary},
+            }
+        )
+        return summary
+
     def update_status(
         self,
         task_id: str,
@@ -251,6 +283,18 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
     FakeTaskRepository.audits = []
+    FakeTaskRepository.purge_summary = {
+        "datasets": 0,
+        "datasets_shared_with_other_tasks": 0,
+        "joins": 0,
+        "plans": 0,
+        "plan_steps": 0,
+        "experiments": 0,
+        "model_artifacts": 0,
+        "strategies": 0,
+        "backtests": 0,
+        "sub_agents": 0,
+    }
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)

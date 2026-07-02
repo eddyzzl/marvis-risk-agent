@@ -2,12 +2,27 @@ import pytest
 
 import marvis.db as db_module
 import marvis.repositories.tasks as task_repo_module
-from marvis.db import TaskRepository, _ensure_column, connect, init_db
+from marvis.db import (
+    DatasetRepository,
+    ModelingRepository,
+    PlanRepository,
+    StrategyRepository,
+    TaskRepository,
+    _ensure_column,
+    _list_audit_rows,
+    connect,
+    init_db,
+)
+from marvis.data.contracts import ColumnFingerprint, ColumnProfile, Dataset, JoinPlan
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TaskCreate,
     TaskStatus,
 )
+from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+from marvis.packs.modeling import Experiment, ModelArtifact, ModelMetrics, TrainConfig
+from marvis.packs.strategy import build_strategy
+from marvis.plugins.manifest import ToolRef
 from marvis.state_machine import ConflictError, IllegalTransition
 
 
@@ -664,3 +679,235 @@ def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
             _ensure_column(conn, "tasks;DROP", "safe_column", "TEXT")
         with pytest.raises(ValueError, match="unsafe SQL identifier"):
             _ensure_column(conn, "tasks", "bad-column", "TEXT")
+
+
+def _profile(name: str) -> ColumnProfile:
+    return ColumnProfile(
+        name=name,
+        dtype="object",
+        semantic_role="id",
+        fingerprint=ColumnFingerprint("categorical", None, None, False, None, None, None),
+        null_rate=0.0,
+        cardinality=2,
+        sample_values=("a***", "b***"),
+    )
+
+
+def _dataset(dataset_id: str, *, task_id: str, source_path: str | None = None) -> Dataset:
+    return Dataset(
+        id=dataset_id,
+        task_id=task_id,
+        role="sample",
+        source_path=source_path or f"{task_id}/{dataset_id}.parquet",
+        format="parquet",
+        sheet=None,
+        row_count=2,
+        columns=(_profile("customer_id"),),
+        has_target=False,
+        target_col=None,
+        created_at="2026-06-19T00:00:00Z",
+    )
+
+
+def _plan(plan_id: str, task_id: str) -> Plan:
+    step = PlanStep(
+        id=f"{plan_id}-step-1",
+        plan_id=plan_id,
+        index=0,
+        title="step",
+        tool_ref=ToolRef("_sample", "echo"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+        needs_confirmation=False,
+        decision_point=False,
+        sub_agent_scope=None,
+        granted_tools=[],
+    )
+    return Plan(
+        id=plan_id,
+        task_id=task_id,
+        goal="finish",
+        source="template",
+        template_id="test",
+        steps=[step],
+        autonomy_level=1,
+        status=PlanStatus.CONFIRMED,
+    )
+
+
+def _experiment(experiment_id: str, task_id: str) -> Experiment:
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="bad",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=7,
+        early_stopping_rounds=10,
+    )
+    return Experiment(
+        id=experiment_id,
+        task_id=task_id,
+        recipe_id="lgb",
+        config=config,
+        metrics=ModelMetrics(
+            train_ks=0.4,
+            test_ks=0.37,
+            oot_ks=0.35,
+            train_auc=0.78,
+            test_auc=0.74,
+            oot_auc=0.72,
+            psi_test_vs_train=0.04,
+            psi_oot_vs_train=0.08,
+            overfit_train_test_gap=0.03,
+            overfit_train_oot_gap=0.05,
+            overfit_flag=False,
+        ),
+        artifact_id=None,
+        status="pending",
+        created_at="2026-06-19T00:00:00Z",
+    )
+
+
+def _seed_full_task_graph(db_path, task_id: str, *, shared_dataset_path: str | None = None):
+    task_repo = TaskRepository(db_path)
+    task = task_repo.create_task(_task_create(model_name=f"model-{task_id}"))
+    dataset_repo = DatasetRepository(db_path)
+    dataset = _dataset(f"ds-{task.id}", task_id=task.id, source_path=shared_dataset_path)
+    dataset_repo.create_dataset(dataset)
+    join_plan = JoinPlan(
+        id=f"join-{task.id}",
+        task_id=task.id,
+        anchor_dataset_id=dataset.id,
+        joins=[],
+        status="draft",
+    )
+    dataset_repo.create_join_plan(join_plan)
+    plan_repo = PlanRepository(db_path)
+    plan_repo.create_plan(_plan(f"plan-{task.id}", task.id))
+    modeling_repo = ModelingRepository(db_path)
+    experiment = _experiment(f"exp-{task.id}", task.id)
+    modeling_repo.create_experiment(experiment)
+    artifact = ModelArtifact(
+        id=f"artifact-{task.id}",
+        experiment_id=experiment.id,
+        algorithm="lgb",
+        model_path=f"{task.id}/model.pkl",
+        pmml_path=None,
+        feature_list=("score",),
+        params={},
+        woe_maps=None,
+        created_at="2026-06-19T00:00:00Z",
+    )
+    modeling_repo.create_model_artifact(artifact)
+    strategy_repo = StrategyRepository(db_path)
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="baseline cutoff",
+    )
+    strategy_repo.create_strategy(task.id, strategy, created_at="2026-06-19T00:00:00Z")
+    return task, dataset
+
+
+def test_purge_task_removes_all_task_scoped_rows_and_writes_audit(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, dataset = _seed_full_task_graph(db_path, "task-a")
+    repo = TaskRepository(db_path)
+
+    summary = repo.purge_task(task.id, actor="tester")
+
+    assert summary["datasets"] == 1
+    assert summary["joins"] == 1
+    assert summary["plans"] == 1
+    assert summary["plan_steps"] == 1
+    assert summary["experiments"] == 1
+    assert summary["model_artifacts"] == 1
+    assert summary["strategies"] == 1
+    assert summary["datasets_shared_with_other_tasks"] == 0
+    assert summary["dataset_source_paths"] == [dataset.source_path]
+
+    with pytest.raises(KeyError):
+        repo.get_task(task.id)
+    with connect(db_path) as conn:
+        for table, column in (
+            ("datasets", "task_id"),
+            ("joins", "task_id"),
+            ("plans", "task_id"),
+            ("experiments", "task_id"),
+            ("strategies", "task_id"),
+            ("model_artifacts", "experiment_id"),
+            ("plan_steps", "plan_id"),
+        ):
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            assert remaining == 0, f"{table} still has rows after purge"
+
+    audit_rows = _list_audit_rows(db_path, kind="task.delete")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["target_ref"] == task.id
+    assert audit_rows[0]["actor"] == "tester"
+    assert audit_rows[0]["detail"]["purge_summary"]["datasets"] == 1
+
+
+def test_purge_task_missing_raises_key_error(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    with pytest.raises(KeyError, match="Task not found: missing"):
+        repo.purge_task("missing")
+    with pytest.raises(KeyError, match="Task not found: missing"):
+        repo.purge_preview("missing")
+
+
+def test_purge_preview_matches_purge_task_summary_without_deleting(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _dataset = _seed_full_task_graph(db_path, "task-b")
+    repo = TaskRepository(db_path)
+
+    preview = repo.purge_preview(task.id)
+
+    assert preview["datasets"] == 1
+    assert preview["plans"] == 1
+    assert "dataset_source_paths" not in preview
+    # dry-run must not touch any rows
+    assert repo.get_task(task.id).id == task.id
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 1
+
+
+def test_purge_task_does_not_report_dataset_file_shared_with_another_task(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    shared_path = "task-owner/shared.parquet"
+    owner_task, _owner_dataset = _seed_full_task_graph(
+        db_path, "task-owner", shared_dataset_path=shared_path
+    )
+    reuser_task_repo = TaskRepository(db_path)
+    reuser_task = reuser_task_repo.create_task(_task_create(model_name="reuser"))
+    DatasetRepository(db_path).create_dataset(
+        _dataset(f"ds-{reuser_task.id}", task_id=reuser_task.id, source_path=shared_path)
+    )
+
+    repo = TaskRepository(db_path)
+    reuser_summary = repo.purge_task(reuser_task.id)
+
+    # the reuser's own dataset row referenced the shared file, but the owner task
+    # still has a dataset row pointing at it -- the file must not be marked removable.
+    assert reuser_summary["datasets_shared_with_other_tasks"] == 1
+    assert reuser_summary["dataset_source_paths"] == []
+
+    with connect(db_path) as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM datasets WHERE source_path = ?", (shared_path,)
+        ).fetchone()[0]
+    assert remaining == 1  # the owner task's dataset row survives
+
