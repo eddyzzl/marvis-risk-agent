@@ -178,7 +178,7 @@
 | ✅ | TST-1 | 24 个退化 fixtures（6 形态×4 触点）+回归门（`40bac66f`）；<think> 三例经 LLM-6 修复翻转为回归守卫；仍不安全路径 9 条已 expected_failure 记录（负反馈候选：action/negation 交叉校验、planner 围栏=AGT-10 在修、指标伪造结构检查） | High/M | ⚠️ |
 | ✅ | MEM-5 | recency 加减分+age_days+"(N 天前)"标注（`ef56b2e7`） | Med/S | — |
 | ✅ | MEM-6 | 按 kind 定向查询+各类上限（`42731506`） | Med/S | — |
-| ⬜ | MEM-7 | 记忆质量无负反馈闭环 | Med/M | — |
+| ✅ | MEM-7 | 负反馈闭环落地（`0158ea0d`）：任务失败自动降档+面板"没用/有误"按钮+API、蒸馏 support 计净值、全程审计 | Med/M | — |
 | ✅ | MEM-8 | raw 侧 low 过滤+raw_quota 保底名额（`d3729dd0`） | Med/S | — |
 | ⬜ | AGT-5 | route_instruction 上下文只有 gate 标题：抽参数盲猜 | Med/S | — |
 | ✅ | AGT-6 | 无 LLM→status=skipped 不渲染警告；触发面收窄到 decision/confirm/带指标步骤（`b53254cd`） | Med/M | — |
@@ -186,7 +186,7 @@
 | ⬜ | AGT-8 | AUTO replan_goal 当用户文本回灌：双跳 LLM 且可能被 is_confirm 抢跑 | Med/S | — |
 | ⬜ | AGT-9 | 门决策红旗 checklist 不覆盖建模门（调参/选实验） | Med/S | — |
 | ⬜ | AGT-10 | planner generate/replan/explore 仍用严格 json.loads 未剥围栏 | Low/S | — |
-| ⬜ | MEM-9 | 用户偏好捕获入口过窄且子串一票否决静默丢弃 | Low/S | — |
+| ✅ | MEM-9 | 触发词表拓宽+reserved 主题需主题级判定+被拒给回执不再静默（`19381de`） | Low/S | — |
 | ✅ | MEM-10 | 触发器接通+吞错改记录+consolidate 返回错误计数（`bdc10ede`） | Low/S | — |
 | ✅ | MEM-11 | ids 截断计数+3 样本、3000 字符总预算、审计保全量（`96d4f409`） | Low/S | — |
 
