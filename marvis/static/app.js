@@ -5500,7 +5500,10 @@ if (typeof document !== "undefined") {
 }
 
 function agentMessageGateButtonHtml(message) {
-  return renderDriverGateButton(message);
+  // UX-10: resolve the gate step's own tool (the step it is confirming) so the
+  // button copy can state the consequence (确认并执行拼接/确认所选特征/...).
+  const step = planRailController.planStep(message?.metadata || {});
+  return renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || "" });
 }
 
 async function submitDriverConfirm(button) {
@@ -6544,10 +6547,17 @@ $("agentEffortSelect").onchange = (event) => {
   event.target.blur();
 };
 $("agentAcceptanceModeSelect").onchange = (event) => {
+  const previousMode = agentAcceptanceMode;
   agentAcceptanceMode = normalizeAgentAcceptanceMode(event.target.value);
   event.target.value = agentAcceptanceMode;
   renderAgentAcceptanceModePreference();
   persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
+  // UX-10: switching INTO auto mode is the moment the risk (Agent confirms every
+  // gate on the user's behalf, including destructive ones like execute_join) becomes
+  // real — surface it once here rather than relying only on the chip's hover title.
+  if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
+    setAgentComposerNotice("自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。", "info");
+  }
   event.target.blur();
 };
 

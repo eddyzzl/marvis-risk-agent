@@ -5592,7 +5592,10 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     # widget through free-text routing only); it still steps aside whenever the
     # gate carries a structured widget, since that widget owns the primary
     # confirm action.
-    assert "renderDriverGateButton(message)" in app_js
+    # UX-10: the button also resolves the gate step's own tool_ref (via
+    # planRailController.planStep) so its copy can state the consequence
+    # (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every gate.
+    assert "renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || \"\" })" in app_js
     assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
     assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js
@@ -9575,3 +9578,140 @@ def test_plan_rail_omits_event_chrome_when_plan_has_no_events():
     assert "function loopEventStripHtml(plan)" in plan_js
     assert "function replanBadgeHtml(plan)" in plan_js
     assert "function subAgentRowsHtml(plan)" in plan_js
+
+
+def test_plan_rail_shows_waiting_for_confirmation_not_generating():
+    """UX-10: at the C1 role-assignment gate (no plan built yet by design), the
+    rail must say "等待确认：<步骤名>" — the system is waiting on the USER, not
+    generating a plan. The old unconditional "计划生成中…" text misattributed
+    the wait for this exact scenario.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const gateMessage = { role: 'assistant', metadata: { join_c1: { target_col: 'bad' } } };",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [gateMessage],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "等待确认：文件角色与目标列" in html
+    assert "计划生成中" not in html
+
+
+def test_plan_rail_falls_back_to_generating_when_no_open_gate():
+    """UX-10: a genuine still-generating wait (no plan yet, no open gate message)
+    must keep showing "计划生成中…" — only the gate-waiting case changes.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "计划生成中" in html
+    assert "等待确认" not in html
+
+
+def test_gate_confirm_button_states_consequence_by_tool():
+    """UX-10: gate confirm-button copy maps to the gate step's own tool
+    (execute_join/screen_features/train_model/...) instead of a bare "确认"
+    for every gate — the button looks identical today whether it just accepts
+    a read-only screening result or writes artifacts to disk.
+    """
+    driver_gate_js = _read_static("js/v2/driver_gate_confirm.js")
+
+    assert "export function gateConfirmLabel(toolName)" in driver_gate_js
+    assert 'execute_join: "确认并执行拼接"' in driver_gate_js
+    assert 'screen_features: "确认所选特征"' in driver_gate_js
+    assert 'train_model: "确认并开始训练"' in driver_gate_js
+
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderDriverGateButton }} from {json.dumps(module_url)};",
+            "const message = { metadata: { kind: 'gate', step_id: 'gate-1' } };",
+            "const joinHtml = renderDriverGateButton(message, { gateStepTool: 'execute_join' });",
+            "const genericHtml = renderDriverGateButton(message, {});",
+            "process.stdout.write(JSON.stringify({ joinHtml, genericHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert "确认并执行拼接" in payload["joinHtml"]
+    assert ">确认<" in payload["genericHtml"]
+
+
+def test_acceptance_mode_chip_explains_auto_mode_scope():
+    """UX-10: the acceptance-mode chip/select must explain, on hover, that auto
+    mode confirms every gate (including destructive ones) on the user's
+    behalf — previously there was no title/tooltip at all.
+    """
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="agentAcceptanceModeSelect"' in index_html
+    assert "自动模式下 Agent 将替你确认全部关键节点" in index_html
+    # fires the composer notice once on switching INTO auto mode.
+    assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
+    assert "setAgentComposerNotice(\"自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。\", \"info\")" in app_js

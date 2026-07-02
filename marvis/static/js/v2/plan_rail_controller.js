@@ -2,6 +2,7 @@ import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml, skeletonTableHtml } from "../skeleton.js";
 import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";
+import { gateConfirmLabel } from "./driver_gate_confirm.js";
 
 // Wired driver task types drive the plan rail / analysis flow.
 export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);
@@ -421,10 +422,14 @@ export function createPlanRailController({
         // only); agent mode shows a read-only "待确认" badge because the LLM
         // operates the gate. The button reuses the document-level
         // data-driver-confirm handler.
+        // UX-10: manual mode's step-rail confirm button states the consequence
+        // (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every
+        // gate — the step's own tool_ref IS the tool the gate confirms.
+        const confirmLabel = escapeHtml(gateConfirmLabel(ref.tool || ""));
         const awaiting = status === "awaiting_confirm"
           ? (isAgentMode?.()
             ? '<span class="plan-step-await">待确认</span>'
-            : '<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">确认</button>')
+            : `<button type="button" class="button compact primary plan-step-confirm driver-confirm" data-driver-confirm="1">${confirmLabel}</button>`)
           : "";
         // Download sits inline on the producing report step (spec §9: like validation's
         // step-action-button), not floating at the rail bottom.
@@ -466,6 +471,28 @@ export function createPlanRailController({
       return Boolean((message.metadata || {}).error);
     }
     return false;
+  }
+
+  // UX-10: mirrors the backend's latest_open_gate() predicate (turn_handlers.py) so
+  // the plan rail can tell "the system is waiting on YOU" (a gate message with no
+  // plan yet, e.g. the C1 role-assignment stage before confirm_join builds the plan)
+  // apart from "the system is still generating" — the two were both rendered as
+  // "计划生成中…" before, misattributing who the wait is on.
+  function latestOpenGateStepName() {
+    const messages = getAgentMessages?.() || [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message?.role !== "assistant") continue;
+      const meta = message.metadata || {};
+      if (meta.error || meta.join_skip) return null;
+      const isGateShaped = meta.kind === "gate" || meta.kind === "plan_overview" || "join_c1" in meta;
+      if (!isGateShaped) return null;
+      if (meta.kind === "plan_overview") return "开始执行";
+      if ("join_c1" in meta) return "文件角色与目标列";
+      const step = planStep(meta);
+      return step?.title || "当前步骤";
+    }
+    return null;
   }
 
   function maybeFetchPlan(taskId = selectedTaskId()) {
@@ -577,6 +604,14 @@ export function createPlanRailController({
       }
       if (blocked) {
         return '<div class="plan-rail-empty">尚未生成计划。请按对话中的提示处理后重新发起。</div>';
+      }
+      // UX-10: the system is not "生成中" here — it is waiting on the user (e.g. the
+      // C1 role-assignment gate runs before confirm_join has built a plan at all).
+      // Distinguish that from a genuine still-generating wait so the two don't read
+      // as the same two-way "who's waiting on whom" deadlock.
+      const openGateStep = latestOpenGateStepName();
+      if (openGateStep) {
+        return `<div class="plan-rail-empty">等待确认：${escapeHtml(openGateStep)}</div>`;
       }
       // VD-3: the genuine first fetch (no cached response yet, successful or
       // not) shows a skeleton instead of blank-then-text, so a slow first

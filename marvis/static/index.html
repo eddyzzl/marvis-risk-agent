@@ -1199,7 +1199,7 @@
                 <textarea id="agentComposerInput" rows="1" placeholder="输入执行步骤或问题"></textarea>
                 <div class="agent-composer-toolbar">
                   <div class="agent-composer-controls agent-composer-mode-controls">
-                    <div class="agent-composer-chip agent-composer-acceptance" data-acceptance-mode="normal">
+                    <div class="agent-composer-chip agent-composer-acceptance" data-acceptance-mode="normal" title="自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）">
                       <svg class="agent-composer-chip-icon agent-acceptance-icon-default" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
                         <rect x="4" y="10.5" width="16" height="10.5" rx="2.2" />
                         <path d="M7.5 10.5V7.5a4.5 4.5 0 0 1 9 0V10.5" />
@@ -1208,7 +1208,7 @@
                         <path d="M20 12c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 19.5 4 17 4 12V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
                         <path d="m9 12 2 2 4-4" />
                       </svg>
-                      <select id="agentAcceptanceModeSelect" aria-label="选择 Agent 执行模式">
+                      <select id="agentAcceptanceModeSelect" aria-label="选择 Agent 执行模式" title="自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）">
                         <option value="normal">默认权限</option>
                         <option value="auto_accept">自动审查</option>
                       </select>
