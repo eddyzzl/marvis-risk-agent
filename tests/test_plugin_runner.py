@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from marvis.db import PluginRepository, init_db
+from marvis.plugins.contracts import PROTOCOL_VERSION
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import PluginManifest, ToolRef, ToolSpec
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -79,7 +80,10 @@ def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeyp
 
         def communicate(self, input=None, timeout=None):
             calls.append({"input": input, "timeout": timeout})
-            return json.dumps({"ok": True, "output": {"echoed": "你好"}}, ensure_ascii=False), ""
+            return json.dumps(
+                {"ok": True, "output": {"echoed": "你好"}, "worker_protocol_version": PROTOCOL_VERSION},
+                ensure_ascii=False,
+            ), ""
 
         def poll(self):
             return self.returncode
@@ -103,6 +107,7 @@ def test_tool_runner_starts_worker_with_explicit_utf8_encoding(tmp_path, monkeyp
     assert "OPENAI_API_KEY" not in calls[0]["kwargs"]["env"]
     assert "PYTHONPATH" not in calls[0]["kwargs"]["env"]
     job = json.loads(calls[1]["input"])
+    assert job["protocol_version"] == PROTOCOL_VERSION
     assert job["cpu_limit_seconds"] == 12
     assert job["file_size_limit_mb"] == 2048
     assert job["side_effects"] == []
@@ -384,6 +389,7 @@ def test_tool_runner_validates_output_paths_for_registered_tool(tmp_path, monkey
                 json.dumps({
                     "ok": True,
                     "output": {"report_path": str(tmp_path / "outside" / "report.xlsx")},
+                    "worker_protocol_version": PROTOCOL_VERSION,
                 }),
                 "",
             )
@@ -430,6 +436,7 @@ def test_worker_execution_failure_uses_nonzero_exit_code(tmp_path):
         encoding="utf-8",
     )
     job = {
+        "protocol_version": PROTOCOL_VERSION,
         "module_path": str(module_path),
         "entrypoint": "run",
         "inputs": {},
@@ -1217,6 +1224,103 @@ def test_tool_runner_adhoc_validates_input_and_output_schema(tmp_path):
     assert mismatch.ok is False
     assert mismatch.error_kind == "schema"
     assert "echoed" in mismatch.error
+
+
+def test_worker_protocol_version_matches_host_runs_normally(tmp_path):
+    # ARCH-5: happy path -- host and worker agree on protocol_version, tool
+    # executes normally, and the result carries the worker's reported version.
+    runner, repo = _runtime(tmp_path)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is True
+    assert result.error_kind is None
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[-1]["outcome"] == "succeeded"
+
+
+def test_worker_rejects_job_with_mismatched_protocol_version(tmp_path):
+    # ARCH-5: the worker subprocess validates protocol_version itself before
+    # doing any real work, independent of the host. Simulate an old/new host
+    # sending a version the worker doesn't recognize.
+    job = {
+        "protocol_version": PROTOCOL_VERSION + 999,
+        "module": "marvis.packs.sample.tools",
+        "entrypoint": "echo",
+        "inputs": {"message": "hi"},
+        "task_id": "task-1",
+        "datasets_root": str(tmp_path / "datasets"),
+        "workspace": str(tmp_path / "workspace"),
+        "side_effects": [],
+        "builtin": True,
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "marvis.plugins.subprocess_worker"],
+        input=json.dumps(job),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode != 0
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "protocol_version_mismatch"
+    assert payload["error_detail"]["kind"] == "protocol_version_mismatch"
+    assert payload["error_detail"]["host_protocol_version"] == PROTOCOL_VERSION + 999
+    assert payload["error_detail"]["worker_protocol_version"] == PROTOCOL_VERSION
+    assert payload["worker_protocol_version"] == PROTOCOL_VERSION
+    # No side effects, guards, or module loading should have run.
+    assert "output" not in payload
+
+
+def test_tool_runner_surfaces_typed_error_and_audit_on_worker_version_mismatch(tmp_path, monkeypatch):
+    # ARCH-5: end-to-end through ToolRunner.invoke with the real subprocess
+    # worker, host-side pinned to a stale protocol version via monkeypatch so
+    # the worker (unpatched, current code) rejects the job. Verifies the typed
+    # error_kind and that the failure is recorded in the audit log (INV-8).
+    runner, repo = _runtime(tmp_path)
+    monkeypatch.setattr("marvis.plugins.runner.PROTOCOL_VERSION", PROTOCOL_VERSION + 999)
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "protocol_version_mismatch"
+    assert "协议版本不匹配" in result.error
+    assert result.error_detail["kind"] == "protocol_version_mismatch"
+
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[-1]["outcome"] == "failed"
+    assert audits[-1]["detail"]["error_kind"] == "protocol_version_mismatch"
+
+
+def test_tool_runner_flags_worker_missing_version_as_mismatch(tmp_path, monkeypatch):
+    # ARCH-5: host-side defense in depth -- an old worker binary predating the
+    # handshake would silently ignore the unknown protocol_version job field
+    # and report ok=true with no worker_protocol_version at all. The host must
+    # not treat that as success.
+    runner = _runner(tmp_path)
+
+    class FakeProcess:
+        pid = 123
+        returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return json.dumps({"ok": True, "output": {"echoed": "hi"}}), ""
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr("marvis.plugins.runner.subprocess.Popen", lambda *a, **k: FakeProcess())
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is False
+    assert result.error_kind == "protocol_version_mismatch"
+    assert "未上报版本号" in result.error
 
 
 def test_worker_entrypoint_import_stays_dependency_free():

@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from marvis.db import PluginRepository
+from marvis.plugins.contracts import PROTOCOL_VERSION
 from marvis.plugins.contracts import ToolContext as ToolContext  # noqa: F401 (re-exported for compatibility)
 from marvis.plugins.manifest import PluginManifest, ToolRef
 from marvis.plugins.registry import ToolRegistry
@@ -134,6 +135,7 @@ class ToolRunner:
             return checkpoint_error
 
         job = {
+            "protocol_version": PROTOCOL_VERSION,
             "module": manifest.module,
             "entrypoint": tool.entrypoint,
             "inputs": inputs,
@@ -193,6 +195,24 @@ class ToolRunner:
                 f"worker returned invalid protocol with exit code {completed.returncode}",
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=effective_seed,
+            )
+
+        version_error = _check_worker_protocol_version(protocol)
+        if version_error is not None:
+            result = _failed_result(
+                started,
+                "protocol_version_mismatch",
+                version_error,
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                error_detail=_protocol_version_error_detail(protocol),
             )
             return self._finalize_audited_result(
                 started,
@@ -325,6 +345,7 @@ class ToolRunner:
             return checkpoint_error
 
         job = {
+            "protocol_version": PROTOCOL_VERSION,
             "module_path": str(Path(module)),
             "entrypoint": entrypoint,
             "inputs": inputs,
@@ -388,6 +409,26 @@ class ToolRunner:
                 f"worker returned invalid protocol with exit code {completed.returncode}",
                 stdout_tail=_tail(completed.stdout),
                 stderr_tail=_tail(completed.stderr),
+            )
+            return self._finalize_audited_result(
+                started,
+                target_ref,
+                inputs,
+                result,
+                seed=seed,
+                kind=audit_kind,
+                mode=mode,
+            )
+
+        version_error = _check_worker_protocol_version(protocol)
+        if version_error is not None:
+            result = _failed_result(
+                started,
+                "protocol_version_mismatch",
+                version_error,
+                stdout_tail=_tail(protocol.get("stdout") or completed.stdout),
+                stderr_tail=_tail(protocol.get("stderr") or completed.stderr),
+                error_detail=_protocol_version_error_detail(protocol),
             )
             return self._finalize_audited_result(
                 started,
@@ -775,6 +816,48 @@ def _parse_worker_result(stdout: str) -> dict[str, Any] | None:
 def _protocol_resource_limits(protocol: dict) -> dict | None:
     value = protocol.get("resource_limits")
     return value if isinstance(value, dict) else None
+
+
+def _check_worker_protocol_version(protocol: dict) -> str | None:
+    """ARCH-5: host-side half of the version handshake. The worker validates
+    protocol_version itself (subprocess_worker._check_protocol_version) and
+    reports back worker_protocol_version on every response, but the host must
+    not simply trust that self-check -- an old, pre-handshake worker binary
+    silently ignores the unrecognized protocol_version job field and returns
+    ok=true with no worker_protocol_version at all, which would otherwise slip
+    through as a false success. Returns a Chinese-readable error message when
+    the worker's reported version is missing or does not match the host's,
+    else None.
+    """
+    worker_version = protocol.get("worker_protocol_version")
+    if worker_version == PROTOCOL_VERSION:
+        return None
+    if worker_version is None and protocol.get("ok"):
+        return (
+            f"插件 worker 协议版本不匹配：宿主={PROTOCOL_VERSION!r}，worker 未上报版本号"
+            f"（可能是握手协议之前的旧 worker）；请确认 execution_environment 配置的 "
+            f"python_executable 与宿主使用同一份 marvis 代码"
+        )
+    if worker_version is None:
+        # Worker already failed for an unrelated reason (execution/timeout/etc)
+        # before it could report its version -- let that original error surface
+        # unchanged rather than masking it with a version complaint.
+        return None
+    return (
+        f"插件 worker 协议版本不匹配：宿主={PROTOCOL_VERSION!r}，worker={worker_version!r}；"
+        f"请确认 execution_environment 配置的 python_executable 与宿主使用同一份 marvis 代码"
+    )
+
+
+def _protocol_version_error_detail(protocol: dict) -> dict:
+    detail = protocol.get("error_detail")
+    if isinstance(detail, dict) and detail.get("kind") == "protocol_version_mismatch":
+        return detail
+    return {
+        "kind": "protocol_version_mismatch",
+        "host_protocol_version": PROTOCOL_VERSION,
+        "worker_protocol_version": protocol.get("worker_protocol_version"),
+    }
 
 
 def _resource_limit_message(resource_usage: dict[str, Any]) -> str:

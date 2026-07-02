@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 
 from marvis.db_schema import (
+    SCHEMA_VERSION as SCHEMA_VERSION,
+    SchemaDowngradeError as SchemaDowngradeError,
     _ensure_column as _ensure_column,
     connect as connect,
     init_db as init_db,

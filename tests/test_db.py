@@ -684,6 +684,126 @@ def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
             _ensure_column(conn, "tasks", "bad-column", "TEXT")
 
 
+def test_init_db_stamps_schema_version_on_fresh_database(tmp_path):
+    # ARCH-10: a brand-new database should come up fully migrated and stamped
+    # at the current SCHEMA_VERSION via PRAGMA user_version.
+    db_path = tmp_path / "app.sqlite"
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    assert version == db_schema_module.SCHEMA_VERSION
+    # Spot-check a representative slice of tables from across the schema
+    # (base tables, plugin tables, S1a/S1b additions all land via the same
+    # baseline migration).
+    assert {"tasks", "jobs", "audit", "plugins", "tools", "model_artifacts", "agent_memory_entries"} <= tables
+
+
+def test_init_db_upgrades_pre_arch10_database_losslessly(tmp_path):
+    # ARCH-10: a database created before schema_version existed reports
+    # PRAGMA user_version == 0 (SQLite's untouched default). init_db must
+    # bring it up to SCHEMA_VERSION, adding every missing table/column/index
+    # while preserving existing data byte-for-byte -- the exact "old library
+    # opens new version, no loss" guarantee the task requires.
+    db_path = tmp_path / "legacy.sqlite"
+
+    # Simulate a pre-ARCH-10 jobs table (missing the heartbeat_at column that
+    # migration 1 adds) with a live row, and never touch PRAGMA user_version --
+    # this is exactly what a database predating this commit looks like.
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_message TEXT NOT NULL DEFAULT '',
+                error_name TEXT,
+                error_value TEXT,
+                traceback TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                log_path TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs(id, task_id, kind, status, created_at)
+            VALUES ('job-1', 'task-1', 'join', 'running', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        row = conn.execute("SELECT status, heartbeat_at FROM jobs WHERE id = 'job-1'").fetchone()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "heartbeat_at" in columns
+    assert row["status"] == "running"
+    assert row["heartbeat_at"] is None
+    # Every other table the baseline migration owns must also now exist.
+    assert {"tasks", "audit", "plugins", "tools", "agent_memory_entries"} <= tables
+
+
+def test_init_db_is_idempotent_across_repeated_calls(tmp_path):
+    # ARCH-10: calling init_db repeatedly (as app startup / eval runner / CLI
+    # scripts all do) must not re-run already-applied migrations or error.
+    db_path = tmp_path / "app.sqlite"
+
+    init_db(db_path)
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == db_schema_module.SCHEMA_VERSION
+
+
+def test_init_db_rejects_database_with_newer_schema_version(tmp_path):
+    # ARCH-10: downgrade guard -- if a database's schema_version is ahead of
+    # what this code supports (an older marvis checkout opening a database a
+    # newer checkout already migrated), init_db must refuse with a clear typed
+    # error instead of silently proceeding and risking misinterpreting
+    # tables/columns a later migration added.
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        conn.execute(f"PRAGMA user_version = {db_schema_module.SCHEMA_VERSION + 1}")
+
+    with pytest.raises(db_schema_module.SchemaDowngradeError, match="schema_version"):
+        init_db(db_path)
+
+
+def test_sqlite_health_reports_schema_version(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    health = db_schema_module.sqlite_health(db_path)
+
+    assert health["schema_version"] == db_schema_module.SCHEMA_VERSION
+    assert health["schema_version_expected"] == db_schema_module.SCHEMA_VERSION
+    assert health["schema_version_stale"] is False
+
+
 def _profile(name: str) -> ColumnProfile:
     return ColumnProfile(
         name=name,
