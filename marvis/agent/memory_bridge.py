@@ -26,11 +26,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from marvis.agent_memory.extractors import extract_join_experience, extract_model_experience
+from marvis.agent_memory.extractors import (
+    extract_join_experience,
+    extract_model_experience,
+    extract_strategy_experience,
+)
 from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
-from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TaskRecord
+from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TASK_TYPE_STRATEGY, TaskRecord
 from marvis.memory_policy import load_memory_policy
+from marvis.repositories.strategy import StrategyRepository
 
 MEMORY_ANCHOR_MAX_ENTRIES = 3
 MEMORY_ANCHOR_MAX_LINE_CHARS = 120
@@ -63,6 +68,8 @@ def capture_agent_memory_for_driver_done(
             _capture_model_experience(settings, task, done_message_metadata)
         elif task.task_type == TASK_TYPE_DATA_JOIN:
             _capture_join_experience(settings, task, done_message_content, done_message_metadata)
+        elif task.task_type == TASK_TYPE_STRATEGY:
+            _capture_strategy_experience(settings, task)
     except Exception:
         # Memory capture is best-effort; never fail the user-facing turn over it.
         return
@@ -131,6 +138,51 @@ def _capture_join_experience(
         return
     store = AgentMemoryStore(settings.db_path)
     store.create(candidate, task_id=task.id)
+
+
+def _capture_strategy_experience(settings, task: TaskRecord) -> None:
+    """S2: strategy_experience capture, sourced straight from persisted results
+    (INV-1: no recompute) rather than parsed from the terminal message -- the
+    STRATEGY_DEVELOPMENT template's terminal step is render_strategy_doc, not
+    adopt_strategy, so the adoption metrics aren't in done_message_metadata.
+    Reads the task's most-recently-adopted strategy and its latest backtest
+    straight from StrategyRepository; a no-op if nothing has been adopted yet
+    (e.g. the lightweight strategy_analysis entry, or a plan that hasn't
+    reached the adoption gate)."""
+    strategies = StrategyRepository(settings.db_path)
+    adopted = [
+        meta
+        for meta in strategies.list_meta_for_task(task.id)
+        if meta.get("status") == "adopted"
+    ]
+    if not adopted:
+        return
+    latest = max(adopted, key=lambda meta: (meta.get("adopted_at") or "", meta.get("created_at") or ""))
+    strategy = strategies.get_strategy(latest["id"])
+    backtests = strategies.list_backtests(latest["id"])
+    if strategy is None or not backtests:
+        return
+    backtest = backtests[-1]
+    result = {
+        "task_id": task.id,
+        "source_task_id": task.id,
+        "strategy_type": strategy.strategy_type,
+        "cutoff_summary": _strategy_cutoff_summary(strategy),
+        "approval_rate": backtest.approval_rate,
+        "approved_bad_rate": backtest.approved_bad_rate,
+        "expected_profit": backtest.expected_profit,
+        "scope": f"strategy:{strategy.strategy_type}:{task.model_name or task.id}",
+    }
+    candidate = extract_strategy_experience(result)
+    if candidate is None:
+        return
+    store = AgentMemoryStore(settings.db_path)
+    store.create(candidate, task_id=task.id)
+
+
+def _strategy_cutoff_summary(strategy) -> str:
+    conditions = [str(rule.condition) for rule in strategy.rules if getattr(rule, "condition", None)]
+    return "；".join(conditions) if conditions else "无规则"
 
 
 def _join_per_table_from_tables(metadata: dict[str, Any] | None) -> list[dict[str, Any]]:

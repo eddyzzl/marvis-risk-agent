@@ -107,10 +107,19 @@ class GateExecutionAdapter:
         return turn
 
     def apply_adjust(self, plan: Plan, gate: PlanStep, params, run_seq) -> DriverTurn:
-        """Apply declared parameter overrides, reset affected steps, and rerun."""
+        """Apply declared parameter overrides, reset affected steps, and rerun.
+
+        Candidates are the gate's dependencies plus the gate step itself. Most
+        gates wrap a separate upstream computation (e.g. confirm_join gating
+        propose_join), so the dependency is where params get overridden -- but
+        some gates (e.g. STRATEGY_DEVELOPMENT's 设计分数带) are the computation
+        being reviewed, with no separate confirm-wrapper step, so a param like
+        band_edges only ever appears in the gate's own declared inputs. Checking
+        the gate itself last (after its deps) keeps existing dependency-scoped
+        adjust behavior unchanged for every template that already relies on it.
+        """
         deps = [step for step in (find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
-        if not deps:
-            return self._instruction_message(plan, gate, run_seq, "没找到可调整的上一步，请重新确认。")
+        candidates = [*deps, gate]
         params = params or {}
         validation_error = adjust_param_error(params)
         if validation_error:
@@ -118,7 +127,7 @@ class GateExecutionAdapter:
 
         primary = None
         adjusted_ids: list[str] = []
-        for dep in deps:
+        for dep in candidates:
             overrides = {key: value for key, value in params.items() if key in (dep.inputs or {})}
             if "sample_weight_col" in overrides:
                 if dep.tool_ref.tool != "choose_modeling_spec":

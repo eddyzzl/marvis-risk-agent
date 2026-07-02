@@ -35,7 +35,15 @@ from marvis.agent_memory.store import AgentMemoryStore
 from marvis.app import create_app
 from marvis.data.backend import DataBackend
 from marvis.db import init_db
-from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TaskRecord, TaskStatus
+from marvis.domain import (
+    TASK_TYPE_DATA_JOIN,
+    TASK_TYPE_FEATURE_ANALYSIS,
+    TASK_TYPE_MODELING,
+    TASK_TYPE_STRATEGY,
+    TASK_TYPE_VINTAGE,
+    TaskRecord,
+    TaskStatus,
+)
 from marvis.memory_policy import MemoryPolicySettings, save_memory_policy
 from marvis.settings import Settings, build_settings
 
@@ -141,6 +149,144 @@ def test_capture_agent_memory_writes_join_experience_on_join_done(tmp_path: Path
     assert entry.payload["feature_table_count"] == 2
     assert entry.payload["match_rate"] == pytest.approx((0.96 + 0.88) / 2, rel=1e-6)
     assert entry.source_task_id == "task-join-1"
+
+
+# -- (a2) write side: strategy adoption -> strategy_experience ---------------
+
+def test_capture_agent_memory_writes_strategy_experience_on_adoption(tmp_path: Path):
+    """S2: strategy_experience is assembled straight from the persisted adopted
+    strategy + its latest backtest (StrategyRepository), not from
+    done_message_metadata -- the STRATEGY_DEVELOPMENT template's terminal step is
+    render_strategy_doc, which carries no bad_rate/approval_rate/profit."""
+    from marvis.packs.strategy import BacktestResult, build_strategy
+    from marvis.repositories.strategy import StrategyRepository
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(id="task-strategy-1", task_type=TASK_TYPE_STRATEGY, model_name="策略开发")
+
+    strategies = StrategyRepository(settings.db_path)
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="S2 memory capture fixture",
+    )
+    strategies.create_strategy(task.id, strategy)
+    strategies.save_backtest(
+        "backtest-1",
+        strategy.id,
+        "dataset-1",
+        BacktestResult(
+            strategy_id=strategy.id,
+            approval_rate=0.8,
+            approved_count=80,
+            approved_bad_rate=0.03,
+            rejected_bad_rate=0.25,
+            expected_profit=1500.0,
+            swap_in_count=0,
+            swap_out_count=0,
+            swap_in_bad_rate=0.0,
+            swap_out_bad_rate=0.0,
+            by_segment=(),
+        ),
+    )
+    strategies.adopt_strategy_with_audit(
+        strategy.id, reason="test adoption", audit={"kind": "strategy.adopt", "target_ref": strategy.id}
+    )
+
+    capture_agent_memory_for_driver_done(
+        settings, task,
+        done_message_content="策略文档已生成",
+        done_message_metadata={},
+    )
+
+    store = AgentMemoryStore(settings.db_path)
+    entries = store.list_entries(memory_type="strategy_experience")
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.payload["strategy_type"] == "approval"
+    assert entry.payload["approval_rate"] == 0.8
+    assert entry.payload["approved_bad_rate"] == 0.03
+    assert entry.payload["expected_profit"] == 1500.0
+    assert entry.payload["source_task_id"] == "task-strategy-1"
+    assert "score < 600" in entry.payload["cutoff_summary"]
+
+
+def test_capture_agent_memory_strategy_is_noop_when_nothing_adopted(tmp_path: Path):
+    """A strategy task whose plan hasn't reached adoption (or used the
+    lightweight strategy_analysis entry, which never calls adopt_strategy)
+    writes nothing -- no exception, no entry."""
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(id="task-strategy-noop", task_type=TASK_TYPE_STRATEGY)
+
+    capture_agent_memory_for_driver_done(
+        settings, task, done_message_content="", done_message_metadata={}
+    )
+
+    store = AgentMemoryStore(settings.db_path)
+    assert store.list_entries(memory_type="strategy_experience") == []
+
+
+def test_capture_agent_memory_strategy_gated_by_auto_distill(tmp_path: Path):
+    """Same auto_distill gate as model/join capture (ARCH-4 kwargs fix: strategy
+    now passes settings/task into append_driver_messages, so it must honor the
+    same single V2-driver gate memory_bridge already enforces)."""
+    from marvis.packs.strategy import BacktestResult, build_strategy
+    from marvis.repositories.strategy import StrategyRepository
+
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    save_memory_policy(
+        settings.workspace,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=False),
+    )
+    task = _task_record(id="task-strategy-off", task_type=TASK_TYPE_STRATEGY)
+    strategies = StrategyRepository(settings.db_path)
+    strategy = build_strategy(
+        "approval", [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score", default_decision="approve", description="gated",
+    )
+    strategies.create_strategy(task.id, strategy)
+    strategies.save_backtest(
+        "backtest-off", strategy.id, "dataset-1",
+        BacktestResult(
+            strategy_id=strategy.id, approval_rate=0.8, approved_count=80,
+            approved_bad_rate=0.03, rejected_bad_rate=0.25, expected_profit=1500.0,
+            swap_in_count=0, swap_out_count=0, swap_in_bad_rate=0.0, swap_out_bad_rate=0.0,
+            by_segment=(),
+        ),
+    )
+    strategies.adopt_strategy_with_audit(
+        strategy.id, reason="gated", audit={"kind": "strategy.adopt", "target_ref": strategy.id}
+    )
+
+    capture_agent_memory_for_driver_done(settings, task, done_message_metadata={})
+
+    store = AgentMemoryStore(settings.db_path)
+    assert store.list_entries(memory_type="strategy_experience") == []
+
+
+# -- ARCH-4 kwargs fix regression: feature/vintage now pass settings/task too,
+# but neither has an extractor wired -- must be a silent, exception-free no-op.
+
+@pytest.mark.parametrize("task_type", [TASK_TYPE_FEATURE_ANALYSIS, TASK_TYPE_VINTAGE])
+def test_capture_agent_memory_feature_and_vintage_are_noop_not_errors(tmp_path: Path, task_type):
+    settings = build_settings(tmp_path)
+    init_db(settings.db_path)
+    task = _task_record(id=f"task-{task_type}-1", task_type=task_type)
+
+    # Must not raise even though there is no extractor for these two types yet.
+    capture_agent_memory_for_driver_done(
+        settings, task, done_message_content="done", done_message_metadata={"tables": []}
+    )
+
+    store = AgentMemoryStore(settings.db_path)
+    assert store.list_entries(memory_type="model_experience") == []
+    assert store.list_entries(memory_type="join_experience") == []
+    assert store.list_entries(memory_type="strategy_experience") == []
 
 
 def test_agent_mode_autodrive_join_completion_writes_join_experience_via_real_api(

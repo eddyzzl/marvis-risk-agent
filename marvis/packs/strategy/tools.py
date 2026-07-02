@@ -321,8 +321,23 @@ def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
 
 def tool_compare_strategies(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
+    baseline_id = _optional_str(inputs.get("baseline_strategy_id"))
+    if baseline_id is None:
+        # No baseline supplied (e.g. the template's optional compare step ran
+        # without a baseline_strategy_id slot): degrade to a no-op result
+        # instead of failing the plan -- the step is informational, not gating.
+        return {
+            "matrix_2x2": {
+                cell: {"count": 0, "bad_rate": 0.0}
+                for cell in ("both_approve", "only_new", "only_baseline", "both_decline")
+            },
+            "deltas": {"approval_rate": 0.0, "approved_bad_rate": 0.0, "expected_profit": 0.0},
+            "summary_text": "未提供基线策略，跳过对比。",
+            "red_flags": [],
+            "nan_labels_dropped": 0,
+        }
     strategy = _strategy(runtime, str(inputs["strategy_id"]))
-    baseline = _strategy(runtime, str(inputs["baseline_strategy_id"]))
+    baseline = _strategy(runtime, baseline_id)
     frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
     frame, nan_labels_dropped = resolve_labeled_frame(
         frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),

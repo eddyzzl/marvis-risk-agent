@@ -631,7 +631,10 @@
             "minimum": 1
           },
           "band_edges": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "type": "number"
             },
@@ -769,8 +772,7 @@
         "required": [
           "dataset_id",
           "target_col",
-          "strategy_id",
-          "baseline_strategy_id"
+          "strategy_id"
         ],
         "additionalProperties": false
       },

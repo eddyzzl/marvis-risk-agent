@@ -99,10 +99,16 @@ class _TurnHandlerSpec:
     # types always log user_text verbatim.
     format_user_display: Callable[[str], str]
     # join/modeling pass settings=/task= into append_driver_messages (so a
-    # terminal "done" message can trigger MEM-1 memory capture); the other
-    # three types never do (feature/strategy/vintage plans don't write
-    # memory anchors today).
+    # terminal "done" message can trigger MEM-1 memory capture). S2: strategy
+    # now also passes them (strategy_experience capture on adoption); feature/
+    # vintage still don't have an extractor wired, but ARCH-4 found they were
+    # never passed kwargs at all -- fixed alongside strategy so all five types
+    # are parameterized the same way instead of silently diverging.
     pass_memory_kwargs: bool
+    # Optional per-type success_criteria builder threaded into start_kwargs
+    # (mirrors _modeling_success_criteria); None means this type never injects
+    # a deterministic criterion.
+    success_criteria: Callable[[TaskRecord], list[dict] | None] | None = None
 
 
 def run_join_driver_turn(
@@ -263,6 +269,10 @@ def _run_driver_turn(
         if isinstance(setup_result, dict):
             return setup_result
         template_id, slots, start_kwargs = setup_result
+        if spec.success_criteria is not None and "success_criteria" not in start_kwargs:
+            criteria = spec.success_criteria(task)
+            if criteria is not None:
+                start_kwargs = {**start_kwargs, "success_criteria": criteria}
         turn = driver.start(
             task_id=task.id,
             template_id=template_id,
@@ -353,6 +363,22 @@ def _run_feature_setup(
         metadata={"intent": "feature_analysis"},
     )
     return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _strategy_success_criteria(task: TaskRecord) -> list[dict] | None:
+    """S2: mirrors _modeling_success_criteria. task's optional
+    strategy_bad_rate_max/strategy_approval_min (getattr-based -- no schema
+    migration backs these fields today, so tasks without them simply inject no
+    criterion, same graceful default as oot_ks_min) become deterministic
+    approved_bad_rate/approval_rate thresholds final_review can evaluate."""
+    bad_rate_max = getattr(task, "strategy_bad_rate_max", None)
+    approval_min = getattr(task, "strategy_approval_min", None)
+    criteria: list[dict] = []
+    if bad_rate_max is not None:
+        criteria.append({"metric": "approved_bad_rate", "max": float(bad_rate_max)})
+    if approval_min is not None:
+        criteria.append({"metric": "approval_rate", "min": float(approval_min)})
+    return criteria or None
 
 
 def _run_strategy_setup(
@@ -488,7 +514,7 @@ _FEATURE_SPEC = _TurnHandlerSpec(
     error_label="特征分析出错",
     run_setup=_run_feature_setup,
     format_user_display=_identity_display_text,
-    pass_memory_kwargs=False,
+    pass_memory_kwargs=True,
 )
 
 _STRATEGY_SPEC = _TurnHandlerSpec(
@@ -497,7 +523,8 @@ _STRATEGY_SPEC = _TurnHandlerSpec(
     error_label="策略分析出错",
     run_setup=_run_strategy_setup,
     format_user_display=_identity_display_text,
-    pass_memory_kwargs=False,
+    pass_memory_kwargs=True,
+    success_criteria=_strategy_success_criteria,
 )
 
 _VINTAGE_SPEC = _TurnHandlerSpec(
@@ -506,7 +533,7 @@ _VINTAGE_SPEC = _TurnHandlerSpec(
     error_label="Vintage 风险分析出错",
     run_setup=_run_vintage_setup,
     format_user_display=_identity_display_text,
-    pass_memory_kwargs=False,
+    pass_memory_kwargs=True,
 )
 
 _MODELING_SPEC = _TurnHandlerSpec(

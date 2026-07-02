@@ -7,6 +7,7 @@ from typing import Any
 from marvis.agent_memory.models import (
     JOIN_EXPERIENCE_REQUIRED_FIELDS,
     MODEL_EXPERIENCE_REQUIRED_FIELDS,
+    STRATEGY_EXPERIENCE_REQUIRED_FIELDS,
     MemoryCandidate,
 )
 from marvis.agent_memory.policy import classify_memory_candidate
@@ -52,6 +53,26 @@ def extract_join_experience(result: dict[str, Any]) -> MemoryCandidate | None:
         source_task_id=str(payload["source_task_id"]),
         confidence="high",
         reason="structured join execution result",
+    )
+    return _allow(candidate)
+
+
+def extract_strategy_experience(result: dict[str, Any]) -> MemoryCandidate | None:
+    payload = _strategy_experience_payload(result)
+    if payload is None:
+        return None
+
+    candidate = MemoryCandidate(
+        memory_type="strategy_experience",
+        summary=(
+            f"{payload['scope']}采纳{payload['strategy_type']}策略，"
+            f"{payload['cutoff_summary']}，审批率{payload['approval_rate']}，"
+            f"通过坏率{payload['approved_bad_rate']}，预期利润{payload['expected_profit']}。"
+        ),
+        payload=payload,
+        source_task_id=str(payload["source_task_id"]),
+        confidence="high",
+        reason="structured strategy adoption result",
     )
     return _allow(candidate)
 
@@ -233,6 +254,21 @@ def _join_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "source_task_id": _first_value(result, {}, "source_task_id", "task_id"),
     }
     if any(_is_missing(payload[field]) for field in JOIN_EXPERIENCE_REQUIRED_FIELDS):
+        return None
+    return payload
+
+
+def _strategy_experience_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    payload = {
+        "strategy_type": _first_value(result, {}, "strategy_type"),
+        "cutoff_summary": _first_value(result, {}, "cutoff_summary"),
+        "approval_rate": _first_value(result, {}, "approval_rate"),
+        "approved_bad_rate": _first_value(result, {}, "approved_bad_rate"),
+        "expected_profit": _first_value(result, {}, "expected_profit"),
+        "scope": _first_value(result, {}, "scope"),
+        "source_task_id": _first_value(result, {}, "source_task_id", "task_id"),
+    }
+    if any(_is_missing(payload[field]) for field in STRATEGY_EXPERIENCE_REQUIRED_FIELDS):
         return None
     return payload
 

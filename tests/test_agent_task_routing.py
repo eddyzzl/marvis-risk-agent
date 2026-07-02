@@ -13,7 +13,9 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from marvis.agent.turn_handlers import _strategy_success_criteria
 from marvis.app import create_app
+from marvis.domain import TASK_TYPE_STRATEGY, TaskRecord, TaskStatus
 
 
 @pytest.fixture
@@ -101,3 +103,60 @@ def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
         table["title"] == "Vintage 累计坏账率"
         for table in done["metadata"]["tables"]
     )
+
+
+def _bare_strategy_task(**overrides) -> TaskRecord:
+    base = dict(
+        id="task-strategy-sc",
+        model_name="策略",
+        model_version="v1",
+        validator="qa",
+        source_dir="",
+        algorithm="",
+        run_mode="agent",
+        target_col="bad",
+        score_col="score",
+        split_col="",
+        time_col="",
+        feature_columns=[],
+        notebook_path=None,
+        sample_path=None,
+        pmml_path=None,
+        dictionary_path=None,
+        report_values_revision=0,
+        status=TaskStatus.SCANNED,
+        status_message="",
+        created_at="",
+        updated_at="",
+        task_type=TASK_TYPE_STRATEGY,
+    )
+    base.update(overrides)
+    return TaskRecord(**base)
+
+
+def test_strategy_success_criteria_none_when_task_has_no_optional_fields():
+    # Mirrors _modeling_success_criteria's oot_ks_min default: absent optional
+    # fields inject no criterion at all (never a hard-coded platform default).
+    assert _strategy_success_criteria(_bare_strategy_task()) is None
+
+
+def test_strategy_success_criteria_builds_bad_rate_max_and_approval_min():
+    task = _bare_strategy_task()
+    object.__setattr__(task, "strategy_bad_rate_max", 0.05)
+    object.__setattr__(task, "strategy_approval_min", 0.6)
+
+    criteria = _strategy_success_criteria(task)
+
+    assert criteria == [
+        {"metric": "approved_bad_rate", "max": 0.05},
+        {"metric": "approval_rate", "min": 0.6},
+    ]
+
+
+def test_strategy_success_criteria_builds_only_the_field_that_is_set():
+    task = _bare_strategy_task()
+    object.__setattr__(task, "strategy_bad_rate_max", 0.1)
+
+    criteria = _strategy_success_criteria(task)
+
+    assert criteria == [{"metric": "approved_bad_rate", "max": 0.1}]

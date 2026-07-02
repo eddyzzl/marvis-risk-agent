@@ -422,6 +422,55 @@ def test_strategy_analysis_template_marks_backtest_decision_point(tmp_path):
     assert [step.title for step in plan.steps if step.needs_confirmation] == ["回测策略"]
 
 
+def test_strategy_development_template_instantiates_and_validates(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("strategy_development"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "score_col": "score",
+            "adoption_reason": "committee approved",
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("strategy", "tradeoff_view"),
+        ToolRef("strategy", "design_cutoff_bands"),
+        ToolRef("strategy", "build_strategy"),
+        ToolRef("strategy", "backtest_strategy"),
+        ToolRef("strategy", "compare_strategies"),
+        ToolRef("strategy", "adopt_strategy"),
+        ToolRef("strategy", "render_strategy_doc"),
+    ]
+    bands_step = plan.steps[1]
+    build_step = plan.steps[2]
+    backtest_step = plan.steps[3]
+    adopt_step = plan.steps[5]
+    doc_step = plan.steps[6]
+    assert bands_step.needs_confirmation is True
+    assert backtest_step.needs_confirmation is True
+    assert backtest_step.decision_point is True
+    # Mandatory adoption gate: auto-accept must not skip it (delivery-gate precedent).
+    assert adopt_step.needs_confirmation is True
+    assert build_step.inputs["rules"] == f"$ref:{bands_step.id}.output.recommended_rules"
+    assert adopt_step.inputs["backtest_id"] == f"$ref:{backtest_step.id}.output.backtest_id"
+    assert adopt_step.inputs["band_stats"] == f"$ref:{bands_step.id}.output"
+    assert doc_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
+
+
+def test_strategy_development_goal_patterns_do_not_cross_strategy_analysis(tmp_path):
+    load_builtin_templates()
+    development = get_template("strategy_development")
+    analysis = get_template("strategy_analysis")
+    assert set(development.goal_patterns).isdisjoint(set(analysis.goal_patterns))
+
+
 def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)

@@ -71,6 +71,15 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "scope",
         "source_task_id",
     }),
+    "strategy_experience": frozenset({
+        "strategy_type",
+        "cutoff_summary",
+        "approval_rate",
+        "approved_bad_rate",
+        "expected_profit",
+        "scope",
+        "source_task_id",
+    }),
     "skill_experience_reserved": frozenset(),
 }
 SECRET_PATTERNS = (
