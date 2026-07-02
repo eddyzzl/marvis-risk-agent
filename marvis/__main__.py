@@ -25,6 +25,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"MARVIS updated at {result['repo']} ({result['version']}).")
         elif args.command == "version":
             _print_version()
+        elif args.command == "eval-llm":
+            _eval_llm(args)
         else:
             _serve(_apply_serve_defaults(args))
     except RuntimeError as exc:
@@ -73,6 +75,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_parser.add_argument("--skip-install", action="store_true")
 
     subparsers.add_parser("version", help="Print the installed MARVIS version")
+
+    eval_llm_parser = subparsers.add_parser(
+        "eval-llm",
+        help="Run the orchestrator LLM-touchpoint eval suite against a real configured model",
+    )
+    eval_llm_parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model id from settings/llm.json to evaluate (defaults to the configured default model)",
+    )
+    eval_llm_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+    )
+    eval_llm_parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Path to a previous eval-llm JSON report; exits non-zero on regression",
+    )
 
     return parser.parse_args(argv)
 
@@ -173,6 +196,37 @@ def _load_validation_runtime():
     from marvis.settings import build_settings
 
     return build_settings, init_db, PipelineSettings, run_staged_pipeline, load_execution_environment
+
+
+def _eval_llm(args: argparse.Namespace) -> None:
+    from marvis.llm_settings import LLMSettingsError
+    from marvis.orchestrator.eval.cli import EvalCliError, run_eval_llm_cli
+    from marvis.settings import build_settings
+
+    workspace = args.workspace or _profile_defaults(getattr(args, "profile", "")).workspace
+    settings = build_settings(workspace)
+    try:
+        report = run_eval_llm_cli(
+            workspace=settings.workspace,
+            model_id=args.model_id,
+            baseline_path=args.baseline,
+        )
+    except (EvalCliError, LLMSettingsError) as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    recommended = report.get("recommended_tier")
+    print(f"MARVIS eval-llm report written to {report['report_path']}")
+    print(f"model_id={report['model_id']} recommended_tier={recommended}")
+    for tier, data in sorted(report.get("per_tier", {}).items()):
+        print(
+            f"  tier={tier} pass_rate={data['pass_rate']:.2f} "
+            f"guardrail_pass_rate={data['guardrail_pass_rate']:.2f} "
+            f"guardrail_intact={data['guardrail_intact']}"
+        )
+    if "regression_ok" in report:
+        print(f"regression_ok={report['regression_ok']}")
+        for problem in report.get("regression_problems", []):
+            print(f"  - {problem}")
 
 
 def _parse_feature_columns(value: str) -> list[str]:
