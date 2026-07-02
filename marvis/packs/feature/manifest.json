@@ -103,6 +103,8 @@
           "scores": {"type": "object"},
           "n_screened": {"type": "integer", "minimum": 0},
           "excluded_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
+          "sentinel_columns": {"type": "object"},
+          "sentinel_notice": {"type": "string"},
           "note": {"type": "string"}
         },
         "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],
@@ -131,7 +133,8 @@
           "enforce_monotonic": {"type": "boolean"},
           "monotonic_direction": {"type": "string", "enum": ["auto", "increasing", "decreasing"]},
           "seed": {"type": "integer"},
-          "drop_nan_labels": {"type": "boolean"}
+          "drop_nan_labels": {"type": "boolean"},
+          "sentinel_values": {"type": "array", "items": {"type": "number"}}
         },
         "required": ["dataset_id", "feature", "target_col", "method"],
         "additionalProperties": false
@@ -246,7 +249,8 @@
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "seed": {"type": "integer"},
-          "drop_nan_labels": {"type": "boolean"}
+          "drop_nan_labels": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -351,7 +355,8 @@
           "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "columns", "method"],
         "additionalProperties": false
@@ -386,7 +391,8 @@
           "fill_value": {},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "columns", "strategy"],
         "additionalProperties": false
@@ -422,7 +428,8 @@
           "upper_q": {"type": "number", "minimum": 0, "maximum": 1},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "columns"],
         "additionalProperties": false

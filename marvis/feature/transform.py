@@ -6,6 +6,73 @@ import pandas as pd
 from marvis.feature.errors import FeatureError
 
 
+# Sentinel/special-value candidates commonly used by credit-bureau and third-party
+# score feeds to mean "no hit / not covered / over limit" rather than a genuine
+# numeric observation (PREP-4). Checked in addition to whatever the caller passes.
+_DEFAULT_SENTINEL_CANDIDATES: tuple[float, ...] = (-999.0, -99.0, -1.0, 9999.0, 99999.0)
+
+
+def detect_sentinel_values(
+    values: np.ndarray,
+    *,
+    candidates: tuple[float, ...] = _DEFAULT_SENTINEL_CANDIDATES,
+    min_share: float = 0.01,
+    gap_factor: float = 3.0,
+) -> list[tuple[float, float]]:
+    """Deterministically flag suspected sentinel/special values in ``values``.
+
+    A candidate value is flagged when *all* hold on the finite observations:
+
+    - it is actually present in the column;
+    - its share of finite observations is >= ``min_share`` (default 1%) -- an
+      isolated peak, not routine noise;
+    - it sits at an extreme of the observed range (the min or the max) -- sentinels
+      like -999/9999 are placed outside the plausible business range by design;
+    - it is separated from the rest of the distribution by a gap at least
+      ``gap_factor`` times the median gap between other consecutive distinct
+      values -- i.e. the peak is genuinely isolated, not just the tail of a
+      continuous distribution.
+
+    Returns ``[(sentinel_value, share), ...]`` sorted by descending share.
+    Deterministic; no randomness.
+    """
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return []
+    unique_values, counts = np.unique(finite, return_counts=True)
+    if unique_values.size < 2:
+        return []
+    shares = counts / finite.size
+    min_value = float(unique_values[0])
+    max_value = float(unique_values[-1])
+    gaps = np.diff(unique_values)
+    other_gaps = gaps[gaps > 0]
+    typical_gap = float(np.median(other_gaps)) if other_gaps.size else 0.0
+
+    flagged: list[tuple[float, float]] = []
+    for candidate in candidates:
+        index = np.searchsorted(unique_values, float(candidate))
+        if index >= unique_values.size or unique_values[index] != float(candidate):
+            continue
+        share = float(shares[index])
+        if share < min_share:
+            continue
+        is_extreme = unique_values[index] in (min_value, max_value)
+        if not is_extreme:
+            continue
+        if index == 0:
+            neighbor_gap = float(gaps[0]) if gaps.size else 0.0
+        else:
+            neighbor_gap = float(gaps[index - 1])
+        is_isolated = typical_gap <= 0 or neighbor_gap >= gap_factor * typical_gap
+        if not is_isolated:
+            continue
+        flagged.append((float(candidate), share))
+    flagged.sort(key=lambda item: item[1], reverse=True)
+    return flagged
+
+
 def minmax_normalize(
     values: np.ndarray,
     *,
@@ -63,12 +130,25 @@ def apply_scaler(values: np.ndarray, params: dict, *, kind: str) -> np.ndarray:
     raise FeatureError("kind must be 'minmax' or 'zscore'")
 
 
+def mask_sentinel_values(series: pd.Series, sentinel_values: list[float] | None) -> pd.Series:
+    """Treat ``sentinel_values`` (PREP-4) as missing: return ``series`` with those
+    values replaced by NaN, leaving already-missing rows untouched. A no-op when
+    ``sentinel_values`` is empty/None."""
+    if not sentinel_values:
+        return series
+    numeric = pd.to_numeric(series, errors="coerce")
+    mask = numeric.isin([float(value) for value in sentinel_values])
+    return series.mask(mask)
+
+
 def impute_missing(
     series: pd.Series,
     *,
     strategy: str = "median",
     fill_value=None,
+    sentinel_values: list[float] | None = None,
 ) -> tuple[pd.Series, object]:
+    series = mask_sentinel_values(series, sentinel_values)
     if strategy == "constant":
         if fill_value is None:
             raise FeatureError("fill_value is required for constant imputation")
@@ -93,8 +173,12 @@ def cap_outliers(
     method: str = "iqr",
     lower_q: float = 0.01,
     upper_q: float = 0.99,
+    sentinel_values: list[float] | None = None,
 ) -> tuple[np.ndarray, dict]:
     arr = np.asarray(values, dtype=float)
+    if sentinel_values:
+        arr = arr.copy()
+        arr[np.isin(arr, [float(value) for value in sentinel_values])] = np.nan
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
         return arr.copy(), {"lower": float("nan"), "upper": float("nan"), "method": method}
@@ -130,7 +214,9 @@ def _validate_feature_range(feature_range: tuple[float, float]) -> tuple[float, 
 __all__ = [
     "apply_scaler",
     "cap_outliers",
+    "detect_sentinel_values",
     "impute_missing",
+    "mask_sentinel_values",
     "minmax_normalize",
     "zscore_standardize",
 ]

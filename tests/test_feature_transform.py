@@ -6,7 +6,9 @@ from marvis.feature.errors import FeatureError
 from marvis.feature.transform import (
     apply_scaler,
     cap_outliers,
+    detect_sentinel_values,
     impute_missing,
+    mask_sentinel_values,
     minmax_normalize,
     zscore_standardize,
 )
@@ -73,3 +75,55 @@ def test_transform_rejects_invalid_options():
 
     with pytest.raises(FeatureError, match="quantiles"):
         cap_outliers(np.array([1.0]), method="quantile", lower_q=0.9, upper_q=0.1)
+
+
+def test_detect_sentinel_values_flags_isolated_extreme_peak():
+    # 200 normal values in [1, 100], plus a -999 "no hit" sentinel on 5% of rows,
+    # isolated from the real distribution by a huge gap.
+    rng = np.concatenate([np.linspace(1.0, 100.0, 190), np.full(10, -999.0)])
+
+    hits = detect_sentinel_values(rng)
+
+    assert hits == [(-999.0, pytest.approx(10 / 200))]
+
+
+def test_detect_sentinel_values_ignores_low_share_and_non_extreme_and_close_values():
+    # -1 sits below 1% share -> not flagged.
+    low_share = np.concatenate([np.linspace(1.0, 100.0, 199), np.full(1, -1.0)])
+    assert detect_sentinel_values(low_share) == []
+
+    # 9999 present but not at an extreme (larger real values exist above it) -> not flagged.
+    not_extreme = np.concatenate([np.linspace(1.0, 20000.0, 190), np.full(10, 9999.0)])
+    assert detect_sentinel_values(not_extreme) == []
+
+    # -1 sits right next to the rest of a [-1, 100] uniform-ish distribution -> not isolated.
+    close = np.concatenate([np.linspace(-1.0, 100.0, 190), np.full(10, -1.0)])
+    assert detect_sentinel_values(close) == []
+
+
+def test_mask_sentinel_values_treats_configured_values_as_missing():
+    series = pd.Series([1.0, -999.0, 3.0, np.nan])
+
+    masked = mask_sentinel_values(series, [-999.0])
+
+    assert masked.tolist()[:1] == [1.0]
+    assert np.isnan(masked.iloc[1])
+    assert masked.tolist()[2] == 3.0
+    assert np.isnan(masked.iloc[3])
+    # No-op when sentinel_values is empty/None.
+    assert mask_sentinel_values(series, None) is series
+    assert mask_sentinel_values(series, []) is series
+
+
+def test_impute_missing_and_cap_outliers_treat_sentinel_values_as_missing():
+    series = pd.Series([1.0, 2.0, 3.0, -999.0])
+    filled, value = impute_missing(series, strategy="median", sentinel_values=[-999.0])
+    assert value == 2.0  # median of [1, 2, 3], -999 excluded from the fit
+    assert filled.iloc[3] == 2.0  # sentinel row masked to NaN then filled like any other missing row
+
+    values = np.array([1.0, 2.0, 100.0, -999.0])
+    capped, params = cap_outliers(
+        values, method="quantile", lower_q=0.0, upper_q=0.5, sentinel_values=[-999.0]
+    )
+    assert params == {"lower": 1.0, "upper": 2.0, "method": "quantile"}
+    assert np.isnan(capped[3])

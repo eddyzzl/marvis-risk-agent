@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.feature.metrics import feature_ks, feature_metrics
+from marvis.feature.transform import detect_sentinel_values
 
 # Columns whose names strongly suggest a model output / score that would leak the
 # target (an earlier model's prediction). These are *soft* flags surfaced for
@@ -48,6 +49,10 @@ class ScreenResult:
     scores: dict[str, dict[str, float | None]] = field(default_factory=dict)
     """Per-feature {ks, missing_rate, unique_count}; iv added for selected ones."""
     n_screened: int = 0
+    sentinel_columns: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    """Columns with a suspected sentinel/special value (PREP-4): {feature: [(value, share), ...]}.
+    Purely informational (screen_features never drops or auto-treats these) so the caller
+    can prompt for a sentinel_values confirmation before fitting impute/cap/normalize/bin/woe."""
 
 
 def _dev_mask(
@@ -100,6 +105,7 @@ def screen_features(
     suspected: list[tuple[str, float, str]] = []
     unusable: list[tuple[str, str]] = []
     clean: list[tuple[str, float]] = []
+    sentinel_columns: dict[str, list[tuple[float, float]]] = {}
 
     for start in range(0, len(feats), max(1, batch_size)):
         batch = feats[start : start + batch_size]
@@ -110,6 +116,9 @@ def screen_features(
             finite = np.isfinite(v_dev)
             missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
             unique = int(np.unique(v_dev[finite]).size)
+            sentinel_hits = detect_sentinel_values(v_dev)
+            if sentinel_hits:
+                sentinel_columns[col] = sentinel_hits
             if missing_rate >= max_missing_rate:
                 unusable.append((col, f"missing rate {missing_rate:.2f} >= {max_missing_rate}"))
                 continue
@@ -153,6 +162,20 @@ def screen_features(
         unusable=tuple(unusable),
         scores=scores,
         n_screened=len(scores) + len(unusable),
+        sentinel_columns=sentinel_columns,
+    )
+
+
+def sentinel_screen_notice(sentinel_columns: dict[str, list[tuple[float, float]]]) -> str:
+    """Screen-gate copy (PREP-4): tell the caller which columns look like they carry
+    sentinel/special values (e.g. -999/9999 "no hit" codes) so they can pass
+    sentinel_values to impute/cap/normalize/bin_feature/woe_encode before fitting,
+    instead of those values silently skewing fit statistics as real observations."""
+    columns = ", ".join(sorted(sentinel_columns))
+    return (
+        f"检测到 {len(sentinel_columns)} 列疑似哨兵/特殊值（如 -999/9999 表示查无/超限）：{columns}；"
+        "建议在 impute/cap/normalize/bin_feature/woe_encode 中传入 sentinel_values 按缺失处理，"
+        "否则这些值会污染填充/标准化/截断/分箱的拟合统计量。"
     )
 
 
@@ -215,4 +238,4 @@ def screen_features_non_binary(
     )
 
 
-__all__ = ["screen_features", "screen_features_non_binary", "ScreenResult"]
+__all__ = ["ScreenResult", "screen_features", "screen_features_non_binary", "sentinel_screen_notice"]

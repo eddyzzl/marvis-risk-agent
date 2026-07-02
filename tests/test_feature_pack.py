@@ -1037,3 +1037,122 @@ def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_pat
     )
     assert crossed.ok is True, crossed.error
     assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+
+
+def test_screen_features_reports_sentinel_columns_notice(tmp_path):
+    """PREP-4: screen_features must surface a suspected sentinel/special-value column
+    (isolated extreme peak, e.g. -999 "no hit") so the user can pass sentinel_values to
+    impute/cap/normalize/bin_feature/woe_encode before fitting."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    rng = np.concatenate([np.linspace(1.0, 100.0, 190), np.full(10, -999.0)])
+    frame = pd.DataFrame({
+        "score": rng,
+        "y": ([0, 1] * 100)[:200],
+    })
+    path = tmp_path / "sentinel.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["score"], "target_col": "y"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert "score" in result.output["sentinel_columns"]
+    assert result.output["sentinel_columns"]["score"][0][0] == -999.0
+    assert "score" in result.output["sentinel_notice"]
+    assert "sentinel_values" in result.output["sentinel_notice"]
+
+
+def test_impute_cap_normalize_bin_woe_accept_sentinel_values(tmp_path):
+    """PREP-4: sentinel_values on impute/cap/normalize/bin_feature/woe_encode must be
+    treated as missing before fitting/binning, not as real observations."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_tools.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    assert imputed.output["fill_values"]["amount"] == 3.5  # median of [1..6], -999 excluded
+    imputed_frame = backend.read_frame(registry.resolve_path(imputed.output["result_dataset_id"]))
+    assert imputed_frame["amount"].iloc[-1] == 3.5  # sentinel rows filled with the train-only median
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 1.0,
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    assert capped.output["bounds"]["amount"]["lower"] == 1.0
+    assert capped.output["bounds"]["amount"]["upper"] == 6.0  # -999 excluded from the IQR fit
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "minmax",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert normalized.ok is True, normalized.error
+    assert normalized.output["scaler_params"]["amount"]["min"] == 1.0
+    assert normalized.output["scaler_params"]["amount"]["max"] == 6.0
+
+    binned = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "equal_width",
+            "max_bins": 2,
+            "sentinel_values": [-999.0],
+        },
+        task_id="task-feature",
+    )
+    assert binned.ok is True, binned.error
+    # Sentinel rows land in the NA bin rather than skewing the equal-width edges.
+    assert binned.output["na_bin"] is not None
+    assert binned.output["na_bin"]["count"] == 2
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["amount"],
+            "target_col": "y",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    assert woe.output["woe_maps"]["amount"]["na_woe"] is not None

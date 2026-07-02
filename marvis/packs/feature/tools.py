@@ -37,6 +37,7 @@ from marvis.feature.transform import (
     apply_scaler,
     cap_outliers,
     impute_missing,
+    mask_sentinel_values,
     minmax_normalize,
     zscore_standardize,
 )
@@ -125,7 +126,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     if target_type != "binary":
         return _screen_features_non_binary(inputs, ctx)
 
-    from marvis.feature.screen import screen_features
+    from marvis.feature.screen import screen_features, sentinel_screen_notice
 
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
@@ -159,7 +160,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         top_k=int(top_k) if top_k is not None else None,
         batch_size=int(inputs.get("batch_size", 500)),
     )
-    return {
+    payload = {
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
@@ -169,6 +170,10 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "excluded_categorical": excluded_categorical,
     }
+    if result.sentinel_columns:
+        payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
+        payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
+    return payload
 
 
 def _excluded_categorical_for_screen(
@@ -267,6 +272,10 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
     feature = str(inputs["feature"])
     target_col = str(inputs["target_col"])
     target = _target_values(frame, target_col)
+    sentinel_values = inputs.get("sentinel_values")
+    if sentinel_values:
+        frame = frame.copy()
+        frame[feature] = mask_sentinel_values(frame[feature], [float(v) for v in sentinel_values])
     values = frame[feature].to_numpy(dtype=float)
     edges = _edges_for(frame, inputs, ctx)
     before = None
@@ -344,6 +353,9 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         required_columns.append(str(inputs["split_col"]))
     _assert_columns(frame, required_columns)
     out = frame.copy()
+    sentinel_values = _sentinel_values_for(inputs, features)
+    for feature, column_sentinels in sentinel_values.items():
+        out[feature] = mask_sentinel_values(out[feature], column_sentinels)
     fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id)
     nan_labels_dropped = require_labels_confirmed(
         fit_frame,
@@ -475,17 +487,22 @@ def tool_normalize(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "normalize", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
     for col in columns:
-        fit_values = out.loc[fit_mask, col].to_numpy(dtype=float)
+        column_sentinels = sentinel_values.get(col)
+        fit_series = mask_sentinel_values(out.loc[fit_mask, col], column_sentinels)
+        fit_values = fit_series.to_numpy(dtype=float)
+        full_series = mask_sentinel_values(out[col], column_sentinels)
+        full_values = full_series.to_numpy(dtype=float)
         if method == "minmax":
             _fit_values, column_params = minmax_normalize(
                 fit_values,
                 feature_range=tuple(inputs.get("feature_range") or (0, 1)),
             )
-            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="minmax")
+            values = apply_scaler(full_values, column_params, kind="minmax")
         elif method == "zscore":
             _fit_values, column_params = zscore_standardize(fit_values)
-            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="zscore")
+            values = apply_scaler(full_values, column_params, kind="zscore")
         else:
             raise FeatureError("method must be minmax or zscore")
         out[col] = values
@@ -514,13 +531,17 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
     for column in columns:
+        column_sentinels = sentinel_values.get(column)
         _filled_fit, value = impute_missing(
             out.loc[fit_mask, column],
             strategy=str(inputs["strategy"]),
             fill_value=inputs.get("fill_value"),
+            sentinel_values=column_sentinels,
         )
-        out[column] = out[column].fillna(value)
+        masked = mask_sentinel_values(out[column], column_sentinels)
+        out[column] = masked.fillna(value)
         fill_values[column] = value
     result = _register_frame(
         runtime,
@@ -546,15 +567,18 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "cap_outliers", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
     for column in columns:
+        column_sentinels = sentinel_values.get(column)
         fit_values = out.loc[fit_mask, column].to_numpy(dtype=float)
         _capped_fit, params = cap_outliers(
             fit_values,
             method=str(inputs.get("method") or "iqr"),
             lower_q=float(inputs.get("lower_q", 0.01)),
             upper_q=float(inputs.get("upper_q", 0.99)),
+            sentinel_values=column_sentinels,
         )
-        all_values = out[column].to_numpy(dtype=float)
+        all_values = mask_sentinel_values(out[column], column_sentinels).to_numpy(dtype=float)
         mask = np.isfinite(all_values)
         clipped = all_values.copy()
         lower = params["lower"]
@@ -577,6 +601,25 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
         "fit_rows": int(fit_mask.sum()),
         "fit_split": fit_split,
     }
+
+
+def _sentinel_values_for(inputs: dict, columns: list[str]) -> dict[str, list[float]]:
+    """Resolve the ``sentinel_values`` input (PREP-4) into a per-column map.
+
+    Accepts either a flat list (applied to every column in ``columns``) or a
+    ``{column: [values, ...]}`` mapping (applied per-column only). Columns with
+    no sentinel values configured are omitted from the result."""
+    raw = inputs.get("sentinel_values")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {
+            str(column): [float(v) for v in values]
+            for column, values in raw.items()
+            if str(column) in columns and values
+        }
+    flat = [float(v) for v in raw]
+    return {column: flat for column in columns} if flat else {}
 
 
 def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str) -> tuple[np.ndarray, str]:

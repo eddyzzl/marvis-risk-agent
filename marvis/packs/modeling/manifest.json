@@ -511,6 +511,12 @@
               "additionalProperties": false
             }
           },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "sentinel_notice": {
+            "type": "string"
+          },
           "note": {
             "type": "string"
           }
