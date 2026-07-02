@@ -23,10 +23,11 @@ across families:
   * Deterministic given ``seed``: stage 1 and stage 2 each draw from their own
     seed-derived ``RandomState`` (``seed`` and ``seed + 1``).
   * Tree recipes (lgb/xgb/catboost) run every trial with early stopping against
-    the test split (mirrors ``train_models``' early-stopping policy) and report
-    the resolved ``best_iteration``/``num_boost_round`` in ``best_params`` so the
-    downstream ``train_models`` step trains at the tuned depth, not a re-run of
-    the full ceiling.
+    a validation fold carved from ``train`` (default 15%, SEL-4/TUNE-3 -- not
+    ``test``, which stays free to serve only as the trial-selection/comparison
+    set) and report the resolved ``best_iteration``/``num_boost_round`` in
+    ``best_params`` so the downstream ``train_models`` step trains at the tuned
+    depth, not a re-run of the full ceiling.
 
 ``recipe="lgb"`` (the default) preserves the exact historical search space and
 trial semantics -- no behaviour change for existing single-recipe callers.
@@ -42,9 +43,14 @@ import numpy as np
 import pandas as pd
 
 from marvis.data.labels import resolve_modeling_splits
-from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
+from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift, weighted_feature_auc, weighted_feature_ks
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS, DEFAULT_TUNE_NUM_THREADS
 from marvis.packs.modeling.errors import ModelingError
-from marvis.packs.modeling.recipes.common import cat_feature_indices
+from marvis.packs.modeling.recipes.common import (
+    carve_early_stop_fold,
+    cat_feature_indices,
+    normalize_monotone_constraints_value,
+)
 
 # Reference learning rate used to scale the per-trial boost-round ceiling: lower
 # sampled learning rates get proportionally more rounds (early stopping still
@@ -137,6 +143,178 @@ DEFAULT_TRIAL_BUDGET: dict[str, int] = {
     "scorecard": 12,
     "mlp": 12,
 }
+
+#: Tree recipes that early-stop against a carved validation fold instead of the
+#: full test split (SEL-4/TUNE-3) -- mirrors train_models' _EARLY_STOPPED_TREE_RECIPES.
+_EARLY_STOPPED_TREE_RECIPES = frozenset({"lgb", "xgb", "catboost"})
+
+#: Recipes whose trials are single-threaded (xgb/catboost n_jobs=thread_count=1,
+#: lr/scorecard/mlp are inherently single-threaded sklearn estimators at this
+#: dataset scale) -- their trials are bit-identical for a fixed seed regardless
+#: of machine core count. lgb is the one recipe whose tune trials run with
+#: DEFAULT_TUNE_NUM_THREADS (0 = every core) for search wall-clock speed, so its
+#: trials are only reproducible on machines with the same core count (TUNE-6:
+#: this is an explicit, documented trade-off, not an oversight -- see
+#: _run_lgb_trial). Recorded per trial/best_metrics as "deterministic" so a
+#: caller auditing cross-machine reproducibility doesn't have to know this
+#: per-recipe contract by heart.
+_CROSS_MACHINE_DETERMINISTIC_RECIPES = frozenset({"xgb", "catboost", "lr", "scorecard", "mlp"})
+
+
+def _group_cols_from_params(params: dict | None) -> list[str] | None:
+    """Optional group/identity column(s) for the early-stopping valid-fold carve,
+    read from the caller-supplied base_params (mirrors
+    ``recipes.common.VALID_GROUP_COLS_PARAM_KEY``); absent by default."""
+    raw = dict(params or {}).get("valid_group_cols")
+    if not raw:
+        return None
+    return raw if isinstance(raw, list) else [raw]
+
+
+# ==========================================================================
+# Optional grouped cross-validation scoring (TUNE-3)
+# ==========================================================================
+
+
+def _cv_folds(
+    frame: pd.DataFrame,
+    *,
+    cv_folds: int,
+    seed: int,
+    group_cols: list[str] | None,
+) -> list[np.ndarray]:
+    """``cv_folds`` disjoint group-aware row-index arrays covering ``frame`` (each
+    row/group assigned to exactly one fold). Deterministic given ``seed``."""
+    rng = np.random.RandomState(_valid_fold_seed_for_cv(seed))
+    resolved_group_cols = [str(col) for col in (group_cols or []) if str(col) in frame.columns]
+    groups = (
+        frame.groupby(resolved_group_cols, sort=False).ngroup().to_numpy()
+        if resolved_group_cols
+        else np.arange(len(frame))
+    )
+    unique_groups = np.unique(groups)
+    rng.shuffle(unique_groups)
+    fold_of_group = {int(group): index % cv_folds for index, group in enumerate(unique_groups)}
+    fold_ids = np.array([fold_of_group[int(g)] for g in groups])
+    return [np.where(fold_ids == fold)[0] for fold in range(cv_folds)]
+
+
+def _valid_fold_seed_for_cv(seed: int) -> int:
+    import hashlib
+
+    digest = hashlib.sha256(f"{int(seed)}:cv_folds".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
+
+
+def _make_cv_trial_runner(
+    recipe: str,
+    *,
+    train: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    feats: list[str],
+    target_col: str,
+    weight_col: str,
+    cv_folds: int,
+    seed: int,
+    early_stopping_rounds: int,
+    max_boost_round: int,
+    overfit_penalty: float,
+    oot_has_labels: bool,
+    base_params: dict | None,
+    pos_weight_hint: float,
+    group_cols: list[str] | None,
+) -> Callable[[dict, str], dict]:
+    """A trial_runner that scores each sampled param set with grouped k-fold CV
+    over ``train`` instead of a single held-out split (TUNE-3): each fold takes a
+    turn as the held-out "test" (tree recipes additionally carve their own
+    early-stopping valid fold from that fold's training portion, exactly like the
+    single-split path), and the trial's score is
+    ``mean(fold_test_ks) - 0.5 * std(fold_test_ks)`` -- a robustness penalty so a
+    param set that wins by getting lucky on one fold doesn't out-rank a param set
+    that wins consistently across folds.
+    """
+    fold_indices = _cv_folds(train, cv_folds=cv_folds, seed=seed, group_cols=group_cols)
+    fold_woot = _sample_weight(oot, weight_col) if oot is not None and weight_col else None
+    fold_runners: list[Callable[[dict, str], dict]] = []
+    for fold in range(cv_folds):
+        fold_test_idx = fold_indices[fold]
+        fold_train_idx = np.concatenate([fold_indices[i] for i in range(cv_folds) if i != fold])
+        fold_train = train.iloc[fold_train_idx]
+        fold_test = train.iloc[fold_test_idx]
+        fold_ytr = fold_train[target_col].to_numpy(dtype=float)
+        fold_yte = fold_test[target_col].to_numpy(dtype=float)
+        fold_wtr = _sample_weight(fold_train, weight_col)
+        fold_wte = _sample_weight(fold_test, weight_col)
+        if recipe in _EARLY_STOPPED_TREE_RECIPES:
+            fold_fit_train, fold_valid = carve_early_stop_fold(
+                fold_train, seed=seed + fold + 1, group_cols=group_cols,
+            )
+            fold_yfit = fold_fit_train[target_col].to_numpy(dtype=float)
+            fold_yva = fold_valid[target_col].to_numpy(dtype=float)
+            fold_wfit = _sample_weight(fold_fit_train, weight_col)
+            fold_wva = _sample_weight(fold_valid, weight_col)
+        else:
+            fold_fit_train, fold_valid = fold_train, fold_test
+            fold_yfit, fold_yva, fold_wfit, fold_wva = fold_ytr, fold_yte, fold_wtr, fold_wte
+        _, _, fold_runner = _recipe_search_hooks(
+            recipe,
+            train=fold_train, test=fold_test, oot=oot,
+            fit_train=fold_fit_train, valid=fold_valid,
+            feats=feats, target_col=target_col,
+            ytr=fold_ytr, yte=fold_yte, wtr=fold_wtr, wte=fold_wte, woot=fold_woot,
+            yfit=fold_yfit, yva=fold_yva, wfit=fold_wfit, wva=fold_wva,
+            seed=seed, early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels,
+            base_params=base_params, pos_weight_hint=pos_weight_hint,
+        )
+        fold_runners.append(fold_runner)
+
+    # Numeric per-fold metrics averaged into the merged record -- each fold trains
+    # its own model, so its oot_ks/oot_auc/etc. are genuinely different values, not
+    # an arbitrary fold's report (only test_ks/train_ks additionally get their
+    # spread reported via test_ks_std/cv_fold_test_ks, since those drive the score).
+    _AVERAGED_KEYS = (
+        "train_auc", "test_auc", "oot_ks", "oot_auc",
+        "lift_head_5", "lift_tail_5", "lift_head_10", "lift_tail_10",
+        "overfit_gap_to", "oot_stability_gap",
+        "weighted_train_auc", "weighted_test_auc", "weighted_oot_ks", "weighted_oot_auc",
+    )
+
+    def cv_runner(params: dict, stage: str) -> dict:
+        fold_records = [runner(params, stage) for runner in fold_runners]
+        # TUNE-5: fold spread/score use the weighted test KS when weights exist
+        # (same fallback _score_trial already applies per fold) -- otherwise CV
+        # would optimise the weighted objective per-fold but rank param sets by
+        # the unweighted one when combining folds.
+        fold_test_ks = [
+            record["weighted_test_ks"] if record.get("weighted_test_ks") is not None else record["test_ks"]
+            for record in fold_records
+        ]
+        fold_train_ks = [
+            record["weighted_train_ks"] if record.get("weighted_train_ks") is not None else record["train_ks"]
+            for record in fold_records
+        ]
+        mean_ks = float(np.mean(fold_test_ks))
+        std_ks = float(np.std(fold_test_ks))
+        score = mean_ks - overfit_penalty * std_ks
+        merged = dict(fold_records[0])
+        merged["train_ks"] = float(np.mean([record["train_ks"] for record in fold_records]))
+        merged["test_ks"] = float(np.mean([record["test_ks"] for record in fold_records]))
+        if any(record.get("weighted_train_ks") is not None for record in fold_records):
+            merged["weighted_train_ks"] = float(np.mean(fold_train_ks))
+        if any(record.get("weighted_test_ks") is not None for record in fold_records):
+            merged["weighted_test_ks"] = mean_ks
+        merged["test_ks_std"] = std_ks
+        merged["cv_fold_test_ks"] = fold_test_ks
+        merged["score"] = score
+        merged["overfit_gap_tt"] = float(np.mean(fold_train_ks)) - mean_ks
+        for key in _AVERAGED_KEYS:
+            values = [record.get(key) for record in fold_records]
+            merged[key] = float(np.mean(values)) if all(v is not None for v in values) else None
+        return merged
+
+    return cv_runner
 
 
 @dataclass(frozen=True)
@@ -296,11 +474,27 @@ def _run_lgb_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     import lightgbm as lgb
 
     params = {**params, **fixed_params}
-    params.update({"seed": seed, "num_threads": 0, "deterministic": True})
+    # TUNE-6: sourced from defaults.py (single source shared with the direct-train
+    # path's DEFAULT_TRAIN_NUM_THREADS) instead of a bare literal. Deliberately
+    # NOT forced to match train_lgb's single-threaded default -- a multi-hour,
+    # multi-recipe two-stage search benefits far more from full-core parallelism
+    # than a single train_model call does. force_row_wise pins the row/col-wise
+    # split so deterministic=True's guarantee actually holds (LightGBM's
+    # determinism contract requires it); without it, deterministic=True alone
+    # does not guarantee bit-identical trees even at a fixed thread count.
+    params.update({
+        "seed": seed,
+        "num_threads": DEFAULT_TUNE_NUM_THREADS,
+        "deterministic": True,
+        "force_row_wise": True,
+    })
     round_ceiling = _boost_round_ceiling(params["learning_rate"], trial_max_boost_round)
     booster = lgb.train(
         params,
@@ -321,6 +515,7 @@ def _run_lgb_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=rounds,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -352,23 +547,45 @@ def _score_trial(
     overfit_penalty: float,
     stage: str,
     best_iteration: int | None = None,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
+    """Score one trial's predictions. TUNE-5: when ``wtr``/``wte`` (sample weights)
+    are given, the score driving trial/champion selection uses weighted KS
+    (``weighted_train_ks``/``weighted_test_ks``) instead of the unweighted KS --
+    a trial tuned against weighted training data must also be *selected* against
+    the weighted population, or the search optimises one objective while picking
+    winners by another. Unweighted train_ks/test_ks/oot_ks are still computed and
+    reported alongside (never dropped) so both readings stay auditable."""
     train_ks = feature_ks(train_preds, ytr)
     test_ks = feature_ks(test_preds, yte)
     train_auc = feature_auc(train_preds, ytr)
     test_auc = feature_auc(test_preds, yte)
     lift = head_tail_lift(test_preds, yte)
+    weighted_train_ks = weighted_feature_ks(train_preds, ytr, wtr) if wtr is not None else None
+    weighted_test_ks = weighted_feature_ks(test_preds, yte, wte) if wte is not None else None
+    weighted_train_auc = weighted_feature_auc(train_preds, ytr, wtr) if wtr is not None else None
+    weighted_test_auc = weighted_feature_auc(test_preds, yte, wte) if wte is not None else None
     if oot is None or not oot_has_labels:
-        oot_ks = oot_auc = None
+        oot_ks = oot_auc = weighted_oot_ks = weighted_oot_auc = None
     else:
         yoot = oot[target_col].to_numpy(dtype=float)
         oot_preds = score_fn(oot)
         oot_ks = feature_ks(oot_preds, yoot)
         oot_auc = feature_auc(oot_preds, yoot)
-    gap_tt = train_ks - test_ks
-    gap_to = (train_ks - oot_ks) if oot_ks is not None else None
-    oot_stability_gap = abs(test_ks - oot_ks) if oot_ks is not None else None
-    score = _trial_score(train_ks=train_ks, test_ks=test_ks, overfit_penalty=overfit_penalty)
+        weighted_oot_ks = weighted_feature_ks(oot_preds, yoot, woot) if woot is not None else None
+        weighted_oot_auc = weighted_feature_auc(oot_preds, yoot, woot) if woot is not None else None
+    # TUNE-5: score by the weighted KS when weights exist, else the unweighted one --
+    # same fallback used for train_ks/test_ks below so gaps stay on the same footing
+    # as whichever metric actually drove selection.
+    score_train_ks = weighted_train_ks if weighted_train_ks is not None else train_ks
+    score_test_ks = weighted_test_ks if weighted_test_ks is not None else test_ks
+    score_oot_ks = weighted_oot_ks if weighted_oot_ks is not None else oot_ks
+    gap_tt = score_train_ks - score_test_ks
+    gap_to = (score_train_ks - score_oot_ks) if score_oot_ks is not None else None
+    oot_stability_gap = abs(score_test_ks - score_oot_ks) if score_oot_ks is not None else None
+    score = _trial_score(train_ks=score_train_ks, test_ks=score_test_ks, overfit_penalty=overfit_penalty)
     record = {
         "params": params,
         "train_ks": train_ks, "test_ks": test_ks, "oot_ks": oot_ks, "score": score,
@@ -379,6 +596,18 @@ def _score_trial(
         "oot_stability_gap": oot_stability_gap,
         "search_stage": stage,
     }
+    if weighted_train_ks is not None:
+        record["weighted_train_ks"] = weighted_train_ks
+    if weighted_test_ks is not None:
+        record["weighted_test_ks"] = weighted_test_ks
+    if weighted_oot_ks is not None:
+        record["weighted_oot_ks"] = weighted_oot_ks
+    if weighted_train_auc is not None:
+        record["weighted_train_auc"] = weighted_train_auc
+    if weighted_test_auc is not None:
+        record["weighted_test_auc"] = weighted_test_auc
+    if weighted_oot_auc is not None:
+        record["weighted_oot_auc"] = weighted_oot_auc
     if best_iteration is not None:
         record["best_iteration"] = best_iteration
     return record
@@ -452,13 +681,20 @@ def _run_xgb_trial(
     feats: list[str],
     ytr: np.ndarray,
     yte: np.ndarray,
-    wtr: np.ndarray | None,
-    wte: np.ndarray | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
+    wva: np.ndarray | None,
     n_estimators: int,
     early_stopping_rounds: int,
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     import xgboost as xgb
 
@@ -466,7 +702,10 @@ def _run_xgb_trial(
         "objective": "binary:logistic",
         "eval_metric": "auc",
         "random_state": seed,
-        "n_jobs": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with the
+        # direct-train path) -- xgb's tune trials already matched train_xgb's
+        # single-threaded default, unlike lgb's (see _run_lgb_trial).
+        "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
         **params,
         **fixed_params,
     }
@@ -475,11 +714,12 @@ def _run_xgb_trial(
         n_estimators=n_estimators,
         early_stopping_rounds=early_stopping_rounds,
     )
+    # SEL-4/TUNE-3: fit/early-stop against the carved fit_train/valid, not train/test.
     model.fit(
-        train[feats], ytr.astype(int),
-        sample_weight=wtr,
-        eval_set=[(test[feats], yte.astype(int))],
-        sample_weight_eval_set=[wte] if wte is not None else None,
+        fit_train[feats], yfit.astype(int),
+        sample_weight=wfit,
+        eval_set=[(valid[feats], yva.astype(int))],
+        sample_weight_eval_set=[wva] if wva is not None else None,
         verbose=False,
     )
     best_iteration = int(getattr(model, "best_iteration", n_estimators - 1)) + 1
@@ -493,6 +733,7 @@ def _run_xgb_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=best_iteration,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -535,12 +776,19 @@ def _run_catboost_trial(
     feats: list[str],
     ytr: np.ndarray,
     yte: np.ndarray,
-    wtr: np.ndarray | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
     iterations: int,
     early_stopping_rounds: int,
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from catboost import CatBoostClassifier
 
@@ -548,7 +796,10 @@ def _run_catboost_trial(
         "loss_function": "Logloss",
         "eval_metric": "AUC",
         "random_seed": seed,
-        "thread_count": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with the
+        # direct-train path) -- catboost's tune trials already matched
+        # train_catboost's single-threaded default, unlike lgb's (see _run_lgb_trial).
+        "thread_count": DEFAULT_TRAIN_NUM_THREADS,
         "allow_writing_files": False,
         "od_type": "Iter",
         **params,
@@ -562,10 +813,11 @@ def _run_catboost_trial(
         od_wait=od_wait,
         cat_features=cat_features or None,
     )
+    # SEL-4/TUNE-3: fit/early-stop against the carved fit_train/valid, not train/test.
     model.fit(
-        train[feats], ytr.astype(int),
-        sample_weight=wtr,
-        eval_set=(test[feats], yte.astype(int)),
+        fit_train[feats], yfit.astype(int),
+        sample_weight=wfit,
+        eval_set=(valid[feats], yva.astype(int)),
         verbose=False,
     )
     best_iteration = int(model.get_best_iteration() or model.tree_count_ - 1) + 1
@@ -584,6 +836,7 @@ def _run_catboost_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=best_iteration,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -622,6 +875,8 @@ def _run_lr_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.linear_model import LogisticRegression
 
@@ -643,6 +898,7 @@ def _run_lr_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -691,6 +947,8 @@ def _run_scorecard_trial(
     target_col: str,
     enforce_monotonic: bool,
     monotonic_direction_hint: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.linear_model import LogisticRegression
 
@@ -738,6 +996,7 @@ def _run_scorecard_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
     return record
 
@@ -787,6 +1046,8 @@ def _run_mlp_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.impute import SimpleImputer
     from sklearn.neural_network import MLPClassifier
@@ -816,6 +1077,7 @@ def _run_mlp_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -837,10 +1099,23 @@ def tune_hyperparameters(
     base_params: dict | None = None,
     drop_nan_labels: bool = False,
     coarse_fraction: float = 0.6,
+    cv_folds: int | None = None,
 ) -> TuneResult:
     """Deterministic two-stage random search for ``recipe``; selects by test KS
     minus in-time overfit penalty. ``recipe`` defaults to ``"lgb"`` and its search
     space/semantics are unchanged from the original lgb-only implementation.
+
+    ``cv_folds`` (TUNE-3, default ``None`` -- single train/test split, unchanged
+    historical behaviour): when set to an integer >= 2, each trial is instead
+    scored with grouped ``cv_folds``-fold cross-validation over ``train`` (group-
+    aware via the same ``valid_group_cols`` param used for the early-stopping
+    carve) -- ``score = mean(fold_test_ks) - overfit_penalty * std(fold_test_ks)``,
+    a robustness penalty against a param set that only got lucky on one fold.
+    ``test`` is not touched by CV scoring; ``best_metrics["test_ks"]`` becomes the
+    fold mean and ``best_metrics["test_ks_std"]`` / trial ``cv_fold_test_ks``
+    additionally report the spread. Costs roughly ``cv_folds``x the runtime of a
+    single split; recommended for small datasets where a single split's KS is
+    noisy.
 
     Supported recipes: ``lgb``, ``xgb``, ``catboost`` (tree recipes, early-stopped
     against the test split, so ``num_boost_round``/``iterations`` in the returned
@@ -881,21 +1156,61 @@ def tune_hyperparameters(
     yte = test[target_col].to_numpy(dtype=float)
     wtr = _sample_weight(train, weight_col)
     wte = _sample_weight(test, weight_col)
+    # TUNE-5: OOT sample weight, for the (report-only) weighted_oot_ks/auc trial
+    # fields -- mirrors compute_model_metrics' weighted OOT metrics on the training
+    # path. OOT is never scored/selected on either way (DOM-9).
+    woot = _sample_weight(oot, weight_col) if oot is not None and weight_col else None
     pos = _weighted_count(ytr, wtr, 1.0)
     neg = _weighted_count(ytr, wtr, 0.0)
     pos_weight_hint = round(neg / pos, 1) if pos > 0 else 1.0
+
+    # SEL-4/TUNE-3: tree recipes early-stop each trial against a fold carved from
+    # train (default 15%), not test -- test stays the trial-selection metric (and,
+    # downstream, the one-time champion comparison set) instead of also deciding
+    # each trial's round count. lr/scorecard/mlp have no early-stopping concept so
+    # they keep fitting/scoring against the full train/test split unchanged.
+    if recipe in _EARLY_STOPPED_TREE_RECIPES:
+        fit_train, valid = carve_early_stop_fold(
+            train, seed=seed, group_cols=_group_cols_from_params(base_params),
+        )
+        yfit = fit_train[target_col].to_numpy(dtype=float)
+        yva = valid[target_col].to_numpy(dtype=float)
+        wfit = _sample_weight(fit_train, weight_col)
+        wva = _sample_weight(valid, weight_col)
+    else:
+        fit_train, valid = train, test
+        yfit, yva, wfit, wva = ytr, yte, wtr, wte
 
     # Recipe-specific search hook: (coarse_sampler, fine_sampler, trial_runner).
     coarse_sampler, fine_sampler, trial_runner = _recipe_search_hooks(
         recipe,
         train=train, test=test, oot=oot,
+        fit_train=fit_train, valid=valid,
         feats=feats, target_col=target_col,
-        ytr=ytr, yte=yte, wtr=wtr, wte=wte,
+        ytr=ytr, yte=yte, wtr=wtr, wte=wte, woot=woot,
+        yfit=yfit, yva=yva, wfit=wfit, wva=wva,
         seed=seed, early_stopping_rounds=early_stopping_rounds,
         max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
         oot_has_labels=oot_has_labels,
         base_params=base_params, pos_weight_hint=pos_weight_hint,
     )
+    resolved_cv_folds = int(cv_folds) if cv_folds else None
+    if resolved_cv_folds is not None:
+        if resolved_cv_folds < 2:
+            raise ModelingError(f"cv_folds must be >= 2: {resolved_cv_folds}")
+        # TUNE-3: replace the single-split trial_runner with grouped k-fold CV
+        # scoring over train; the coarse/fine samplers are recipe-space-only and
+        # stay the single-split ones (no data dependency).
+        trial_runner = _make_cv_trial_runner(
+            recipe,
+            train=train, oot=oot, feats=feats, target_col=target_col,
+            weight_col=weight_col, cv_folds=resolved_cv_folds, seed=seed,
+            early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels, base_params=base_params,
+            pos_weight_hint=pos_weight_hint,
+            group_cols=_group_cols_from_params(base_params),
+        )
 
     total_trials = max(1, resolved_n_trials)
     n_coarse = min(total_trials, max(1, round(total_trials * coarse_fraction)))
@@ -928,8 +1243,14 @@ def tune_hyperparameters(
             best = record
 
     assert best is not None
+    # TUNE-6: explicit deterministic marker per trial (and mirrored onto
+    # best_metrics below) -- True means this recipe's trials are bit-identical
+    # for a fixed seed on any machine; False (lgb only, by design) means
+    # reproduction additionally requires the same core count.
+    trial_deterministic = recipe in _CROSS_MACHINE_DETERMINISTIC_RECIPES
     for record in trials:
         record.pop("_sampled", None)
+        record["deterministic"] = trial_deterministic
 
     return TuneResult(
         best_params=best["params"],
@@ -942,6 +1263,23 @@ def tune_hyperparameters(
             "train_auc": best.get("train_auc"), "test_auc": best.get("test_auc"),
             "oot_auc": best.get("oot_auc"),
             **({"best_iteration": best["best_iteration"]} if "best_iteration" in best else {}),
+            # TUNE-3: only present when cv_folds was used -- the fold spread behind
+            # the mean test_ks above, so a caller can tell "robustly good" apart
+            # from "got lucky on one fold".
+            **({"test_ks_std": best["test_ks_std"]} if "test_ks_std" in best else {}),
+            **({"cv_fold_test_ks": best["cv_fold_test_ks"]} if "cv_fold_test_ks" in best else {}),
+            # TUNE-5: only present when sample_weight_col was given -- the weighted
+            # KS/AUC that actually drove trial/champion selection, reported
+            # alongside the always-present unweighted reading above.
+            **({"weighted_train_ks": best["weighted_train_ks"]} if "weighted_train_ks" in best else {}),
+            **({"weighted_test_ks": best["weighted_test_ks"]} if "weighted_test_ks" in best else {}),
+            **({"weighted_oot_ks": best["weighted_oot_ks"]} if "weighted_oot_ks" in best else {}),
+            **({"weighted_train_auc": best["weighted_train_auc"]} if "weighted_train_auc" in best else {}),
+            **({"weighted_test_auc": best["weighted_test_auc"]} if "weighted_test_auc" in best else {}),
+            **({"weighted_oot_auc": best["weighted_oot_auc"]} if "weighted_oot_auc" in best else {}),
+            # TUNE-6: explicit cross-machine reproducibility contract for this
+            # recipe's trials -- see _CROSS_MACHINE_DETERMINISTIC_RECIPES.
+            "deterministic": trial_deterministic,
         },
         trials=tuple(trials),
         n_trials=len(trials),
@@ -956,12 +1294,19 @@ def _recipe_search_hooks(
     train: pd.DataFrame,
     test: pd.DataFrame,
     oot: pd.DataFrame | None,
+    fit_train: pd.DataFrame,
+    valid: pd.DataFrame,
     feats: list[str],
     target_col: str,
     ytr: np.ndarray,
     yte: np.ndarray,
     wtr: np.ndarray | None,
     wte: np.ndarray | None,
+    woot: np.ndarray | None,
+    yfit: np.ndarray,
+    yva: np.ndarray,
+    wfit: np.ndarray | None,
+    wva: np.ndarray | None,
     seed: int,
     early_stopping_rounds: int,
     max_boost_round: int,
@@ -978,9 +1323,11 @@ def _recipe_search_hooks(
         import lightgbm as lgb
 
         fixed_params = _lgb_base_params(base_params, pos_weight_hint=pos_weight_hint)
+        fixed_params = _normalize_lgb_monotone_constraints(fixed_params, feats)
         trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
-        dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
-        dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
+        # SEL-4/TUNE-3: early stopping watches the carved valid fold, not test.
+        dtrain = lgb.Dataset(fit_train[feats], label=yfit, weight=wfit, free_raw_data=False)
+        dvalid = lgb.Dataset(valid[feats], label=yva, weight=wva, reference=dtrain, free_raw_data=False)
 
         def runner(params: dict, stage: str) -> dict:
             return _run_lgb_trial(
@@ -992,12 +1339,14 @@ def _recipe_search_hooks(
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _sample_coarse_params, _sample_fine_params, runner
 
     if recipe == "xgb":
         fixed_params = _base_params_without_controls(base_params)
+        fixed_params = _normalize_xgb_monotone_constraints(fixed_params, feats)
         n_estimators = int(fixed_params.pop("num_boost_round", fixed_params.pop("n_estimators", max_boost_round)))
 
         def runner(params: dict, stage: str) -> dict:
@@ -1005,11 +1354,13 @@ def _recipe_search_hooks(
                 params, stage,
                 fixed_params=fixed_params, seed=seed,
                 train=train, test=test, oot=oot, feats=feats,
-                ytr=ytr, yte=yte, wtr=wtr, wte=wte,
+                ytr=ytr, yte=yte,
+                fit_train=fit_train, valid=valid, yfit=yfit, yva=yva, wfit=wfit, wva=wva,
                 n_estimators=n_estimators,
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _xgb_sample_coarse, _xgb_sample_fine, runner
@@ -1023,11 +1374,13 @@ def _recipe_search_hooks(
                 params, stage,
                 fixed_params=fixed_params, seed=seed,
                 train=train, test=test, oot=oot, feats=feats,
-                ytr=ytr, yte=yte, wtr=wtr,
+                ytr=ytr, yte=yte,
+                fit_train=fit_train, valid=valid, yfit=yfit, yva=yva, wfit=wfit,
                 iterations=iterations,
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _catboost_sample_coarse, _catboost_sample_fine, runner
@@ -1043,6 +1396,7 @@ def _recipe_search_hooks(
                 ytr=ytr, yte=yte, wtr=wtr,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wte=wte, woot=woot,
             )
 
         return _lr_sample_coarse, _lr_sample_fine, runner
@@ -1062,6 +1416,7 @@ def _recipe_search_hooks(
                 oot_has_labels=oot_has_labels, target_col=target_col,
                 enforce_monotonic=enforce_monotonic,
                 monotonic_direction_hint=monotonic_direction_hint,
+                wte=wte, woot=woot,
             )
 
         return _scorecard_sample_coarse, _scorecard_sample_fine, runner
@@ -1077,6 +1432,7 @@ def _recipe_search_hooks(
                 ytr=ytr, yte=yte, wtr=wtr,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wte=wte, woot=woot,
             )
 
         return _mlp_sample_coarse, _mlp_sample_fine, runner
@@ -1091,6 +1447,46 @@ def _base_params_without_controls(params: dict | None) -> dict:
         for key, value in dict(params or {}).items()
         if str(key) not in blocked and value not in (None, "")
     }
+
+
+_MONOTONE_CONSTRAINT_PARAM_KEYS = ("monotone_constraints", "monotonic_constraints")
+
+
+def _normalize_lgb_monotone_constraints(fixed_params: dict, feats: list[str]) -> dict:
+    """TUNE-7: normalize a raw dict/str/list monotone_constraints value the same
+    way the lgb training path does (recipes.common.normalized_monotone_constraints)
+    before it reaches lgb.train -- a dict form there raises TypeError, and a list
+    form only "works" by feature-order coincidence. Re-expands against ``feats``
+    (the post-feature-selection feature set tune actually searches over), not
+    whatever feature set the constraint was originally authored against."""
+    out = dict(fixed_params)
+    raw = None
+    for key in _MONOTONE_CONSTRAINT_PARAM_KEYS:
+        if key in out:
+            raw = out.pop(key)
+    if raw is None:
+        return out
+    normalized = normalize_monotone_constraints_value(raw, features=feats)
+    if normalized is not None:
+        out["monotone_constraints"] = list(normalized)
+    return out
+
+
+def _normalize_xgb_monotone_constraints(fixed_params: dict, feats: list[str]) -> dict:
+    """TUNE-7: same normalization as ``_normalize_lgb_monotone_constraints`` but
+    formatted as XGBoost's expected ``"(1,-1,0)"`` tuple-string (matches
+    recipes/xgb.py's train_xgb encoding)."""
+    out = dict(fixed_params)
+    raw = None
+    for key in _MONOTONE_CONSTRAINT_PARAM_KEYS:
+        if key in out:
+            raw = out.pop(key)
+    if raw is None:
+        return out
+    normalized = normalize_monotone_constraints_value(raw, features=feats)
+    if normalized is not None:
+        out["monotone_constraints"] = f"({','.join(str(value) for value in normalized)})"
+    return out
 
 
 __all__ = ["DEFAULT_TRIAL_BUDGET", "tune_hyperparameters", "TuneResult"]

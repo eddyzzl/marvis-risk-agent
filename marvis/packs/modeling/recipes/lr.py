@@ -6,7 +6,10 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
@@ -22,6 +25,15 @@ from marvis.packs.modeling.recipes.common import (
 
 
 def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
+    """LR recipe. Unlike scorecard (WOE-encoded), raw LR needs numeric, imputed,
+    standardized inputs -- without impute, missing data crashes sklearn's fit();
+    without standardization, the L2 penalty (default C=1.0) is dominated by
+    whichever feature happens to have the largest raw scale (e.g. an amount
+    column vs. a 0-1 ratio), distorting the fitted coefficients' relative
+    importance (PREP-6/SEL-3). Pipeline mirrors mlp.py's impute->scale->estimator
+    shape so both non-WOE linear/DNN recipes share the same deterministic,
+    artifact-replayable preprocessing contract. random_state is pinned to
+    config.seed for reproducibility."""
     frame = backend.read_frame(dataset_path)
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
@@ -32,14 +44,19 @@ def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> Tr
         **model_params(config.params),
         "random_state": config.seed,
     }
-    model = LogisticRegression(**params)
+    features = list(config.features)
+    model = Pipeline([
+        ("impute", SimpleImputer(strategy="median")),
+        ("scale", StandardScaler()),
+        ("lr", LogisticRegression(**params)),
+    ])
     model.fit(
-        train[list(config.features)],
+        train[features],
         train[config.target_col].to_numpy(dtype=int),
-        sample_weight=sample_weight_values(train, config),
+        lr__sample_weight=sample_weight_values(train, config),
     )
     metrics = compute_model_metrics(
-        lambda data: model.predict_proba(data[list(config.features)])[:, 1],
+        lambda data: model.predict_proba(data[features])[:, 1],
         train,
         test,
         oot,
@@ -57,7 +74,7 @@ def train_lr(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> Tr
 
 
 def _save_lr_model(
-    model: LogisticRegression,
+    model: Pipeline,
     config: TrainConfig,
     out_dir: Path,
     params: dict,
@@ -82,10 +99,10 @@ def _save_lr_model(
 
 
 def _lr_importance(
-    model: LogisticRegression,
+    model: Pipeline,
     features: tuple[str, ...],
 ) -> tuple[tuple[str, float], ...]:
-    coefficients = np.abs(model.coef_[0])
+    coefficients = np.abs(model.named_steps["lr"].coef_[0])
     pairs = sorted(
         zip(features, coefficients, strict=True),
         key=lambda item: (-float(item[1]), item[0]),

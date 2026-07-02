@@ -10,9 +10,11 @@ import lightgbm as lgb
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
+    carve_early_stop_fold_for_config,
     compute_model_metrics,
     model_params,
     normalized_monotone_constraints,
@@ -32,8 +34,16 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         **get_recipe("lgb").default_params,
         **model_params(config.params),
         "random_state": config.seed,
-        "n_jobs": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with tune.py's
+        # DEFAULT_TUNE_NUM_THREADS) instead of a bare literal -- both training
+        # paths' thread counts now come from one place, even though their
+        # defaults intentionally differ (single-thread here for cross-machine
+        # determinism; tune.py defaults to full-core parallelism for search speed).
+        "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
         "deterministic": True,
+        # TUNE-6: pins the row/col-wise split so deterministic=True's guarantee
+        # actually holds (LightGBM's documented determinism contract requires it).
+        "force_row_wise": True,
     }
     params = resolve_auto_scale_pos_weight(params, train, config)
     constraints = normalized_monotone_constraints(config)
@@ -43,19 +53,26 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         params["monotone_constraints"] = list(constraints)
     num_boost_round = int(params.pop("num_boost_round", 20))
     callbacks = []
+    fit_train = train
     if config.early_stopping_rounds:
+        # SEL-4/TUNE-3: early stopping watches a fold carved from train, not test --
+        # test stays a one-time, unbiased comparison set instead of also picking the
+        # round count.
+        fit_train, valid = carve_early_stop_fold_for_config(train, config)
         callbacks.append(lgb.early_stopping(config.early_stopping_rounds, verbose=False))
+    else:
+        valid = test
     model = lgb.LGBMClassifier(
         **params,
         n_estimators=num_boost_round,
     )
-    test_weight = sample_weight_values(test, config)
+    valid_weight = sample_weight_values(valid, config)
     model.fit(
-        train[list(config.features)],
-        train[config.target_col].to_numpy(dtype=int),
-        sample_weight=sample_weight_values(train, config),
-        eval_set=[(test[list(config.features)], test[config.target_col].to_numpy(dtype=int))],
-        eval_sample_weight=[test_weight] if test_weight is not None else None,
+        fit_train[list(config.features)],
+        fit_train[config.target_col].to_numpy(dtype=int),
+        sample_weight=sample_weight_values(fit_train, config),
+        eval_set=[(valid[list(config.features)], valid[config.target_col].to_numpy(dtype=int))],
+        eval_sample_weight=[valid_weight] if valid_weight is not None else None,
         callbacks=callbacks,
     )
     metrics = compute_model_metrics(

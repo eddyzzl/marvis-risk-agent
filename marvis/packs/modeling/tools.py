@@ -65,6 +65,7 @@ from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
+from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
@@ -620,6 +621,9 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     n_trials_override = _optional_int(inputs.get("n_trials"))
     if n_trials_override is not None and n_trials_override < 1:
         raise ModelingError("n_trials must be at least 1")
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     # Per-recipe tuning budget (TUNE-1/SEL-2): every recipe gets its own trial
     # count from DEFAULT_TRIAL_BUDGET (tree recipes 40, lr/scorecard/mlp 12) so a
     # multi-algorithm comparison tunes every candidate, not just lgb. An explicit
@@ -644,6 +648,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         "sample_weight_candidates": sample_weight_candidates,
         "sample_weight_diagnostics": _jsonable(sample_weight_diagnostics),
         "seed": _effective_seed(inputs, ctx),
+        "cv_folds": cv_folds,
         "n_trials": n_trials,
         "n_trials_by_recipe": n_trials_by_recipe,
         "params": _jsonable(params),
@@ -670,6 +675,11 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     single-recipe entry point for back-compat: it degrades to a one-element
     ``recipes`` list. An explicit ``n_trials`` overrides every listed recipe's
     budget uniformly; per-recipe overrides can be passed via ``n_trials_by_recipe``.
+
+    ``cv_folds`` (TUNE-3, optional, default None -- single split): when set (>=2),
+    every recipe's search additionally scores trials via grouped cross-validation
+    instead of a single train/test split; recommended for small samples where a
+    single split's KS is noisy. Costs roughly ``cv_folds``x the runtime.
     """
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
@@ -685,6 +695,9 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     for item, value in explicit_budgets.items():
         if value < 1:
             raise ModelingError("n_trials must be at least 1")
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     sample_weight_col = str(inputs.get("sample_weight_col") or "").strip()
     seed = _effective_seed(inputs, ctx)
     tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
@@ -707,6 +720,8 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     )
     if non_tunable:
         reason += f" {'/'.join(non_tunable)} 不参与调参,使用算法默认参数。"
+    if cv_folds:
+        reason += f" 已启用 {cv_folds} 折分组交叉验证,每轮 trial 耗时约为单一切分的 {cv_folds} 倍。"
     return {
         "recipe": recipe,
         "recipes": recipes,
@@ -717,6 +732,7 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
         "total_n_trials": total_budget,
         "sample_weight_col": sample_weight_col,
         "seed": seed,
+        "cv_folds": cv_folds,
         "params": _jsonable(params),
         "reason": reason,
     }
@@ -736,6 +752,12 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     DEFAULT_TRIAL_BUDGET), and the output additionally carries ``per_recipe``
     (full per-algorithm detail) plus a ``best_params``/``trials`` dict keyed by
     recipe id for ``train_models`` to consume.
+
+    ``cv_folds`` (TUNE-3, optional, default None -- single split): when set (>=2),
+    every requested recipe's search scores trials via grouped cross-validation
+    over train instead of the single train/test split; recommended for small
+    samples where a single split's KS is noisy. Applies uniformly to every
+    recipe in ``recipes``. Costs roughly ``cv_folds``x the runtime.
     """
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
@@ -743,6 +765,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     control_params = _training_control_params(inputs, configured_params)
     base_params = {**configured_params, **control_params}
     n_trials_override = _optional_int(inputs.get("n_trials"))
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     explicit_budgets = {
         str(k): int(v)
         for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
@@ -787,6 +812,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                 sample_weight_col=control_params.get("sample_weight_col", ""),
                 base_params=base_params,
                 drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+                cv_folds=cv_folds,
             )
             best_params = {**control_params, **result.best_params}
             per_recipe[item] = {
@@ -941,6 +967,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     preprocessing_chain_traceable = bool(preprocessing_steps) or sidecar_path(dataset_path).exists()
 
     experiments: list[dict] = []
+    failed: list[dict] = []
+    last_exc: Exception | None = None
     for recipe in recipes:
         if per_recipe_params is not None:
             recipe_params = {**per_recipe_params.get(recipe, {}), **control_params}
@@ -985,11 +1013,21 @@ def tool_train_models(inputs: dict, ctx) -> dict:
                 out_dir=artifact_dir,
             )
             runtime.experiments.attach_result(experiment_id, result)
-        except Exception:
+        except Exception as exc:
+            # TUNE-8/SEL-3: one recipe's failure (e.g. a data issue only that
+            # algorithm chokes on) no longer aborts the whole multi-algorithm
+            # comparison -- it's recorded as a failed candidate and the batch
+            # continues, so the other recipes' results are never lost.
             if result is not None:
                 _cleanup_unattached_artifact(result.artifact, artifact_dir, meta_snapshot)
             runtime.experiments.set_status(experiment_id, "failed")
-            raise
+            failed.append({
+                "experiment_id": experiment_id,
+                "recipe": recipe,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            last_exc = exc
+            continue
         experiment = runtime.experiments.get(experiment_id)
         experiments.append({
             "experiment_id": experiment_id,
@@ -997,6 +1035,16 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             "metrics": _jsonable(experiment.metrics) or {},
         })
 
+    if not experiments:
+        # Every recipe failed: nothing survived to compare, so this must be a hard
+        # error, not a silently empty result -- re-raise the last recipe's original
+        # exception (not a generic wrapper) so infrastructure failures (e.g. an
+        # audit-log write failure, as opposed to a genuine per-recipe training
+        # issue) still surface with their real type/message for callers/tests
+        # that match on it.
+        if last_exc is not None:
+            raise last_exc
+        raise ModelingError("all requested recipes failed to train")
     best, selection_metric = _pick_best_experiment(experiments, target_type=target_type)
     return {
         "experiments": experiments,
@@ -1005,6 +1053,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         "best_recipe": best["recipe"],
         "target_type": target_type,
         "selection_metric": selection_metric,
+        "failed": failed,
     }
 
 
@@ -1020,14 +1069,26 @@ BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
 def _overfit_penalized_test_ks(metrics: dict) -> float:
     """``test_ks - penalty * max(0, train_ks - test_ks)``; ``-inf`` when test_ks is missing.
 
+    TUNE-5: uses ``weighted_test_ks``/``weighted_train_ks`` when the experiment has
+    them (i.e. it trained with a sample_weight_col) instead of the unweighted
+    reading — a model trained against a weighted population must also be
+    *compared* against the weighted population, or champion selection silently
+    optimises a different objective than training did. Falls back to the
+    unweighted KS when no weighted metric is present (the historical, unweighted
+    contract, unchanged).
+
     OOT is intentionally excluded from the score — using it for champion selection would
     contradict tune_hyperparameters' explicit "OOT metrics are reported for transparency
     but are not used for hyperparameter selection" policy (DOM-9).
     """
-    test_ks = metrics.get("test_ks")
+    test_ks = metrics.get("weighted_test_ks")
+    if not isinstance(test_ks, (int, float)):
+        test_ks = metrics.get("test_ks")
     if not isinstance(test_ks, (int, float)):
         return float("-inf")
-    train_ks = metrics.get("train_ks")
+    train_ks = metrics.get("weighted_train_ks")
+    if not isinstance(train_ks, (int, float)):
+        train_ks = metrics.get("train_ks")
     gap = float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
     return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
 
@@ -1135,20 +1196,86 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         base_dir=_artifact_base_dir(runtime.settings, experiment.task_id),
     )
     runtime.experiments.set_status(selected_id, "selected")
+    pre_refit_metrics = {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None}
+    refit_requested = bool(inputs.get("refit_on_train_plus_test", True))
+    refit_info = _apply_champion_refit(
+        runtime,
+        experiment=experiment,
+        recipe=str(selected.get("recipe") or experiment.recipe_id),
+        requested=refit_requested,
+        pre_refit_metrics=pre_refit_metrics,
+    ) if target_type == "binary" else {"applied": False, "requested": refit_requested, "reason": "非二分类任务暂不支持全量重训。"}
+    final_artifact_id = refit_info.get("artifact_id") or artifact_id
+    final_experiment_id = refit_info.get("experiment_id") or selected_id
+    final_metrics = refit_info.get("metrics") or pre_refit_metrics
     return {
-        "selected_experiment_id": selected_id,
-        "artifact_id": artifact_id,
+        "selected_experiment_id": final_experiment_id,
+        "artifact_id": final_artifact_id,
         "recipe": selected.get("recipe") or experiment.recipe_id,
         "target_type": target_type,
         "selection_metric": selection_metric,
         "selection_reason": selection_reason,
-        "metrics": {k: v for k, v in selected.items() if _is_metric_key(k) and v is not None},
+        "metrics": final_metrics,
         "capabilities": capabilities,
         "policy_profile": selected.get("policy_profile") or {},
         "policy_decision": policy_decision,
         "scorecard_table": selected.get("scorecard_table") or [],
         "model_params": selected.get("model_params") or {},
         "experiments": rows,
+        "refit": refit_info,
+    }
+
+
+def _apply_champion_refit(
+    runtime: "_Runtime",
+    *,
+    experiment,
+    recipe: str,
+    requested: bool,
+    pre_refit_metrics: dict,
+) -> dict:
+    """select_experiment's post-selection refit step (TUNE-4, default enabled).
+
+    Retrains the champion's frozen hyperparameters on train+test combined (test's
+    information would otherwise be permanently wasted on the delivered artifact)
+    and registers the refit as a new experiment/artifact so it is comparable and
+    auditable like any other trained candidate. OOT is untouched by the refit;
+    this reports before/after OOT metrics side by side so the caller can confirm
+    the refit actually helped before relying on it. Returns
+    ``{"applied": bool, "requested": bool, "reason": str, ...}``; on success also
+    ``artifact_id``/``experiment_id`` (of the refit artifact) and ``metrics``
+    (the refit artifact's own metrics, becoming the tool's headline ``metrics``).
+    """
+    if not requested:
+        return {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
+    try:
+        refit = _refit_champion_on_train_plus_test(
+            runtime, task_id=experiment.task_id, experiment=experiment, recipe=recipe,
+        )
+    except Exception as exc:  # noqa: BLE001 - refit is an enhancement, never a hard blocker
+        return {"applied": False, "requested": True, "reason": f"全量重训失败,已保留原候选:{exc}"}
+    if refit is None:
+        return {"applied": False, "requested": True, "reason": "候选实验缺少可全量重训的切分信息,已保留原候选。"}
+    refit_config, result = refit
+    refit_experiment_id = runtime.experiments.create(experiment.task_id, recipe, refit_config)
+    runtime.experiments.attach_result(refit_experiment_id, result)
+    refit_experiment = runtime.experiments.get(refit_experiment_id)
+    refit_row = next(
+        (row for row in runtime.experiments.compare([refit_experiment_id])["experiments"] if row.get("id") == refit_experiment_id),
+        {},
+    )
+    post_metrics = {k: v for k, v in refit_row.items() if _is_metric_key(k) and v is not None}
+    return {
+        "applied": True,
+        "requested": True,
+        "reason": "已用冠军的定型超参在 train+test 全量重训,OOT 未参与训练,指标为重训后模型的 OOT/train 结果。",
+        "experiment_id": refit_experiment_id,
+        "artifact_id": refit_experiment.artifact_id,
+        "metrics": post_metrics,
+        "metrics_before_refit": pre_refit_metrics,
+        "metrics_after_refit": post_metrics,
+        "oot_ks_before_refit": pre_refit_metrics.get("oot_ks"),
+        "oot_ks_after_refit": post_metrics.get("oot_ks"),
     }
 
 
@@ -1588,7 +1715,7 @@ def _score_first(row: dict, keys: tuple[str, ...], *, minimize: bool = False) ->
 
 
 def _is_metric_key(key: str) -> bool:
-    return key.startswith(("train_", "test_", "oot_", "psi_")) or key == "overfit_flag"
+    return key.startswith(("train_", "test_", "oot_", "psi_", "weighted_")) or key == "overfit_flag"
 
 
 def tool_calibrate_model(inputs: dict, ctx) -> dict:
@@ -2495,6 +2622,14 @@ def _model_card_key_metrics(metrics: dict) -> list[dict]:
         "psi_oot_vs_train",
         "psi_test_vs_train",
         "overfit_flag",
+        # TUNE-5: weighted KS/AUC, only present when the model trained with a
+        # sample_weight_col -- the口径 that actually drove selection, alongside
+        # the unweighted reading above.
+        "weighted_oot_ks",
+        "weighted_test_ks",
+        "weighted_train_ks",
+        "weighted_oot_auc",
+        "weighted_test_auc",
     ]:
         if metric in metrics and metrics.get(metric) is not None:
             rows.append({"metric": metric, "value": metrics.get(metric)})
@@ -3533,6 +3668,107 @@ def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool
     except KeyError:
         return False
     return sidecar_path(dataset_path).exists()
+
+
+def _refit_champion_on_train_plus_test(
+    runtime: "_Runtime",
+    *,
+    task_id: str,
+    experiment,
+    recipe: str,
+) -> tuple[TrainConfig, TrainResult] | None:
+    """Retrain the champion's frozen hyperparameters on train+test combined (TUNE-4).
+
+    The champion selected by ``select_experiment`` only ever saw the train split
+    (~50-70% of labeled rows once test+OOT are carved out) -- test's information is
+    otherwise permanently wasted on the delivered artifact. This freezes the
+    champion's resolved params (incl. ``num_boost_round``/``iterations`` for tree
+    recipes, scaled by ``best_iteration * 1/(1 - test_fraction)`` so the combined
+    fit gets a comparable number of boosting rounds for its larger training set),
+    disables early stopping (there is no more held-out fold to watch), and refits
+    on train ∪ test. OOT is never touched -- it stays the pre-refit population,
+    scored fresh against the refit model, so before/after OOT metrics are
+    directly comparable.
+
+    Returns ``(refit_config, result)`` on success, or ``None`` when the recipe/
+    config isn't refittable this way (no ``dataset_id``/split_values on the
+    experiment's config, e.g. a very old record) rather than raising -- refit is
+    an enhancement, never a hard blocker.
+    """
+    config = experiment.config
+    dataset_id = getattr(config, "dataset_id", "") or ""
+    split_values = dict(getattr(config, "split_values", {}) or {})
+    if not dataset_id or "train" not in split_values or "test" not in split_values:
+        return None
+    try:
+        dataset_path = runtime.registry.resolve_path(dataset_id)
+    except KeyError:
+        return None
+    frame = runtime.backend.read_frame(dataset_path)
+    split_col = str(config.split_col)
+    if split_col not in frame.columns:
+        return None
+    train_mask = frame[split_col] == split_values["train"]
+    test_mask = frame[split_col] == split_values["test"]
+    n_train, n_test = int(train_mask.sum()), int(test_mask.sum())
+    if n_train == 0 or n_test == 0:
+        return None
+    test_fraction = n_test / (n_train + n_test)
+
+    # Combined rows become "train"; a small deterministic slice is carved back out
+    # to satisfy split_modeling_frame's non-empty-test contract (early stopping is
+    # off below, so this slice is never fit on and never reported -- only train/
+    # OOT metrics from this refit are surfaced).
+    combined_idx = frame.index[train_mask | test_mask]
+    rng = np.random.RandomState(int(config.seed))
+    shuffled = combined_idx.to_numpy().copy()
+    rng.shuffle(shuffled)
+    holdout_n = max(1, min(len(shuffled) - 1, round(len(shuffled) * 0.05)))
+    scratch = frame.copy()
+    scratch[split_col] = scratch[split_col].astype(object)
+    scratch.loc[combined_idx, split_col] = "__refit_train__"
+    scratch.loc[shuffled[:holdout_n], split_col] = "__refit_holdout__"
+    scratch_split_values = {
+        "train": "__refit_train__",
+        "test": "__refit_holdout__",
+        **({"oot": split_values["oot"]} if "oot" in split_values else {}),
+    }
+
+    frozen_params = dict(config.params)
+    resolved_artifact = runtime.modeling_repo.get_model_artifact(experiment.artifact_id)
+    if resolved_artifact is not None:
+        for key in ("num_boost_round", "iterations"):
+            raw = resolved_artifact.params.get(key)
+            if raw is None:
+                continue
+            scaled = max(1, round(int(raw) * (1.0 / max(1e-6, 1.0 - test_fraction))))
+            frozen_params[key] = scaled
+
+    scratch_dir = _artifact_base_dir(runtime.settings, task_id) / "_refit_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    scratch_path = scratch_dir / f"{uuid.uuid4().hex}.parquet"
+    try:
+        scratch.to_parquet(scratch_path, index=False)
+        refit_params = dict(frozen_params)
+        refit_params[REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY] = True
+        refit_config = TrainConfig(
+            dataset_id=dataset_id,
+            features=tuple(config.features),
+            target_col=str(config.target_col),
+            split_col=split_col,
+            split_values=scratch_split_values,
+            params=refit_params,
+            seed=int(config.seed),
+            early_stopping_rounds=None,
+            recipe_id=recipe,
+            target_type=getattr(config, "target_type", "binary"),
+            drop_nan_labels=bool(getattr(config, "drop_nan_labels", False)),
+        )
+        artifact_dir = _artifact_base_dir(runtime.settings, task_id)
+        result = _train_recipe(recipe, runtime.backend, scratch_path, refit_config, out_dir=artifact_dir)
+        return refit_config, result
+    finally:
+        scratch_path.unlink(missing_ok=True)
 
 
 def _train_recipe(

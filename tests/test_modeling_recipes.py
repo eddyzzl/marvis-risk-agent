@@ -260,6 +260,47 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     )
 
 
+def test_train_lr_handles_missing_feature_values_via_impute_scale_pipeline(tmp_path):
+    """PREP-6/SEL-3: LR is now an impute(median)->scale->LogisticRegression
+    Pipeline (mirroring mlp.py), so feature NaNs no longer crash sklearn's fit --
+    previously LogisticRegression().fit() raised on any missing value."""
+    rows = 180
+    x1 = [((i * 37) % 101) / 100 for i in range(rows)]
+    for index in range(0, rows, 11):
+        x1[index] = float("nan")
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "lr_nan_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    backend = DataBackend(tmp_path)
+    result = train_lr(backend, path, config, out_dir=tmp_path / "models_lr_nan")
+
+    assert result.artifact.algorithm == "lr"
+    assert result.metrics.test_auc is not None
+    from sklearn.pipeline import Pipeline
+
+    from marvis.packs.modeling.artifact import load_model as _load_model
+
+    model = _load_model(result.artifact, base_dir=tmp_path / "models_lr_nan")
+    assert isinstance(model, Pipeline)
+    assert list(model.named_steps) == ["impute", "scale", "lr"]
+
+
 def test_train_mlp_writes_artifact_and_is_seed_reproducible(tmp_path):
     rows = 180
     frame = pd.DataFrame({
@@ -588,6 +629,121 @@ def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
     assert first.best_metrics == second.best_metrics
 
 
+def test_tune_hyperparameters_normalizes_dict_monotone_constraints_for_lgb(tmp_path):
+    """TUNE-7: a dict-form monotone_constraints (the same shape train_lgb accepts
+    via recipes.common.normalized_monotone_constraints) must not crash
+    tune_hyperparameters -- previously it was transplanted unnormalized into
+    lgb.train, which raises TypeError for a dict."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_dict.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(
+            n_trials=3,
+            base_params={"monotone_constraints": {"x1": 1, "x2": -1, "x3": 0}},
+        ),
+    )
+
+    assert result.n_trials == 3
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == [1, -1, 0]
+
+
+def test_tune_monotone_constraints_normalization_matches_train_path_vector(tmp_path):
+    """TUNE-7: tune.py's normalization must produce the exact same constraint
+    vector the training path (recipes.common.normalized_monotone_constraints)
+    would for the same dict input and feature set -- "same config, same result"
+    across tune and train."""
+    from marvis.packs.modeling.recipes.common import normalized_monotone_constraints
+
+    raw = {"x1": 1, "x2": -1, "x3": 0}
+    features = ("x1", "x2", "x3")
+    train_config = TrainConfig(
+        dataset_id="d", features=features, target_col="y", split_col="split",
+        split_values={"train": "train", "test": "test"},
+        params={"monotone_constraints": raw}, seed=1, early_stopping_rounds=None,
+    )
+    train_vector = normalized_monotone_constraints(train_config)
+
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_parity.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(n_trials=2, base_params={"monotone_constraints": raw}),
+    )
+
+    assert list(train_vector) == result.trials[0]["params"]["monotone_constraints"]
+
+
+def test_tune_hyperparameters_normalizes_list_monotone_constraints_for_lgb(tmp_path):
+    """TUNE-7: list-form monotone_constraints is normalized (validated/passed
+    through) the same way, not merely transplanted by feature-order coincidence."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_list.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(n_trials=3, base_params={"monotone_constraints": [1, -1, 0]}),
+    )
+
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == [1, -1, 0]
+
+
+def test_tune_hyperparameters_normalizes_dict_monotone_constraints_for_xgb(tmp_path):
+    """TUNE-7: xgb's tune path normalizes to the same "(1,-1,0)" tuple-string
+    encoding recipes/xgb.py's train_xgb uses, keeping tune/train contracts aligned."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_xgb.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(
+            recipe="xgb",
+            n_trials=3,
+            base_params={"monotone_constraints": {"x1": 1, "x2": -1, "x3": 0}},
+        ),
+    )
+
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == "(1,-1,0)"
+
+
+def test_tune_hyperparameters_records_deterministic_flag_per_recipe(tmp_path):
+    """TUNE-6: every trial (and best_metrics) explicitly records whether this
+    recipe's tune trials are reproducible across machines with different core
+    counts. lgb intentionally trades this away (num_threads=0, full-core
+    parallelism, for search wall-clock speed) while xgb/catboost/lr/scorecard/mlp
+    stay single-threaded and thus cross-machine deterministic -- also proves the
+    lgb tune path's thread config comes from DEFAULT_TUNE_NUM_THREADS (0), not the
+    train path's DEFAULT_TRAIN_NUM_THREADS (1), so the two paths' sourced-but-
+    intentionally-different defaults are both exercised."""
+    from marvis.packs.modeling.defaults import DEFAULT_TUNE_NUM_THREADS
+
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_deterministic_flag.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    lgb_result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=3))
+    assert lgb_result.best_metrics["deterministic"] is False
+    assert all(trial["deterministic"] is False for trial in lgb_result.trials)
+    assert lgb_result.trials[0]["params"]["num_threads"] == DEFAULT_TUNE_NUM_THREADS
+    assert lgb_result.trials[0]["params"]["force_row_wise"] is True
+
+    lr_result = tune_hyperparameters(backend, path, **_tune_kwargs(recipe="lr", n_trials=3))
+    assert lr_result.best_metrics["deterministic"] is True
+    assert all(trial["deterministic"] is True for trial in lr_result.trials)
+
+
 def test_tune_hyperparameters_lgb_default_recipe_matches_historical_contract(tmp_path):
     """TUNE-1 regression (d): generalising tune.py to every recipe family must not
     change the lgb single-recipe contract — recipe defaults to "lgb", the returned
@@ -704,6 +860,122 @@ def test_tune_hyperparameters_default_n_trials_resolves_per_recipe():
     assert DEFAULT_TRIAL_BUDGET == {
         "lgb": 40, "xgb": 40, "catboost": 40, "lr": 12, "scorecard": 12, "mlp": 12,
     }
+
+
+def test_tune_hyperparameters_cv_folds_none_matches_single_split_default(tmp_path):
+    """TUNE-3: cv_folds defaults to None, i.e. today's single train/test split --
+    no behaviour change for existing callers that never pass it."""
+    import inspect
+
+    sig = inspect.signature(tune_hyperparameters)
+    assert sig.parameters["cv_folds"].default is None
+
+
+def test_tune_hyperparameters_cv_folds_rejects_values_below_two(tmp_path):
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_invalid.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    with pytest.raises(ModelingError, match="cv_folds"):
+        tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=2, cv_folds=1))
+
+
+def test_tune_hyperparameters_cv_folds_is_deterministic_and_reports_fold_spread(tmp_path):
+    """TUNE-3: with cv_folds set, each trial's score comes from k-fold CV over
+    train (mean - overfit_penalty*std of the per-fold held-out KS), reported via
+    best_metrics/trial test_ks_std + cv_fold_test_ks, and the whole search stays
+    reproducible for a fixed seed."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_folds.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    kwargs = _tune_kwargs(n_trials=4, cv_folds=3, early_stopping_rounds=5, max_boost_round=20)
+
+    first = tune_hyperparameters(backend, path, **kwargs)
+    second = tune_hyperparameters(backend, path, **kwargs)
+
+    assert first.n_trials == 4
+    assert first.best_params == second.best_params
+    assert first.best_metrics == second.best_metrics
+    assert "test_ks_std" in first.best_metrics
+    assert "cv_fold_test_ks" in first.best_metrics
+    for trial in first.trials:
+        assert "cv_fold_test_ks" in trial
+        assert len(trial["cv_fold_test_ks"]) == 3
+        assert trial["test_ks_std"] == pytest.approx(float(np.std(trial["cv_fold_test_ks"])))
+        expected_score = float(np.mean(trial["cv_fold_test_ks"])) - 0.5 * trial["test_ks_std"]
+        assert trial["score"] == pytest.approx(expected_score)
+
+
+def test_tune_hyperparameters_cv_folds_works_for_non_tree_recipe(tmp_path):
+    """TUNE-3: CV scoring isn't tree-recipe-specific -- lr (no early-stopping
+    concept) also scores trials via k-fold CV when cv_folds is set."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_lr.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(recipe="lr", n_trials=3, cv_folds=3),
+    )
+
+    assert result.n_trials == 3
+    assert "test_ks_std" in result.best_metrics
+    assert len(result.best_metrics["cv_fold_test_ks"]) == 3
+
+
+def _weighted_tune_fixture_frame(rows: int = 400) -> pd.DataFrame:
+    """Same shape as _tune_fixture_frame plus a business sample_weight column with
+    real spread (not all-1) so weighted vs unweighted KS actually differ."""
+    frame = _tune_fixture_frame(rows)
+    frame["weight"] = [3.0 if i % 5 == 0 else 1.0 for i in range(rows)]
+    return frame
+
+
+def test_tune_hyperparameters_scores_trials_by_weighted_ks_when_weights_exist(tmp_path):
+    """TUNE-5: when sample_weight_col is given, trial/champion score uses
+    weighted_test_ks/weighted_train_ks (not the unweighted reading) -- a trial
+    tuned against weighted training data must also be selected against the
+    weighted population. Unweighted train_ks/test_ks/oot_ks stay reported
+    alongside, never dropped."""
+    frame = _weighted_tune_fixture_frame()
+    path = tmp_path / "tune_weighted.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(n_trials=4, sample_weight_col="weight"),
+    )
+
+    assert "weighted_train_ks" in result.best_metrics
+    assert "weighted_test_ks" in result.best_metrics
+    assert "weighted_oot_ks" in result.best_metrics
+    # unweighted readings are still present, never dropped.
+    assert "train_ks" in result.best_metrics
+    assert "test_ks" in result.best_metrics
+    for trial in result.trials:
+        assert "weighted_train_ks" in trial
+        assert "weighted_test_ks" in trial
+        expected_score = trial["weighted_test_ks"] - 0.5 * max(
+            0.0, trial["weighted_train_ks"] - trial["weighted_test_ks"]
+        )
+        assert trial["score"] == pytest.approx(expected_score)
+
+
+def test_tune_hyperparameters_without_weight_col_omits_weighted_keys(tmp_path):
+    """TUNE-5 back-compat: no sample_weight_col -> no weighted_* keys at all (not
+    even as None), matching the historical unweighted-only contract."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_unweighted.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=3))
+
+    assert "weighted_test_ks" not in result.best_metrics
+    for trial in result.trials:
+        assert "weighted_test_ks" not in trial
 
 
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):

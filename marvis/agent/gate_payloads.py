@@ -361,6 +361,9 @@ def _modeling_override_guidance(
                 "label": "调参预算",
                 **_n_trials_guidance_by_scale(n_trials, total_rows),
             })
+        cv_guidance = _cv_folds_guidance_by_scale(output.get("cv_folds"), total_rows)
+        if cv_guidance is not None:
+            guidance.append({"id": "cv_folds", "label": "交叉验证", **cv_guidance})
     invalid_weights = [
         str(item.get("column") or "")
         for item in diagnostics
@@ -430,6 +433,41 @@ def _n_trials_guidance_by_scale(n_trials: int, total_rows: int | None) -> dict:
     else:
         message = f"当前调参轮数 {n_trials}；两阶段搜索（粗搜+细搜）下可按需扩大预算以换取更充分的收敛。"
     return {"level": "info", "message": message}
+
+
+def _cv_folds_guidance_by_scale(cv_folds, total_rows: int | None) -> dict | None:
+    """TUNE-3: recommend enabling grouped cross-validation on small samples, where
+    a single train/test split's KS is noisy enough to make trial selection and
+    champion comparison unreliable. Returns None when there is nothing worth
+    saying (cv_folds already set and sample isn't tiny)."""
+    resolved = _safe_int(cv_folds)
+    very_small_sample = total_rows is not None and total_rows < 5_000
+    small_sample = total_rows is not None and total_rows < 20_000
+    if resolved and resolved >= 2:
+        return {
+            "level": "info",
+            "message": (
+                f"已启用 {resolved} 折分组交叉验证；每轮 trial 耗时约为单一切分的 {resolved} 倍，"
+                "换来更稳健的选参/选冠军口径（folds 间方差越小说明参数越稳）。"
+            ),
+        }
+    if very_small_sample:
+        return {
+            "level": "warning",
+            "message": (
+                "当前数据规模很小（<5000 行），单一 train/test 切分的 KS 抽样噪声可能超过参数差异本身；"
+                "建议设置 cv_folds=5（分组感知）换取更可信的选参/选冠军结果，耗时约为不开启时的 5 倍。"
+            ),
+        }
+    if small_sample:
+        return {
+            "level": "info",
+            "message": (
+                "当前数据规模较小（<2万行），建议设置 cv_folds=3（分组感知）降低单一切分的选择噪声；"
+                "耗时约为不开启时的 3 倍。"
+            ),
+        }
+    return None
 
 
 def _safe_int(value) -> int | None:
