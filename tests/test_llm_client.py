@@ -114,11 +114,12 @@ def test_client_honors_reasoning_effort_from_profile(monkeypatch):
             "api_key": "secret",
             "enable_thinking": True,
             "reasoning_effort": "low",
+            "thinking_style": "openai_reasoning",
         }
     ).complete(system_prompt="s", user_prompt="u")
 
     assert captured["payload"]["reasoning_effort"] == "low"
-    assert captured["payload"]["thinking"] == {"type": "enabled"}
+    assert "thinking" not in captured["payload"]
 
 
 def test_client_sends_extra_request_fields_when_configured(monkeypatch):
@@ -419,3 +420,96 @@ def test_interruption_after_on_delta_is_not_retried(monkeypatch):
 
     assert calls["n"] == 1
     assert deltas == ["partial"]
+
+
+def _capture_payload(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _StreamingResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+    return captured
+
+
+def test_thinking_style_none_sends_no_nonstandard_fields(monkeypatch):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+            # thinking_style defaults to "none"
+        }
+    ).complete(system_prompt="s", user_prompt="u")
+    payload = captured["payload"]
+    assert "reasoning_effort" not in payload
+    assert "thinking" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+def test_thinking_style_qwen_sends_chat_template_kwargs(monkeypatch):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "enable_thinking": True,
+            "thinking_style": "qwen_chat_template",
+        }
+    ).complete(system_prompt="s", user_prompt="u")
+    payload = captured["payload"]
+    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
+    assert "reasoning_effort" not in payload
+    assert "thinking" not in payload
+
+
+def test_thinking_style_anthropic_sends_thinking_field(monkeypatch):
+    captured = _capture_payload(monkeypatch)
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "enable_thinking": True,
+            "thinking_style": "anthropic",
+        }
+    ).complete(system_prompt="s", user_prompt="u")
+    payload = captured["payload"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in payload
+
+
+class _ThinkResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([
+            b'{"choices":[{"message":{"content":'
+            b'"<think>weighing options</think>final answer"}}]}',
+        ])
+
+
+def test_complete_strips_thinking_from_final_content(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _ThinkResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert content == "final answer"

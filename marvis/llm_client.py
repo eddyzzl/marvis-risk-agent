@@ -7,6 +7,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from marvis.agent.json_reply import strip_thinking
+
 
 class LLMClientError(RuntimeError):
     pass
@@ -55,8 +57,16 @@ class OpenAICompatibleLLMClient:
         if stream:
             payload["stream_options"] = {"include_usage": True}
         if self.profile.get("enable_thinking"):
-            payload["reasoning_effort"] = str(self.profile.get("reasoning_effort") or "high")
-            payload["thinking"] = {"type": "enabled"}
+            thinking_style = str(self.profile.get("thinking_style") or "none")
+            if thinking_style == "openai_reasoning":
+                payload["reasoning_effort"] = str(
+                    self.profile.get("reasoning_effort") or "high"
+                )
+            elif thinking_style == "anthropic":
+                payload["thinking"] = {"type": "enabled"}
+            elif thinking_style == "qwen_chat_template":
+                payload["chat_template_kwargs"] = {"enable_thinking": True}
+            # thinking_style == "none" (the default) sends no non-standard field.
         extra_request_fields = self.profile.get("extra_request_fields")
         if isinstance(extra_request_fields, dict):
             payload.update(extra_request_fields)
@@ -160,7 +170,7 @@ class OpenAICompatibleLLMClient:
                 streamed=bool(stream), ok=True, error_kind=None,
                 retry_count=retry_count,
             )
-            return content.strip()
+            return strip_thinking(content).strip()
 
     def _record_call(
         self,
