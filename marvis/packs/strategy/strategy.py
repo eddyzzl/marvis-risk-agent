@@ -3,12 +3,20 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
+from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.strategy.contracts import Strategy, StrategyRule
 from marvis.packs.strategy.errors import StrategyError
+
+
+# S1a: a rule-evaluation consumer has no "declared" score_direction to check against
+# (the direction lives implicitly in each rule's comparison operator) -- these two
+# flags are the two possible per-rule directions, distinct from the enum in
+# marvis.data.direction (which describes a *declared* direction, not an *inferred* one).
+_RuleDirectionFlag = Literal["gte_style", "lte_style"]
 
 
 _ALLOWED_DECISIONS = {
@@ -46,6 +54,9 @@ def build_strategy(
             )
         )
 
+    if score_col:
+        _raise_on_inconsistent_rule_directions(parsed_rules, score_col)
+
     return Strategy(
         id=_strategy_id(
             strategy_type=strategy_type,
@@ -60,6 +71,101 @@ def build_strategy(
         default_decision=default_decision,
         description=description,
     )
+
+
+def infer_strategy_rule_direction(rules: list[StrategyRule], score_col: str | None) -> str | None:
+    """S1a: best-effort direction implied by a strategy's rules' comparison operators
+    against ``score_col`` (not a declared direction -- see module docstring note on
+    _RuleDirectionFlag). Returns None when score_col is falsy, no rule references it
+    via a simple top-level comparison, or the operator styles disagree (ambiguous,
+    including the legitimate case where opposite styles agree with each other via
+    opposite decisions -- see _raise_on_inconsistent_rule_directions). Exposed
+    separately from build_strategy so the tool layer can surface it in a response
+    dict without adding a field to the Strategy dataclass (this is a self-check
+    byproduct, not part of the persisted contract -- see spec §2.3).
+    """
+    if not score_col:
+        return None
+    flags = _rule_direction_flags(rules, score_col)
+    distinct = {flag for _, flag in flags}
+    if len(distinct) != 1:
+        return None
+    return "higher_is_better" if distinct == {"gte_style"} else "higher_is_riskier"
+
+
+def _raise_on_inconsistent_rule_directions(rules: list[StrategyRule], score_col: str) -> None:
+    """Flag rules whose comparison operators against score_col disagree in a way that
+    cannot be explained by a coherent single-direction strategy.
+
+    The spec's naive check (any two distinct operator styles == conflict) has a false
+    positive: a common, coherent "banded cutoff" strategy like
+    ``score < 600 -> reject`` + ``score >= 720 -> approve`` uses opposite operator
+    styles but agrees that higher score is better (the low band is explicitly
+    rejected, the high band explicitly approved) -- opposite styles paired with
+    opposite decisions is exactly what a monotonic cutoff strategy looks like, not a
+    contradiction. The real contradiction is opposite styles that land on the SAME
+    decision (e.g. ``score < 500 -> reject`` + ``score >= 900 -> reject`` with nothing
+    ever approved), which no single score direction can explain. Same-style rules
+    with different decisions (e.g. two ``>=`` rules, one approve one reject) are a
+    rule-ordering pattern (first match wins), not a direction question, and are left
+    alone here -- see test_apply_strategy_uses_first_matching_rule.
+    """
+    flags = _rule_direction_flags(rules, score_col)
+    by_style: dict[_RuleDirectionFlag, set] = {"gte_style": set(), "lte_style": set()}
+    for rule, style in flags:
+        by_style[style].add(rule.decision)
+    conflicting_decisions = by_style["gte_style"] & by_style["lte_style"]
+    if conflicting_decisions:
+        raise ScoreDirectionConflictError(
+            tool="build_strategy",
+            score_col=score_col,
+            reason="rules reference score_col with inconsistent comparison direction",
+            conflicting_rules=[
+                rule.condition
+                for rule, style in flags
+                if rule.decision in conflicting_decisions
+            ],
+        )
+
+
+def _rule_direction_flags(
+    rules: list[StrategyRule], score_col: str
+) -> list[tuple[StrategyRule, _RuleDirectionFlag]]:
+    flags: list[tuple[StrategyRule, _RuleDirectionFlag]] = []
+    for rule in rules:
+        direction = _infer_condition_direction(rule.condition, score_col)
+        if direction is not None:
+            flags.append((rule, direction))
+    return flags
+
+
+def _infer_condition_direction(condition: str, score_col: str) -> _RuleDirectionFlag | None:
+    expression = _parse_condition(condition)
+    for clause in _flatten_top_level_compares(expression.body):
+        if not (isinstance(clause, ast.Compare) and isinstance(clause.left, ast.Name)):
+            continue
+        if clause.left.id != score_col:
+            continue
+        op = clause.ops[0]
+        if isinstance(op, ast.GtE | ast.Gt):
+            return "gte_style"
+        if isinstance(op, ast.LtE | ast.Lt):
+            return "lte_style"
+        return None  # Eq/NotEq/In/NotIn carry no direction
+    return None
+
+
+def _flatten_top_level_compares(node: ast.AST) -> list[ast.AST]:
+    """Expand the direct children of a top-level BoolOp into their leaf clauses,
+    without recursing into nested BoolOps -- direction inference only looks at
+    clauses that directly compare score_col, not at the overall boolean structure
+    (see spec §2.3: complex boolean combinations have no well-defined "direction")."""
+    if isinstance(node, ast.BoolOp):
+        clauses: list[ast.AST] = []
+        for value in node.values:
+            clauses.extend(_flatten_top_level_compares(value))
+        return clauses
+    return [node]
 
 
 def apply_strategy(df: pd.DataFrame, strategy: Strategy) -> pd.Series:
@@ -229,4 +335,4 @@ def _strategy_id(
     return f"strategy-{digest[:12]}"
 
 
-__all__ = ["apply_strategy", "build_strategy"]
+__all__ = ["apply_strategy", "build_strategy", "infer_strategy_rule_direction"]

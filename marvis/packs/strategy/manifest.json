@@ -154,7 +154,8 @@
               "required": ["condition", "decision"],
               "additionalProperties": false
             }
-          }
+          },
+          "inferred_score_direction": {"type": ["string", "null"]}
         },
         "required": ["strategy_id", "strategy_type", "score_col", "default_decision", "description", "rules"],
         "additionalProperties": false

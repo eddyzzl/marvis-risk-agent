@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.feature.correlation import safe_correlation
+from marvis.feature.metrics import head_tail_lift as _feature_head_tail_lift
 from marvis.validation.binning import (
     assign_bins,
     bin_distribution,
@@ -411,23 +412,23 @@ def compute_auc(scores, labels) -> float:
 
 
 def compute_head_tail_lift(scores, labels, fraction: float = 0.05) -> tuple[float | None, float | None]:
-    scores = np.asarray(scores, dtype=float)
-    labels = np.asarray(labels, dtype=int)
-    finite_mask = np.isfinite(scores)
-    scores = scores[finite_mask]
-    labels = labels[finite_mask]
-    if len(scores) == 0:
-        return None, None
-    bad_rate = float(labels.mean())
-    bucket_size = int(len(scores) * fraction)
-    if bucket_size <= 0 or bad_rate == 0.0:
-        return None, None
-
-    order = np.argsort(scores)[::-1]
-    sorted_labels = labels[order]
-    head_lift = float(sorted_labels[:bucket_size].mean() / bad_rate)
-    tail_lift = float(sorted_labels[-bucket_size:].mean() / bad_rate)
-    return head_lift, tail_lift
+    """NEW-2 (S1a): delegates to feature/metrics.py::head_tail_lift, the reference
+    direction-aware implementation (risk_sign = sign(corr(scores, target)), so head is
+    always the high-risk end regardless of whether the score is higher-is-riskier or
+    higher-is-better). This module previously hard-coded a descending sort (head =
+    highest score), which silently mislabeled head/tail for any higher-is-better score
+    (e.g. scorecard points) -- see test_head_tail_lift_flips_for_higher_is_better_score.
+    Only the return-shape is adapted here (dict -> 2-tuple); the algorithm itself is
+    not reimplemented, to avoid the two call sites ever drifting apart again.
+    """
+    result = _feature_head_tail_lift(
+        np.asarray(scores, dtype=float),
+        np.asarray(labels, dtype=int),
+        fractions=(fraction,),
+        min_rows=1,
+    )
+    pct = int(round(fraction * 100))
+    return result.get(f"lift_head_{pct}"), result.get(f"lift_tail_{pct}")
 
 
 def build_effectiveness_result(

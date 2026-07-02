@@ -2,7 +2,9 @@ import pandas as pd
 import pytest
 
 import marvis.packs.strategy as strategy_pack
+from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.strategy import StrategyError, apply_strategy, build_strategy
+from marvis.packs.strategy.strategy import infer_strategy_rule_direction
 
 
 def test_build_strategy_applies_rules_in_order_with_default_decision():
@@ -104,3 +106,50 @@ def test_strategy_package_exports_build_surface():
     assert strategy_pack.StrategyError is StrategyError
     assert strategy_pack.build_strategy is build_strategy
     assert strategy_pack.apply_strategy is apply_strategy
+
+
+def test_build_strategy_raises_on_inconsistent_rule_directions():
+    """Two rules land on the SAME decision via opposite comparison styles against
+    score_col -- no single score direction can explain "always reject" whether the
+    score is low or high, unlike a coherent banded cutoff strategy."""
+    with pytest.raises(ScoreDirectionConflictError, match="score_direction conflict"):
+        build_strategy(
+            "approval",
+            [
+                {"condition": "score < 500", "decision": "reject"},
+                {"condition": "score >= 900", "decision": "reject"},
+            ],
+            score_col="score",
+            default_decision="approve",
+        )
+
+
+def test_build_strategy_single_direction_rules_pass_and_report_inferred_direction():
+    strategy = build_strategy(
+        "approval",
+        [
+            {"condition": "score >= 600", "decision": "approve"},
+            {"condition": "score >= 750", "decision": "approve"},
+        ],
+        score_col="score",
+        default_decision="reject",
+    )
+
+    assert infer_strategy_rule_direction(list(strategy.rules), strategy.score_col) == "higher_is_better"
+
+
+def test_build_strategy_banded_cutoff_does_not_raise_despite_opposite_operator_styles():
+    """score < 600 -> reject and score >= 720 -> approve use opposite comparison
+    styles but agree that a higher score is better (reject the low band, approve the
+    high band) -- a coherent monotonic cutoff strategy, not a direction conflict."""
+    strategy = build_strategy(
+        "approval",
+        [
+            {"condition": "score < 600", "decision": "reject"},
+            {"condition": "score >= 720", "decision": "approve"},
+        ],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    assert strategy.score_col == "score"
