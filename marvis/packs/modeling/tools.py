@@ -613,6 +613,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         overfit_penalty=float(inputs.get("overfit_penalty", 0.5)),
         sample_weight_col=control_params.get("sample_weight_col", ""),
         base_params=base_params,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
     )
     best_params = {**control_params, **result.best_params}
     return {
@@ -620,6 +621,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
         "best_metrics": _jsonable(result.best_metrics),
         "n_trials": result.n_trials,
         "trials": _jsonable(result.trials),
+        "nan_labels_dropped": result.nan_labels_dropped,
     }
 
 

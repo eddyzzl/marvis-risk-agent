@@ -952,6 +952,9 @@
           },
           "seed": {
             "type": "integer"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -981,6 +984,10 @@
             "items": {
               "type": "object"
             }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [

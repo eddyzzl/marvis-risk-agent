@@ -22,6 +22,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
 from marvis.packs.modeling.errors import ModelingError
 
@@ -35,6 +36,8 @@ class TuneResult:
     trials: tuple[dict, ...] = field(default_factory=tuple)
     """Per-trial {params, train_ks, test_ks, oot_ks, score} for transparency."""
     n_trials: int = 0
+    nan_labels_dropped: int = 0
+    """Rows excluded by the NaN-label gate (train/test/oot), for audit (mirrors TrainResult)."""
 
 
 def _split(frame: pd.DataFrame, split_col: str, split_values: dict) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
@@ -88,17 +91,26 @@ def tune_hyperparameters(
     overfit_penalty: float = 0.5,
     sample_weight_col: str = "",
     base_params: dict | None = None,
+    drop_nan_labels: bool = False,
 ) -> TuneResult:
     """Random-search LightGBM params; select by test KS minus in-time overfit penalty.
 
     Objective per trial:
     ``test_ks - overfit_penalty * max(0, train_ks - test_ks)``.
+
+    Applies the shared NaN-label confirmation gate (mirrors the training recipes):
+    a NaN target in train/test raises ``NanLabelNotConfirmedError`` unless
+    ``drop_nan_labels=True``. A fully-unlabeled OOT split is legitimate
+    (scoring-only); its oot_ks/oot_auc are reported as ``None``.
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     weight_col = str(sample_weight_col or "").strip()
     cols = feats + [target_col, split_col] + ([weight_col] if weight_col else [])
     frame = backend.read_frame(dataset_path, columns=cols)
     train, test, oot = _split(frame, split_col, split_values)
+    train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
+        train, test, oot, target_col=target_col, drop_nan_labels=drop_nan_labels,
+    )
     ytr = train[target_col].to_numpy(dtype=float)
     yte = test[target_col].to_numpy(dtype=float)
     wtr = _sample_weight(train, weight_col)
@@ -135,7 +147,7 @@ def tune_hyperparameters(
         # head/tail lift of the model SCORE on the test split, at 5% AND 10% (spec §5
         # leaderboard columns 头部/尾部 lift5%/10%).
         lift = head_tail_lift(test_preds, yte)
-        if oot is None:
+        if oot is None or not oot_has_labels:
             oot_ks = oot_auc = None
         else:
             yoot = oot[target_col].to_numpy(dtype=float)
@@ -178,6 +190,7 @@ def tune_hyperparameters(
         },
         trials=tuple(trials),
         n_trials=len(trials),
+        nan_labels_dropped=audit["total_dropped"],
     )
 
 
