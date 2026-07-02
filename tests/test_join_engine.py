@@ -389,3 +389,136 @@ def test_join_engine_has_final_fanout_defense_when_diagnostics_are_wrong(tmp_pat
 
     with pytest.raises(FanOutError):
         engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+
+def _propose_with_key_pairs(engine, registry, repo, anchor, feature, key_pairs, *, seed=0):
+    """Mirror JoinEngine.propose_join_plan but with explicit KeyPairs (skips the
+    ColumnAligner's automatic key discovery), so PERF-2 regression tests can pin an exact
+    match_method (exact_lower/hash/date) without depending on aligner heuristics."""
+    from marvis.data.contracts import JoinPlan, JoinSpec
+
+    diagnostics = engine.diagnose_join(
+        anchor,
+        registry.resolve_path(anchor.id),
+        feature,
+        registry.resolve_path(feature.id),
+        key_pairs,
+        seed=seed,
+    )
+    plan = JoinPlan(
+        id=f"plan-{feature.id}",
+        task_id="task-1",
+        anchor_dataset_id=anchor.id,
+        joins=[
+            JoinSpec(
+                feature_dataset_id=feature.id,
+                key_pairs=key_pairs,
+                diagnostics=diagnostics,
+                dedup_strategy=None,
+                confirmed=False,
+            ),
+        ],
+        status="draft",
+    )
+    repo.create_join_plan(plan)
+    return plan
+
+
+def test_join_engine_exact_lower_uniqueness_and_dedup_use_transformed_key_space(tmp_path):
+    """PERF-2 (H3 recurrence): the feature table has TWO rows ('ABC'/'abc') that are
+    distinct in the raw key space but collide once exact_lower is applied — the same
+    transform the JOIN itself uses. propose must report the duplicate (not raw-unique),
+    and after the user picks dedup=first, execute must succeed 1:1 (no fan-out)."""
+    engine, registry, repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"acct_no": ["abc"], "score": [0.5]}),
+    )
+    feature = _write_dataset(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"acct_no": ["ABC", "abc"], "val": [1, 2]}),
+    )
+    key_pairs = [
+        KeyPair("acct_no", "acct_no", "exact_lower", "both", match_rate=1.0, resolved_by="test"),
+    ]
+
+    plan = _propose_with_key_pairs(engine, registry, repo, anchor, feature, key_pairs)
+    spec = plan.joins[0]
+
+    # (a) propose: uniqueness/needs_dedup must report duplicate in the TRANSFORMED key
+    # space, not the raw key space (raw 'ABC' != 'abc' looks unique).
+    assert spec.diagnostics.feature_key_unique is False
+    assert spec.diagnostics.conflict_report is not None
+    assert spec.diagnostics.conflict_report.n_conflict_keys == 1
+
+    # (b) confirm + execute with dedup must succeed 1:1, not hard-fail with fan-out.
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy="first")
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+    assert result.row_count == anchor.row_count
+    joined = pd.read_parquet(registry.resolve_path(result.id))
+    assert len(joined) == anchor.row_count
+
+
+def test_join_engine_date_uniqueness_and_dedup_use_transformed_key_space(tmp_path):
+    """Same PERF-2 regression for the `date` match method: '20260101' and '2026-01-01'
+    are raw-distinct but the same calendar date once normalized."""
+    engine, registry, repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"apply_date": ["2026-01-01"], "score": [0.5]}),
+    )
+    feature = _write_dataset(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"biz_date": ["20260101", "2026-01-01"], "val": [10, 20]}),
+    )
+    key_pairs = [
+        KeyPair("apply_date", "biz_date", "date", "both", match_rate=1.0, resolved_by="test"),
+    ]
+
+    plan = _propose_with_key_pairs(engine, registry, repo, anchor, feature, key_pairs)
+    spec = plan.joins[0]
+
+    assert spec.diagnostics.feature_key_unique is False
+    assert spec.diagnostics.conflict_report is not None
+    assert spec.diagnostics.conflict_report.n_conflict_keys == 1
+
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy="last")
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+    assert result.row_count == anchor.row_count
+    joined = pd.read_parquet(registry.resolve_path(result.id))
+    assert len(joined) == anchor.row_count
+
+
+def test_join_engine_hash_uniqueness_and_dedup_use_transformed_key_space(tmp_path):
+    """Same PERF-2 regression for a `hash:` match method: a phone hashed with mixed hex
+    case is raw-distinct from its lowercase twin but collides once normalized to lower()."""
+    engine, registry, repo = _engine(tmp_path)
+    digest = hashlib.md5("13800138000".encode()).hexdigest()
+    anchor = _write_dataset(
+        registry, tmp_path, "anchor",
+        pd.DataFrame({"mobile": ["13800138000"], "score": [0.5]}),
+    )
+    feature = _write_dataset(
+        registry, tmp_path, "feature",
+        pd.DataFrame({"phone_md5": [digest.upper(), digest.lower()], "val": [1, 2]}),
+    )
+    key_pairs = [
+        KeyPair("mobile", "phone_md5", "hash:md5", "anchor", match_rate=1.0, resolved_by="test"),
+    ]
+
+    plan = _propose_with_key_pairs(engine, registry, repo, anchor, feature, key_pairs)
+    spec = plan.joins[0]
+
+    assert spec.diagnostics.feature_key_unique is False
+    assert spec.diagnostics.conflict_report is not None
+    assert spec.diagnostics.conflict_report.n_conflict_keys == 1
+
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy="agg_max")
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined")
+
+    assert result.row_count == anchor.row_count
+    joined = pd.read_parquet(registry.resolve_path(result.id))
+    assert len(joined) == anchor.row_count
+    assert joined["val"].tolist() == [2]

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.align import ColumnAligner
-from marvis.data.backend import DataBackend
+from marvis.data.backend import DataBackend, transformed_key_names
 from marvis.data.contracts import (
     LARGE_ROW_THRESHOLD,
     SHRINK_WARN_THRESHOLD,
@@ -121,7 +122,7 @@ class JoinEngine:
 
         anchor_keys = [pair.anchor_col for pair in key_pairs]
         feature_keys = [pair.feature_col for pair in key_pairs]
-        key_unique = self._backend.is_key_unique(feature_path, feature_keys)
+        key_unique = self._backend.is_key_unique(feature_path, feature_keys, key_pairs=key_pairs)
         if len(key_pairs) == 1:
             match_rate = key_pairs[0].match_rate
             sampled = min(SMALL_SAMPLE_N, anchor_rows)
@@ -144,7 +145,9 @@ class JoinEngine:
             joined_preview = anchor_rows
             fan_out = False
         else:
-            distinct_keys = self._backend.distinct_count(feature_path, feature_keys)
+            distinct_keys = self._backend.distinct_count(
+                feature_path, feature_keys, key_pairs=key_pairs
+            )
             duplicate_factor = feature_rows / max(1, distinct_keys)
             joined_preview = int(
                 anchor_rows * match_rate * duplicate_factor
@@ -154,15 +157,24 @@ class JoinEngine:
             # Break the non-unique key down (spec §6): how many duplicates are safe
             # (whole-row identical) vs genuine same-key value conflicts that must not be
             # silently dropped. Surfaced at the C2 gate so the user resolves consciously.
+            # Uniqueness/dedup must be computed in the TRANSFORMED key space (matches the
+            # actual JOIN condition) — the raw key space can disagree, e.g. 'ABC' vs 'abc'
+            # look unique raw but collide under exact_lower.
             if feature_rows <= LARGE_ROW_THRESHOLD:
-                _deduped, conflict_report = two_level_dedup(
-                    self._backend.read_frame(feature_path), list(feature_keys)
+                raw_frame = self._backend.read_frame(feature_path)
+                transformed_frame = self._backend.with_transformed_key_columns(raw_frame, key_pairs)
+                _deduped, level2_report = two_level_dedup(
+                    transformed_frame, transformed_key_names(key_pairs)
+                )
+                conflict_report = replace(
+                    level2_report, key_columns=tuple(str(col) for col in feature_keys)
                 )
             else:
                 try:
                     conflict_report = self._backend.conflict_report(
                         feature_path,
                         list(feature_keys),
+                        key_pairs=key_pairs,
                     )
                 except DataBackendError:
                     conflict_report = None
@@ -234,11 +246,13 @@ class JoinEngine:
             # Only propose a relaxation that actually raises the match (else it is strictly worse).
             if match_rate <= current_match_rate:
                 continue
-            key_unique = self._backend.is_key_unique(feature_path, feature_keys)
+            key_unique = self._backend.is_key_unique(feature_path, feature_keys, key_pairs=reduced)
             if key_unique:
                 fan_out = False
             else:
-                distinct_keys = self._backend.distinct_count(feature_path, feature_keys)
+                distinct_keys = self._backend.distinct_count(
+                    feature_path, feature_keys, key_pairs=reduced
+                )
                 duplicate_factor = feature.row_count / max(1, distinct_keys)
                 preview = int(
                     anchor.row_count * match_rate * duplicate_factor
