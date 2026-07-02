@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from marvis import __version__
 from marvis.app import _is_local_client, create_app
+from marvis.data.backend import DUCKDB_TEMP_DIR_NAME
 from marvis.db import PluginRepository, connect, init_db
 
 
@@ -108,6 +109,22 @@ def test_remote_client_can_read_health_check(tmp_path):
     assert isinstance(payload["sqlite_busy_timeout_ms"], int)
 
 
+def test_health_check_surfaces_duckdb_runtime_config(tmp_path):
+    """PERF-8: /api/health must expose the DuckDB memory_limit / threads /
+    temp_directory actually applied, so an operator can confirm the JOIN engine
+    is not still running on DuckDB's own unconfigured (all-cores, ~80%-RAM)
+    defaults."""
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["duckdb_memory_limit"]
+    assert payload["duckdb_threads"]
+    assert payload["duckdb_temp_directory"] == str(tmp_path / DUCKDB_TEMP_DIR_NAME)
+
+
 def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "marvis.app.sqlite_health",
@@ -122,12 +139,14 @@ def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
     response = TestClient(app).get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "sqlite_journal_mode": "delete",
-        "sqlite_wal_degraded": True,
-        "sqlite_busy_timeout_ms": 5000,
-    }
+    payload = response.json()
+    # This test only cares that sqlite_health()'s output is surfaced verbatim;
+    # duckdb_health() (PERF-8) contributes its own independent keys, asserted in
+    # test_health_check_surfaces_duckdb_runtime_config below.
+    assert payload["status"] == "ok"
+    assert payload["sqlite_journal_mode"] == "delete"
+    assert payload["sqlite_wal_degraded"] is True
+    assert payload["sqlite_busy_timeout_ms"] == 5000
 
 
 def test_remote_client_can_read_api_when_explicitly_enabled(tmp_path, monkeypatch):

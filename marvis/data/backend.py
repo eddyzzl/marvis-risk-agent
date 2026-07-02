@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from numbers import Integral, Real
@@ -39,6 +41,77 @@ DUCKDB_NUMERIC_TYPES = {
     "NUMERIC",
 }
 
+# PERF-8: DuckDB defaults to memory_limit roughly 80% of physical RAM and
+# threads=all cores, with a temp_directory that does not point at a durable,
+# workspace-scoped location -- on a single machine that also runs training
+# subprocesses and (often) a local LLM, that starves everything else and, once
+# a large JOIN exceeds the worker's RLIMIT, fails as an opaque process death
+# instead of spilling to disk. Configure the shared default connection (the one
+# every ``duckdb.sql(...)`` call in this module implicitly uses) once with
+# conservative, overridable settings instead.
+DUCKDB_MEMORY_LIMIT_ENV = "MARVIS_DUCKDB_MEMORY_LIMIT"
+DUCKDB_THREADS_ENV = "MARVIS_DUCKDB_THREADS"
+DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
+DUCKDB_TEMP_DIR_NAME = ".duckdb_tmp"
+
+_duckdb_config_lock = threading.Lock()
+_duckdb_configured_temp_dirs: set[str] = set()
+
+
+def default_duckdb_threads() -> int:
+    """max(2, cpu_count // 2): leaves headroom for training subprocesses / a
+    co-located local LLM instead of DuckDB claiming every core by default."""
+    cpu_count = os.cpu_count() or 2
+    return max(2, cpu_count // 2)
+
+
+def duckdb_runtime_config(temp_directory: Path) -> dict[str, str]:
+    """The PRAGMA values actually applied to the shared default connection, so
+    callers (health/audit endpoints) can report what is in effect."""
+    return {
+        "memory_limit": os.environ.get(DUCKDB_MEMORY_LIMIT_ENV, DEFAULT_DUCKDB_MEMORY_LIMIT),
+        "threads": str(
+            os.environ.get(DUCKDB_THREADS_ENV) or default_duckdb_threads()
+        ),
+        "temp_directory": str(temp_directory),
+    }
+
+
+def configure_duckdb_defaults(temp_directory: Path) -> dict[str, str]:
+    """Idempotently apply memory_limit / threads / temp_directory PRAGMAs to the
+    process-wide default DuckDB connection (the one ``duckdb.sql(...)`` uses).
+    Safe to call from multiple DataBackend instances / threads: guarded by a lock
+    and skipped once a given temp_directory has already been configured, so
+    concurrent threadpool requests (PERF-1) never race on ``SET`` statements."""
+    key = str(temp_directory)
+    if key in _duckdb_configured_temp_dirs:
+        return duckdb_runtime_config(temp_directory)
+    with _duckdb_config_lock:
+        if key in _duckdb_configured_temp_dirs:
+            return duckdb_runtime_config(temp_directory)
+        temp_directory.mkdir(parents=True, exist_ok=True)
+        config = duckdb_runtime_config(temp_directory)
+        duckdb.sql(f"SET memory_limit={sql_string_literal(config['memory_limit'])}")
+        duckdb.sql(f"SET threads={int(config['threads'])}")
+        duckdb.sql(f"SET temp_directory={sql_string_literal(config['temp_directory'])}")
+        _duckdb_configured_temp_dirs.add(key)
+        return config
+
+
+def duckdb_health() -> dict[str, object]:
+    """Current effective PRAGMA values on the shared default connection, for
+    ``/api/health`` (PERF-8 audit visibility)."""
+    rows = duckdb.sql(
+        "SELECT name, value FROM duckdb_settings() "
+        "WHERE name IN ('memory_limit', 'threads', 'temp_directory')"
+    ).fetchall()
+    settings = {str(name): str(value) for name, value in rows}
+    return {
+        "duckdb_memory_limit": settings.get("memory_limit", ""),
+        "duckdb_threads": settings.get("threads", ""),
+        "duckdb_temp_directory": settings.get("temp_directory", ""),
+    }
+
 
 def sql_string_literal(value: str) -> str:
     if "\x00" in value:
@@ -63,6 +136,7 @@ def csv_rel(path: Path) -> str:
 class DataBackend:
     def __init__(self, datasets_root: Path):
         self._root = Path(datasets_root)
+        configure_duckdb_defaults(self._root.parent / DUCKDB_TEMP_DIR_NAME)
 
     def row_count(self, path: Path) -> int:
         path = self._resolve_path(path)
@@ -907,7 +981,10 @@ __all__ = [
     "DataBackend",
     "SUPPORTED_DUCKDB_SUFFIXES",
     "SUPPORTED_FRAME_SUFFIXES",
+    "configure_duckdb_defaults",
     "csv_rel",
+    "duckdb_health",
+    "duckdb_runtime_config",
     "parquet_rel",
     "sql_identifier",
     "sql_string_literal",
