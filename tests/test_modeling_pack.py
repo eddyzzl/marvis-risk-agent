@@ -1227,6 +1227,113 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["failed"] == []
 
 
+def test_train_models_reports_deterministic_ks_bootstrap_confidence_intervals(tmp_path):
+    """SEL-5: every trained experiment carries a bootstrap 95% CI for test_ks (and
+    oot_ks when OOT is present), and the interval is a pure function of the
+    training seed -- the same config trained twice produces bit-identical CI
+    bounds (the platform's deterministic-metrics invariant extended to the new
+    bootstrap statistic)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    def _train():
+        result = runner.invoke(
+            ToolRef("modeling", "train_model"),
+            {
+                "dataset_id": prepared.output["result_dataset_id"],
+                "recipe": "lgb",
+                "features": ["x1", "x2"],
+                "target_col": "y",
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+                "seed": 23,
+            },
+            task_id=task.id,
+        )
+        assert result.ok is True, result.error
+        return result.output["metrics"]
+
+    metrics_a = _train()
+    metrics_b = _train()
+
+    for key in ("test_ks_ci_low", "test_ks_ci_high", "test_ks_ci_std", "ks_ci_n_boot"):
+        assert key in metrics_a, key
+        assert metrics_a[key] == metrics_b[key], key
+
+    assert metrics_a["test_ks_ci_low"] <= metrics_a["test_ks"] <= metrics_a["test_ks_ci_high"]
+    assert metrics_a["ks_ci_n_boot"] == 200
+    # OOT is present in this fixture's split -> OOT CI is also populated.
+    assert metrics_a["oot_ks_ci_low"] <= metrics_a["oot_ks"] <= metrics_a["oot_ks_ci_high"]
+
+
+def test_compare_and_select_experiment_surface_ks_ci_overlap_note(tmp_path):
+    """SEL-5: when two candidates' test_ks bootstrap CIs overlap, compare_experiments
+    and select_experiment both surface a "within sampling error" hint -- the
+    selection RULE itself is untouched (still picks the metric-best row); this is
+    purely an informational note attached to the output."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "lr"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    experiment_ids = trained.output["experiment_ids"]
+
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": experiment_ids, "target_type": "binary"},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    assert "ks_ci_note" in compared.output
+    for row in compared.output["experiments"]:
+        assert "test_ks_ci_low" in row
+        assert "test_ks_ci_high" in row
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": experiment_ids,
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert "ks_ci_note" in selected.output
+    # note is either empty (CIs did not overlap) or mentions the sampling-error
+    # language -- both are valid depending on the random data draw, but the
+    # field must always be present and, when non-empty, carry the expected hint.
+    if selected.output["ks_ci_note"]:
+        assert "抽样误差" in selected.output["ks_ci_note"]
+        assert "抽样误差" in selected.output["selection_reason"]
+
+
 def test_train_models_isolates_a_single_recipe_failure(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """TUNE-8/SEL-3: one recipe's failure (e.g. a data quirk only that algorithm
     chokes on) is recorded as a failed candidate and the batch continues -- the

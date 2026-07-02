@@ -69,6 +69,16 @@ class ModelMetrics:
     train_accuracy: float | None = None
     test_accuracy: float | None = None
     oot_accuracy: float | None = None
+    # SEL-5: bootstrap KS confidence intervals (deterministic, seed-derived).
+    # ci_n_boot is the replicate count actually used (0 when the sample was too
+    # degenerate for a real interval -- see feature/metrics.bootstrap_ks_ci).
+    test_ks_ci_low: float | None = None
+    test_ks_ci_high: float | None = None
+    test_ks_ci_std: float | None = None
+    oot_ks_ci_low: float | None = None
+    oot_ks_ci_high: float | None = None
+    oot_ks_ci_std: float | None = None
+    ks_ci_n_boot: int | None = None
 
 
 @dataclass(frozen=True)

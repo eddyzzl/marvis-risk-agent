@@ -1439,6 +1439,9 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "target_type": {
+            "type": "string"
           }
         },
         "required": [
@@ -1454,6 +1457,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "ks_ci_note": {
+            "type": "string"
           }
         },
         "required": [
@@ -1626,6 +1632,9 @@
           },
           "refit": {
             "type": "object"
+          },
+          "ks_ci_note": {
+            "type": "string"
           }
         },
         "required": [

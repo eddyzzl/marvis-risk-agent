@@ -5,6 +5,9 @@ from sklearn.metrics import roc_auc_score
 from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.errors import FeatureError
 from marvis.feature.metrics import (
+    BOOTSTRAP_KS_LARGE_SAMPLE_N_BOOT,
+    BOOTSTRAP_KS_LARGE_SAMPLE_ROWS,
+    bootstrap_ks_ci,
     compute_psi,
     feature_auc,
     feature_ks,
@@ -31,6 +34,58 @@ def test_feature_ks_matches_naive_threshold_scan():
 
     assert feature_ks(scores, target) == pytest.approx(_naive_ks(scores, target))
     assert feature_ks(scores, np.zeros_like(target)) == 0.0
+
+
+def test_bootstrap_ks_ci_is_deterministic_and_brackets_the_point_estimate():
+    """SEL-5: same seed + same scores/target always reproduces the exact same
+    interval (the platform's deterministic-metrics invariant), and the interval
+    always contains the point estimate it is bracketing."""
+    rng = np.random.RandomState(3)
+    n = 400
+    target = (rng.rand(n) < 0.35).astype(float)
+    scores = target * 0.5 + rng.rand(n) * 0.7
+
+    first = bootstrap_ks_ci(scores, target, seed=42, n_boot=64)
+    second = bootstrap_ks_ci(scores, target, seed=42, n_boot=64)
+
+    assert first == second
+    assert first["ks"] == pytest.approx(feature_ks(scores, target))
+    assert first["ci_low"] <= first["ks"] <= first["ci_high"]
+    assert first["n_boot"] == 64
+    assert first["std"] >= 0.0
+
+    # A different seed generally produces a different interval (not required to
+    # differ in principle, but with 64 replicates over 400 rows the resampled
+    # quantiles essentially never collide bit-for-bit across independent draws).
+    third = bootstrap_ks_ci(scores, target, seed=7, n_boot=64)
+    assert third["ci_low"] != first["ci_low"] or third["ci_high"] != first["ci_high"]
+
+
+def test_bootstrap_ks_ci_downshifts_replicates_for_large_samples():
+    """SEL-5: samples above BOOTSTRAP_KS_LARGE_SAMPLE_ROWS auto-downshift n_boot
+    to bound wall-clock cost, unless the caller passed an explicit n_boot."""
+    rng = np.random.RandomState(5)
+    n = BOOTSTRAP_KS_LARGE_SAMPLE_ROWS + 1000
+    target = (rng.rand(n) < 0.2).astype(float)
+    scores = rng.rand(n)
+
+    auto = bootstrap_ks_ci(scores, target, seed=1)
+    assert auto["n_boot"] == BOOTSTRAP_KS_LARGE_SAMPLE_N_BOOT
+
+    explicit = bootstrap_ks_ci(scores, target, seed=1, n_boot=10)
+    assert explicit["n_boot"] == 10
+
+
+def test_bootstrap_ks_ci_degenerate_single_class_returns_zero_width_interval():
+    """SEL-5: fewer than 2 rows in either class can't support resampling -- this
+    is a reporting enhancement, not a hard blocker, so it degrades to a
+    zero-width interval around the (0.0) point estimate rather than raising."""
+    scores = np.array([0.1, 0.2, 0.3, 0.4])
+    target = np.zeros_like(scores)
+
+    result = bootstrap_ks_ci(scores, target, seed=1)
+
+    assert result == {"ks": 0.0, "ci_low": 0.0, "ci_high": 0.0, "std": 0.0, "n_boot": 0}
 
 
 def test_feature_auc_matches_sklearn_rank_auc():

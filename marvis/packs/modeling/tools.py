@@ -1143,6 +1143,20 @@ def tool_compare_experiments(inputs: dict, ctx) -> dict:
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
     _attach_policy_profile_to_comparison_rows(runtime, rows)
+    target_type = str(inputs.get("target_type") or "").strip()
+    if not target_type and rows:
+        first_id = str(rows[0].get("id") or "")
+        if first_id:
+            target_type = getattr(runtime.experiments.get(first_id).config, "target_type", "binary")
+    # SEL-5: surface the same "within sampling error" hint the gate text uses in
+    # select_experiment, here against the metric-best row -- so a caller
+    # comparing candidates (before ever calling select_experiment) sees the same
+    # signal ahead of time.
+    ks_ci_note = ""
+    if rows and str(target_type or "binary") == "binary":
+        best_row, _metric = _pick_best_comparison_row(rows, target_type=target_type or "binary")
+        ks_ci_note = _ks_ci_overlap_note(best_row, rows, target_type=target_type or "binary")
+    compared["ks_ci_note"] = ks_ci_note
     return _jsonable(compared)
 
 
@@ -1208,6 +1222,9 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     final_artifact_id = refit_info.get("artifact_id") or artifact_id
     final_experiment_id = refit_info.get("experiment_id") or selected_id
     final_metrics = refit_info.get("metrics") or pre_refit_metrics
+    ks_ci_note = _ks_ci_overlap_note(selected, rows, target_type=target_type)
+    if ks_ci_note:
+        selection_reason = f"{selection_reason} {ks_ci_note}"
     return {
         "selected_experiment_id": final_experiment_id,
         "artifact_id": final_artifact_id,
@@ -1223,7 +1240,51 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "model_params": selected.get("model_params") or {},
         "experiments": rows,
         "refit": refit_info,
+        "ks_ci_note": ks_ci_note,
     }
+
+
+#: SEL-5: champion selection message appended when the runner-up's KS bootstrap
+#: CI overlaps the champion's -- the observed gap may be within sampling noise.
+_KS_CI_OVERLAP_NOTE_TEMPLATE = (
+    "冠军与亚军({runner_recipe})的{metric_label} bootstrap 95% 置信区间存在重叠"
+    "(冠军 [{champ_low:.4f}, {champ_high:.4f}] vs 亚军 [{runner_low:.4f}, {runner_high:.4f}]),"
+    "差异在抽样误差内,不构成统计显著优势(选择规则本身未改变,仍按 {metric_label} 排序)。"
+)
+
+
+def _ks_ci_overlap_note(selected: dict, rows: list[dict], *, target_type: str) -> str:
+    """SEL-5: when the champion and runner-up's KS bootstrap CIs overlap, surface
+    a "statistically indistinguishable" hint in the selection output -- purely
+    informational, the selection rule (max overfit-penalized test KS) is
+    unchanged. Only evaluated for binary targets (KS is a binary-only
+    statistic); compares test_ks CI first (the actual selection basis), falling
+    back to oot_ks CI when test CI evidence is missing on either side."""
+    if str(target_type or "binary") != "binary":
+        return ""
+    others = [row for row in rows if row.get("id") != selected.get("id")]
+    if not others:
+        return ""
+    runner_up = max(others, key=_overfit_penalized_test_ks)
+    for metric, label in (("test_ks", "test KS"), ("oot_ks", "OOT KS")):
+        champ_low = selected.get(f"{metric}_ci_low")
+        champ_high = selected.get(f"{metric}_ci_high")
+        runner_low = runner_up.get(f"{metric}_ci_low")
+        runner_high = runner_up.get(f"{metric}_ci_high")
+        if not all(isinstance(v, (int, float)) for v in (champ_low, champ_high, runner_low, runner_high)):
+            continue
+        overlaps = float(champ_low) <= float(runner_high) and float(runner_low) <= float(champ_high)
+        if not overlaps:
+            return ""
+        return _KS_CI_OVERLAP_NOTE_TEMPLATE.format(
+            runner_recipe=runner_up.get("recipe") or runner_up.get("id") or "?",
+            metric_label=label,
+            champ_low=float(champ_low),
+            champ_high=float(champ_high),
+            runner_low=float(runner_low),
+            runner_high=float(runner_high),
+        )
+    return ""
 
 
 def _apply_champion_refit(

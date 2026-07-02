@@ -8,6 +8,7 @@ import pandas as pd
 
 from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.metrics import (
+    bootstrap_ks_ci,
     feature_auc,
     feature_ks,
     feature_psi,
@@ -372,6 +373,7 @@ def compute_model_metrics(
         edges,
     )
     gap_tt, gap_to, overfit_flag = overfitting_check(train_ks, test_ks, oot_ks)
+    ks_ci = _ks_confidence_intervals(test_scores, test_target, oot_scores, oot_target, config)
     return ModelMetrics(
         train_ks=train_ks,
         test_ks=test_ks,
@@ -385,7 +387,50 @@ def compute_model_metrics(
         overfit_train_oot_gap=gap_to,
         overfit_flag=overfit_flag,
         **weighted,
+        **ks_ci,
     )
+
+
+def _ks_confidence_intervals(
+    test_scores: np.ndarray,
+    test_target: np.ndarray,
+    oot_scores: np.ndarray | None,
+    oot_target: np.ndarray | None,
+    config: TrainConfig,
+) -> dict[str, float | int | None]:
+    """SEL-5: bootstrap 95% CI for test/OOT KS, deterministic given config.seed.
+
+    Uses a seed derived from config.seed (distinct from the fitting RNG stream,
+    same derivation pattern as ``_valid_fold_seed``) so the same training config
+    always reproduces the same interval. n_boot auto-downshifts for large
+    samples inside bootstrap_ks_ci itself; not requested here explicitly so
+    every recipe gets that cost control automatically.
+    """
+    ci_seed = _bootstrap_ci_seed(config.seed)
+    test_ci = bootstrap_ks_ci(test_scores, test_target, seed=ci_seed)
+    out: dict[str, float | int | None] = {
+        "test_ks_ci_low": test_ci["ci_low"],
+        "test_ks_ci_high": test_ci["ci_high"],
+        "test_ks_ci_std": test_ci["std"],
+        "ks_ci_n_boot": test_ci["n_boot"],
+    }
+    if oot_scores is not None and oot_target is not None:
+        oot_ci = bootstrap_ks_ci(oot_scores, oot_target, seed=ci_seed)
+        out["oot_ks_ci_low"] = oot_ci["ci_low"]
+        out["oot_ks_ci_high"] = oot_ci["ci_high"]
+        out["oot_ks_ci_std"] = oot_ci["std"]
+    else:
+        out["oot_ks_ci_low"] = None
+        out["oot_ks_ci_high"] = None
+        out["oot_ks_ci_std"] = None
+    return out
+
+
+def _bootstrap_ci_seed(seed: int) -> int:
+    """Deterministic seed derivation distinct from the base training seed and
+    the early-stop valid-fold seed (mirrors ``_valid_fold_seed``'s pattern)."""
+    digest = hashlib.sha256(f"{int(seed)}:ks_ci".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
 
 
 def _weighted_binary_metrics(
