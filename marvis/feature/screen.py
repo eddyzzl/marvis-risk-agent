@@ -21,7 +21,8 @@ import re
 import numpy as np
 import pandas as pd
 
-from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
+from marvis.feature.correlation import safe_correlation
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_auc, feature_ks, feature_metrics
 from marvis.feature.transform import detect_sentinel_values
 
 # Columns whose names strongly suggest a model output / score that would leak the
@@ -309,6 +310,7 @@ def screen_features_non_binary(
     *,
     features: list[str],
     target_col: str,
+    target_type: str = "continuous",
     split_col: str | None = None,
     holdout_values: tuple[str, ...] = ("oot",),
     max_missing_rate: float = 0.95,
@@ -320,14 +322,25 @@ def screen_features_non_binary(
     Eligibility still uses the same dev-row contract as binary screening: OOT or
     other holdout rows must not decide whether a feature is usable. ``ranked``
     contains every clean feature, while ``selected`` applies ``top_k``.
+
+    FS-10: previously every clean feature was kept in *input order* (no association
+    with the target at all), so ``top_k`` amounted to picking whichever columns
+    happened to come first. Clean features are now ranked by target association —
+    ``target_type="continuous"`` uses ``|Spearman(feature, target)|`` descending;
+    ``target_type="multiclass"`` uses the one-vs-rest AUC macro-average descending —
+    and the score is recorded in ``scores[col]["assoc_score"]`` (``ks`` stays ``None``
+    for non-binary, unchanged, so existing binary-shaped consumers are unaffected).
+    Both are deterministic (no model, closed-form formulas already used elsewhere).
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
-    base = (
-        backend.read_frame(dataset_path, columns=[split_col])
-        if split_col
-        else None
-    )
+    base_cols = [target_col] + ([split_col] if split_col else [])
+    base = backend.read_frame(dataset_path, columns=base_cols) if (split_col or feats) else None
     dev = _dev_mask(base, split_col, holdout_values) if base is not None else None
+    target_dev = None
+    if base is not None:
+        target_dev = base[target_col].to_numpy(dtype=float)
+        if dev is not None:
+            target_dev = target_dev[dev]
 
     scores: dict[str, dict[str, float | None]] = {}
     unusable: list[tuple[str, str]] = []
@@ -347,8 +360,13 @@ def screen_features_non_binary(
             if unique < min_unique:
                 unusable.append((col, "constant"))
                 continue
+            scores[col]["assoc_score"] = _non_binary_assoc_score(v_dev, target_dev, target_type)
             clean.append((col, None))
 
+    # FS-10: rank by |assoc_score| descending (stable sort keeps input order on ties, and
+    # missing/undefined association sorts last) instead of leaving top_k a slice of
+    # whatever order `features` happened to arrive in.
+    clean.sort(key=lambda item: _assoc_sort_key(scores[item[0]].get("assoc_score")), reverse=True)
     ranked = tuple(clean)
     selected = tuple(c for c, _ in (clean[:top_k] if top_k else clean))
     return ScreenResult(
@@ -360,6 +378,40 @@ def screen_features_non_binary(
         scores=scores,
         n_screened=len(feats),
     )
+
+
+def _non_binary_assoc_score(
+    values: np.ndarray,
+    target: np.ndarray | None,
+    target_type: str,
+) -> float | None:
+    """FS-10 ranking score for a non-binary screen candidate: |Spearman| for a continuous
+    target, one-vs-rest AUC macro-average for multiclass. ``None`` when there is no target
+    to rank against (mirrors the pre-FS-10 no-target-read behavior for callers that omit
+    it) or too few finite pairs to form a correlation/AUC."""
+    if target is None:
+        return None
+    if str(target_type) == "multiclass":
+        classes = np.unique(target[np.isfinite(target)])
+        if classes.size < 2:
+            return None
+        aucs = [
+            feature_auc(values, (target == cls).astype(float), direction_agnostic=True)
+            for cls in classes
+        ]
+        return float(np.mean(aucs))
+    # continuous (default): |Spearman(feature, target)| via rank-transformed Pearson —
+    # the same rank-correlation pattern correlation_matrix() already uses for
+    # method="spearman", reused here instead of reimplementing rank correlation.
+    ranked_values = pd.Series(values).rank().to_numpy(dtype=float)
+    ranked_target = pd.Series(target).rank().to_numpy(dtype=float)
+    return abs(safe_correlation(ranked_values, ranked_target))
+
+
+def _assoc_sort_key(assoc_score: float | None) -> float:
+    """Missing/undefined association sorts last (FS-10) — never crashes the comparator
+    and never outranks a real (even zero) association score."""
+    return assoc_score if assoc_score is not None else float("-inf")
 
 
 __all__ = ["ScreenResult", "screen_features", "screen_features_non_binary", "sentinel_screen_notice"]

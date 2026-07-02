@@ -7,6 +7,7 @@ from marvis.feature.screen import (
     LEAKAGE_WATCH_LOW,
     SPLIT_SHIFT_THRESHOLD,
     screen_features,
+    screen_features_non_binary,
 )
 
 
@@ -165,3 +166,68 @@ def test_screen_records_iv_binning_convention(tmp_path):
 
     assert "f" in result.selected
     assert result.scores["f"]["iv_binning"] == "equal_frequency_10"
+
+
+def test_screen_non_binary_continuous_ranks_by_spearman(tmp_path):
+    """FS-10: continuous-target screening ranks clean features by |Spearman| descending
+    instead of leaving top_k a slice of input order — the weakly-associated feature
+    listed FIRST in `features` must not out-rank the strongly-associated one listed later."""
+    rows = 100
+    target = np.linspace(0, 1, rows)
+    strong = target + np.random.RandomState(1).normal(scale=0.02, size=rows)  # |corr| ~ 1
+    weak = np.random.RandomState(2).permutation(rows).astype(float)           # |corr| ~ 0
+    frame = pd.DataFrame({"weak": weak, "strong": strong, "target": target})
+    backend, path = _write(tmp_path, frame, name="non_binary.parquet")
+
+    result = screen_features_non_binary(
+        backend, path, features=["weak", "strong"], target_col="target",
+        target_type="continuous",
+    )
+
+    assert [c for c, _ks in result.ranked] == ["strong", "weak"]
+    assert result.scores["strong"]["assoc_score"] > result.scores["weak"]["assoc_score"]
+    assert result.scores["strong"]["ks"] is None  # ks stays None for non-binary (unchanged)
+    # top_k now picks the actually-associated feature, not whichever came first in input.
+    capped = screen_features_non_binary(
+        backend, path, features=["weak", "strong"], target_col="target",
+        target_type="continuous", top_k=1,
+    )
+    assert capped.selected == ("strong",)
+
+
+def test_screen_non_binary_multiclass_ranks_by_one_vs_rest_auc(tmp_path):
+    """FS-10: multiclass screening ranks by one-vs-rest AUC macro-average descending."""
+    rows = 150
+    rng = np.random.RandomState(4)
+    target = np.array([0, 1, 2] * (rows // 3))
+    # informative: distinct level per class -> high macro AUC.
+    informative = target.astype(float) + rng.normal(scale=0.1, size=rows)
+    # noise: unrelated to class.
+    noise = rng.normal(size=rows)
+    frame = pd.DataFrame({"noise": noise, "informative": informative, "target": target})
+    backend, path = _write(tmp_path, frame, name="non_binary_mc.parquet")
+
+    result = screen_features_non_binary(
+        backend, path, features=["noise", "informative"], target_col="target",
+        target_type="multiclass",
+    )
+
+    assert [c for c, _ks in result.ranked][0] == "informative"
+    assert result.scores["informative"]["assoc_score"] > result.scores["noise"]["assoc_score"]
+
+
+def test_screen_non_binary_ties_preserve_input_order(tmp_path):
+    """FS-10: a stable sort on tied association scores must not reorder input — regression
+    guard for the existing continuous-screen ranked-order test expectations."""
+    target = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+    good1 = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])   # |Spearman| == 1.0
+    good2 = np.array([6.0, 5.0, 4.0, 3.0, 2.0, 1.0])   # |Spearman| == 1.0 (tied with good1)
+    frame = pd.DataFrame({"good1": good1, "good2": good2, "target": target})
+    backend, path = _write(tmp_path, frame, name="non_binary_tie.parquet")
+
+    result = screen_features_non_binary(
+        backend, path, features=["good1", "good2"], target_col="target",
+        target_type="continuous",
+    )
+
+    assert [c for c, _ks in result.ranked] == ["good1", "good2"]

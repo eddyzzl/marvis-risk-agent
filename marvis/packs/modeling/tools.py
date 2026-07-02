@@ -580,6 +580,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         runtime.registry.resolve_path(dataset.id),
         features=features,
         target_col=str(inputs["target_col"]),
+        target_type=str(inputs.get("target_type") or "continuous"),
         split_col=_optional_str(inputs.get("split_col")),
         holdout_values=tuple(str(v) for v in holdout) if holdout else ("oot",),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
