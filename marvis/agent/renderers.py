@@ -100,6 +100,53 @@ def _render_screen(o: dict):
     return text, tables
 
 
+def _render_select(o: dict):
+    """FS-1 multivariate refinement gate: IV floor + correlation (+ optional VIF) funnel
+    between the sanity-level screen and tuning. Surfaces per-stage drop counts/reasons so
+    the confirm gate reads as a funnel, not just a final list."""
+    selected = o.get("selected") or []
+    dropped = o.get("dropped") or []
+    scores = o.get("scores") if isinstance(o.get("scores"), dict) else {}
+    n_in = len(selected) + len(dropped)
+    low_iv = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "low" in str(item[1]) and "IV" in str(item[1])]
+    collinear = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "collinear" in str(item[1])]
+    high_vif = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "VIF" in str(item[1])]
+    top_k_dropped = [item for item in dropped if isinstance(item, (list, tuple)) and len(item) > 1 and "top_k" in str(item[1])]
+    other = [item for item in dropped if item not in low_iv and item not in collinear and item not in high_vif and item not in top_k_dropped]
+    text = (
+        f"**精选特征完成**:从 {n_in} 个候选中精选出 **{len(selected)}** 个特征"
+        f"(淘汰 {len(dropped)} 个)。\n"
+        f"- IV 底线淘汰 {len(low_iv)} 个\n"
+        f"- 相关性去冗余淘汰 {len(collinear)} 个\n"
+        f"- 高 VIF 淘汰 {len(high_vif)} 个\n"
+        f"- 超出 top_k 淘汰 {len(top_k_dropped)} 个"
+    )
+    if other:
+        text += f"\n- 其他原因淘汰 {len(other)} 个"
+    fit_rows = o.get("fit_rows")
+    fit_split = o.get("fit_split")
+    if fit_rows is not None:
+        text += f"\n\n统计口径:{fit_split or 'train'} 上 {fit_rows} 行。"
+    tables = []
+    if selected:
+        rows = []
+        for feat in selected[:20]:
+            s = scores.get(feat) if isinstance(scores.get(feat), dict) else {}
+            rows.append([feat, _num(s.get("iv")), _num(s.get("ks"))])
+        tables.append({"title": f"最终清单(前20,共{len(selected)})", "columns": ["特征", "IV", "KS"], "rows": rows})
+    if dropped:
+        rows = []
+        for item in dropped[:30]:
+            if isinstance(item, (list, tuple)) and item:
+                feat = str(item[0])
+                reason = str(item[1]) if len(item) > 1 else ""
+            else:
+                feat, reason = str(item), ""
+            rows.append([feat, reason])
+        tables.append({"title": f"淘汰清单(前30,共{len(dropped)})", "columns": ["特征", "原因"], "rows": rows})
+    return text, tables
+
+
 def _render_choose_modeling_spec(o: dict):
     recipes = [str(item) for item in (o.get("recipes") or [])]
     target_type = str(o.get("target_type") or "binary")
@@ -830,6 +877,7 @@ _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
     "screen_features": _render_screen,
+    "select_features": _render_select,
     "configure_tuning": _render_configure_tuning,
     "tune_hyperparameters": _render_tune,
     "train_model": _render_train,

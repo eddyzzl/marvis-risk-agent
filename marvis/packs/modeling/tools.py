@@ -409,6 +409,7 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         runtime.registry.resolve_path(dataset.id),
         features=features,
         target_col=str(inputs["target_col"]),
+        target_type=str(inputs.get("target_type", "binary")),
         iv_min=float(inputs.get("iv_min", 0.02)),
         corr_max=float(inputs.get("corr_max", 0.8)),
         vif_max=float(inputs.get("vif_max", 10.0)),

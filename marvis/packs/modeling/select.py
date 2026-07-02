@@ -33,6 +33,7 @@ def select_features(
     *,
     features: list[str],
     target_col: str,
+    target_type: str = "binary",
     iv_min: float = 0.02,
     corr_max: float = 0.8,
     vif_max: float = 10.0,
@@ -75,6 +76,15 @@ def select_features(
     nan_labels_dropped = require_labels_confirmed(
         frame, target_col, drop_nan_labels=drop_nan_labels,
     )
+    if str(target_type or "binary") != "binary":
+        # IV/KS (and therefore the WOE space) are binary-only statistics (the FS-1 funnel
+        # is framed around binary KS/IV throughout). For continuous/multiclass targets,
+        # skip the multivariate refinement and pass every candidate through top_k only —
+        # mirrors screen_features' non-binary bypass (tools.py::_screen_features_non_binary).
+        return _select_features_passthrough(
+            features, top_k=top_k, nan_labels_dropped=nan_labels_dropped,
+            fit_rows=fit_rows, fit_split=fit_split,
+        )
     target = frame[target_col].to_numpy(dtype=float)
     normalized_space = str(space or "raw").strip().lower()
     if normalized_space == "woe":
@@ -295,6 +305,29 @@ def _apply_top_k(
             dropped.append((feature, f"outside top_k {top_k}"))
         kept = selected
     return kept, dropped
+
+
+def _select_features_passthrough(
+    features: list[str],
+    *,
+    top_k: int | None,
+    nan_labels_dropped: int,
+    fit_rows: int,
+    fit_split: str,
+) -> SelectionResult:
+    """Non-binary bypass: no IV/corr/VIF statistic applies, so every candidate is kept
+    (column order preserved) and only the top_k guardrail is enforced."""
+    unique_features = list(dict.fromkeys(features))
+    kept = unique_features
+    dropped: list[tuple[str, str]] = []
+    if top_k is not None and top_k > 0 and len(kept) > top_k:
+        dropped = [(feature, f"outside top_k {top_k}") for feature in kept[top_k:]]
+        kept = kept[:top_k]
+    scores = {feature: {"space": "n/a (non-binary target)"} for feature in unique_features}
+    return SelectionResult(
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped,
+        fit_rows=fit_rows, fit_split=fit_split,
+    )
 
 
 def _woe_sign_warnings(

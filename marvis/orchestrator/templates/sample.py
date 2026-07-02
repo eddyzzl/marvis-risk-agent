@@ -412,11 +412,51 @@ MODELING = WorkflowTemplate(
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "leakage_ks": 0.4,
                 "max_missing_rate": 0.95,
+                # Loose top_k backstop (FS-1 decision #3): a wide raw table (hundreds/
+                # thousands of clean columns) must not flow straight into multivariate
+                # refinement unbounded — 200 is far above any real feature count but
+                # caps the pathological case. iv_min/corr_max in "精选特征" below do the
+                # real narrowing.
+                "top_k": 200,
             },
             depends_on_titles=("切分样本", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             # G1 门:确认切分(train/test/oot 计数、按月/渠道分布)后再筛特征
             #(执行器暂停在本步前,驱动展示"切分样本"产出的样本分析)
+            needs_confirmation=True,
+            phase="特征",
+        ),
+        StepTemplate(
+            # FS-1: multivariate refinement funnel between the sanity-level screen and
+            # tuning — IV floor + correlation dedup narrow the screen's clean-but-
+            # unranked candidate set before it reaches the model. VIF stays off by
+            # default (vif_max=1e9 below never trips; tree recipes don't need
+            # multicollinearity control the way linear scorecards do) but iv_min/
+            # corr_max are adjustable via the gate's adjust path (same generic
+            # mechanism as the screen gate's leakage_ks/max_missing_rate) to loosen or
+            # effectively bypass the funnel.
+            title="精选特征",
+            tool_ref=ToolRef("modeling", "select_features"),
+            inputs_template={
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "features": "$ref:特征筛选.output.selected",
+                "target_col": "{slot:target_col}",
+                "split_col": "{slot:split_col}",
+                "holdout_values": "{slot:holdout_values}",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "space": "raw",
+                "iv_min": 0.02,
+                "corr_max": 0.95,
+                # VIF off by default (tree recipes don't need multicollinearity control
+                # the way linear scorecards do): 1e9 matches correlation.py's own VIF
+                # cap sentinel, so the >vif_max check never trips. Set a real threshold
+                # (e.g. 10.0) via adjust/template override to opt in.
+                "vif_max": 1e9,
+            },
+            depends_on_titles=("切分样本", "特征筛选", "选择建模规格"),
+            post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+            # 门:确认精选后的特征漏斗(进/出特征数、IV 底线与相关去冗余各自淘汰数)后再配置调参
+            #(执行器暂停在本步前,驱动展示"特征筛选"产出;确认后才进入调参配置)
             needs_confirmation=True,
             phase="特征",
         ),
@@ -431,7 +471,7 @@ MODELING = WorkflowTemplate(
                 "params": "$ref:选择建模规格.output.params",
                 "seed": "$ref:选择建模规格.output.seed",
             },
-            depends_on_titles=("选择建模规格", "特征筛选"),
+            depends_on_titles=("选择建模规格", "精选特征"),
             post_checks=(
                 PostCheck("nonempty", {"field": "reason"}),
             ),
@@ -443,7 +483,7 @@ MODELING = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "tune_hyperparameters"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "$ref:特征筛选.output.selected",
+                "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
@@ -456,7 +496,7 @@ MODELING = WorkflowTemplate(
                 # recipes skip the search and train with their own defaults.
                 "n_trials": "$ref:配置调参.output.n_trials",
             },
-            depends_on_titles=("切分样本", "特征筛选", "配置调参"),
+            depends_on_titles=("切分样本", "精选特征", "配置调参"),
             # best_params must be present + a dict, but MAY be empty: only lgb runs the random
             # search; every other recipe (lr/xgb/scorecard/mlp/regressor/multiclass) skips it
             # and trains with its own defaults ({}), so "nonempty" would wrongly fail them.
@@ -475,7 +515,7 @@ MODELING = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
-                "features": "$ref:特征筛选.output.selected",
+                "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
@@ -484,7 +524,7 @@ MODELING = WorkflowTemplate(
                 "seed": "$ref:选择建模规格.output.seed",
                 "target_type": "$ref:选择建模规格.output.target_type",
             },
-            depends_on_titles=("切分样本", "选择建模规格", "特征筛选", "调参"),
+            depends_on_titles=("切分样本", "选择建模规格", "精选特征", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),
@@ -670,8 +710,32 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "leakage_ks": 0.4,
                 "max_missing_rate": 0.95,
+                # Loose top_k backstop (FS-1 decision #3), same rationale as MODELING.
+                "top_k": 200,
             },
             depends_on_titles=("切分样本", "选择建模规格"),
+            post_checks=(PostCheck("nonempty", {"field": "selected"}),),
+            needs_confirmation=True,
+            phase="特征",
+        ),
+        StepTemplate(
+            # FS-1 multivariate refinement funnel — see MODELING template for rationale.
+            title="精选特征",
+            tool_ref=ToolRef("modeling", "select_features"),
+            inputs_template={
+                "dataset_id": "$ref:切分样本.output.result_dataset_id",
+                "features": "$ref:特征筛选.output.selected",
+                "target_col": "{slot:target_col}",
+                "split_col": "$ref:切分样本.output.split_col",
+                "holdout_values": "$ref:切分样本.output.holdout_values",
+                "target_type": "$ref:选择建模规格.output.target_type",
+                "space": "raw",
+                "iv_min": 0.02,
+                "corr_max": 0.95,
+                # VIF off by default — see MODELING template for rationale.
+                "vif_max": 1e9,
+            },
+            depends_on_titles=("切分样本", "特征筛选", "选择建模规格"),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
             needs_confirmation=True,
             phase="特征",
@@ -687,7 +751,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "params": "$ref:选择建模规格.output.params",
                 "seed": "$ref:选择建模规格.output.seed",
             },
-            depends_on_titles=("选择建模规格", "特征筛选"),
+            depends_on_titles=("选择建模规格", "精选特征"),
             post_checks=(
                 PostCheck("nonempty", {"field": "reason"}),
             ),
@@ -699,7 +763,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "tune_hyperparameters"),
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
-                "features": "$ref:特征筛选.output.selected",
+                "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
@@ -709,7 +773,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "params": "$ref:配置调参.output.params",
                 "n_trials": "$ref:配置调参.output.n_trials",
             },
-            depends_on_titles=("切分样本", "特征筛选", "配置调参"),
+            depends_on_titles=("切分样本", "精选特征", "配置调参"),
             post_checks=(PostCheck("schema", {
                 "type": "object",
                 "properties": {"best_params": {"type": "object"}},
@@ -724,7 +788,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             inputs_template={
                 "dataset_id": "$ref:切分样本.output.result_dataset_id",
                 "recipes": "$ref:选择建模规格.output.recipes",
-                "features": "$ref:特征筛选.output.selected",
+                "features": "$ref:精选特征.output.selected",
                 "target_col": "{slot:target_col}",
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
@@ -733,7 +797,7 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "seed": "$ref:选择建模规格.output.seed",
                 "target_type": "$ref:选择建模规格.output.target_type",
             },
-            depends_on_titles=("切分样本", "选择建模规格", "特征筛选", "调参"),
+            depends_on_titles=("切分样本", "选择建模规格", "精选特征", "调参"),
             post_checks=(PostCheck("nonempty", {"field": "best_experiment_id"}),),
             phase="建模",
         ),

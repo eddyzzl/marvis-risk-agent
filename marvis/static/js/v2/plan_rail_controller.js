@@ -15,6 +15,7 @@ const PLAN_STEP_HINTS = {
   "data_ops.confirm_join": "确认拼接规格",
   "data_ops.execute_join": "左连接生成锚样本",
   "modeling.screen_features": "泄漏感知特征筛选",
+  "modeling.select_features": "IV/相关性多变量精选",
   "modeling.tune_hyperparameters": "超参搜索调优",
   "modeling.train_model": "训练模型",
   "modeling.compare_experiments": "对比候选实验",
