@@ -40,6 +40,9 @@ def test_memory_types_cover_v1_1_foundation_categories():
         "model_experience",
         # MEM-1: V2 data_join plan-completion capture (join match rate / row scale).
         "join_experience",
+        # S2: V2 strategy-adoption plan-completion capture (cutoff/approval/bad
+        # rate/expected profit).
+        "strategy_experience",
         "skill_experience_reserved",
     }
 
