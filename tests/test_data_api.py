@@ -520,6 +520,43 @@ def test_join_api_execute_async_rejects_active_task_job(tmp_path):
     assert DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status != "executed"
 
 
+def test_join_api_execute_sync_rejects_active_task_job(tmp_path):
+    client, settings = _client(tmp_path)
+    task, plan = _confirmed_join_plan(client, settings, tmp_path)
+    TaskRepository(settings.db_path).start_job(task.id, "metrics")
+
+    execute = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
+
+    assert execute.status_code == 409
+    assert DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status != "executed"
+
+
+def test_join_api_execute_sync_second_concurrent_call_gets_409_without_double_execution(tmp_path):
+    client, settings = _client(tmp_path)
+    task, plan = _confirmed_join_plan(client, settings, tmp_path)
+
+    # Simulate a second synchronous request racing in while the first sync
+    # execution's job is still claimed (TOCTOU window from REL-9).
+    task_repo = TaskRepository(settings.db_path)
+    job_id = task_repo.start_job(task.id, "join")
+    try:
+        second = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
+        assert second.status_code == 409
+        assert (
+            DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status
+            != "executed"
+        )
+    finally:
+        task_repo.finish_job(job_id, status="succeeded")
+
+    # Once the guard clears, a legitimate execute call still succeeds exactly once.
+    first = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
+    assert first.status_code == 200
+    assert TaskRepository(settings.db_path).get_active_job_kind(task.id) is None
+    repeat = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
+    assert repeat.status_code == 409
+
+
 def test_join_api_marks_aggregate_dedup_as_synthetic(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)

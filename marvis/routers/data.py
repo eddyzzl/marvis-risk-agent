@@ -369,15 +369,41 @@ async def execute_join_plan(
             "anchor_rows": anchor.row_count,
             "message": "join execution dispatched; poll GET /api/tasks/{task_id}",
         }
+    task_repo = TaskRepository(request.app.state.settings.db_path)
+    job_id = start_task_job(task_repo, plan.task_id, "join")
+    task_repo.mark_job_running(job_id)
     try:
         result = join_engine.execute_join_plan(
             join_plan_id,
             out_dir=request.app.state.settings.datasets_dir / plan.task_id / "joins",
         )
     except (JoinNotConfirmedError, DedupRequiredError, FanOutError) as exc:
+        task_repo.finish_job(
+            job_id,
+            status="failed",
+            error_name=exc.__class__.__name__,
+            error_value=str(exc),
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DataBackendError as exc:
+        task_repo.finish_job(
+            job_id,
+            status="failed",
+            error_name=exc.__class__.__name__,
+            error_value=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        task_repo.finish_job(
+            job_id,
+            status="failed",
+            error_name=exc.__class__.__name__,
+            error_value=str(exc),
+            traceback=traceback.format_exc(),
+        )
+        raise
+    else:
+        task_repo.finish_job(job_id, status="succeeded")
     return {
         "result_dataset_id": result.id,
         "anchor_rows": anchor.row_count,

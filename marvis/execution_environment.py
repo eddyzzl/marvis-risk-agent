@@ -1,9 +1,14 @@
 from dataclasses import asdict, dataclass
 import json
+import logging
 from pathlib import Path
 import subprocess
 import sys
 
+from marvis.files import write_json_atomic
+
+
+logger = logging.getLogger(__name__)
 
 SETTINGS_FILE = "execution_environment.json"
 
@@ -42,7 +47,18 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
     path = _settings_path(workspace)
     if not path.exists():
         return ExecutionEnvironmentSettings()
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            raise json.JSONDecodeError("empty file", raw, 0)
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        logger.warning(
+            "execution_environment: failed to read %s (%s); falling back to defaults",
+            path,
+            exc,
+        )
+        return ExecutionEnvironmentSettings()
     return ExecutionEnvironmentSettings(
         execution_mode=str(payload.get("execution_mode") or "jupyter_kernel"),
         kernel_name=str(payload.get("kernel_name") or "python3"),
@@ -56,11 +72,7 @@ def save_execution_environment(
     settings: ExecutionEnvironmentSettings,
 ) -> ExecutionEnvironmentSettings:
     path = _settings_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(asdict(settings), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    write_json_atomic(path, asdict(settings), ensure_ascii=False, indent=2)
     return settings
 
 

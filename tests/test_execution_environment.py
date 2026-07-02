@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import marvis.execution_environment as execution_environment
@@ -159,3 +160,57 @@ def test_python_path_for_conda_environment_uses_posix_candidate(tmp_path: Path, 
     monkeypatch.setattr(execution_environment.sys, "platform", "darwin")
 
     assert execution_environment._python_path_for_environment(env_path) == posix_python
+
+
+def test_save_execution_environment_writes_atomically(tmp_path: Path, monkeypatch):
+    calls = []
+    original_replace = Path.replace
+
+    def tracking_replace(self, target):
+        calls.append((str(self), str(target)))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", tracking_replace)
+
+    settings = ExecutionEnvironmentSettings(
+        execution_mode="jupyter_kernel",
+        kernel_name="marvis-kernel",
+        conda_env_name="",
+        python_executable="",
+    )
+
+    save_execution_environment(tmp_path, settings)
+
+    settings_path = tmp_path / "settings" / "execution_environment.json"
+    assert calls, "expected save_execution_environment to use an atomic replace"
+    temp_source, final_target = calls[-1]
+    assert final_target == str(settings_path)
+    assert temp_source != str(settings_path)
+    assert settings_path.exists()
+    # No leftover temp file after a successful atomic write.
+    leftover_tmp_files = list(settings_path.parent.glob(".*.tmp"))
+    assert leftover_tmp_files == []
+
+
+def test_load_execution_environment_self_heals_from_truncated_json(
+    tmp_path: Path, caplog
+):
+    settings_path = tmp_path / "settings" / "execution_environment.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text('{"execution_mode": "jupyter_ker', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="marvis.execution_environment"):
+        settings = load_execution_environment(tmp_path)
+
+    assert settings == ExecutionEnvironmentSettings()
+    assert any("execution_environment" in record.message for record in caplog.records)
+
+
+def test_load_execution_environment_self_heals_from_empty_file(tmp_path: Path):
+    settings_path = tmp_path / "settings" / "execution_environment.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("", encoding="utf-8")
+
+    settings = load_execution_environment(tmp_path)
+
+    assert settings == ExecutionEnvironmentSettings()
