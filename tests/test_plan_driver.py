@@ -1448,6 +1448,35 @@ def test_driver_adjust_reruns_analysis_step_with_new_params(tmp_path):
     assert any("调整参数" in m.content for m in turn.messages)
 
 
+def test_driver_handle_instruction_passes_gate_param_schema_to_router(tmp_path):
+    """AGT-5: _handle_instruction assembles the gate's dependency-step inputs into
+    a param_schema and passes it to route_instruction, so the router prompt carries
+    real parameter names/current values instead of just the gate title."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    llm = FakeRouterLLM('{"action":"clarify","params":{},"constraint":"","reason":"请说明具体参数"}')
+    driver = PlanDriver(repo, executor, llm_client=llm)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # screen runs once, pause at the tune gate
+
+    driver.resume(plan_id="plan-1", user_text="调一下", run_seq=1)
+
+    assert llm.calls
+    prompt = llm.calls[0]["user_prompt"]
+    assert "【可调参数】" in prompt
+    assert "leakage_ks" in prompt
+    assert "当前值=0.4" in prompt
+
+
 def test_driver_manual_adjust_params_reruns_without_llm_router(tmp_path):
     """Manual-mode structured controls can re-run a gate dependency without relying on
     an LLM to parse free text."""

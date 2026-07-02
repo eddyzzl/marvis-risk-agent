@@ -21,6 +21,7 @@ import re
 
 from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
+from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
@@ -225,7 +226,14 @@ class PlanDriver:
         if self._llm is None:
             return self._adjust_placeholder(plan.id, gate, run_seq)
         context = gate.title if gate is not None else "计划总览(尚未开始执行)"
-        route = route_instruction(self._llm, gate_context=context, instruction=user_text)
+        # AGT-5: tell the router which parameters this gate's dependency step(s)
+        # actually declare (name/type/current value/bounds) instead of leaving it
+        # to blind-guess key names from free text — a wrong guess previously only
+        # surfaced as "没有识别到可调整的参数" after apply_adjust already failed.
+        param_schema = gate_param_schema(plan, gate)
+        route = route_instruction(
+            self._llm, gate_context=context, instruction=user_text, param_schema=param_schema
+        )
         action = route["action"]
         if action == "confirm":
             if plan.status == PlanStatus.VALIDATED:

@@ -25,7 +25,9 @@ _SYSTEM = (
     "判断该指令属于哪类并抽取要素:\n"
     "- confirm:其实是同意继续(如\"可以\"\"没问题\")。\n"
     "- adjust:调整刚算出这一步的参数后重算(如\"n_trials 调到 20\"\"阈值放宽到 0.1\")。"
-    "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。\n"
+    "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。"
+    "params 的键只能取自下方【可调参数】列表中的参数名,不要自己编造参数名;"
+    "取值要落在给出的取值范围内。\n"
     "- replan:结构性改动(加/删步骤、换算法、换流程),把诉求写进 constraint。\n"
     "- clarify:看不懂或信息不足。\n"
     '严格只返回 JSON:'
@@ -49,9 +51,16 @@ _ROUTE_SCHEMA = {
 }
 
 
-def route_instruction(client, *, gate_context, instruction, tables=None):
-    """Ask the injected LLM to classify one free-text gate instruction."""
-    prompt = _format(gate_context, instruction, tables or [])
+def route_instruction(client, *, gate_context, instruction, tables=None, param_schema=None):
+    """Ask the injected LLM to classify one free-text gate instruction.
+
+    ``param_schema`` (optional, AGT-5): the current gate's adjustable-parameter
+    summary — a list of ``{"name", "type", "current", "bounds"}`` dicts assembled
+    from the gate's dependency step inputs (see
+    ``marvis.agent.gate_param_schema.gate_param_schema``). Injected into the
+    prompt so the routing LLM extracts ``adjust`` params against real parameter
+    names/bounds instead of guessing key names from the instruction text alone."""
+    prompt = _format(gate_context, instruction, tables or [], param_schema or [])
     raw = client.complete(
         system_prompt=_SYSTEM,
         user_prompt=prompt,
@@ -82,13 +91,50 @@ def route_instruction(client, *, gate_context, instruction, tables=None):
     return parse_route(raw)
 
 
-def _format(gate_context, instruction, tables):
+_MAX_PARAM_SCHEMA_ITEMS = 12
+_MAX_PARAM_VALUE_CHARS = 80
+
+
+def _format(gate_context, instruction, tables, param_schema):
     lines = ["【当前节点】", str(gate_context or "")]
     for table in tables:
         lines.append(f"表:{table.get('title', '')} 列={table.get('columns')}")
+    schema_lines = _format_param_schema(param_schema)
+    if schema_lines:
+        lines.append("【可调参数】(adjust 的 params 键只能取自这里)")
+        lines.extend(schema_lines)
     lines.append("【用户指令】")
     lines.append(str(instruction or ""))
     return "\n".join(lines)
+
+
+def _format_param_schema(param_schema) -> list[str]:
+    """Render a length-bounded 参数名/类型/当前值(/取值范围) summary line per
+    adjustable parameter (AGT-5). Silently drops malformed entries rather than
+    erroring — this is prompt context, not a validated control payload."""
+    lines: list[str] = []
+    for item in list(param_schema or [])[:_MAX_PARAM_SCHEMA_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        kind = str(item.get("type") or "").strip() or "unknown"
+        current = _truncate(item.get("current"))
+        bounds = item.get("bounds") if isinstance(item.get("bounds"), dict) else None
+        line = f"- {name} (类型={kind}, 当前值={current})"
+        if bounds:
+            bounds_text = ", ".join(f"{k}={v}" for k, v in bounds.items())
+            line += f" 取值范围: {bounds_text}"
+        lines.append(line)
+    return lines
+
+
+def _truncate(value) -> str:
+    text = str(value if value is not None else "-")
+    if len(text) > _MAX_PARAM_VALUE_CHARS:
+        return text[:_MAX_PARAM_VALUE_CHARS] + "…"
+    return text
 
 
 def parse_route(raw):

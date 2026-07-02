@@ -79,3 +79,35 @@ def test_route_instruction_retries_once_after_unparseable_reply():
     assert out["params"] == {"n_trials": 30}
     assert len(fake.calls) == 2
     assert "上一次返回无法解析" in fake.calls[1]["user_prompt"]
+
+
+def test_route_instruction_injects_param_schema_into_prompt():
+    """AGT-5: the gate's adjustable-parameter schema (name/type/current value/
+    bounds) is rendered into the prompt so the router extracts adjust params
+    against real parameter names instead of guessing them from the instruction."""
+    fake = _FakeLLM('{"action":"adjust","params":{"n_trials":30},"reason":"调大轮数"}')
+
+    route_instruction(
+        fake,
+        gate_context="调参节点",
+        instruction="n_trials 调到 30",
+        param_schema=[
+            {"name": "n_trials", "type": "integer", "current": 20, "bounds": {"min": 1}},
+            {"name": "leakage_ks", "type": "number", "current": 0.4, "bounds": {"min": 0, "max": 1}},
+        ],
+    )
+
+    prompt = fake.calls[0]["user_prompt"]
+    assert "【可调参数】" in prompt
+    assert "n_trials" in prompt
+    assert "当前值=20" in prompt
+    assert "leakage_ks" in prompt
+    assert "min=0, max=1" in prompt
+
+
+def test_route_instruction_omits_param_schema_section_when_empty():
+    fake = _FakeLLM('{"action":"confirm","reason":"同意"}')
+
+    route_instruction(fake, gate_context="计划总览", instruction="可以")
+
+    assert "【可调参数】" not in fake.calls[0]["user_prompt"]
