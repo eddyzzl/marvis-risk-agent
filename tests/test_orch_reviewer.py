@@ -136,6 +136,43 @@ def test_reviewer_llm_critique_returns_soft_verdict_only():
     assert llm.calls
 
 
+def test_reviewer_llm_critique_prompt_carries_real_metric_values():
+    # AGT-3: the critic previously saw only {"type": "object", "keys": [...]} for
+    # a step's metrics dict — no actual KS/AUC number ever reached the prompt.
+    # After the metric-aware _summarize_output fix, the JSON sent to the LLM must
+    # contain the real train/test/oot KS value, not just the field name.
+    llm = FakeLLM(json.dumps({"passed": True, "reasons": []}))
+    output = {
+        "target_type": "binary",
+        "metrics": {"train_ks": 0.52, "oot_ks": 0.41, "oot_auc": 0.77},
+    }
+
+    Reviewer(lambda: llm).llm_critique(_step([]), output, "finish")
+
+    assert llm.calls
+    prompt = llm.calls[0]["user_prompt"]
+    assert "0.41" in prompt
+    assert "0.52" in prompt
+    assert "0.77" in prompt
+
+
+def test_reviewer_final_review_prompt_carries_real_metric_values():
+    done = _step([])
+    done.status = StepStatus.DONE
+    llm = FakeLLM(json.dumps({"summary": "ok", "open_items": [], "goal_doubt": False, "goal_met": True}))
+
+    Reviewer(lambda: llm).final_review(
+        _plan(done),
+        {"step-1": {"target_type": "binary", "metrics": {"oot_ks": 0.4123, "oot_auc": 0.71}}},
+        "finish",
+    )
+
+    assert llm.calls
+    prompt = llm.calls[0]["user_prompt"]
+    assert "0.4123" in prompt
+    assert "0.71" in prompt
+
+
 def test_reviewer_llm_critique_marks_unparseable_reply_as_soft_warning():
     verdict = Reviewer(lambda: FakeLLM("not json")).llm_critique(
         _step([]),
@@ -183,7 +220,11 @@ def test_reviewer_final_review_goal_doubt_blocks_goal_met():
     assert review.open_items == ["review business wording"]
 
 
-def test_reviewer_final_review_llm_goal_met_false_blocks_goal_met():
+def test_reviewer_final_review_llm_goal_met_false_blocks_goal_met_via_doubt():
+    # AGT-3: with every step DONE and no deterministic success_criteria failure,
+    # a bare llm_goal_met=false is *doubt*, not a veto — goal_doubt is forced True
+    # so the executor routes to REVIEW (human re-check) rather than FAILED or an
+    # automatic replan. The LLM's opinion can pause a plan but never fail one.
     done = _step([])
     done.status = StepStatus.DONE
     llm = FakeLLM(json.dumps({
@@ -200,7 +241,7 @@ def test_reviewer_final_review_llm_goal_met_false_blocks_goal_met():
     )
 
     assert review.goal_met is False
-    assert review.goal_doubt is False
+    assert review.goal_doubt is True
     assert review.llm_goal_met is False
     assert review.open_items == ["choose final production model"]
 
@@ -218,7 +259,40 @@ def test_reviewer_final_review_llm_goal_met_false_adds_default_open_item():
     review = Reviewer(lambda: llm).final_review(_plan(done), {"step-1": {"ok": True}}, "finish")
 
     assert review.goal_met is False
+    assert review.goal_doubt is True
     assert review.open_items == ["LLM final review marked goal_met=false"]
+
+
+def test_reviewer_final_review_llm_goal_met_false_stays_veto_when_criteria_fail():
+    # When a deterministic success_criteria failure is *also* present, the LLM's
+    # goal_met=false does not need the doubt escape hatch — the deterministic
+    # failure alone already justifies FAILED/replan, and goal_doubt stays as the
+    # LLM reported it (False here), matching the pre-AGT-3 behavior for the case
+    # the fix does NOT touch: real deterministic failures.
+    done = _step([])
+    done.status = StepStatus.DONE
+    plan = _plan(
+        done,
+        success_criteria=[
+            {"metric": "oot_ks", "min": 0.3331, "label": "OOT KS", "target_type": "binary"}
+        ],
+    )
+    llm = FakeLLM(json.dumps({
+        "summary": "Metrics look weak.",
+        "open_items": [],
+        "goal_doubt": False,
+        "goal_met": False,
+    }))
+
+    review = Reviewer(lambda: llm).final_review(
+        plan,
+        {"step-1": {"target_type": "binary", "metrics": {"oot_ks": 0.2}}},
+        "finish",
+    )
+
+    assert review.goal_met is False
+    assert review.goal_doubt is False
+    assert "OOT KS=0.2 < 0.3331" in review.open_items
 
 
 def test_reviewer_final_review_retries_summary_after_unparseable_reply():

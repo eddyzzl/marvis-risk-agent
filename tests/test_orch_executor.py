@@ -383,7 +383,11 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     assert resumed.summary_ref == result.summary_ref
 
 
-def test_plan_executor_fails_when_final_reviewer_marks_goal_unmet(tmp_path):
+def test_plan_executor_routes_to_review_when_llm_alone_marks_goal_unmet(tmp_path):
+    # AGT-3: with the step DONE and no configured/failed success_criteria, a bare
+    # llm_goal_met=false is doubt, not a veto — the plan routes to REVIEW (human
+    # re-check) instead of FAILED, and workflow.completed does NOT fire (that
+    # event is reserved for a plan reaching a genuine terminal DONE/FAILED state).
     plan = _plan(_step("step-1"))
     repo = _repo(tmp_path, plan)
     runner = FakeRunner([_ok({"echoed": "hi"})])
@@ -408,11 +412,58 @@ def test_plan_executor_fails_when_final_reviewer_marks_goal_unmet(tmp_path):
 
     loaded = repo.load_plan("plan-1")
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.FAILED
-    assert loaded.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.REVIEW
+    assert loaded.status == PlanStatus.REVIEW
     assert summary["goal_met"] is False
     assert summary["llm_goal_met"] is False
+    assert summary["goal_doubt"] is True
     assert summary["open_items"] == ["select production model"]
+    assert [call[0] for call in hooks.calls] == ["step.completed"]
+
+
+def test_plan_executor_still_fails_when_success_criteria_fail_alongside_llm_doubt(tmp_path):
+    # The narrowed LLM authority (AGT-3) does not touch the deterministic path:
+    # a real success_criteria failure still fails the plan even if the LLM also
+    # (redundantly) says goal_met=false.
+    plan = _plan(
+        _step("step-1"),
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "aggregate": "max",
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"target_type": "binary", "metrics": {"oot_ks": 0.2}})])
+    hooks = FakeHooks()
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "summary": "Needs final model selection.",
+                "open_items": [],
+                "goal_doubt": False,
+                "goal_met": False,
+            }
+        )
+    )
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    summary = repo.load_plan_summary(result.summary_ref)
+    assert result.status == PlanStatus.FAILED
+    assert loaded.status == PlanStatus.FAILED
+    assert summary["goal_doubt"] is False
+    assert "OOT KS=0.2 < 0.3331" in summary["open_items"]
     assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
