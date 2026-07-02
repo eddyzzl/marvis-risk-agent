@@ -114,10 +114,10 @@
 | ✅ | SEL-2 | 公平竞技场已落地（`babd61fe`）：每配方先调参再参赛、树模型统一早停、同切分同特征断言进回归；门文案含"总预算=Σ配方预算"与耗时提示 | High/M | ✅ |
 | ✅ | SEL-3 | LR 重建为 impute→scale→LR Pipeline（`56827495`），随 artifact 可重放 | Med/S | — |
 | ✅ | SEL-4 | 早停折从 train 内切出（`cf924d49`），test 职责单一化 | Med/M | — |
-| ⬜ | SEL-5 | KS 抽样误差零量化：无 bootstrap 置信区间/多 seed，冠军由千分位差决出 | Med/M | — |
-| ⬜ | SEL-6 | 模型融合能力为零：无 seed-bagging/stacking/blending | Med/L | — |
-| ⬜ | SEL-7 | 默认 selection_policy 无稳定性/过拟合/最小 KS 阈值；delivery-ready 预过滤静默排除 catboost/mlp | Med/S | — |
-| ⬜ | SEL-8 | 分群建模（segmented models）不支持 | Low/L | — |
+| ✅ | SEL-5 | bootstrap_ks_ci 落地（`95b49ab4`）：分层重采样 n_boot=200/大样本自动降 100、确定性 seed；对比/选择输出 CI 并在重叠时标"差异在抽样误差内" | Med/M | — |
+| ✅ | SEL-6 | ensemble 配方落地（`e0b527e2`）：seed-bagging N=5 全家族、opt-in 不进默认、scorer 重放、PMML 显式拒绝带原因 | Med/L | — |
+| ✅ | SEL-7 | 默认护栏（gap>0.10 overfit_warning、<3 特征 sanity_warning，可关）+ 排除候选就地标注原因（`d6f3217a`） | Med/S | — |
+| ✅ | SEL-8 | 按预授权降级交付：segment_value_evaluation 诊断工具（整体 vs 分群 KS/AUC+小群归并；`404b4797`），完整多模型路由的设计残章在 commit message | Low/L | — |
 
 ## 4. 阶段三：S1a/S1b 策略与打分底座（6–10 天）
 
@@ -180,12 +180,12 @@
 | ✅ | MEM-6 | 按 kind 定向查询+各类上限（`42731506`） | Med/S | — |
 | ✅ | MEM-7 | 负反馈闭环落地（`0158ea0d`）：任务失败自动降档+面板"没用/有误"按钮+API、蒸馏 support 计净值、全程审计 | Med/M | — |
 | ✅ | MEM-8 | raw 侧 low 过滤+raw_quota 保底名额（`d3729dd0`） | Med/S | — |
-| ⬜ | AGT-5 | route_instruction 上下文只有 gate 标题：抽参数盲猜 | Med/S | — |
+| ✅ | AGT-5 | 路由 prompt 注入门参数 schema 摘要+提示词 v2 约束键名（`3c5f069c`） | Med/S | — |
 | ✅ | AGT-6 | 无 LLM→status=skipped 不渲染警告；触发面收窄到 decision/confirm/带指标步骤（`b53254cd`） | Med/M | — |
-| ⬜ | AGT-7 | AUTO 8 门预算对 ≥9 门流程必然静默耗尽；confidence 从未使用 | Med/S | — |
-| ⬜ | AGT-8 | AUTO replan_goal 当用户文本回灌：双跳 LLM 且可能被 is_confirm 抢跑 | Med/S | — |
-| ⬜ | AGT-9 | 门决策红旗 checklist 不覆盖建模门（调参/选实验） | Med/S | — |
-| ⬜ | AGT-10 | planner generate/replan/explore 仍用严格 json.loads 未剥围栏 | Low/S | — |
+| ✅ | AGT-7 | 预算按门数动态（门数+2 可配）+耗尽显式消息+confidence<0.6 降级人工（`a9ad8eca`） | Med/S | — |
+| ✅ | AGT-8 | AUTO replan 改走结构化 replan 路径带 constraint（`4aa1b8ba`） | Med/S | — |
+| ✅ | AGT-9 | 调参门与选实验门确定性红旗落地（`20dc685d`，样本量/特征数/不平衡/OOT 缺失/gap/CI 重叠/failed candidate） | Med/S | — |
+| ✅ | AGT-10 | 三条解析路径改 load_json_object（`f8360fa0`），评测集 planner 围栏 case 随之转安全 | Low/S | — |
 | ✅ | MEM-9 | 触发词表拓宽+reserved 主题需主题级判定+被拒给回执不再静默（`19381de`） | Low/S | — |
 | ✅ | MEM-10 | 触发器接通+吞错改记录+consolidate 返回错误计数（`bdc10ede`） | Low/S | — |
 | ✅ | MEM-11 | ids 截断计数+3 样本、3000 字符总预算、审计保全量（`96d4f409`） | Low/S | — |
