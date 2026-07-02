@@ -64,11 +64,19 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         config,
         oot_has_labels=oot_has_labels,
     )
+    resolved_rounds = (
+        int(getattr(model, "best_iteration", num_boost_round - 1)) + 1
+        if config.early_stopping_rounds
+        else num_boost_round
+    )
     artifact = _save_xgb_model(
         model,
         config,
         out_dir,
-        artifact_params({**params, "num_boost_round": num_boost_round}, config),
+        artifact_params(
+            {**params, "num_boost_round": num_boost_round, "best_iteration": resolved_rounds},
+            config,
+        ),
     )
     return TrainResult(
         artifact=artifact,

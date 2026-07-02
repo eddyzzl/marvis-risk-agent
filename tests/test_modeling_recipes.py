@@ -510,6 +510,41 @@ def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
     assert first.best_metrics == second.best_metrics
 
 
+def test_tune_hyperparameters_lgb_default_recipe_matches_historical_contract(tmp_path):
+    """TUNE-1 regression (d): generalising tune.py to every recipe family must not
+    change the lgb single-recipe contract — recipe defaults to "lgb", the returned
+    TuneResult keeps the exact historical flat shape (best_params/best_metrics/
+    trials/n_trials, no per-recipe nesting leaking into the dataclass), and every
+    trial record still carries the original key set (plus the new recipe-agnostic
+    best_iteration key only where lgb already exposed the concept implicitly via
+    num_boost_round)."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_lgb_contract.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=6))
+
+    assert result.recipe == "lgb"
+    assert isinstance(result.best_params, dict)
+    assert isinstance(result.best_metrics, dict)
+    assert isinstance(result.trials, tuple)
+    assert result.n_trials == 6
+    # historical lgb best_metrics keys (no xgb/catboost-only additions leak in
+    # when best_iteration is absent for lgb — lgb reports round count via params).
+    assert {"train_ks", "test_ks", "oot_ks", "overfit_gap", "overfit_gap_oot",
+            "oot_stability_gap", "train_auc", "test_auc", "oot_auc"} <= set(result.best_metrics.keys())
+    # lgb has always resolved a best_iteration internally (booster.best_iteration
+    # feeds num_boost_round); the generalized engine now surfaces it explicitly
+    # alongside the historical keys, matching the other tree recipes' evidence.
+    assert "best_iteration" in result.best_metrics
+    for trial in result.trials:
+        assert {"params", "train_ks", "test_ks", "oot_ks", "score", "train_auc",
+                "test_auc", "oot_auc", "search_stage"} <= set(trial.keys())
+        assert "best_iteration" in trial  # lgb trials always resolve a best_iteration
+        assert "num_boost_round" in trial["params"]
+
+
 def test_tune_hyperparameters_runs_two_search_stages_with_fine_near_best_coarse(tmp_path):
     """TUNE-2 regression (b): trials carry a coarse/fine search_stage label, both
     stages actually run under the default 60/40 split, and every fine-stage trial's
@@ -577,11 +612,20 @@ def test_tune_hyperparameters_lambda_sampling_spans_multiple_orders_of_magnitude
     assert max(learning_rates) > 0.08  # old space capped at ~0.08; new upper bound is 0.3
 
 
-def test_tune_hyperparameters_default_n_trials_is_40():
+def test_tune_hyperparameters_default_n_trials_resolves_per_recipe():
+    """TUNE-1: n_trials defaults to None and resolves via DEFAULT_TRIAL_BUDGET
+    per recipe (lgb keeps its historical 40; lr/scorecard/mlp get a smaller
+    12-trial budget, tree challengers xgb/catboost also get 40)."""
     import inspect
 
+    from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET
+
     sig = inspect.signature(tune_hyperparameters)
-    assert sig.parameters["n_trials"].default == 40
+    assert sig.parameters["n_trials"].default is None
+    assert sig.parameters["recipe"].default == "lgb"
+    assert DEFAULT_TRIAL_BUDGET == {
+        "lgb": 40, "xgb": 40, "catboost": 40, "lr": 12, "scorecard": 12, "mlp": 12,
+    }
 
 
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
