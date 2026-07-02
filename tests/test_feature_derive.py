@@ -10,6 +10,7 @@ from marvis.feature.derive import (
     aggregate_feature,
     cross_arithmetic,
     derive_batch,
+    derive_date_features,
     evaluate_crosses,
     recommend_feature_crosses,
 )
@@ -148,3 +149,54 @@ def test_derive_rejects_invalid_recipes_and_conflicts():
 
     with pytest.raises(FeatureError, match="unsupported"):
         derive_batch(frame, [{"kind": "unknown"}])
+
+def test_derive_date_features_datediff_month_and_tenure():
+    frame = pd.DataFrame({
+        "apply_date": ["2024-01-15", "2024-03-01", None],
+        "open_date": ["2023-01-15", "2023-01-01", "2023-06-01"],
+    })
+    recipe = [
+        {"kind": "datediff", "col": "apply_date", "anchor": "open_date", "unit": "days"},
+        {"kind": "month", "col": "apply_date"},
+        {"kind": "tenure_months", "col": "apply_date", "anchor": "open_date"},
+    ]
+
+    derived, cols = derive_date_features(frame, recipe)
+
+    assert cols == [
+        "apply_date__days_since_open_date",
+        "apply_date__month",
+        "apply_date__months_on_book",
+    ]
+    assert derived["apply_date__days_since_open_date"].tolist()[:2] == [365.0, 425.0]
+    assert pd.isna(derived["apply_date__days_since_open_date"].iloc[2])
+    assert derived["apply_date__month"].tolist()[:2] == [1.0, 3.0]
+    assert derived["apply_date__months_on_book"].tolist()[:2] == [11.0, 13.0]
+
+
+def test_derive_date_features_supports_literal_anchor_date():
+    frame = pd.DataFrame({"apply_date": ["2024-01-01", "2024-02-01"]})
+    recipe = [{"kind": "datediff", "col": "apply_date", "anchor": "2024-01-01", "unit": "days"}]
+
+    derived, cols = derive_date_features(frame, recipe)
+
+    assert cols == ["apply_date__days_since_ref"]
+    assert derived["apply_date__days_since_ref"].tolist() == [0.0, 31.0]
+
+
+def test_derive_date_features_rejects_invalid_kind_conflicts_and_bad_anchor():
+    frame = pd.DataFrame({"apply_date": ["2024-01-01"], "apply_date__month": [1]})
+
+    with pytest.raises(FeatureError, match="unsupported date derive kind"):
+        derive_date_features(frame, [{"kind": "unknown", "col": "apply_date"}])
+
+    with pytest.raises(FeatureError, match="already exist"):
+        derive_date_features(frame, [{"kind": "month", "col": "apply_date"}])
+
+    with pytest.raises(FeatureError, match="not a column or a parseable date"):
+        derive_date_features(
+            frame, [{"kind": "datediff", "col": "apply_date", "anchor": "not-a-date"}]
+        )
+
+    with pytest.raises(FeatureError, match="anchor"):
+        derive_date_features(frame, [{"kind": "datediff", "col": "apply_date"}])

@@ -27,7 +27,7 @@ from marvis.feature.binning import (
     tree_edges,
 )
 from marvis.feature.correlation import correlation_report
-from marvis.feature.derive import derive_batch
+from marvis.feature.derive import derive_batch, derive_date_features
 from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
@@ -679,6 +679,18 @@ def tool_cross_features(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     derived, new_columns = derive_batch(frame, list(inputs["recipe"]))
     result = _register_frame(runtime, derived, dataset, ctx, "cross")
+    return {"result_dataset_id": result.id, "new_columns": new_columns}
+
+
+def tool_derive_date_features(inputs: dict, ctx) -> dict:
+    """Derive datediff/month/tenure-months numeric columns from date-role columns
+    (PREP-7). Opt-in: never runs as part of any default template, so a caller must
+    explicitly invoke it (with a date column identified e.g. via profiling/schema
+    inference) to pull date information into the modeling frame."""
+    runtime = _runtime(ctx)
+    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    derived, new_columns = derive_date_features(frame, list(inputs["recipe"]))
+    result = _register_frame(runtime, derived, dataset, ctx, "datefeat")
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 
 

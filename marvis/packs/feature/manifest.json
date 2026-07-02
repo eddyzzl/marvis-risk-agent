@@ -480,6 +480,34 @@
       "entrypoint": "tool_cross_features",
       "side_effects": ["read:dataset", "write:dataset"],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "derive_date_features",
+      "summary": "Derive datediff/month/tenure-months numeric columns from date columns (opt-in; never runs automatically).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "recipe": {"type": "array", "items": {"type": "object"}, "minItems": 1}
+        },
+        "required": ["dataset_id", "recipe"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "new_columns": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["result_dataset_id", "new_columns"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_derive_date_features",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],

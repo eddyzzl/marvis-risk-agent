@@ -1066,6 +1066,44 @@ def test_screen_features_reports_suspected_categorical_numeric_codes(tmp_path):
     assert "region_code" in result.output["selected"]
 
 
+def test_derive_date_features_tool_creates_derived_dataset(tmp_path):
+    """PREP-7: derive_date_features is opt-in (not part of any default template)
+    and must produce deterministic datediff/month/tenure columns registered as a
+    new derived dataset, same pattern as cross_features."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "apply_date": ["2024-01-15", "2024-03-01", "2024-06-10"],
+        "open_date": ["2023-01-15", "2023-01-01", "2023-06-01"],
+        "y": [0, 1, 0],
+    })
+    path = tmp_path / "dates.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "derive_date_features"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": [
+                {"kind": "datediff", "col": "apply_date", "anchor": "open_date", "unit": "days"},
+                {"kind": "month", "col": "apply_date"},
+                {"kind": "tenure_months", "col": "apply_date", "anchor": "open_date"},
+            ],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["new_columns"] == [
+        "apply_date__days_since_open_date",
+        "apply_date__month",
+        "apply_date__months_on_book",
+    ]
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["apply_date__days_since_open_date"].tolist() == [365.0, 425.0, 375.0]
+    assert derived_frame["apply_date__month"].tolist() == [1.0, 3.0, 6.0]
+
+
 def test_screen_features_reports_sentinel_columns_notice(tmp_path):
     """PREP-4: screen_features must surface a suspected sentinel/special-value column
     (isolated extreme peak, e.g. -999 "no hit") so the user can pass sentinel_values to

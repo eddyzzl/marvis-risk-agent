@@ -13,6 +13,7 @@ from marvis.feature.metrics import feature_metrics
 
 ALLOWED_CROSS_OPS = {"add", "sub", "mul", "div", "ratio"}
 ALLOWED_AGGS = {"mean", "max", "min", "std", "sum", "count"}
+ALLOWED_DATE_KINDS = {"datediff", "month", "tenure_months"}
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 CROSS_SYS = (
     "你基于特征的业务含义推荐值得交叉的特征对和运算，给出理由。"
@@ -86,6 +87,94 @@ def aggregate_feature(
     if len(merged) != len(df):
         raise FeatureError("aggregate join expanded row count")
     return merged, new_cols
+
+
+def derive_date_features(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, list[str]]:
+    """Derive deterministic numeric features from date/datetime columns (PREP-7).
+
+    Each ``recipe`` item is one of:
+
+    - ``{"kind": "datediff", "col": <date col>, "anchor": <date col or ISO date
+      string>, "unit": "days"|"months"}`` -> ``{col}__{unit}_since_{anchor}`` (a
+      literal anchor date is named ``{col}__{unit}_since_ref``). Positive when
+      ``col`` is *after* the anchor.
+    - ``{"kind": "month", "col": <date col>}`` -> ``{col}__month`` (calendar
+      month, 1-12).
+    - ``{"kind": "tenure_months", "col": <date col>, "anchor": <date col or ISO
+      date string>}`` -> ``{col}__months_on_book``: whole months between ``col``
+      and the anchor (a account-age / months-on-book style measure; an alias of
+      ``datediff`` with ``unit="months"`` under the tenure-specific name so the
+      derived column is self-describing in the feature dictionary).
+
+    Unparseable dates produce NaN (never a silent zero), matching the platform's
+    existing "missing over wrong" convention (see ``cross_arithmetic``'s
+    divide-by-zero -> NaN handling). Column-name / kind validation mirrors
+    :func:`derive_batch`: unsupported kinds and duplicate output columns raise
+    :class:`FeatureError` up front rather than partially applying the recipe.
+    """
+    out = df.copy()
+    new_cols: list[str] = []
+    for item in recipe:
+        kind = item.get("kind")
+        if kind not in ALLOWED_DATE_KINDS:
+            raise FeatureError(f"unsupported date derive kind: {kind}")
+        col = str(item["col"])
+        _assert_columns(out, [col])
+        col_dates = pd.to_datetime(out[col], errors="coerce")
+        if kind == "month":
+            new_col = f"{col}__month"
+            _assert_no_conflicts(out, {new_col: None})
+            out[new_col] = col_dates.dt.month.to_numpy(dtype=float)
+            new_cols.append(new_col)
+            continue
+
+        anchor = item.get("anchor")
+        anchor_dates, anchor_label = _resolve_date_anchor(out, anchor)
+        unit = "months" if kind == "tenure_months" else str(item.get("unit") or "days")
+        if unit not in {"days", "months"}:
+            raise FeatureError("unit must be 'days' or 'months'")
+        delta_days = (col_dates - anchor_dates).dt.days.to_numpy(dtype=float)
+        if unit == "days":
+            values = delta_days
+        else:
+            values = np.floor(delta_days / 30.436875)
+        if kind == "tenure_months":
+            new_col = f"{col}__months_on_book"
+        else:
+            new_col = f"{col}__{unit}_since_{anchor_label}"
+        _assert_no_conflicts(out, {new_col: None})
+        out[new_col] = values
+        new_cols.append(new_col)
+
+    repeated = _duplicates(new_cols)
+    if repeated:
+        raise FeatureError(f"duplicate derived columns: {', '.join(sorted(repeated))}")
+    return out, new_cols
+
+
+def _resolve_date_anchor(df: pd.DataFrame, anchor: Any) -> tuple[pd.Series, str]:
+    """Resolve a ``datediff``/``tenure_months`` anchor: either another column in
+    ``df`` (row-wise anchor, e.g. application date) or a literal ISO date string
+    (a single reference date broadcast to every row, e.g. a report-run date)."""
+    if anchor is None:
+        raise FeatureError("datediff/tenure_months requires an anchor")
+    anchor_name = str(anchor)
+    if anchor_name in df.columns:
+        return pd.to_datetime(df[anchor_name], errors="coerce"), anchor_name
+    literal = pd.to_datetime(anchor_name, errors="coerce")
+    if pd.isna(literal):
+        raise FeatureError(f"anchor is not a column or a parseable date: {anchor_name}")
+    return pd.Series(literal, index=df.index), "ref"
+
+
+def _duplicates(values: list[str]) -> set[str]:
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for value in values:
+        if value in seen:
+            dupes.add(value)
+        seen.add(value)
+    return dupes
 
 
 def derive_batch(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, list[str]]:
@@ -250,12 +339,14 @@ def _op_from_col(col: str, col_a: str, col_b: str) -> str:
 
 
 __all__ = [
+    "ALLOWED_DATE_KINDS",
     "CROSS_SYS",
     "CrossRecommendation",
     "aggregate_feature",
     "build_cross_prompt",
     "cross_arithmetic",
     "derive_batch",
+    "derive_date_features",
     "evaluate_crosses",
     "recommend_feature_crosses",
 ]
