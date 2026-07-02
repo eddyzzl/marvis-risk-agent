@@ -9115,3 +9115,91 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
     assert 'class="champion-badge"' in html
     assert "lightgbm ★" not in html
     assert ">lightgbm<" in html
+
+
+
+def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence():
+    """VD-2: needs_confirmation gate messages must render as a distinct "gate
+    card" (tone bar + header pill + red-flag checklist + consequence line)
+    rather than an ordinary chat bubble with one extra button. Red flags are
+    read from the backend's already-emitted "\u26a0\ufe0f" markers in both the
+    message text and inline-table cells (no new backend data — INV-1).
+    """
+    app_js = _read_static("app.js")
+
+    def slice_fn(signature: str) -> str:
+        start = app_js.index(signature)
+        end = app_js.index("\n}", start)
+        return app_js[start : end + 2]
+
+    src = "\n\n".join(
+        [
+            slice_fn("function shieldGateIconHtml"),
+            slice_fn("function driverGateRedFlags(message)"),
+            slice_fn("function driverGateRedFlagsHtml"),
+            slice_fn("function driverGateConsequenceHtml"),
+            slice_fn("function driverGateCardHeaderHtml"),
+            slice_fn("function driverGateCardHtml"),
+            slice_fn("function agentMessagePlanStep"),
+        ]
+    )
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "const planRailController = {",
+            "  planStep: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's2', title: '拼接执行' } : null),",
+            "  nextStepAfter: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's3', title: '训练模型' } : null),",
+            "};",
+            "const selectedTaskId = 'task-A';",
+            src,
+            "const withFlags = {",
+            "  content: '**拼接诊断完成**。\\n\\n⚠️ 检测到**同键值冲突**,请先确认去重策略。',",
+            "  metadata: {",
+            "    kind: 'gate',",
+            "    step_id: 's2',",
+            "    tables: [{ title: '拼接诊断', columns: ['特征表', '膨胀'],"
+            " rows: [['bureau.parquet', '⚠️是']] }],",
+            "  },",
+            "};",
+            "const bodyHtml = '<div class=\"agent-message-content\">body</div>';",
+            "const withFlagsHtml = driverGateCardHtml(withFlags, bodyHtml);",
+            "const cleanHtml = driverGateCardHtml("
+            " { content: '上一步已完成。', metadata: { kind: 'gate', step_id: 's2' } },"
+            " bodyHtml,",
+            ");",
+            "process.stdout.write(JSON.stringify({ withFlagsHtml, cleanHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    with_flags_html = payload["withFlagsHtml"]
+    clean_html = payload["cleanHtml"]
+
+    # Distinct card shell, not a plain chat bubble.
+    assert 'class="gate-card"' in with_flags_html
+    assert 'data-gate-tone="warn"' in with_flags_html
+    # Header pill + step title, so the gate is locatable at a glance.
+    assert "⏸ 等待确认" in with_flags_html
+    assert "待确认：拼接执行" in with_flags_html
+    # Red-flag checklist section rendered from the "⚠️" markers already in the
+    # message text and table cells.
+    assert "gate-card-redflags" in with_flags_html
+    assert "gate-card-redflags-list" in with_flags_html
+    # Consequence line names the next plan step from plan-rail topology.
+    assert "确认后将执行：训练模型" in with_flags_html
+    # The original message content still renders nested inside the card.
+    assert "agent-message-content" in with_flags_html
+
+    # No red flags in the message/tables -> review tone, no redflags section.
+    assert 'data-gate-tone="review"' in clean_html
+    assert "gate-card-redflags" not in clean_html

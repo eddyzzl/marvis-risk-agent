@@ -5643,6 +5643,123 @@ dialog.draft-tools-dialog,
   line-height: 1.78;
 }
 
+/* VD-2: needs_confirmation gate messages get a distinct "gate card" shell so
+   they read as a blocking decision point, not an ordinary chat bubble with an
+   extra button. Reuses the task-hero glass/backdrop-filter material and the
+   existing pill-pulse breathing animation (keyframes at .task-pill.run::before
+   above) instead of inventing a new visual language. */
+.gate-card {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  padding: 14px 16px 14px 18px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  backdrop-filter: blur(12px) saturate(1.4);
+  box-shadow: var(--glass-edge);
+}
+.gate-card[data-gate-tone="review"] {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+.gate-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.gate-card-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--warning);
+}
+.gate-card[data-gate-tone="review"] .gate-card-icon {
+  color: var(--accent);
+}
+.gate-card-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+}
+.gate-card-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pill-pulse 1.2s ease-in-out infinite;
+}
+.gate-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.gate-card-body {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.78;
+}
+.gate-card-redflags {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.gate-card-redflags-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--warning-strong);
+  margin-bottom: 4px;
+}
+.gate-card-redflags-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.gate-card-consequence {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gate-card-pill::before {
+    animation: none;
+  }
+}
+
+body[data-theme="dark"] .gate-card {
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+}
+body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+/* Manual-mode analysis: the one still-pending gate section gets the same
+   warning tone bar as the agent-mode gate card (no card shell — manual mode
+   deliberately stays "tool, not conversation"; see driver_manual_analysis.js). */
+.driver-analysis-section.is-gate-pending {
+  border-left: 3px solid var(--warning);
+  padding-left: 13px;
+  background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+
 .agent-memory-references {
   max-width: min(680px, 100%);
   color: var(--text-muted);

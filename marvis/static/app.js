@@ -5480,9 +5480,107 @@ if (typeof document !== "undefined") {
   planRailController.installArtifactHandlers(document);
 }
 
+// VD-2: needs_confirmation gate messages get a distinct "gate card" shell
+// (left tone bar + glass tint + header pill + red-flag checklist + consequence
+// line) instead of looking like an ordinary chat bubble with one extra button.
+// Red flags are read from the backend's already-emitted "⚠️" markers (message
+// text lines + inline-table cells) — a pure presentation read, no new backend
+// data (INV-1).
+function shieldGateIconHtml() {
+  return '<svg class="gate-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/>'
+    + '<path d="M9.5 12l1.8 1.8L15 10"/>'
+    + '</svg>';
+}
+
+function driverGateRedFlags(message) {
+  const flags = [];
+  const content = String(message?.content || "");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("⚠️")) {
+      flags.push(trimmed.replace(/^⚠️\s*/, "").replace(/\*\*/g, ""));
+    }
+  }
+  const tables = Array.isArray(message?.metadata?.tables) ? message.metadata.tables : [];
+  for (const table of tables) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    const rows = Array.isArray(table?.rows) ? table.rows : [];
+    rows.forEach((row) => {
+      const cells = Array.isArray(row) ? row : [row];
+      cells.forEach((cell, columnIndex) => {
+        if (typeof cell !== "string" || !cell.includes("⚠️")) return;
+        const label = columns[columnIndex] ?? "";
+        const rowLabel = cells[0] ?? "";
+        flags.push(`${escapeHtml(String(rowLabel))} · ${escapeHtml(String(label))}：${escapeHtml(cell.replace(/⚠️/g, "").trim())}`.replace(/^ · /, ""));
+      });
+    });
+  }
+  return flags;
+}
+
+function driverGateRedFlagsHtml(flags) {
+  if (!flags.length) return "";
+  return [
+    '<div class="gate-card-redflags" data-tone="warn">',
+    '<div class="gate-card-redflags-title">⚠️ 需要留意</div>',
+    '<ul class="gate-card-redflags-list">',
+    ...flags.map((flag) => `<li>${flag.includes("<") ? flag : escapeHtml(flag)}</li>`),
+    "</ul>",
+    "</div>",
+  ].join("");
+}
+
+function driverGateConsequenceHtml(message) {
+  const next = typeof planRailController?.nextStepAfter === "function"
+    ? planRailController.nextStepAfter(message?.metadata || {})
+    : null;
+  if (!next?.title) return "";
+  return `<div class="gate-card-consequence">确认后将执行：${escapeHtml(String(next.title))}</div>`;
+}
+
+function driverGateCardHeaderHtml(message) {
+  const step = agentMessagePlanStep(message?.metadata || {});
+  const stepTitle = step?.title || message?.metadata?.step_title || "";
+  return [
+    '<div class="gate-card-header">',
+    shieldGateIconHtml(),
+    '<span class="gate-card-pill">⏸ 等待确认</span>',
+    stepTitle ? `<span class="gate-card-title">待确认：${escapeHtml(String(stepTitle))}</span>` : "",
+    "</div>",
+  ].join("");
+}
+
+// Wraps an already-rendered gate message body in the gate-card shell. Shared by
+// both agent-mode chat bubbles (agentMessageHtml) and manual-mode analysis
+// sections (driverManualAnalysisHtml), so the card form is identical in both
+// modes — only the confirm control differs (chat button vs. step-rail button).
+function driverGateCardHtml(message, innerHtml) {
+  const redFlags = driverGateRedFlags(message);
+  return [
+    '<div class="gate-card" data-gate-tone="' + (redFlags.length ? "warn" : "review") + '">',
+    driverGateCardHeaderHtml(message),
+    '<div class="gate-card-body">',
+    innerHtml,
+    "</div>",
+    driverGateRedFlagsHtml(redFlags),
+    driverGateConsequenceHtml(message),
+    "</div>",
+  ].join("");
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
-  const className = role === "user" ? "agent-message user" : "agent-message assistant";
+  // join_c1 turns carry no explicit metadata.kind (backend groups them with
+  // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
+  // same needs_confirmation moment — the C1 role-assignment form — so they
+  // get the same card treatment.
+  const isGate = role === "assistant"
+    && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
+  const className = role === "user"
+    ? "agent-message user"
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
   const contentHtml = thinking
@@ -5493,14 +5591,17 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
-  return [
-    `<article class="${className}"${idAttr}>`,
-    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+  const bodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
     role === "assistant"
       ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}`)
       : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
+  ].join("");
+  return [
+    `<article class="${className}"${idAttr}>`,
+    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+    isGate ? driverGateCardHtml(message, bodyHtml) : bodyHtml,
     memoryReferencesHtml,
     "</article>",
   ].join("");

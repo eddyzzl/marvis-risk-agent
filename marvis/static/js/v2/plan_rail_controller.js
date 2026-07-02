@@ -564,12 +564,28 @@ export function createPlanRailController({
     return steps.find((step) => String(step?.id || "") === stepId) || null;
   }
 
+  // VD-2: the gate card's consequence line ("确认后将执行:<下一步>") reads the
+  // step that depends on the gate step, so it can name what happens next
+  // without the caller re-deriving plan topology.
+  function nextStepAfter(metadata = {}, taskId = selectedTaskId()) {
+    const gate = planStep(metadata, taskId);
+    if (!gate) return null;
+    const plan = v2PlanCache.get(taskId);
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    const downstream = steps.filter((step) => (step?.depends_on || []).includes(gate.id));
+    if (!downstream.length) return null;
+    return downstream.reduce((earliest, step) => (
+      earliest === null || (step?.index ?? Infinity) < (earliest?.index ?? Infinity) ? step : earliest
+    ), null);
+  }
+
   return {
     artifactPreviewContainer,
     clearArtifactPanel,
     handleClick,
     installArtifactHandlers,
     maybeFetchPlan,
+    nextStepAfter,
     planStep,
     render,
     resetFetchThrottle,
