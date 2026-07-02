@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
@@ -93,25 +94,39 @@ class DataBackend:
         *,
         sample_key_limit: int = 50,
         row_limit: int = 5000,
+        key_pairs: Sequence[KeyPair] | None = None,
     ) -> ConflictReport:
         from marvis.data.dedup import two_level_dedup
 
         path = self._resolve_path(path)
         if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
-            _deduped, report = two_level_dedup(self.read_frame(path), list(key_columns))
+            frame = self.read_frame(path)
+            if key_pairs is not None:
+                frame = self.with_transformed_key_columns(frame, key_pairs)
+                transformed_keys = transformed_key_names(key_pairs)
+                _deduped, report = two_level_dedup(frame, transformed_keys)
+                return replace(report, key_columns=tuple(str(col) for col in key_columns))
+            _deduped, report = two_level_dedup(frame, list(key_columns))
             return report
         allowed_columns = set(self.column_names(path))
         self._validate_columns(key_columns, allowed_columns)
-        keys_sql = ", ".join(sql_identifier(col, allowed_columns) for col in key_columns)
-        key_not_null = " AND ".join(
-            f"{sql_identifier(col, allowed_columns)} IS NOT NULL"
-            for col in key_columns
-        ) or "TRUE"
+        if key_pairs is not None:
+            key_exprs = self._transformed_key_exprs(key_pairs, allowed_columns, side="feature")
+            keys_sql = ", ".join(f"{expr} AS {alias}" for expr, alias in key_exprs)
+            keys_select_sql = ", ".join(alias for _expr, alias in key_exprs)
+            key_not_null = " AND ".join(f"{alias} IS NOT NULL" for _expr, alias in key_exprs) or "TRUE"
+        else:
+            keys_sql = ", ".join(sql_identifier(col, allowed_columns) for col in key_columns)
+            keys_select_sql = keys_sql
+            key_not_null = " AND ".join(
+                f"{sql_identifier(col, allowed_columns)} IS NOT NULL"
+                for col in key_columns
+            ) or "TRUE"
         duplicate_groups = (
             f"SELECT {keys_sql}, count(*) AS __n "
             f"FROM {self._duckdb_rel(path)} "
             f"WHERE {key_not_null} "
-            f"GROUP BY {keys_sql} "
+            f"GROUP BY {keys_select_sql} "
             "HAVING count(*) > 1"
         )
         count_row = duckdb.sql(
@@ -128,6 +143,39 @@ class DataBackend:
                 n_conflict_rows=0,
                 safe_dropped=0,
                 sample_keys=(),
+            )
+
+        if key_pairs is not None:
+            key_exprs = self._transformed_key_exprs(key_pairs, allowed_columns, side="feature")
+            key_aliases = [alias for _expr, alias in key_exprs]
+            join_condition = " AND ".join(
+                f"f_key.{alias} IS NOT DISTINCT FROM d.{alias}" for alias in key_aliases
+            )
+            sample_rows = duckdb.sql(
+                "WITH duplicate_keys AS ("
+                # duplicate_groups already projects the transformed keys under their
+                # aliases, so re-select the aliases here (not the raw expressions again —
+                # the raw source column no longer exists in this subquery's output).
+                f"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} "
+                f"LIMIT {int(sample_key_limit)}"
+                "), feature_with_keys AS ("
+                f"SELECT f.*, {keys_sql} FROM {self._duckdb_rel(path)} f"
+                ") "
+                f"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) "
+                "FROM feature_with_keys f_key "
+                f"JOIN duplicate_keys d ON {join_condition} "
+                f"LIMIT {int(row_limit)}"
+            ).df()
+            frame = self.with_transformed_key_columns(sample_rows, key_pairs)
+            transformed_keys = transformed_key_names(key_pairs)
+            _deduped, sample_report = two_level_dedup(frame, transformed_keys)
+            return ConflictReport(
+                key_columns=tuple(str(col) for col in key_columns),
+                conflict_columns=sample_report.conflict_columns,
+                n_conflict_keys=n_conflict_keys,
+                n_conflict_rows=n_conflict_rows,
+                safe_dropped=sample_report.safe_dropped,
+                sample_keys=sample_report.sample_keys,
             )
 
         join_condition = " AND ".join(
@@ -208,25 +256,44 @@ class DataBackend:
             return duckdb.sql(query).df()
         return self.read_frame(path).sample(n=int(n), random_state=int(seed))
 
-    def distinct_count(self, path: Path, columns: list[str]) -> int:
+    def distinct_count(
+        self,
+        path: Path,
+        columns: list[str],
+        *,
+        key_pairs: Sequence[KeyPair] | None = None,
+    ) -> int:
         path = self._resolve_path(path)
         if not columns:
             raise DataBackendError("distinct_count requires at least one column")
         allowed_columns = set(self.column_names(path))
         self._validate_columns(columns, allowed_columns)
         if path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES:
-            cols_sql = ", ".join(sql_identifier(col, allowed_columns) for col in columns)
+            if key_pairs is not None:
+                key_exprs = self._transformed_key_exprs(key_pairs, allowed_columns, side="feature")
+                cols_sql = ", ".join(expr for expr, _alias in key_exprs)
+            else:
+                cols_sql = ", ".join(sql_identifier(col, allowed_columns) for col in columns)
             query = (
                 "SELECT count(*) FROM ("
                 f"SELECT DISTINCT {cols_sql} FROM {self._duckdb_rel(path)}"
                 ")"
             )
             return int(duckdb.sql(query).fetchone()[0])
+        if key_pairs is not None:
+            frame = self.with_transformed_key_columns(self.read_frame(path), key_pairs)
+            return int(frame[transformed_key_names(key_pairs)].drop_duplicates().shape[0])
         frame = self.read_frame(path, columns=columns)
         return int(frame.drop_duplicates().shape[0])
 
-    def is_key_unique(self, path: Path, columns: list[str]) -> bool:
-        return self.distinct_count(path, columns) == self.row_count(path)
+    def is_key_unique(
+        self,
+        path: Path,
+        columns: list[str],
+        *,
+        key_pairs: Sequence[KeyPair] | None = None,
+    ) -> bool:
+        return self.distinct_count(path, columns, key_pairs=key_pairs) == self.row_count(path)
 
     def left_join(
         self,
@@ -253,7 +320,9 @@ class DataBackend:
         self._validate_columns([pair.anchor_col for pair in key_pairs], anchor_columns)
         self._validate_columns(feature_key_columns, feature_columns)
 
-        if dedup_strategy == "abort" and not self.is_key_unique(feature_path, feature_key_columns):
+        if dedup_strategy == "abort" and not self.is_key_unique(
+            feature_path, feature_key_columns, key_pairs=key_pairs
+        ):
             raise DataBackendError("feature keys are not unique")
 
         feature_rel = self._dedup_feature_rel(
@@ -261,6 +330,7 @@ class DataBackend:
             feature_columns,
             feature_key_columns,
             dedup_strategy,
+            key_pairs=key_pairs,
         )
         on_sql = " AND ".join(
             self._join_condition(pair, anchor_columns, feature_columns)
@@ -469,21 +539,29 @@ class DataBackend:
         feature_columns: set[str],
         feature_key_columns: Sequence[str],
         dedup_strategy: str | None,
+        *,
+        key_pairs: Sequence[KeyPair] | None = None,
     ) -> str:
         rel = self._duckdb_rel(feature_path)
         if dedup_strategy in (None, "abort"):
             return f"SELECT * FROM {rel}"
-        key_sql = ", ".join(
-            sql_identifier(column, feature_columns)
-            for column in feature_key_columns
-        )
+        if key_pairs is not None:
+            partition_sql = ", ".join(
+                expr for expr, _alias in
+                self._transformed_key_exprs(key_pairs, feature_columns, side="feature")
+            )
+        else:
+            partition_sql = ", ".join(
+                sql_identifier(column, feature_columns)
+                for column in feature_key_columns
+            )
         if dedup_strategy in {"first", "last"}:
             order = "ASC" if dedup_strategy == "first" else "DESC"
-            return self._first_last_dedup_sql(feature_path, rel, key_sql, feature_columns, order)
+            return self._first_last_dedup_sql(feature_path, rel, partition_sql, feature_columns, order)
         if dedup_strategy in {"agg_mean", "agg_max"}:
             numeric = self.numeric_columns(feature_path) if dedup_strategy == "agg_mean" else set()
             return self._agg_dedup_sql(
-                rel, key_sql, feature_columns, feature_key_columns, dedup_strategy, numeric
+                rel, partition_sql, feature_columns, feature_key_columns, dedup_strategy, numeric
             )
         raise DataBackendError(f"unsupported dedup_strategy: {dedup_strategy}")
 
@@ -501,6 +579,9 @@ class DataBackend:
         # full-row content order, which is also deterministic.
         # The synthetic rank column name is derived to be PROVABLY absent from the feature
         # columns so it can never collide with (and silently drop or shadow) a real column.
+        # key_sql is expressed in the TRANSFORMED key space (matches the actual JOIN
+        # condition), so rows whose raw keys differ but transform to the same value
+        # (e.g. 'ABC' vs 'abc' under exact_lower) land in the same partition.
         rank = _unique_internal_name("__marvis_rn", feature_columns)
         # file_row_number=true is rejected by DuckDB when a real column is already named
         # 'file_row_number', so only use it when that name is free.
@@ -533,7 +614,16 @@ class DataBackend:
         dedup_strategy: str,
         numeric_columns: set[str] = frozenset(),
     ) -> str:
-        projections = list(feature_key_columns)
+        # key_sql is expressed in the TRANSFORMED key space (matches the actual JOIN
+        # condition). Raw key columns can disagree within a transformed-key group (e.g.
+        # 'ABC' vs 'abc' under exact_lower), so they are no longer valid GROUP BY
+        # projections on their own — aggregate them deterministically like any other
+        # non-numeric column instead of selecting the raw column directly.
+        projections = []
+        for column in feature_key_columns:
+            ident = sql_identifier(column, feature_columns)
+            alias = _quote_identifier(column)
+            projections.append(f"max({ident}) AS {alias}")
         for column in sorted(feature_columns - set(feature_key_columns)):
             ident = sql_identifier(column, feature_columns)
             alias = _quote_identifier(column)
@@ -543,12 +633,7 @@ class DataBackend:
                 # Non-numeric columns under agg_mean (and all columns under agg_max) take a
                 # deterministic max() rather than being silently NULLed by try_cast(DOUBLE).
                 projections.append(f"max({ident}) AS {alias}")
-        projection_sql = ", ".join(
-            sql_identifier(column, feature_columns)
-            if column in feature_columns
-            else column
-            for column in projections
-        )
+        projection_sql = ", ".join(projections)
         return f"SELECT {projection_sql} FROM {rel} GROUP BY {key_sql}"
 
     def _join_condition(
@@ -563,6 +648,47 @@ class DataBackend:
             f"{_sql_transform(pair.match_method, anchor_col, side='anchor', pair=pair)} = "
             f"{_sql_transform(pair.match_method, feature_col, side='feature', pair=pair)}"
         )
+
+    def _transformed_key_exprs(
+        self,
+        key_pairs: Sequence[KeyPair],
+        columns: set[str],
+        *,
+        side: str,
+    ) -> list[tuple[str, str]]:
+        """SQL (expression, alias) pairs for each key pair's column, transformed with the
+        SAME ``_sql_transform`` used by the actual JOIN condition (:meth:`_join_condition`).
+        Uniqueness/dedup must compare keys the way the JOIN will compare them — an
+        `exact_lower`/`hash`/`date` transform can make raw-distinct values collide (or vice
+        versa), so grouping on raw columns silently disagrees with what the JOIN does."""
+        exprs = []
+        for index, pair in enumerate(key_pairs):
+            column = pair.feature_col if side == "feature" else pair.anchor_col
+            source = sql_identifier(column, columns)
+            alias = _unique_internal_name(f"__marvis_key_{index}", columns)
+            expr = _sql_transform(pair.match_method, source, side=side, pair=pair)
+            exprs.append((expr, alias))
+        return exprs
+
+    def with_transformed_key_columns(
+        self,
+        frame: pd.DataFrame,
+        key_pairs: Sequence[KeyPair],
+        *,
+        side: str = "feature",
+    ) -> pd.DataFrame:
+        """Pandas-fallback counterpart to :meth:`_transformed_key_exprs`: adds one column per
+        key pair holding the value transformed the same way the DuckDB JOIN condition would
+        (via ``_transformed_key_value``), so uniqueness/dedup computed on these columns stays
+        consistent with the transformed-key-space JOIN even off the DuckDB code path."""
+        frame = frame.copy()
+        for name, pair in zip(transformed_key_names(key_pairs), key_pairs):
+            column = pair.feature_col if side == "feature" else pair.anchor_col
+            frame[name] = [
+                _transformed_key_value(value, method=pair.match_method, side=side, pair=pair)
+                for value in frame[column]
+            ]
+        return frame
 
     def _feature_projection(
         self,
@@ -745,6 +871,34 @@ def _hash_text(text: str, algorithm: str) -> str:
     return digest.hexdigest().lower()
 
 
+def _transformed_key_value(value: Any, *, method: str, side: str, pair: KeyPair) -> str | None:
+    """Pandas-fallback counterpart to ``_sql_transform``: applies the SAME match-method
+    transform (and the same ``pair.transform_side`` hash-skip rule) to a single Python
+    value, so a uniqueness/dedup check computed off the DuckDB code path still agrees with
+    what the actual JOIN condition would compute for this value."""
+    if pd.isna(value):
+        return None
+    text = _value_text(value)
+    if not text:
+        return None
+    if method == "exact":
+        return text
+    if method == "exact_lower":
+        return text.lower()
+    if method == "date":
+        return _canonical_date(text)
+    if method.startswith("hash:"):
+        algorithm = method.split(":", 1)[1]
+        if side == pair.transform_side or pair.transform_side == "both":
+            return _hash_text(text, algorithm)
+        return text.lower()
+    raise DataBackendError(f"unsupported match method: {method}")
+
+
+def transformed_key_names(key_pairs: Sequence[KeyPair]) -> list[str]:
+    return [f"__marvis_key_{index}" for index in range(len(key_pairs))]
+
+
 def _iter_strings(items: Iterable[str]) -> list[str]:
     return [str(item) for item in items]
 
@@ -757,4 +911,5 @@ __all__ = [
     "parquet_rel",
     "sql_identifier",
     "sql_string_literal",
+    "transformed_key_names",
 ]
