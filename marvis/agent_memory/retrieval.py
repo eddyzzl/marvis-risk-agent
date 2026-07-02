@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 import re
 from typing import Any, Iterable
 
+from marvis.agent_memory.models import MEMORY_TYPES
+
 
 METRIC_FIELDS = ("ks", "auc", "psi")
 MODEL_PAYLOAD_FIELDS = (
@@ -32,6 +34,12 @@ RECENCY_HALF_LIFE_DAYS = 90
 RECENCY_STALE_DAYS = 365
 RECENCY_RECENT_BONUS = 10
 RECENCY_STALE_PENALTY = -10
+# Raw-memory recall ceiling, per memory_type: model_experience is the highest
+# volume, highest-value category (comparison anchors), so it gets its own
+# generous window instead of being crowded out by preference/convention
+# entries once the store grows past a couple hundred rows.
+RAW_RECALL_LIMIT_PER_KIND = 200
+RAW_RECALL_LIMIT_OTHER_KINDS = 200
 MODEL_FAMILY_PATTERNS = (
     ("a_card", (r"\ba\s*card\b", r"a卡")),
     ("b_card", (r"\bb\s*card\b", r"b卡")),
@@ -123,9 +131,31 @@ def retrieve_with_distillations(
     remaining = limit - len(packets)
     if remaining <= 0:
         return packets[:limit]
-    raw_results = retrieve_relevant_memories(store.list_entries(limit=200), query, limit=remaining)
+    raw_results = retrieve_relevant_memories(_recall_raw_entries(store), query, limit=remaining)
     packets.extend(_raw_packet(result.context_packet) for result in raw_results)
     return packets[:limit]
+
+
+def _recall_raw_entries(store) -> list[Any]:
+    """Pull candidate raw entries for scoring, targeted by memory_type instead
+    of a single "most recent 200 across all types" scan. Without this,
+    model_experience anchors (and any other type) silently fall out of the
+    recall window as unrelated preference/convention entries accumulate."""
+    entries: list[Any] = []
+    seen_ids: set[str] = set()
+    for memory_type in MEMORY_TYPES:
+        per_kind_limit = (
+            RAW_RECALL_LIMIT_PER_KIND
+            if memory_type == "model_experience"
+            else RAW_RECALL_LIMIT_OTHER_KINDS
+        )
+        for entry in store.list_entries(memory_type=memory_type, limit=per_kind_limit):
+            entry_id = str(entry.get("id") if isinstance(entry, dict) else getattr(entry, "id", None))
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            entries.append(entry)
+    return entries
 
 
 def compare_model_experience(

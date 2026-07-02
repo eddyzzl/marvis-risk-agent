@@ -89,3 +89,61 @@ def test_distillation_prompt_packet_preserves_audit_fields():
             "source_memory_ids": ["mem-1", "mem-2"],
         }
     ]
+
+
+
+def test_raw_recall_targets_by_kind_so_old_model_experience_is_not_crowded_out(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+
+    # An old, high-value model_experience entry created first.
+    store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="A卡模型历史KS表现记录",
+            payload={
+                "ks": 30.0,
+                "auc": 0.72,
+                "psi": 0.08,
+                "month": "202501",
+                "channel": "自营",
+                "model_name": "分润通用A卡模型",
+                "model_version": "V2025",
+                "scope": "mob3贷前A卡",
+                "source_task_id": "task-old",
+                "important_feature_sources": ["征信"],
+            },
+            source_task_id="task-old",
+            confidence="high",
+        )
+    )
+
+    # Flood the store with 250 newer field_convention entries -- under the old
+    # "most recent 200 across all types" recall window, these alone would push
+    # the model_experience entry above out of list_entries(limit=200).
+    for i in range(250):
+        store.create(
+            MemoryCandidate(
+                memory_type="field_convention",
+                summary=f"字段口径经验 {i}",
+                payload={"target_col": f"col_{i}"},
+                source_task_id=f"task-conv-{i}",
+            )
+        )
+
+    packets = retrieve_with_distillations(
+        store,
+        {
+            "model_name": "分润通用A卡模型",
+            "scope": "mob3贷前A卡",
+            "channel": "自营",
+            "month": "202501",
+        },
+        limit=6,
+    )
+
+    assert any(
+        packet["kind"] == "raw" and packet["source_task_id"] == "task-old"
+        for packet in packets
+    )
