@@ -321,8 +321,8 @@
             "type": "integer"
           },
           "split_col": {
-          "type": "string"
-        }
+            "type": "string"
+          }
         },
         "required": [
           "dataset_id",
@@ -815,6 +815,13 @@
           },
           "reason": {
             "type": "string"
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "required": [
@@ -841,7 +848,7 @@
     },
     {
       "name": "configure_tuning",
-      "summary": "Prepare an explicit tuning configuration for the selected modeling recipe before hyperparameter search.",
+      "summary": "Prepare an explicit tuning configuration for one or more modeling recipes before hyperparameter search; each recipe gets its own trial budget (total = sum of per-recipe budgets).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -864,6 +871,30 @@
           },
           "seed": {
             "type": "integer"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass"
+              ]
+            },
+            "minItems": 1
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         "required": [
@@ -899,6 +930,23 @@
           },
           "reason": {
             "type": "string"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "total_n_trials": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -920,7 +968,7 @@
     },
     {
       "name": "tune_hyperparameters",
-      "summary": "Random-search LightGBM hyperparameters (seeded), selecting by test KS minus train/test overfit penalty. OOT metrics are reported but not used for search selection.",
+      "summary": "Two-stage random search (seeded) for one or more recipes (lgb/xgb/catboost/lr/scorecard/mlp), selecting by test KS minus train/test overfit penalty. OOT metrics are reported but not used for search selection. Single recipe returns a flat best_params/trials shape (back-compat); multiple recipes return per-recipe-keyed best_params/best_metrics plus a per_recipe detail map.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -977,6 +1025,30 @@
           },
           "drop_nan_labels": {
             "type": "boolean"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass"
+              ]
+            },
+            "minItems": 1
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         "required": [
@@ -1010,6 +1082,12 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "per_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
           }
         },
         "required": [

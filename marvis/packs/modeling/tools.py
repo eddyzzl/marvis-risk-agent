@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass, replace
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -58,7 +59,7 @@ from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
 from marvis.packs.modeling.select import select_features
-from marvis.packs.modeling.tune import tune_hyperparameters
+from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET, tune_hyperparameters
 from marvis.packs.modeling.errors import ModelingError, ReportScoreMissingError
 from marvis.settings import build_settings
 from marvis.validation.config import ValidationConfig
@@ -539,9 +540,19 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     if sample_weight_col and sample_weight_col in features:
         features = [feature for feature in features if feature != sample_weight_col]
         warnings.append("样本权重列已从入模特征中移除。")
-    n_trials = int(inputs.get("n_trials") or 40)
-    if n_trials < 1:
+    n_trials_override = _optional_int(inputs.get("n_trials"))
+    if n_trials_override is not None and n_trials_override < 1:
         raise ModelingError("n_trials must be at least 1")
+    # Per-recipe tuning budget (TUNE-1/SEL-2): every recipe gets its own trial
+    # count from DEFAULT_TRIAL_BUDGET (tree recipes 40, lr/scorecard/mlp 12) so a
+    # multi-algorithm comparison tunes every candidate, not just lgb. An explicit
+    # `n_trials` override applies uniformly to every recipe in the request (the
+    # single-recipe case behaves exactly like before: one scalar budget).
+    n_trials_by_recipe = {
+        item: (n_trials_override if n_trials_override is not None else DEFAULT_TRIAL_BUDGET.get(item, 40))
+        for item in recipes
+    }
+    n_trials = n_trials_by_recipe.get(primary_recipe, 40)
     params = _training_params(inputs)
     if sample_weight_col:
         params["sample_weight_col"] = sample_weight_col
@@ -557,6 +568,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         "sample_weight_diagnostics": _jsonable(sample_weight_diagnostics),
         "seed": _effective_seed(inputs, ctx),
         "n_trials": n_trials,
+        "n_trials_by_recipe": n_trials_by_recipe,
         "params": _jsonable(params),
         "metric_policy": metric_policy,
         "eligible_algorithms": _eligible_algorithms(target_type),
@@ -566,68 +578,171 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         "reason": (
             f"目标类型 `{target_type}`,候选算法 {'/'.join(recipes)},"
             f"主调参算法 `{primary_recipe}`,选择指标 {metric_policy}。"
+            f"调参预算(按算法):{', '.join(f'{k}={v}' for k, v in n_trials_by_recipe.items())}。"
         ),
     }
 
 
 def tool_configure_tuning(inputs: dict, ctx) -> dict:
+    """Prepare the tuning configuration for one or more recipes (TUNE-1/SEL-2).
+
+    Every recipe in BINARY_MODELING_RECIPES (lgb/xgb/catboost/lr/scorecard/mlp)
+    now runs the two-stage search in tune.py, each with its own budget — total
+    search cost is the SUM of each recipe's n_trials (tree recipes default 40,
+    lr/scorecard/mlp default 12; see DEFAULT_TRIAL_BUDGET). ``recipe`` stays the
+    single-recipe entry point for back-compat: it degrades to a one-element
+    ``recipes`` list. An explicit ``n_trials`` overrides every listed recipe's
+    budget uniformly; per-recipe overrides can be passed via ``n_trials_by_recipe``.
+    """
     recipe = str(inputs.get("recipe") or "lgb")
+    recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
     target_type = str(inputs.get("target_type") or "binary")
-    n_trials = int(inputs.get("n_trials") or 40)
-    if n_trials < 1:
+    n_trials_override = _optional_int(inputs.get("n_trials"))
+    if n_trials_override is not None and n_trials_override < 1:
         raise ModelingError("n_trials must be at least 1")
+    explicit_budgets = {
+        str(k): int(v)
+        for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
+        if v is not None
+    }
+    for item, value in explicit_budgets.items():
+        if value < 1:
+            raise ModelingError("n_trials must be at least 1")
     sample_weight_col = str(inputs.get("sample_weight_col") or "").strip()
     seed = _effective_seed(inputs, ctx)
-    tune_enabled = recipe == "lgb"
+    tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
+    budgets = {
+        item: explicit_budgets.get(
+            item,
+            n_trials_override if n_trials_override is not None else DEFAULT_TRIAL_BUDGET.get(item, 40),
+        )
+        for item in tunable
+    }
+    tune_enabled = bool(tunable)
+    total_budget = sum(budgets.values())
     params = _training_params(inputs)
+    budget_note = ', '.join(f'{item}={budgets[item]}' for item in tunable)
+    non_tunable = [item for item in recipes if item not in DEFAULT_TRIAL_BUDGET]
+    reason = (
+        f"{'/'.join(tunable)} 使用有界两阶段随机搜索(按算法预算:{budget_note};"
+        f"多算法总预算=Σ各配方预算={total_budget} 轮)。"
+        if tunable else "所选算法暂不支持随机搜索,使用算法默认参数。"
+    )
+    if non_tunable:
+        reason += f" {'/'.join(non_tunable)} 不参与调参,使用算法默认参数。"
     return {
         "recipe": recipe,
+        "recipes": recipes,
         "target_type": target_type,
         "tune_enabled": tune_enabled,
-        "n_trials": n_trials if tune_enabled else 0,
+        "n_trials": budgets.get(recipe, 0),
+        "n_trials_by_recipe": budgets,
+        "total_n_trials": total_budget,
         "sample_weight_col": sample_weight_col,
         "seed": seed,
         "params": _jsonable(params),
-        "reason": "LightGBM 使用有界随机搜索。" if tune_enabled else f"{recipe} 暂不执行随机搜索,使用算法默认参数。",
+        "reason": reason,
     }
 
 
 def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
-    # The random search is LightGBM-specific. For other recipes there is no lgb
-    # search to run (lr/scorecard have their own knobs, not a random search; xgb
-    # tuning is a later slice), so we skip tuning and let train_model use the
-    # recipe's own defaults.
+    """Two-stage random search, generalised to every BINARY_MODELING_RECIPES
+    family (TUNE-1/SEL-2): lgb/xgb/catboost get tree-recipe spaces with early
+    stopping against the test split; lr/scorecard/mlp get smaller spaces
+    (regularization strength, scorecard bin granularity, mlp architecture).
+
+    ``recipe`` (single, back-compat) stays the default entry point: with one
+    recipe, ``best_params``/``best_metrics``/``trials``/``n_trials`` are the
+    flat, single-recipe shape unchanged from the historical lgb-only contract.
+    Pass ``recipes`` (list) to tune several algorithms in one call — each gets
+    its own budget from ``n_trials_by_recipe`` (falling back to
+    DEFAULT_TRIAL_BUDGET), and the output additionally carries ``per_recipe``
+    (full per-algorithm detail) plus a ``best_params``/``trials`` dict keyed by
+    recipe id for ``train_models`` to consume.
+    """
     recipe = str(inputs.get("recipe") or "lgb")
+    recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
     configured_params = dict(inputs.get("params") or {})
     control_params = _training_control_params(inputs, configured_params)
     base_params = {**configured_params, **control_params}
-    if recipe != "lgb":
-        return {"best_params": _jsonable(base_params), "best_metrics": {}, "n_trials": 0, "trials": []}
-    runtime = _runtime(ctx)
-    dataset = runtime.registry.get(str(inputs["dataset_id"]))
-    result = tune_hyperparameters(
-        runtime.backend,
-        runtime.registry.resolve_path(dataset.id),
-        features=[str(item) for item in inputs["features"]],
-        target_col=str(inputs["target_col"]),
-        split_col=str(inputs["split_col"]),
-        split_values=dict(inputs["split_values"]),
-        n_trials=int(inputs.get("n_trials", 40)),
-        seed=_effective_seed(inputs, ctx),
-        early_stopping_rounds=int(inputs.get("early_stopping_rounds", 100)),
-        max_boost_round=int(inputs.get("max_boost_round", 3000)),
-        overfit_penalty=float(inputs.get("overfit_penalty", 0.5)),
-        sample_weight_col=control_params.get("sample_weight_col", ""),
-        base_params=base_params,
-        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    n_trials_override = _optional_int(inputs.get("n_trials"))
+    explicit_budgets = {
+        str(k): int(v)
+        for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
+        if v is not None
+    }
+
+    def _budget_for(item: str) -> int:
+        if item in explicit_budgets:
+            return explicit_budgets[item]
+        if n_trials_override is not None:
+            return n_trials_override
+        return DEFAULT_TRIAL_BUDGET.get(item, 40)
+
+    non_tunable = [item for item in recipes if item not in DEFAULT_TRIAL_BUDGET]
+    tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
+    per_recipe: dict[str, dict] = {}
+    for item in non_tunable:
+        per_recipe[item] = {"best_params": _jsonable(base_params), "best_metrics": {}, "n_trials": 0, "trials": []}
+
+    if tunable:
+        runtime = _runtime(ctx)
+        dataset = runtime.registry.get(str(inputs["dataset_id"]))
+        dataset_path = runtime.registry.resolve_path(dataset.id)
+        seed = _effective_seed(inputs, ctx)
+        for item in tunable:
+            result = tune_hyperparameters(
+                runtime.backend,
+                dataset_path,
+                features=[str(f) for f in inputs["features"]],
+                target_col=str(inputs["target_col"]),
+                split_col=str(inputs["split_col"]),
+                split_values=dict(inputs["split_values"]),
+                recipe=item,
+                n_trials=_budget_for(item),
+                # Per-recipe deterministic seed derivation: same base seed always
+                # reproduces the same trial sequence per recipe, but different
+                # recipes don't share identical RNG draws.
+                seed=_recipe_seed(seed, item),
+                early_stopping_rounds=int(inputs.get("early_stopping_rounds", 100)),
+                max_boost_round=int(inputs.get("max_boost_round", 3000)),
+                overfit_penalty=float(inputs.get("overfit_penalty", 0.5)),
+                sample_weight_col=control_params.get("sample_weight_col", ""),
+                base_params=base_params,
+                drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+            )
+            best_params = {**control_params, **result.best_params}
+            per_recipe[item] = {
+                "best_params": _jsonable(best_params),
+                "best_metrics": _jsonable(result.best_metrics),
+                "n_trials": result.n_trials,
+                "trials": _jsonable(result.trials),
+                "nan_labels_dropped": result.nan_labels_dropped,
+            }
+
+    total_nan_dropped = max(
+        (int(item.get("nan_labels_dropped") or 0) for item in per_recipe.values()),
+        default=0,
     )
-    best_params = {**control_params, **result.best_params}
+    if len(recipes) == 1:
+        # Single-recipe back-compat shape: flat best_params/trials, exactly like
+        # the historical lgb-only contract.
+        only = per_recipe[recipes[0]]
+        return {
+            "best_params": only["best_params"],
+            "best_metrics": only["best_metrics"],
+            "n_trials": only["n_trials"],
+            "trials": only["trials"],
+            "nan_labels_dropped": only.get("nan_labels_dropped", 0),
+            "per_recipe": _jsonable(per_recipe),
+        }
     return {
-        "best_params": _jsonable(best_params),
-        "best_metrics": _jsonable(result.best_metrics),
-        "n_trials": result.n_trials,
-        "trials": _jsonable(result.trials),
-        "nan_labels_dropped": result.nan_labels_dropped,
+        "best_params": {item: per_recipe[item]["best_params"] for item in recipes},
+        "best_metrics": {item: per_recipe[item]["best_metrics"] for item in recipes},
+        "n_trials": sum(per_recipe[item]["n_trials"] for item in recipes),
+        "trials": [trial for item in recipes for trial in per_recipe[item]["trials"]],
+        "nan_labels_dropped": total_nan_dropped,
+        "per_recipe": _jsonable(per_recipe),
     }
 
 
@@ -685,17 +800,50 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     }
 
 
+#: Tree recipes that fit on a boosting-round ceiling and support early stopping
+#: in train_models' multi-algorithm comparison (TUNE-1/SEL-2 fair-arena policy).
+_EARLY_STOPPED_TREE_RECIPES = frozenset({"lgb", "xgb", "catboost"})
+
+#: Early-stopping round count used in train_models when a tree recipe's params
+#: were not produced by tune_hyperparameters (e.g. a manually-fixed param dict) —
+#: mirrors tune.py's own default so an untuned tree recipe still trains to a
+#: real ceiling instead of starving at the recipe's bare default round count.
+_TRAIN_MODELS_EARLY_STOPPING_ROUNDS = 100
+
+
+def _params_by_recipe(tuned_params: dict, recipes: list[str]) -> dict[str, dict] | None:
+    """Detect whether ``tuned_params`` is a per-recipe-keyed dict (as produced by
+    tool_tune_hyperparameters when called with multiple ``recipes``) vs. the
+    legacy flat-params shape (single dict of hyperparameters applied only to the
+    lgb slot). A dict counts as per-recipe-keyed when every one of its keys is a
+    requested recipe id and every value is itself a dict — real hyperparameter
+    names never collide with recipe ids."""
+    if not tuned_params or not all(isinstance(v, dict) for v in tuned_params.values()):
+        return None
+    if not set(tuned_params.keys()) <= set(recipes):
+        return None
+    return {k: dict(v) for k, v in tuned_params.items()}
+
+
 def tool_train_models(inputs: dict, ctx) -> dict:
     """Train each requested recipe and return all experiments plus the champion picked by
     overfit-penalized test KS (OOT is reported only, never used to select — mirrors
-    tune_hyperparameters' "OOT reports only" policy, DOM-9). lgb uses the tuned params;
-    other recipes train with their own defaults. The single-recipe case (recipes=[lgb])
-    behaves like train_model."""
+    tune_hyperparameters' "OOT reports only" policy, DOM-9).
+
+    Fair multi-algorithm arena (TUNE-1/SEL-2): every recipe trains with its own
+    tuned params (when ``params`` is the per-recipe dict tool_tune_hyperparameters
+    produces for multi-recipe runs) or the legacy flat dict (back-compat: applies
+    only to the lgb slot, exactly like before). Tree recipes (lgb/xgb/catboost)
+    always train with early stopping against the test split — either the round
+    count tuning already resolved, or a default early-stopping window when no
+    tuned params were supplied for that recipe. The single-recipe case
+    (recipes=[lgb]) behaves like train_model."""
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     recipes = [str(item) for item in inputs["recipes"]]
     tuned_params = dict(inputs.get("params") or {})
     control_params = _training_control_params(inputs, tuned_params)
+    per_recipe_params = _params_by_recipe(tuned_params, recipes)
     features = tuple(str(item) for item in inputs["features"])
     target_col = str(inputs["target_col"])
     split_col = str(inputs["split_col"])
@@ -709,16 +857,28 @@ def tool_train_models(inputs: dict, ctx) -> dict:
 
     experiments: list[dict] = []
     for recipe in recipes:
+        if per_recipe_params is not None:
+            recipe_params = {**per_recipe_params.get(recipe, {}), **control_params}
+        elif recipe == "lgb":
+            # legacy flat-params shape: only the lgb slot consumes it (unchanged
+            # single-recipe / lgb-only-tuned back-compat behaviour).
+            recipe_params = {**tuned_params, **control_params}
+        else:
+            recipe_params = dict(control_params)
+        early_stopping_rounds = (
+            _TRAIN_MODELS_EARLY_STOPPING_ROUNDS
+            if recipe in _EARLY_STOPPED_TREE_RECIPES
+            else None
+        )
         config = TrainConfig(
             dataset_id=dataset.id,
             features=features,
             target_col=target_col,
             split_col=split_col,
             split_values=split_values,
-            # only the lgb recipe consumes the tuned params; others use their defaults
-            params={**tuned_params, **control_params} if recipe == "lgb" else dict(control_params),
+            params=recipe_params,
             seed=seed,
-            early_stopping_rounds=None,
+            early_stopping_rounds=early_stopping_rounds,
             recipe_id=recipe,
             target_type=target_type,
             drop_nan_labels=drop_nan,
@@ -3694,6 +3854,15 @@ def _effective_seed(inputs: dict, ctx) -> int:
     if getattr(ctx, "seed", None) is not None:
         return int(ctx.seed)
     return DEFAULT_RANDOM_SEED
+
+
+def _recipe_seed(seed: int, recipe: str) -> int:
+    """Deterministic per-recipe seed derivation (TUNE-1): every recipe's search
+    gets its own seed so trial sequences don't collide across algorithms, but the
+    derivation is a pure function of (seed, recipe) — same base seed always
+    reproduces the same per-recipe trial sequence."""
+    digest = hashlib.sha256(f"{seed}:{recipe}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
 
 
 def _training_params(inputs: dict) -> dict:

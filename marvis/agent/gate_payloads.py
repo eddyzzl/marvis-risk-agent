@@ -338,11 +338,29 @@ def _modeling_override_guidance(
     n_trials = _safe_int(output.get("n_trials"))
     if n_trials is not None:
         total_rows = _safe_int(split_summary.get("total_rows")) if isinstance(split_summary, dict) else None
-        guidance.append({
-            "id": "n_trials",
-            "label": "调参预算",
-            **_n_trials_guidance_by_scale(n_trials, total_rows),
-        })
+        budgets = output.get("n_trials_by_recipe") if isinstance(output.get("n_trials_by_recipe"), dict) else {}
+        if len(budgets) > 1:
+            # Multi-algorithm comparison (TUNE-1/SEL-2): every recipe now tunes with
+            # its own budget — total search cost is the SUM of each recipe's
+            # n_trials, so surface that instead of a single scalar's guidance.
+            total_budget = sum(int(v) for v in budgets.values())
+            budget_note = "、".join(f"{recipe}={value}" for recipe, value in budgets.items())
+            guidance.append({
+                "id": "n_trials",
+                "label": "调参预算",
+                "level": "info",
+                "message": (
+                    f"多算法对比:按算法预算 {budget_note};多算法总预算=Σ各配方预算={total_budget} 轮"
+                    "(树模型 lgb/xgb/catboost 默认各 40 轮两阶段搜索,lr/scorecard/mlp 默认各 12 轮;"
+                    "总预算越大,本步运行耗时越长,可按需在本门调整每个算法的预算)。"
+                ),
+            })
+        else:
+            guidance.append({
+                "id": "n_trials",
+                "label": "调参预算",
+                **_n_trials_guidance_by_scale(n_trials, total_rows),
+            })
     invalid_weights = [
         str(item.get("column") or "")
         for item in diagnostics

@@ -35,7 +35,11 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
         "allow_writing_files": False,
     }
     iterations = int(params.pop("iterations", params.pop("num_boost_round", 50)))
-    model = CatBoostClassifier(**params, iterations=iterations)
+    od_wait = params.pop("od_wait", None)
+    if config.early_stopping_rounds:
+        params.setdefault("od_type", "Iter")
+        od_wait = int(config.early_stopping_rounds)
+    model = CatBoostClassifier(**params, iterations=iterations, od_wait=od_wait)
     features = list(config.features)
     model.fit(
         train[features],
@@ -52,11 +56,12 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
         config,
         oot_has_labels=oot_has_labels,
     )
+    resolved_iterations = int(model.get_best_iteration() or model.tree_count_ - 1) + 1 if config.early_stopping_rounds else iterations
     artifact = _save_catboost_model(
         model,
         config,
         out_dir,
-        artifact_params({**params, "iterations": iterations}, config),
+        artifact_params({**params, "iterations": iterations, "best_iteration": resolved_iterations}, config),
     )
     return TrainResult(
         artifact=artifact,

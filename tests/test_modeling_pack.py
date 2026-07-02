@@ -883,25 +883,44 @@ def test_train_model_allows_scoring_only_oot(tmp_path):
     assert result.output["metrics"]["oot_auc"] is None
 
 
-def test_tune_skips_random_search_for_non_lgb_recipe():
-    """The LightGBM random search only runs for the lgb recipe; other recipes
-    (lr/scorecard/xgb/catboost) train with their own defaults, so tuning returns empty
-    params (G2 recipe-aware tune). The skip path runs before touching the runtime."""
-    from marvis.packs.modeling.tools import tool_tune_hyperparameters
+def test_tune_hyperparameters_supports_all_binary_recipes(tmp_path):
+    """TUNE-1: the two-stage random search now runs for every BINARY_MODELING_RECIPES
+    family, not just lgb. xgb/catboost get tree-recipe spaces with early-stopping
+    evidence (best_iteration); lr/scorecard/mlp get their own smaller spaces. Each
+    recipe actually searches (n_trials > 0, non-empty trials, non-default params)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
 
-    for recipe in ("lr", "scorecard", "xgb", "catboost"):
-        out = tool_tune_hyperparameters(
+    for recipe, budget in (("lr", 3), ("scorecard", 3), ("xgb", 3), ("catboost", 3), ("mlp", 3)):
+        out = runner.invoke(
+            ToolRef("modeling", "tune_hyperparameters"),
             {
                 "recipe": recipe,
-                "dataset_id": "x",
-                "features": ["a"],
+                "dataset_id": prepared.output["result_dataset_id"],
+                "features": ["x1", "x2"],
                 "target_col": "y",
                 "split_col": "split",
-                "split_values": {},
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "n_trials": budget,
+                "seed": 23,
+                "early_stopping_rounds": 5,
+                "max_boost_round": 20,
             },
-            ctx=None,
+            task_id=task.id,
         )
-        assert out == {"best_params": {}, "best_metrics": {}, "n_trials": 0, "trials": []}
+        assert out.ok is True, (recipe, out.error)
+        assert out.output["n_trials"] == budget, recipe
+        assert len(out.output["trials"]) == budget, recipe
+        assert out.output["best_metrics"]["test_ks"] is not None, recipe
+        if recipe in ("xgb", "catboost"):
+            assert "best_iteration" in out.output["best_metrics"], recipe
+            assert all("best_iteration" in trial for trial in out.output["trials"]), recipe
 
 
 def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
@@ -954,7 +973,11 @@ def test_choose_modeling_spec_validates_family_and_sample_weight_controls():
         )
 
 
-def test_configure_tuning_preserves_manual_controls_and_disables_non_lgb():
+def test_configure_tuning_preserves_manual_controls_and_enables_every_recipe():
+    """TUNE-1/SEL-2: configure_tuning enables the two-stage search for every
+    BINARY_MODELING_RECIPES family (not just lgb), assigns each recipe its own
+    default budget from DEFAULT_TRIAL_BUDGET when multiple recipes are requested,
+    and an explicit n_trials still overrides uniformly (single-recipe back-compat)."""
     from marvis.packs.modeling.tools import tool_configure_tuning
 
     lgb = tool_configure_tuning(
@@ -970,15 +993,26 @@ def test_configure_tuning_preserves_manual_controls_and_disables_non_lgb():
     )
     assert lgb["tune_enabled"] is True
     assert lgb["n_trials"] == 7
+    assert lgb["n_trials_by_recipe"] == {"lgb": 7}
     assert lgb["sample_weight_col"] == "weight"
     assert lgb["params"]["sample_weight_col"] == "weight"
     assert lgb["params"]["learning_rate"] == 0.03
     assert lgb["params"]["monotone_constraints"] == {"x1": 1, "x2": -1}
 
     lr = tool_configure_tuning({"recipe": "lr", "seed": 13, "n_trials": 7}, SimpleNamespace(seed=None))
-    assert lr["tune_enabled"] is False
-    assert lr["n_trials"] == 0
+    assert lr["tune_enabled"] is True
+    assert lr["n_trials"] == 7
     assert lr["params"] == {}
+
+    multi = tool_configure_tuning(
+        {"recipe": "lgb", "recipes": ["lgb", "xgb", "catboost", "lr", "scorecard", "mlp"], "seed": 13},
+        SimpleNamespace(seed=None),
+    )
+    assert multi["tune_enabled"] is True
+    assert multi["n_trials_by_recipe"] == {
+        "lgb": 40, "xgb": 40, "catboost": 40, "lr": 12, "scorecard": 12, "mlp": 12,
+    }
+    assert multi["total_n_trials"] == 40 + 40 + 40 + 12 + 12 + 12
 
 
 def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
@@ -1017,6 +1051,115 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["best_recipe"] in {"lgb", "lr"}
     assert out["target_type"] == "binary"
     assert out["selection_metric"] == "test_ks(overfit-penalized)"
+
+
+def test_multi_algorithm_pipeline_tunes_every_recipe_before_training(tmp_path):
+    """TUNE-1/SEL-2 end-to-end: configure_tuning -> tune_hyperparameters(recipes=[...])
+    -> train_models is a fair arena. Every recipe in the comparison gets its own
+    tuning trials (not just lgb), tree recipes train with early stopping, and the
+    whole chain reproduces identically for the same seed."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+    recipes = ["lgb", "xgb", "catboost", "lr"]
+
+    def _run_pipeline():
+        configured = runner.invoke(
+            ToolRef("modeling", "configure_tuning"),
+            {"recipe": "lgb", "recipes": recipes, "seed": 29, "n_trials_by_recipe": {r: 3 for r in recipes}},
+            task_id=task.id,
+        )
+        assert configured.ok is True, configured.error
+        assert configured.output["tune_enabled"] is True
+        assert configured.output["n_trials_by_recipe"] == {r: 3 for r in recipes}
+        assert configured.output["total_n_trials"] == 12
+
+        tuned = runner.invoke(
+            ToolRef("modeling", "tune_hyperparameters"),
+            {
+                "dataset_id": prepared.output["result_dataset_id"],
+                "features": ["x1", "x2"],
+                "target_col": "y",
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "recipe": configured.output["recipe"],
+                "recipes": configured.output["recipes"],
+                "n_trials_by_recipe": configured.output["n_trials_by_recipe"],
+                "seed": configured.output["seed"],
+                "early_stopping_rounds": 5,
+                "max_boost_round": 20,
+            },
+            task_id=task.id,
+        )
+        assert tuned.ok is True, tuned.error
+        return configured, tuned
+
+    configured, tuned = _run_pipeline()
+    _configured2, tuned2 = _run_pipeline()
+
+    # Every requested recipe has its own tuning trials recorded — the SEL-2 fair
+    # arena: no recipe is left at bare defaults while lgb alone gets a search.
+    per_recipe = tuned.output["per_recipe"]
+    assert set(per_recipe.keys()) == set(recipes)
+    for recipe in recipes:
+        assert per_recipe[recipe]["n_trials"] == 3, recipe
+        assert len(per_recipe[recipe]["trials"]) == 3, recipe
+        assert per_recipe[recipe]["best_metrics"]["test_ks"] is not None, recipe
+    for recipe in ("xgb", "catboost"):
+        assert "best_iteration" in per_recipe[recipe]["best_metrics"], recipe
+
+    # best_params is a dict keyed by recipe (multi-recipe shape) ready for train_models.
+    assert set(tuned.output["best_params"].keys()) == set(recipes)
+
+    # Same seed -> identical per-recipe trial params (deterministic derivation).
+    for recipe in recipes:
+        assert tuned.output["per_recipe"][recipe]["trials"] == tuned2.output["per_recipe"][recipe]["trials"], recipe
+        assert tuned.output["best_params"][recipe] == tuned2.output["best_params"][recipe], recipe
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": recipes,
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": tuned.output["best_params"],
+            "seed": configured.output["seed"],
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    assert {exp["recipe"] for exp in trained.output["experiments"]} == set(recipes)
+    assert trained.output["best_recipe"] in recipes
+
+    # Fair arena requirement (task item 2): every recipe trained on the identical
+    # split/feature set, not just the same tuning budget.
+    store = ExperimentStore(_settings.db_path)
+    experiments = {
+        experiment.recipe_id: experiment
+        for experiment in store.list_for_task(task.id)
+        if experiment.id in trained.output["experiment_ids"]
+    }
+    assert set(experiments.keys()) == set(recipes)
+    reference = experiments[recipes[0]].config
+    for recipe in recipes[1:]:
+        config = experiments[recipe].config
+        assert config.features == reference.features, recipe
+        assert config.split_col == reference.split_col, recipe
+        assert config.split_values == reference.split_values, recipe
+        assert config.seed == reference.seed, recipe
+    # Tree recipes trained with early stopping (SEL-2 fair-arena requirement).
+    for recipe in ("lgb", "xgb", "catboost"):
+        assert experiments[recipe].config.early_stopping_rounds == 100, recipe
+    assert experiments["lr"].config.early_stopping_rounds is None
 
 
 def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):

@@ -221,10 +221,12 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     # tune + train consume the REFINED feature set (not the raw screen output); train
     # consumes tuned params
     assert tuning_config.inputs["recipe"] == f"$ref:{spec.id}.output.recipe"
-    assert tuning_config.inputs["n_trials"] == f"$ref:{spec.id}.output.n_trials"
+    assert tuning_config.inputs["recipes"] == f"$ref:{spec.id}.output.recipes"
+    assert tuning_config.inputs["n_trials_by_recipe"] == f"$ref:{spec.id}.output.n_trials_by_recipe"
     assert tune.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert tune.inputs["recipe"] == f"$ref:{tuning_config.id}.output.recipe"
-    assert tune.inputs["n_trials"] == f"$ref:{tuning_config.id}.output.n_trials"
+    assert tune.inputs["recipes"] == f"$ref:{tuning_config.id}.output.recipes"
+    assert tune.inputs["n_trials_by_recipe"] == f"$ref:{tuning_config.id}.output.n_trials_by_recipe"
     assert tune.inputs["params"] == f"$ref:{tuning_config.id}.output.params"
     assert train.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert train.inputs["params"] == f"$ref:{tune.id}.output.best_params"
