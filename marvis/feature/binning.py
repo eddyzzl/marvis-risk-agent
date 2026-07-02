@@ -5,7 +5,12 @@ import numpy as np
 from marvis.feature.errors import BinningError
 
 
-def equal_frequency_edges(values: np.ndarray, bin_count: int) -> np.ndarray:
+def equal_frequency_edges(
+    values: np.ndarray,
+    bin_count: int,
+    *,
+    min_bin_pct: float = 0.0,
+) -> np.ndarray:
     _validate_bin_count(bin_count)
     arr = _finite_values(values)
     if arr.size == 0:
@@ -21,6 +26,8 @@ def equal_frequency_edges(values: np.ndarray, bin_count: int) -> np.ndarray:
     edges = edges.astype(float)
     edges[0] = -np.inf
     edges[-1] = np.inf
+    if min_bin_pct > 0:
+        edges = _merge_small_count_bins(arr, edges, min_bin_pct)
     return edges
 
 
@@ -55,6 +62,7 @@ def chimerge_edges(
     max_bins: int,
     min_pvalue: float = 0.05,
     init_bins: int = 100,
+    min_bin_pct: float = 0.0,
 ) -> np.ndarray:
     _validate_bin_count(max_bins)
     arr, tgt = _finite_pairs(values, target)
@@ -81,6 +89,9 @@ def chimerge_edges(
         stats[max_index] = _merge_stats(stats[max_index], stats[max_index + 1])
         del stats[max_index + 1]
         edges = np.delete(edges, max_index + 1)
+
+    if min_bin_pct > 0:
+        stats, edges = _merge_small_share_stats(stats, edges, min_bin_pct)
     edges[0] = -np.inf
     edges[-1] = np.inf
     return edges.astype(float)
@@ -210,6 +221,76 @@ def _bin_stats(values: np.ndarray, target: np.ndarray, edges: np.ndarray) -> lis
         count = int(np.sum(mask))
         stats.append({"good": count - bad, "bad": bad, "count": count})
     return stats
+
+
+def _merge_small_count_bins(values: np.ndarray, edges: np.ndarray, min_bin_pct: float) -> np.ndarray:
+    """Merge any bin whose share of ``values`` is below ``min_bin_pct`` into its
+    smaller neighbor (PREP-9), for binning methods with no target/good-bad split to
+    drive a chi2-based merge (:func:`equal_frequency_edges`). Repeats until every
+    surviving bin clears the threshold or only one bin remains."""
+    edges = np.asarray(edges, dtype=float)
+    total = values.size
+    if total == 0 or edges.size <= 2:
+        return edges
+    min_count = min_bin_pct * total
+    while edges.size > 2:
+        counts = _bin_counts(values, edges)
+        small = [index for index, count in enumerate(counts) if count < min_count]
+        if not small:
+            break
+        index = small[0]
+        # Merge with whichever neighbor is smaller (ties -> the left/previous bin),
+        # so a small edge bin doesn't get stranded with no smaller neighbor to join.
+        if index == 0:
+            merge_with = 1
+        elif index == len(counts) - 1:
+            merge_with = index - 1
+        else:
+            merge_with = index - 1 if counts[index - 1] <= counts[index + 1] else index + 1
+        drop_index = max(index, merge_with)
+        edges = np.delete(edges, drop_index)
+    return edges
+
+
+def _bin_counts(values: np.ndarray, edges: np.ndarray) -> list[int]:
+    assigned = assign_bins(values, edges)
+    return [int(np.sum(assigned == index)) for index in range(len(edges) - 1)]
+
+
+def _merge_small_share_stats(
+    stats: list[dict[str, int]], edges: np.ndarray, min_bin_pct: float
+) -> tuple[list[dict[str, int]], np.ndarray]:
+    """Merge any bin whose share of the fit rows is below ``min_bin_pct`` (PREP-9)
+    into its statistically-nearest neighbor (chi2-least-distinct), same merge rule
+    :func:`chimerge_edges` already uses for its ``max_bins`` reduction. Runs after
+    the p-value convergence loop so it never fights that loop's own merges; repeats
+    until every surviving bin clears the threshold or only one bin remains."""
+    stats = list(stats)
+    edges = np.asarray(edges, dtype=float)
+    total = sum(stat["count"] for stat in stats)
+    if total == 0:
+        return stats, edges
+    min_count = min_bin_pct * total
+    while len(stats) > 1:
+        shares = [stat["count"] for stat in stats]
+        if min(shares) >= min_count:
+            break
+        index = _least_distinct_adjacent_pair_containing_smallest(stats)
+        stats[index] = _merge_stats(stats[index], stats[index + 1])
+        del stats[index + 1]
+        edges = np.delete(edges, index + 1)
+    return stats, edges
+
+
+def _least_distinct_adjacent_pair_containing_smallest(stats: list[dict[str, int]]) -> int:
+    """Like :func:`_least_distinct_adjacent_pair`, but restricted to adjacent pairs
+    that include the smallest bin -- so a below-threshold bin always gets merged
+    (into whichever neighbor is statistically closest), rather than some unrelated
+    pair of already-large bins."""
+    smallest = min(range(len(stats)), key=lambda index: stats[index]["count"])
+    candidates = [index for index in (smallest - 1, smallest) if 0 <= index < len(stats) - 1]
+    chi2_values = [(index, _adjacent_chi2(stats[index], stats[index + 1])) for index in candidates]
+    return min(chi2_values, key=lambda item: item[1])[0]
 
 
 def _edges_without_empty_bins(edges: np.ndarray, stats: list[dict[str, int]]) -> np.ndarray:

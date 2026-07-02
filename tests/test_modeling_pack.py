@@ -385,6 +385,72 @@ def test_train_model_persists_preprocessing_chain_and_flags_pmml_boundary(tmp_pa
     assert any("预处理" in item for item in post_training.output["model_card"]["limitations"])
 
 
+def test_train_model_persists_woe_preprocessing_chain_and_scorer_replays_it(tmp_path):
+    """W3a tail end-to-end: feature.woe_encode (train-only fit) -> modeling.train_model
+    on the WOE-encoded dataset must carry a 'woe' preprocessing step onto the artifact,
+    and _ModelArtifactScorer must be able to score *raw* (pre-WOE) data by replaying
+    that chain -- not just the already-encoded derived dataset."""
+    runner, _plugin_registry, registry, backend, settings, task = _runtime(tmp_path)
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "raw_for_woe.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="raw_sample")
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "split_col": "split",
+        },
+        task_id=task.id,
+    )
+    assert woe.ok is True, woe.error
+    assert woe.output["fit_split"] == "train"
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": woe.output["result_dataset_id"],
+            "recipe": "lr",
+            "features": ["x1_woe", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact is not None
+    assert artifact.params["preprocessing_steps"] == [
+        {"kind": "woe", "columns": ["x1"], "params": woe.output["woe_maps"]}
+    ]
+
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    replay_scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
+    raw_frame = pd.read_parquet(registry.resolve_path(dataset.id))  # pre-WOE raw data
+    raw_scores = replay_scorer.score(raw_frame, use_calibration=False)
+    assert len(raw_scores) == rows
+    assert all(0.0 <= score <= 1.0 for score in raw_scores)
+
+    already_transformed_scorer = _ModelArtifactScorer(artifact, base_dir=base_dir)
+    woe_frame = backend.read_frame(registry.resolve_path(woe.output["result_dataset_id"]))
+    already_encoded_scores = already_transformed_scorer.score(woe_frame, use_calibration=False)
+    # Replaying the chain on raw data must match scoring the already-WOE-encoded
+    # dataset directly -- proof the chain round-trips through the scorer correctly.
+    assert raw_scores == already_encoded_scores
+
+
 def test_train_model_without_preprocessing_chain_flags_untraceable_on_model_card(tmp_path):
     """PREP-2 (d): a model trained straight off a historical dataset (no lineage
     sidecar at all) must get an explicit '预处理链不可追溯' model-card note, distinct

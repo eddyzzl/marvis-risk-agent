@@ -170,6 +170,14 @@ def _jsonable(value):
             return value.item()
         except (TypeError, ValueError):
             pass
+    if isinstance(value, float) and not math.isfinite(value):
+        # model_meta.json is dumped with allow_nan=False (strict JSON for handoff/
+        # audit portability). +-inf shows up legitimately in WOE bin edges (W3a tail:
+        # preprocessing_steps' "woe"/"categorical_woe" params) -- stringify rather
+        # than crash the whole artifact write; this file is an audit copy, not what
+        # _ModelArtifactScorer replays from (it reads the DB-backed artifact.params,
+        # which round-trips inf fine through the platform's lenient JSON elsewhere).
+        return str(value)
     return value
 
 

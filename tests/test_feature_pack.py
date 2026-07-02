@@ -186,7 +186,14 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
             "dataset_id": dataset.id,
             "recipe": [
                 {"kind": "ratio", "num": "x1", "den": "x2"},
-                {"kind": "agg", "group": "cat", "value": "amount", "aggs": ["mean"]},
+                {
+                    "kind": "agg",
+                    "group": "cat",
+                    "value": "amount",
+                    "aggs": ["mean"],
+                    "allow_full_fit": True,
+                    "min_group_size": 1,
+                },
             ],
         },
         task_id="task-feature",
@@ -1008,13 +1015,133 @@ def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_pat
     assert onehot_chain == [{"kind": "onehot", "columns": ["cat"], "params": onehot.output["mapping"]}]
 
 
-def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_path):
-    """WOE replay is handled separately (scorecard/woe_encode already replay their own
-    WOE maps) and cross_features derives new columns rather than transforming existing
-    ones in place — neither should be recorded in preprocessing_steps (PREP-2 scope)."""
+def test_impute_missing_add_indicators_emits_was_missing_columns_and_sidecar_step(tmp_path):
+    """PREP-8: add_indicators=true must emit a col__was_missing 0/1 column per column
+    that actually had missing values, record a missing_indicator step (ordered before
+    the paired impute step) in the preprocessing chain sidecar, and replay identically
+    via apply_preprocessing_steps on new raw data."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, np.nan, 3.0, np.nan, 5.0],
+        "complete": [1.0, 2.0, 3.0, 4.0, 5.0],  # never missing -> no indicator column
+    })
+    path = tmp_path / "indicator.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount", "complete"],
+            "strategy": "median",
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == ["amount__was_missing"]
+
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["amount__was_missing"].tolist() == [0, 1, 0, 1, 0]
+    assert derived_frame["amount"].tolist() == [1.0, 3.0, 3.0, 3.0, 5.0]  # median of [1,3,5]
+    assert "complete__was_missing" not in derived_frame.columns
+
+    chain = read_preprocessing_chain(registry.resolve_path(result.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["missing_indicator", "impute"]
+    assert chain[0]["params"] == {"amount": "amount__was_missing"}
+
+    # Replay on fresh raw data reproduces the same indicator + fill.
+    replayed = apply_preprocessing_steps(frame, chain)
+    assert replayed["amount__was_missing"].tolist() == [0, 1, 0, 1, 0]
+    assert replayed["amount"].tolist() == [1.0, 3.0, 3.0, 3.0, 5.0]
+
+
+def test_impute_missing_add_indicators_avoids_column_name_collision(tmp_path):
+    """PREP-8: if col__was_missing already exists, the indicator name gets a numeric
+    suffix rather than silently overwriting the existing column."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, np.nan, 3.0],
+        "amount__was_missing": [9, 9, 9],  # pre-existing column with that exact name
+    })
+    path = tmp_path / "collision.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == ["amount__was_missing_2"]
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["amount__was_missing"].tolist() == [9, 9, 9]  # untouched
+    assert derived_frame["amount__was_missing_2"].tolist() == [0, 1, 0]
+
+
+def test_impute_missing_without_add_indicators_omits_indicator_columns(tmp_path):
+    """add_indicators defaults to false -- no behavior change for existing callers."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({"amount": [1.0, np.nan, 3.0]})
+    path = tmp_path / "no_indicator.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {"dataset_id": dataset.id, "columns": ["amount"], "strategy": "median", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == []
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert "amount__was_missing" not in derived_frame.columns
+    chain = read_preprocessing_chain(registry.resolve_path(result.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["impute"]
+
+
+def test_cross_features_does_not_append_preprocessing_steps(tmp_path):
+    """cross_features derives new columns (cross/ratio) rather than transforming
+    existing ones in place — not recorded in preprocessing_steps (PREP-2 scope)."""
     from marvis.feature.preprocessing import read_preprocessing_chain
 
     runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    crossed = runner.invoke(
+        ToolRef("feature", "cross_features"),
+        {"dataset_id": dataset.id, "recipe": [{"kind": "ratio", "num": "x1", "den": "x2"}]},
+        task_id="task-feature",
+    )
+    assert crossed.ok is True, crossed.error
+    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+
+
+def test_woe_encode_and_woe_encode_categorical_persist_preprocessing_chain_sidecar(tmp_path):
+    """W3a tail: the general-purpose woe_encode/woe_encode_categorical tools must
+    record their fitted maps in the preprocessing chain sidecar (kind=woe /
+    categorical_woe) and replay to the exact same *_woe column on new raw data via
+    apply_preprocessing_steps -- the scorecard recipe's own internal WOE fitting is
+    a separate, already-solved path and is untouched by this."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)
 
     woe = runner.invoke(
@@ -1028,12 +1155,260 @@ def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_pat
         task_id="task-feature",
     )
     assert woe.ok is True, woe.error
-    assert read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"])) == []
+    chain = read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["woe"]
+    assert chain[0]["columns"] == ["x1"]
+    assert chain[0]["params"]["x1"] == woe.output["woe_maps"]["x1"]
 
-    crossed = runner.invoke(
-        ToolRef("feature", "cross_features"),
-        {"dataset_id": dataset.id, "recipe": [{"kind": "ratio", "num": "x1", "den": "x2"}]},
+    raw_frame = backend.read_frame(registry.resolve_path(dataset.id))
+    replayed = apply_preprocessing_steps(raw_frame, chain)
+    derived_frame = backend.read_frame(registry.resolve_path(woe.output["result_dataset_id"]))
+    assert replayed["x1_woe"].tolist() == derived_frame["x1_woe"].tolist()
+
+    catwoe = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["cat"],
+            "target_col": "y",
+            "allow_full_fit": True,
+            "min_count": 1,
+        },
         task_id="task-feature",
     )
-    assert crossed.ok is True, crossed.error
-    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+    assert catwoe.ok is True, catwoe.error
+    cat_chain = read_preprocessing_chain(registry.resolve_path(catwoe.output["result_dataset_id"]))
+    assert [step["kind"] for step in cat_chain] == ["categorical_woe"]
+    assert cat_chain[0]["params"]["cat"] == catwoe.output["woe_maps"]["cat"]
+
+    cat_replayed = apply_preprocessing_steps(raw_frame, cat_chain)
+    cat_derived_frame = backend.read_frame(registry.resolve_path(catwoe.output["result_dataset_id"]))
+    assert cat_replayed["cat_woe"].tolist() == cat_derived_frame["cat_woe"].tolist()
+
+
+def test_screen_features_reports_suspected_categorical_numeric_codes(tmp_path):
+    """PREP-5: a numeric column that looks like a nominal code (low cardinality,
+    all-integer, code-like name) must be surfaced as suspected_categorical without
+    changing the selected/candidate set."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "region_code": [1, 2, 3, 1, 2, 3, 1, 2] * 4,
+        "amount": np.linspace(10.0, 100.0, 32),
+        "y": [0, 1] * 16,
+    })
+    path = tmp_path / "suspected_categorical.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": [], "target_col": "y"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    suspected = {item["column"]: item["cardinality"] for item in result.output["suspected_categorical"]}
+    assert suspected == {"region_code": 3}
+    # Informational only: region_code is still modeled as numeric (not dropped/changed).
+    assert "region_code" in result.output["selected"]
+
+
+def test_bin_feature_defaults_to_min_bin_pct_and_can_be_overridden(tmp_path):
+    """PREP-9: bin_feature/woe_encode default to min_bin_pct=0.05, merging any bin
+    below 5% share; callers can override (e.g. back to 0.0 for the old behavior)."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    rng = np.random.default_rng(3)
+    values = np.concatenate([rng.uniform(0, 100, 950), rng.uniform(50, 51, 50)])
+    target = (values > 50).astype(int)
+    frame = pd.DataFrame({"amount": values, "y": target})
+    path = tmp_path / "min_bin_pct.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    default_result = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "chimerge",
+            "max_bins": 10,
+        },
+        task_id="task-feature",
+    )
+    assert default_result.ok is True, default_result.error
+    default_shares = [row["count"] / 1000 for row in default_result.output["bins"]]
+    assert min(default_shares) >= 0.05 - 1e-9
+
+    unconstrained_result = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "chimerge",
+            "max_bins": 10,
+            "min_bin_pct": 0.0,
+        },
+        task_id="task-feature",
+    )
+    assert unconstrained_result.ok is True, unconstrained_result.error
+    unconstrained_shares = [row["count"] / 1000 for row in unconstrained_result.output["bins"]]
+    assert min(unconstrained_shares) < 0.05
+
+
+def test_derive_date_features_tool_creates_derived_dataset(tmp_path):
+    """PREP-7: derive_date_features is opt-in (not part of any default template)
+    and must produce deterministic datediff/month/tenure columns registered as a
+    new derived dataset, same pattern as cross_features."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "apply_date": ["2024-01-15", "2024-03-01", "2024-06-10"],
+        "open_date": ["2023-01-15", "2023-01-01", "2023-06-01"],
+        "y": [0, 1, 0],
+    })
+    path = tmp_path / "dates.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "derive_date_features"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": [
+                {"kind": "datediff", "col": "apply_date", "anchor": "open_date", "unit": "days"},
+                {"kind": "month", "col": "apply_date"},
+                {"kind": "tenure_months", "col": "apply_date", "anchor": "open_date"},
+            ],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["new_columns"] == [
+        "apply_date__days_since_open_date",
+        "apply_date__month",
+        "apply_date__months_on_book",
+    ]
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["apply_date__days_since_open_date"].tolist() == [365.0, 425.0, 375.0]
+    assert derived_frame["apply_date__month"].tolist() == [1.0, 3.0, 6.0]
+
+
+def test_screen_features_reports_sentinel_columns_notice(tmp_path):
+    """PREP-4: screen_features must surface a suspected sentinel/special-value column
+    (isolated extreme peak, e.g. -999 "no hit") so the user can pass sentinel_values to
+    impute/cap/normalize/bin_feature/woe_encode before fitting."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    rng = np.concatenate([np.linspace(1.0, 100.0, 190), np.full(10, -999.0)])
+    frame = pd.DataFrame({
+        "score": rng,
+        "y": ([0, 1] * 100)[:200],
+    })
+    path = tmp_path / "sentinel.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["score"], "target_col": "y"},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert "score" in result.output["sentinel_columns"]
+    assert result.output["sentinel_columns"]["score"][0][0] == -999.0
+    assert "score" in result.output["sentinel_notice"]
+    assert "sentinel_values" in result.output["sentinel_notice"]
+
+
+def test_impute_cap_normalize_bin_woe_accept_sentinel_values(tmp_path):
+    """PREP-4: sentinel_values on impute/cap/normalize/bin_feature/woe_encode must be
+    treated as missing before fitting/binning, not as real observations."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -999.0, -999.0],
+        "y": [0, 0, 0, 1, 0, 1, 1, 1],
+    })
+    path = tmp_path / "sentinel_tools.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    assert imputed.output["fill_values"]["amount"] == 3.5  # median of [1..6], -999 excluded
+    imputed_frame = backend.read_frame(registry.resolve_path(imputed.output["result_dataset_id"]))
+    assert imputed_frame["amount"].iloc[-1] == 3.5  # sentinel rows filled with the train-only median
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 1.0,
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    assert capped.output["bounds"]["amount"]["lower"] == 1.0
+    assert capped.output["bounds"]["amount"]["upper"] == 6.0  # -999 excluded from the IQR fit
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "minmax",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert normalized.ok is True, normalized.error
+    assert normalized.output["scaler_params"]["amount"]["min"] == 1.0
+    assert normalized.output["scaler_params"]["amount"]["max"] == 6.0
+
+    binned = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "equal_width",
+            "max_bins": 2,
+            "sentinel_values": [-999.0],
+        },
+        task_id="task-feature",
+    )
+    assert binned.ok is True, binned.error
+    # Sentinel rows land in the NA bin rather than skewing the equal-width edges.
+    assert binned.output["na_bin"] is not None
+    assert binned.output["na_bin"]["count"] == 2
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["amount"],
+            "target_col": "y",
+            "sentinel_values": [-999.0],
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    assert woe.output["woe_maps"]["amount"]["na_woe"] is not None

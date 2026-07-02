@@ -103,6 +103,9 @@
           "scores": {"type": "object"},
           "n_screened": {"type": "integer", "minimum": 0},
           "excluded_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
+          "suspected_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
+          "sentinel_columns": {"type": "object"},
+          "sentinel_notice": {"type": "string"},
           "note": {"type": "string"}
         },
         "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],
@@ -131,7 +134,9 @@
           "enforce_monotonic": {"type": "boolean"},
           "monotonic_direction": {"type": "string", "enum": ["auto", "increasing", "decreasing"]},
           "seed": {"type": "integer"},
-          "drop_nan_labels": {"type": "boolean"}
+          "drop_nan_labels": {"type": "boolean"},
+          "sentinel_values": {"type": "array", "items": {"type": "number"}},
+          "min_bin_pct": {"type": "number", "minimum": 0, "maximum": 1}
         },
         "required": ["dataset_id", "feature", "target_col", "method"],
         "additionalProperties": false
@@ -246,7 +251,9 @@
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
           "seed": {"type": "integer"},
-          "drop_nan_labels": {"type": "boolean"}
+          "drop_nan_labels": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]},
+          "min_bin_pct": {"type": "number", "minimum": 0, "maximum": 1}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -351,7 +358,8 @@
           "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "columns", "method"],
         "additionalProperties": false
@@ -386,7 +394,9 @@
           "fill_value": {},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]},
+          "add_indicators": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns", "strategy"],
         "additionalProperties": false
@@ -397,7 +407,8 @@
           "result_dataset_id": {"type": "string"},
           "fill_values": {"type": "object"},
           "fit_rows": {"type": "integer", "minimum": 0},
-          "fit_split": {"type": "string", "enum": ["train", "full"]}
+          "fit_split": {"type": "string", "enum": ["train", "full"]},
+          "indicator_columns": {"type": "array", "items": {"type": "string"}}
         },
         "required": ["result_dataset_id", "fill_values"],
         "additionalProperties": false
@@ -422,7 +433,8 @@
           "upper_q": {"type": "number", "minimum": 0, "maximum": 1},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
-          "allow_full_fit": {"type": "boolean"}
+          "allow_full_fit": {"type": "boolean"},
+          "sentinel_values": {"type": ["array", "object"]}
         },
         "required": ["dataset_id", "columns"],
         "additionalProperties": false
@@ -447,7 +459,7 @@
     },
     {
       "name": "cross_features",
-      "summary": "Create a derived dataset from explicit feature derivation recipes.",
+      "summary": "Create a derived dataset from explicit feature derivation recipes (an agg item requires split_col or allow_full_fit=true).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -470,6 +482,34 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_cross_features",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "derive_date_features",
+      "summary": "Derive datediff/month/tenure-months numeric columns from date columns (opt-in; never runs automatically).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "recipe": {"type": "array", "items": {"type": "object"}, "minItems": 1}
+        },
+        "required": ["dataset_id", "recipe"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "new_columns": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["result_dataset_id", "new_columns"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_derive_date_features",
       "side_effects": ["read:dataset", "write:dataset"],
       "memory_limit_mb": 4096
     }

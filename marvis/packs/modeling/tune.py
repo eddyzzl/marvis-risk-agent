@@ -703,7 +703,10 @@ def _run_scorecard_trial(
     woe_maps: dict = {}
     for feature in feats:
         values = train[feature].to_numpy(dtype=float)
-        edges = chimerge_edges(values, target, max_bins=max_bins)
+        # PREP-9: minimum bin share (5%), consistent with the scorecard training
+        # path (recipes/scorecard.py::_fit_woe_maps), so tuned trials are evaluated
+        # on the same WOE convention the final model will actually use.
+        edges = chimerge_edges(values, target, max_bins=max_bins, min_bin_pct=0.05)
         if enforce_monotonic:
             resolved_direction = monotonic_direction(values, target, edges, direction=monotonic_direction_hint)
             edges = monotonic_edges(values, target, edges, direction=resolved_direction)

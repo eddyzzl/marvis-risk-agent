@@ -77,6 +77,60 @@ def test_chimerge_edges_reduce_to_max_bins_and_keep_open_endpoints():
     assert np.all(np.diff(edges) > 0)
 
 
+def test_equal_frequency_edges_min_bin_pct_merges_small_bins():
+    """PREP-9: a bin below min_bin_pct share must be merged with a neighbor so every
+    surviving bin clears the threshold."""
+    rng = np.random.default_rng(2)
+    values = np.concatenate([rng.uniform(0, 90, 900), rng.uniform(95, 96, 100)])
+
+    edges = equal_frequency_edges(values, 8)
+    assigned = assign_bins(values, edges)
+    counts = [int(np.sum(assigned == index)) for index in range(len(edges) - 1)]
+    assert min(counts) / values.size < 0.15  # unconstrained: at least one small bin
+
+    edges2 = equal_frequency_edges(values, 8, min_bin_pct=0.15)
+    assigned2 = assign_bins(values, edges2)
+    counts2 = [int(np.sum(assigned2 == index)) for index in range(len(edges2) - 1)]
+    assert min(counts2) / values.size >= 0.15 - 1e-9
+    assert edges2[0] == float("-inf")
+    assert edges2[-1] == float("inf")
+
+
+def test_chimerge_edges_min_bin_pct_merges_small_bins():
+    """PREP-9: chimerge can leave a statistically-significant but tiny bin; min_bin_pct
+    merges it into its chi2-nearest neighbor."""
+    rng = np.random.default_rng(3)
+    values = np.concatenate([rng.uniform(0, 100, 950), rng.uniform(50, 51, 50)])
+    target = (values > 50).astype(int)
+
+    edges = chimerge_edges(values, target, max_bins=10, min_pvalue=0.001)
+    assigned = assign_bins(values, edges)
+    counts = [int(np.sum(assigned == index)) for index in range(len(edges) - 1)]
+    assert min(counts) / values.size < 0.05  # unconstrained: the 50-row bin survives
+
+    edges2 = chimerge_edges(values, target, max_bins=10, min_pvalue=0.001, min_bin_pct=0.05)
+    assigned2 = assign_bins(values, edges2)
+    counts2 = [int(np.sum(assigned2 == index)) for index in range(len(edges2) - 1)]
+    assert min(counts2) / values.size >= 0.05 - 1e-9
+    assert edges2[0] == float("-inf")
+    assert edges2[-1] == float("inf")
+
+
+def test_min_bin_pct_defaults_to_no_op_and_collapses_to_single_bin_when_too_high():
+    values = np.arange(1, 13, dtype=float)
+    target = np.array([0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1])
+
+    # Default (min_bin_pct=0.0) matches the pre-PREP-9 behavior exactly.
+    assert equal_frequency_edges(values, 4).tolist() == equal_frequency_edges(values, 4, min_bin_pct=0.0).tolist()
+    assert chimerge_edges(values, target, max_bins=4).tolist() == chimerge_edges(
+        values, target, max_bins=4, min_bin_pct=0.0
+    ).tolist()
+
+    # An unreasonably high min_bin_pct collapses everything to a single bin, not an error.
+    collapsed = equal_frequency_edges(values, 4, min_bin_pct=0.9)
+    assert collapsed.tolist() == [float("-inf"), float("inf")]
+
+
 def test_monotonic_edges_merge_adjacent_bad_rate_violations():
     values = np.arange(1, 13, dtype=float)
     target = np.array([0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1])

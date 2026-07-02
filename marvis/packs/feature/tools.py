@@ -12,7 +12,11 @@ from marvis.data.backend import DataBackend
 from marvis.data.labels import require_labels_confirmed
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
-from marvis.feature.candidates import candidate_numeric_features, excluded_categorical_columns
+from marvis.feature.candidates import (
+    candidate_numeric_features,
+    excluded_categorical_columns,
+    suspected_categorical_columns,
+)
 from marvis.feature.binning import (
     chimerge_edges,
     equal_frequency_edges,
@@ -23,13 +27,13 @@ from marvis.feature.binning import (
     tree_edges,
 )
 from marvis.feature.correlation import correlation_report
-from marvis.feature.derive import derive_batch
+from marvis.feature.derive import derive_batch, derive_date_features
 from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
 from marvis.feature.preprocessing import (
-    append_step,
+    read_preprocessing_chain,
     sidecar_path,
     write_preprocessing_chain,
 )
@@ -37,6 +41,7 @@ from marvis.feature.transform import (
     apply_scaler,
     cap_outliers,
     impute_missing,
+    mask_sentinel_values,
     minmax_normalize,
     zscore_standardize,
 )
@@ -125,7 +130,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     if target_type != "binary":
         return _screen_features_non_binary(inputs, ctx)
 
-    from marvis.feature.screen import screen_features
+    from marvis.feature.screen import screen_features, sentinel_screen_notice
 
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
@@ -145,6 +150,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         split_col=str(split_col) if split_col else None,
     )
+    suspected_categorical = _suspected_categorical_for_screen(
+        runtime,
+        dataset.id,
+        target_col=str(inputs["target_col"]),
+        split_col=str(split_col) if split_col else None,
+    )
     holdout = inputs.get("holdout_values")
     top_k = inputs.get("top_k")
     result = screen_features(
@@ -159,7 +170,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         top_k=int(top_k) if top_k is not None else None,
         batch_size=int(inputs.get("batch_size", 500)),
     )
-    return {
+    payload = {
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
@@ -169,6 +180,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "excluded_categorical": excluded_categorical,
     }
+    if suspected_categorical:
+        payload["suspected_categorical"] = suspected_categorical
+    if result.sentinel_columns:
+        payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
+        payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
+    return payload
 
 
 def _excluded_categorical_for_screen(
@@ -194,6 +211,27 @@ def _excluded_categorical_for_screen(
         split_col=split_col,
     )
     return [{"column": item.column, "cardinality": item.cardinality} for item in excluded]
+
+
+def _suspected_categorical_for_screen(
+    runtime: "_Runtime",
+    dataset_id: str,
+    *,
+    target_col: str,
+    split_col: str | None,
+) -> list[dict]:
+    """Numeric columns that look like nominal codes rather than continuous measures
+    (PREP-5), e.g. a zip/industry code — surfaced as a screen-gate hint, always (even
+    with an explicit feature list) since these columns keep being modeled as continuous
+    numeric today; nothing about candidate inference or the selected set changes."""
+    dataset = runtime.registry.get(str(dataset_id))
+    suspected = suspected_categorical_columns(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=target_col,
+        split_col=split_col,
+    )
+    return [{"column": item.column, "cardinality": item.cardinality} for item in suspected]
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:
@@ -267,6 +305,10 @@ def tool_bin_feature(inputs: dict, ctx) -> dict:
     feature = str(inputs["feature"])
     target_col = str(inputs["target_col"])
     target = _target_values(frame, target_col)
+    sentinel_values = inputs.get("sentinel_values")
+    if sentinel_values:
+        frame = frame.copy()
+        frame[feature] = mask_sentinel_values(frame[feature], [float(v) for v in sentinel_values])
     values = frame[feature].to_numpy(dtype=float)
     edges = _edges_for(frame, inputs, ctx)
     before = None
@@ -344,6 +386,9 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         required_columns.append(str(inputs["split_col"]))
     _assert_columns(frame, required_columns)
     out = frame.copy()
+    sentinel_values = _sentinel_values_for(inputs, features)
+    for feature, column_sentinels in sentinel_values.items():
+        out[feature] = mask_sentinel_values(out[feature], column_sentinels)
     fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id)
     nan_labels_dropped = require_labels_confirmed(
         fit_frame,
@@ -366,7 +411,14 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         out[encoded.name] = encoded
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
-    result = _register_frame(runtime, out, dataset, ctx, "woe")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "woe",
+        preprocessing_step={"kind": "woe", "columns": features, "params": _jsonable(woe_maps)},
+    )
     return {
         "result_dataset_id": result.id,
         "new_columns": new_columns,
@@ -434,7 +486,14 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
         out[encoded.name] = encoded
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
-    result = _register_frame(runtime, out, dataset, ctx, "catwoe")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "catwoe",
+        preprocessing_step={"kind": "categorical_woe", "columns": features, "params": _jsonable(woe_maps)},
+    )
     return {
         "result_dataset_id": result.id,
         "new_columns": new_columns,
@@ -475,17 +534,22 @@ def tool_normalize(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "normalize", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
     for col in columns:
-        fit_values = out.loc[fit_mask, col].to_numpy(dtype=float)
+        column_sentinels = sentinel_values.get(col)
+        fit_series = mask_sentinel_values(out.loc[fit_mask, col], column_sentinels)
+        fit_values = fit_series.to_numpy(dtype=float)
+        full_series = mask_sentinel_values(out[col], column_sentinels)
+        full_values = full_series.to_numpy(dtype=float)
         if method == "minmax":
             _fit_values, column_params = minmax_normalize(
                 fit_values,
                 feature_range=tuple(inputs.get("feature_range") or (0, 1)),
             )
-            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="minmax")
+            values = apply_scaler(full_values, column_params, kind="minmax")
         elif method == "zscore":
             _fit_values, column_params = zscore_standardize(fit_values)
-            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="zscore")
+            values = apply_scaler(full_values, column_params, kind="zscore")
         else:
             raise FeatureError("method must be minmax or zscore")
         out[col] = values
@@ -511,30 +575,53 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     out = frame.copy()
     fill_values = {}
+    indicators = {}
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
+    add_indicators = bool(inputs.get("add_indicators"))
+    indicator_columns: list[str] = []
     for column in columns:
+        column_sentinels = sentinel_values.get(column)
         _filled_fit, value = impute_missing(
             out.loc[fit_mask, column],
             strategy=str(inputs["strategy"]),
             fill_value=inputs.get("fill_value"),
+            sentinel_values=column_sentinels,
         )
-        out[column] = out[column].fillna(value)
+        masked = mask_sentinel_values(out[column], column_sentinels)
+        if add_indicators and masked.isna().any():
+            # PREP-8: preserve the "missing" signal that plain imputation erases —
+            # a col__was_missing 0/1 column, guarded against colliding with an
+            # existing column name.
+            indicator_name = _unique_column_name(f"{column}__was_missing", out.columns)
+            out[indicator_name] = masked.isna().astype(int)
+            indicators[column] = indicator_name
+            indicator_columns.append(indicator_name)
+        out[column] = masked.fillna(value)
         fill_values[column] = value
+    preprocessing_steps = []
+    if indicators:
+        # Ordered before "impute" so replay computes the pre-fill NaN mask first.
+        preprocessing_steps.append(
+            {"kind": "missing_indicator", "columns": list(indicators), "params": _jsonable(indicators)}
+        )
+    preprocessing_steps.append({"kind": "impute", "columns": columns, "params": _jsonable(fill_values)})
     result = _register_frame(
         runtime,
         out,
         dataset,
         ctx,
         "impute",
-        preprocessing_step={"kind": "impute", "columns": columns, "params": _jsonable(fill_values)},
+        preprocessing_steps=preprocessing_steps,
     )
     return {
         "result_dataset_id": result.id,
         "fill_values": _jsonable(fill_values),
         "fit_rows": int(fit_mask.sum()),
         "fit_split": fit_split,
+        "indicator_columns": indicator_columns,
     }
 
 
@@ -546,15 +633,18 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "cap_outliers", dataset.id)
+    sentinel_values = _sentinel_values_for(inputs, columns)
     for column in columns:
+        column_sentinels = sentinel_values.get(column)
         fit_values = out.loc[fit_mask, column].to_numpy(dtype=float)
         _capped_fit, params = cap_outliers(
             fit_values,
             method=str(inputs.get("method") or "iqr"),
             lower_q=float(inputs.get("lower_q", 0.01)),
             upper_q=float(inputs.get("upper_q", 0.99)),
+            sentinel_values=column_sentinels,
         )
-        all_values = out[column].to_numpy(dtype=float)
+        all_values = mask_sentinel_values(out[column], column_sentinels).to_numpy(dtype=float)
         mask = np.isfinite(all_values)
         clipped = all_values.copy()
         lower = params["lower"]
@@ -579,6 +669,37 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     }
 
 
+def _sentinel_values_for(inputs: dict, columns: list[str]) -> dict[str, list[float]]:
+    """Resolve the ``sentinel_values`` input (PREP-4) into a per-column map.
+
+    Accepts either a flat list (applied to every column in ``columns``) or a
+    ``{column: [values, ...]}`` mapping (applied per-column only). Columns with
+    no sentinel values configured are omitted from the result."""
+    raw = inputs.get("sentinel_values")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {
+            str(column): [float(v) for v in values]
+            for column, values in raw.items()
+            if str(column) in columns and values
+        }
+    flat = [float(v) for v in raw]
+    return {column: flat for column in columns} if flat else {}
+
+
+def _unique_column_name(candidate: str, existing) -> str:
+    """A column name guaranteed not to collide with ``existing`` (PREP-8): appends
+    an incrementing numeric suffix (``_2``, ``_3``, ...) until it is unique."""
+    existing_set = set(str(column) for column in existing)
+    if candidate not in existing_set:
+        return candidate
+    suffix = 2
+    while f"{candidate}_{suffix}" in existing_set:
+        suffix += 1
+    return f"{candidate}_{suffix}"
+
+
 def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str) -> tuple[np.ndarray, str]:
     """Rows used to fit statistical transforms (impute/normalize/cap) — excludes holdout
     (default test+OOT) so fill values / scaler params / capping bounds never absorb
@@ -601,8 +722,20 @@ def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str
 def tool_cross_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
-    derived, new_columns = derive_batch(frame, list(inputs["recipe"]))
+    derived, new_columns = derive_batch(frame, list(inputs["recipe"]), dataset_id=dataset.id)
     result = _register_frame(runtime, derived, dataset, ctx, "cross")
+    return {"result_dataset_id": result.id, "new_columns": new_columns}
+
+
+def tool_derive_date_features(inputs: dict, ctx) -> dict:
+    """Derive datediff/month/tenure-months numeric columns from date-role columns
+    (PREP-7). Opt-in: never runs as part of any default template, so a caller must
+    explicitly invoke it (with a date column identified e.g. via profiling/schema
+    inference) to pull date information into the modeling frame."""
+    runtime = _runtime(ctx)
+    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    derived, new_columns = derive_date_features(frame, list(inputs["recipe"]))
+    result = _register_frame(runtime, derived, dataset, ctx, "datefeat")
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 
 
@@ -660,29 +793,38 @@ def _register_frame(
     suffix: str,
     *,
     preprocessing_step: dict[str, Any] | None = None,
+    preprocessing_steps: list[dict[str, Any]] | None = None,
 ):
     out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}.parquet"
     uow = ArtifactUnitOfWork()
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         frame.to_parquet(artifact.path, index=False)
+        steps_to_append = list(preprocessing_steps or [])
         if preprocessing_step is not None:
-            # PREP-2: persist the accumulated preprocessing chain (source dataset's
-            # chain + this new step) as a sidecar next to the derived parquet, so a
-            # model trained downstream can replay every fit param at scoring time
-            # instead of only seeing it in this tool's JSON response. Staged via the
-            # same unit of work as the parquet so both promote/commit atomically.
+            steps_to_append.append(preprocessing_step)
+        if steps_to_append:
+            # PREP-2/PREP-8: persist the accumulated preprocessing chain (source
+            # dataset's chain + these new steps, in order) as a sidecar next to the
+            # derived parquet, so a model trained downstream can replay every fit
+            # param at scoring time instead of only seeing it in this tool's JSON
+            # response. Staged via the same unit of work as the parquet so both
+            # promote/commit atomically.
             source_path = None
             try:
                 source_path = runtime.registry.resolve_path(source_dataset.id)
             except KeyError:
                 source_path = None
-            chain = append_step(
-                source_path,
-                kind=str(preprocessing_step["kind"]),
-                columns=list(preprocessing_step["columns"]),
-                params=preprocessing_step["params"],
-            )
+            chain = read_preprocessing_chain(source_path) if source_path else []
+            for step in steps_to_append:
+                chain = [
+                    *chain,
+                    {
+                        "kind": str(step["kind"]),
+                        "columns": [str(c) for c in step["columns"]],
+                        "params": step["params"],
+                    },
+                ]
             sidecar_name = sidecar_path(Path(out_path.name)).name
             sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
             write_preprocessing_chain(sidecar_artifact.path, chain)
@@ -713,14 +855,20 @@ def _edges_for(frame: pd.DataFrame, inputs: dict, ctx) -> np.ndarray:
     values = frame[feature].to_numpy(dtype=float)
     method = str(inputs.get("method") or "equal_frequency")
     max_bins = int(inputs.get("max_bins") or inputs.get("bins") or 10)
+    # PREP-9: minimum bin share (default 5%) merges small bins so WOE stays stable
+    # across time periods; only meaningful for the frequency-driven methods below
+    # (equal_width/manual/tree already control bin size some other way).
+    min_bin_pct = float(inputs.get("min_bin_pct", 0.05))
     if method in {"equal_frequency", "quantile"}:
-        return equal_frequency_edges(values, max_bins)
+        return equal_frequency_edges(values, max_bins, min_bin_pct=min_bin_pct)
     if method == "equal_width":
         return equal_width_edges(values, max_bins)
     if method == "manual":
         return manual_edges([float(item) for item in inputs.get("breakpoints") or []])
     if method == "chimerge":
-        return chimerge_edges(values, _target_values(frame, target_col), max_bins=max_bins)
+        return chimerge_edges(
+            values, _target_values(frame, target_col), max_bins=max_bins, min_bin_pct=min_bin_pct
+        )
     if method == "tree":
         return tree_edges(values, _target_values(frame, target_col), max_bins=max_bins, seed=int(ctx.seed or 0))
     raise FeatureError("method must be equal_frequency, equal_width, manual, chimerge, or tree")

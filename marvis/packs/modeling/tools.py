@@ -18,9 +18,14 @@ from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
-from marvis.feature.candidates import candidate_numeric_features, excluded_categorical_columns
+from marvis.feature.candidates import (
+    candidate_numeric_features,
+    excluded_categorical_columns,
+    suspected_categorical_columns,
+)
 from marvis.feature.metrics import feature_metrics
 from marvis.feature.encode import woe_encode
+from marvis.feature.screen import sentinel_screen_notice
 from marvis.feature.preprocessing import (
     apply_preprocessing_steps,
     read_preprocessing_chain,
@@ -465,6 +470,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         target_col=str(inputs["target_col"]),
         split_col=_optional_str(inputs.get("split_col")),
     )
+    suspected_categorical = _suspected_categorical_for_screen(
+        runtime,
+        dataset.id,
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+    )
     holdout = inputs.get("holdout_values")
     result = screen_features(
         runtime.backend,
@@ -478,7 +489,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         top_k=_optional_int(inputs.get("top_k")),
         batch_size=int(inputs.get("batch_size", 500)),
     )
-    return {
+    payload = {
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [[feature, ks, reason] for feature, ks, reason in result.leakage],
@@ -488,6 +499,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "excluded_categorical": excluded_categorical,
     }
+    if suspected_categorical:
+        payload["suspected_categorical"] = suspected_categorical
+    if result.sentinel_columns:
+        payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
+        payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
+    return payload
 
 
 def _excluded_categorical_for_screen(
@@ -513,6 +530,27 @@ def _excluded_categorical_for_screen(
         split_col=split_col,
     )
     return [{"column": item.column, "cardinality": item.cardinality} for item in excluded]
+
+
+def _suspected_categorical_for_screen(
+    runtime: "_Runtime",
+    dataset_id: str,
+    *,
+    target_col: str,
+    split_col: str | None,
+) -> list[dict]:
+    """Numeric columns that look like nominal codes rather than continuous measures
+    (PREP-5), e.g. a zip/industry code — surfaced as a screen-gate hint, always (even
+    with an explicit feature list) since these columns keep being modeled as continuous
+    numeric today; nothing about candidate inference or the selected set changes."""
+    dataset = runtime.registry.get(str(dataset_id))
+    suspected = suspected_categorical_columns(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=target_col,
+        split_col=split_col,
+    )
+    return [{"column": item.column, "cardinality": item.cardinality} for item in suspected]
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:

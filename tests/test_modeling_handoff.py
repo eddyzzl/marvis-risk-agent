@@ -216,6 +216,43 @@ def test_scoring_notebook_replays_preprocessing_chain_when_artifact_has_one(tmp_
     assert '"kind": "impute"' in source or "'kind': 'impute'" in source or "kind\": \"impute" in source
 
 
+def test_scoring_notebook_replays_woe_preprocessing_step_with_infinite_edges(tmp_path):
+    """W3a tail regression: a 'woe' preprocessing step's edges legitimately contain
+    +-inf (the platform's open-interval bin convention) -- persist_model_meta's
+    strict (allow_nan=False) model_meta.json dump must not crash on that, and the
+    generated scoring notebook must still embed the step for replay."""
+    preprocessing_steps = [
+        {
+            "kind": "woe",
+            "columns": ["x1"],
+            "params": {
+                "x1": {
+                    "feature": "x1",
+                    "edges": [float("-inf"), 0.5, float("inf")],
+                    "woe_by_bin": [-0.2, 0.3],
+                    "na_woe": 0.0,
+                }
+            },
+        }
+    ]
+    settings, store, _source_task, dataset, artifact = _seed_experiment(
+        tmp_path, preprocessing_steps=preprocessing_steps,
+    )
+
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    validation_task = TaskRepository(settings.db_path).get_task(validation_task_id)
+    material_dir = Path(validation_task.source_dir)
+    notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
+    source = notebook.cells[0].source
+    assert '"kind": "woe"' in source or "'kind': 'woe'" in source or "kind\": \"woe" in source
+
+
 def test_scoring_notebook_replay_is_a_no_op_without_a_preprocessing_chain(tmp_path):
     """PREP-2 regression: an artifact with no preprocessing_steps still generates a
     notebook that calls apply_preprocessing_steps (uniform code path), but with an

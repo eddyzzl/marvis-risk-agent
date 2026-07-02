@@ -511,6 +511,32 @@
               "additionalProperties": false
             }
           },
+          "suspected_categorical": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "column": {
+                  "type": "string"
+                },
+                "cardinality": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "column",
+                "cardinality"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "sentinel_notice": {
+            "type": "string"
+          },
           "note": {
             "type": "string"
           }
