@@ -15,6 +15,7 @@ from marvis.data.contracts import (
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, init_db
+from marvis.repositories.audit import _list_audit_rows
 import marvis.db as db_module
 import marvis.repositories.datasets as dataset_repo_module
 from marvis.state_machine import ConflictError
@@ -418,6 +419,69 @@ def test_dataset_registry_registers_csv_and_feather_as_profiled_parquet(tmp_path
     }
     assert feature.format == "parquet"
     assert registry.list_for_task("task-1") == [sample, feature]
+
+
+def test_dataset_registry_register_from_upload_reuses_existing_file_by_content_hash(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+    frame = pd.DataFrame({
+        "mobile": ["13800138000", "13900139000"],
+        "bad_flag": [0, 1],
+    })
+    first_csv = tmp_path / "task_a_sample.csv"
+    second_csv = tmp_path / "task_b_sample.csv"
+    frame.to_csv(first_csv, index=False)
+    frame.to_csv(second_csv, index=False)
+
+    first = registry.register_from_upload("task-a", first_csv, role="sample")
+    second = registry.register_from_upload("task-b", second_csv, role="sample")
+
+    assert first.content_hash is not None
+    assert first.content_hash == second.content_hash
+    # the second registration reuses the first task's parquet file rather than
+    # writing its own -- same source_path, no second file on disk under task-b.
+    assert second.source_path == first.source_path
+    # no duplicate parquet file was written under task-b's own directory
+    assert not list((datasets_root / "task-b").glob("*.parquet"))
+    assert second.row_count == first.row_count
+    assert second.has_target == first.has_target
+    assert second.target_col == first.target_col
+    assert [column.name for column in second.columns] == [column.name for column in first.columns]
+
+    audit_rows = _list_audit_rows(db_path, kind="dataset.dedup_reference")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["target_ref"] == second.id
+    assert audit_rows[0]["detail"]["reused_dataset_id"] == first.id
+    assert audit_rows[0]["detail"]["reused_task_id"] == "task-a"
+    assert audit_rows[0]["detail"]["task_id"] == "task-b"
+
+
+def test_dataset_registry_register_from_upload_profiles_again_for_different_content(
+    tmp_path,
+):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+    first_csv = tmp_path / "sample_a.csv"
+    second_csv = tmp_path / "sample_b.csv"
+    pd.DataFrame({"mobile": ["13800138000"], "bad_flag": [0]}).to_csv(first_csv, index=False)
+    pd.DataFrame({"mobile": ["13900139000"], "bad_flag": [1]}).to_csv(second_csv, index=False)
+
+    first = registry.register_from_upload("task-a", first_csv, role="sample")
+    second = registry.register_from_upload("task-b", second_csv, role="sample")
+
+    assert first.content_hash != second.content_hash
+    assert first.source_path != second.source_path
+    assert (datasets_root / "task-b").exists()
 
 
 def test_dataset_registry_register_from_upload_removes_parquet_when_db_write_fails(

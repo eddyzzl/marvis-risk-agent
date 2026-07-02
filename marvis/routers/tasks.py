@@ -146,6 +146,20 @@ def get_latest_task_job(task_id: str, request: Request, kind: str | None = None)
     return {"job": _job_payload(repo.get_latest_job(task_id, kind=normalized_kind))}
 
 
+@router.get("/tasks/{task_id}/purge-preview")
+def purge_preview(task_id: str, request: Request) -> dict:
+    repo = _repo(request)
+    get_task_or_404(repo, task_id)
+    try:
+        summary = repo.purge_preview(task_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}",
+        ) from exc
+    return {"task_id": task_id, "purge_summary": summary}
+
+
 @router.delete("/tasks/{task_id}", status_code=204)
 def delete_task(task_id: str, request: Request) -> None:
     repo = _repo(request)
@@ -156,7 +170,7 @@ def delete_task(task_id: str, request: Request) -> None:
     task_dir = assert_within(settings.tasks_dir, settings.tasks_dir / task_id)
     close_live_notebook_session(task_id)
     try:
-        repo.delete_task(task_id)
+        summary = repo.purge_task(task_id)
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
@@ -167,3 +181,32 @@ def delete_task(task_id: str, request: Request) -> None:
             shutil.rmtree(task_dir)
     except OSError as exc:
         logger.warning("task dir cleanup failed for %s: %s", task_id, exc)
+    datasets_root = getattr(settings, "datasets_dir", None)
+    if datasets_root is not None:
+        # Only the dataset files this task exclusively owned are safe to remove --
+        # purge_task already excluded source_paths still referenced by another
+        # task's dataset row (GAP-7 content-fingerprint reuse shares parquet files
+        # across tasks). Remove files individually rather than rmtree'ing the whole
+        # datasets/<task_id>/ subtree, since a dataset row reused by this task may
+        # point at a file physically stored under a *different* task's directory.
+        for relative_path in summary.get("dataset_source_paths", []):
+            try:
+                dataset_path = assert_within(datasets_root, datasets_root / relative_path)
+            except ValueError:
+                continue
+            try:
+                if dataset_path.exists():
+                    dataset_path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "dataset file cleanup failed for %s (%s): %s",
+                    task_id,
+                    relative_path,
+                    exc,
+                )
+        task_datasets_dir = datasets_root / task_id
+        try:
+            if task_datasets_dir.exists() and not any(task_datasets_dir.rglob("*")):
+                shutil.rmtree(task_datasets_dir)
+        except OSError as exc:
+            logger.warning("datasets dir cleanup failed for %s: %s", task_id, exc)

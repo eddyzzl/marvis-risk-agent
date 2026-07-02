@@ -56,7 +56,7 @@ class DatasetRepository:
             row = conn.execute(
                 """
                 SELECT id, task_id, role, source_path, format, sheet, row_count,
-                       columns_json, has_target, target_col, created_at
+                       columns_json, has_target, target_col, created_at, content_hash
                   FROM datasets
                  WHERE id = ?
                 """,
@@ -69,7 +69,7 @@ class DatasetRepository:
             rows = conn.execute(
                 """
                 SELECT id, task_id, role, source_path, format, sheet, row_count,
-                       columns_json, has_target, target_col, created_at
+                       columns_json, has_target, target_col, created_at, content_hash
                   FROM datasets
                  WHERE task_id = ?
                  ORDER BY created_at, id
@@ -77,6 +77,24 @@ class DatasetRepository:
                 (task_id,),
             ).fetchall()
         return [_dataset_from_row(row) for row in rows]
+
+    def find_dataset_by_content_hash(self, content_hash: str) -> Dataset | None:
+        """GAP-7: look up an already-registered dataset with identical file
+        content, regardless of which task registered it, so a new upload can
+        reuse the existing parquet + profiling instead of duplicating both."""
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, role, source_path, format, sheet, row_count,
+                       columns_json, has_target, target_col, created_at, content_hash
+                  FROM datasets
+                 WHERE content_hash = ?
+                 ORDER BY created_at, id
+                 LIMIT 1
+                """,
+                (content_hash,),
+            ).fetchone()
+        return None if row is None else _dataset_from_row(row)
 
     def set_dataset_role(self, dataset_id: str, role: str) -> None:
         with connect(self.db_path) as conn:
@@ -198,6 +216,7 @@ def _dataset_insert_values(dataset: Dataset) -> tuple:
         1 if dataset.has_target else 0,
         dataset.target_col,
         dataset.created_at,
+        dataset.content_hash,
     )
 
 
@@ -206,9 +225,9 @@ def _insert_dataset_row(conn: sqlite3.Connection, dataset: Dataset) -> None:
         """
         INSERT INTO datasets(
             id, task_id, role, source_path, format, sheet, row_count,
-            columns_json, has_target, target_col, created_at
+            columns_json, has_target, target_col, created_at, content_hash
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _dataset_insert_values(dataset),
     )
@@ -230,6 +249,9 @@ def _dataset_from_row(row: sqlite3.Row) -> Dataset:
         has_target=bool(row["has_target"]),
         target_col=row["target_col"],
         created_at=str(row["created_at"]),
+        content_hash=(
+            _optional_str(row["content_hash"]) if "content_hash" in row.keys() else None
+        ),
     )
 
 

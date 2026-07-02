@@ -37,6 +37,7 @@ def dataset_payload(dataset) -> dict:
         ],
         "has_target": dataset.has_target,
         "target_col": dataset.target_col,
+        "content_hash": dataset.content_hash,
     }
 
 

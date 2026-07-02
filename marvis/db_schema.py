@@ -17,6 +17,7 @@ _MIGRATION_TABLES = frozenset({
     "plan_step_runs",
     "model_artifacts",
     "llm_calls",
+    "datasets",
 })
 
 
@@ -522,6 +523,15 @@ def init_db(db_path: Path) -> None:
                 created_at TEXT NOT NULL
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="datasets",
+            column="content_hash",
+            definition="TEXT",
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_datasets_content_hash ON datasets(content_hash)"
         )
         conn.execute(
             """

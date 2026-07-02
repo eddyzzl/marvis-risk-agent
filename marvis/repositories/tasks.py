@@ -128,6 +128,53 @@ class TaskRepository:
             if cursor.rowcount == 0:
                 raise KeyError(f"Task not found: {task_id}")
 
+    def purge_preview(self, task_id: str) -> dict:
+        with connect(self.db_path) as conn:
+            row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            summary = _task_purge_summary(conn, task_id)
+        summary.pop("_dataset_source_paths", None)
+        return summary
+
+    def purge_task(self, task_id: str, *, actor: str = "system") -> dict:
+        with connect(self.db_path) as conn:
+            return self.purge_task_on_connection(conn, task_id, actor=actor)
+
+    def purge_task_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+        *,
+        actor: str = "system",
+    ) -> dict:
+        row = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Task not found: {task_id}")
+        summary = _task_purge_summary(conn, task_id)
+        source_paths = summary.pop("_dataset_source_paths")
+        # datasets/joins/plans/experiments/strategies/sub_agents have no ON DELETE
+        # CASCADE from tasks (see marvis/db_schema.py); their own children
+        # (model_artifacts, backtests, plan_steps/outputs/runs) do cascade once the
+        # parent row is removed. jobs/agent_messages already cascade from tasks.
+        conn.execute("DELETE FROM datasets WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM joins WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM plans WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM experiments WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM strategies WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM sub_agents WHERE parent_task_id = ?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        _write_audit_row(
+            conn,
+            kind="task.delete",
+            target_ref=task_id,
+            actor=actor,
+            outcome="succeeded",
+            detail={"purge_summary": summary},
+        )
+        summary["dataset_source_paths"] = source_paths
+        return summary
+
     def list_tasks(self, *, limit: int | None = None, offset: int = 0) -> list[TaskRecord]:
         bounded_limit = None if limit is None else max(1, int(limit))
         bounded_offset = max(0, int(offset))
@@ -973,6 +1020,89 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         updated_at=row["updated_at"],
         status_reason_code=row["status_reason_code"],
     )
+
+
+def _task_purge_summary(conn: sqlite3.Connection, task_id: str) -> dict:
+    dataset_rows = conn.execute(
+        "SELECT id, source_path FROM datasets WHERE task_id = ?",
+        (task_id,),
+    ).fetchall()
+    dataset_ids = [str(row["id"]) for row in dataset_rows]
+    source_paths = [str(row["source_path"]) for row in dataset_rows]
+    # A dataset's underlying parquet file may be shared with other tasks (GAP-7
+    # content-fingerprint reuse writes multiple dataset rows pointing at the same
+    # source_path). Only source paths with zero remaining references after this
+    # task's dataset rows are removed are safe for the caller to delete from disk.
+    shared_paths: set[str] = set()
+    for source_path in set(source_paths):
+        (other_count,) = conn.execute(
+            "SELECT COUNT(*) FROM datasets WHERE source_path = ? AND task_id != ?",
+            (source_path, task_id),
+        ).fetchone()
+        if other_count:
+            shared_paths.add(source_path)
+    removable_paths = [path for path in source_paths if path not in shared_paths]
+
+    def _count(table: str, column: str = "task_id") -> int:
+        (value,) = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
+            (task_id,),
+        ).fetchone()
+        return int(value)
+
+    plan_ids = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM plans WHERE task_id = ?", (task_id,)
+        ).fetchall()
+    ]
+    experiment_ids = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM experiments WHERE task_id = ?", (task_id,)
+        ).fetchall()
+    ]
+    strategy_ids = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM strategies WHERE task_id = ?", (task_id,)
+        ).fetchall()
+    ]
+    model_artifact_count = 0
+    if experiment_ids:
+        placeholders = ",".join("?" for _ in experiment_ids)
+        (model_artifact_count,) = conn.execute(
+            f"SELECT COUNT(*) FROM model_artifacts WHERE experiment_id IN ({placeholders})",
+            tuple(experiment_ids),
+        ).fetchone()
+    backtest_count = 0
+    if strategy_ids:
+        placeholders = ",".join("?" for _ in strategy_ids)
+        (backtest_count,) = conn.execute(
+            f"SELECT COUNT(*) FROM backtests WHERE strategy_id IN ({placeholders})",
+            tuple(strategy_ids),
+        ).fetchone()
+    plan_step_count = 0
+    if plan_ids:
+        placeholders = ",".join("?" for _ in plan_ids)
+        (plan_step_count,) = conn.execute(
+            f"SELECT COUNT(*) FROM plan_steps WHERE plan_id IN ({placeholders})",
+            tuple(plan_ids),
+        ).fetchone()
+
+    return {
+        "datasets": len(dataset_ids),
+        "datasets_shared_with_other_tasks": len(shared_paths),
+        "joins": _count("joins"),
+        "plans": len(plan_ids),
+        "plan_steps": int(plan_step_count),
+        "experiments": len(experiment_ids),
+        "model_artifacts": int(model_artifact_count),
+        "strategies": len(strategy_ids),
+        "backtests": int(backtest_count),
+        "sub_agents": _count("sub_agents", "parent_task_id"),
+        "_dataset_source_paths": removable_paths,
+    }
 
 
 def _normalize_run_mode(value: str | None) -> str:
