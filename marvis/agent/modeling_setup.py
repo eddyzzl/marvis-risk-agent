@@ -5,9 +5,12 @@ split column + values, and the numeric candidate features, then fills the
 `modeling` template slots. When the sample already carries a split column we use
 it. When it does not, we generate a grouped train/test split via ``make_split``
 (spec §2 G1): anti-leakage grouping by an identity column when present, fixed
-seed, non-empty guards — and crucially NO fabricated OOT (a real out-of-time
-holdout needs a time/split column, so downstream OOT metrics simply degrade to
-n/a rather than mislabelling a random holdout as out-of-time).
+seed, non-empty guards. When a date/month business column has been detected
+(e.g. loan_month/apply_month), OOT is time-extrapolated by default — the most
+recent slice of the timeline is held out as OOT, credit-risk-standard (SEL-1).
+Without such a column, no OOT is fabricated: a real out-of-time holdout needs a
+time/split column, so downstream OOT metrics simply degrade to n/a rather than
+mislabelling a random holdout as out-of-time.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
+from marvis.packs.modeling.prepare import DEFAULT_OOT_SIZE
 
 _DATA_ROLES = frozenset({FileRole.SAMPLE.value, "sample", "feature"})
 
@@ -239,13 +243,25 @@ def build_modeling_proposal(
         counts = {}
         group_cols = _detect_group_cols(dataset)
         # The joined frame does not exist yet, so the split must run inside the plan:
-        # make_split(split_col="") generates it from this config after 执行拼接.
+        # make_split(split_col="") generates it from this config after 执行拼接. The
+        # anchor's own columns (pre-join) are enough to detect a date/month column, so
+        # the same time-extrapolated-OOT default (SEL-1) applies here too, keeping the
+        # single-file and joined paths consistent.
         auto_split_config = {"test_size": 0.25, "group_cols": group_cols}
         grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
-        notes.append(
-            f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping};"
-            "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
-        )
+        time_col = business_columns.get("loan_month_col")
+        if isinstance(time_col, str) and time_col:
+            auto_split_config["oot_by_time"] = time_col
+            auto_split_config["oot_size"] = DEFAULT_OOT_SIZE
+            notes.append(
+                f"多文件建模将在拼接后按 `{time_col}` 时间外推 OOT(最近约 {int(DEFAULT_OOT_SIZE * 100)}% 时间跨度);"
+                f"其余按 75/25 分组随机切 train/test{grouping}。"
+            )
+        else:
+            notes.append(
+                f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping};"
+                "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
+            )
     else:
         dataset_id, split_col, split_values, counts, note = _generate_split(
             registry,
@@ -258,6 +274,7 @@ def build_modeling_proposal(
                 *weight_candidates,
                 *_business_passthrough_cols(business_columns),
             ]),
+            time_col=business_columns.get("loan_month_col") if isinstance(business_columns.get("loan_month_col"), str) else None,
         )
         notes.append(note)
     if len(recipe_list) > 1:
@@ -523,13 +540,29 @@ def _unique(values: list[str]) -> list[str]:
     return [value for value in dict.fromkeys(str(item).strip() for item in values) if value]
 
 
-def _generate_split(registry, backend, dataset, setup, seed, *, passthrough_cols: list[str] | None = None):
-    """No split column → build a grouped train/test split (spec §2 G1). No OOT is
-    fabricated; downstream OOT metrics degrade to n/a."""
+def _generate_split(
+    registry, backend, dataset, setup, seed, *,
+    passthrough_cols: list[str] | None = None,
+    time_col: str | None = None,
+):
+    """No split column → build a grouped train/test split (spec §2 G1).
+
+    When a date/month business column has been detected (``time_col``), OOT is time-
+    extrapolated by default: the most recent slice of the timeline (``DEFAULT_OOT_SIZE``,
+    i.e. the last ~1/5) is held out as OOT and the remainder is grouped-random 75/25
+    train/test — the credit-risk-standard split (SEL-1). Without a time column, the
+    prior behaviour is unchanged: no OOT is fabricated; downstream OOT metrics degrade
+    to n/a.
+    """
     from marvis.packs.modeling.errors import ModelingError
     from marvis.packs.modeling.prepare import prepare_modeling_frame
 
     group_cols = _detect_group_cols(dataset)
+    split_config: dict[str, object] = {"test_size": 0.25, "group_cols": group_cols}
+    passthrough_cols = _unique([*(passthrough_cols or []), *([time_col] if time_col else [])])
+    if time_col:
+        split_config["oot_by_time"] = time_col
+        split_config["oot_size"] = DEFAULT_OOT_SIZE
     try:
         derived = prepare_modeling_frame(
             registry,
@@ -538,21 +571,31 @@ def _generate_split(registry, backend, dataset, setup, seed, *, passthrough_cols
             target_col=setup.target_col,
             feature_cols=list(setup.candidates),
             split_col=None,
-            split_config={"test_size": 0.25, "group_cols": group_cols},
+            split_config=split_config,
             passthrough_cols=passthrough_cols,
             seed=seed,
         )
     except ModelingError as exc:
         raise ModelingSetupError(f"自动切分失败:{exc}") from exc
 
-    split_series = backend.read_frame(registry.resolve_path(derived.id), columns=["split"])["split"]
+    read_cols = ["split", time_col] if time_col else ["split"]
+    frame = backend.read_frame(registry.resolve_path(derived.id), columns=read_cols)
+    split_series = frame["split"]
     counts = {str(key): int(value) for key, value in split_series.value_counts().items()}
     split_values = {role: role for role in counts}
     grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
-    note = (
-        f"未提供切分列,已自动 75/25 分组随机切 train/test{grouping};"
-        "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
-    )
+    if time_col and counts.get("oot"):
+        oot_time = frame.loc[frame["split"] == "oot", time_col]
+        window = f"{oot_time.min()}~{oot_time.max()}"
+        note = (
+            f"未提供切分列,已按 `{time_col}` 时间外推 OOT(区间 {window},{counts['oot']} 行);"
+            f"其余按 75/25 分组随机切 train/test{grouping}。"
+        )
+    else:
+        note = (
+            f"未提供切分列,已自动 75/25 分组随机切 train/test{grouping};"
+            "未设 OOT(时间外推 OOT 需切分列或日期列),OOT 相关指标将显示 n/a。"
+        )
     return derived.id, "split", split_values, counts, note
 
 

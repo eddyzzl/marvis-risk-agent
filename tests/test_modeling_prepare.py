@@ -188,6 +188,62 @@ def test_prepare_modeling_frame_splits_oot_by_time_before_random_test(tmp_path):
     assert not (out[out["split"] == "test"]["month"] >= 80).any()
 
 
+def test_prepare_modeling_frame_splits_oot_by_time_with_string_month_column(tmp_path):
+    """SEL-1: the default modeling setup detects loan_month/apply_month-style business
+    columns, which are text ("2025-10" apply-month strings), not numeric. ``.quantile()``
+    has no kernel for pandas/pyarrow string dtypes, so the OOT cutoff must be computed via
+    a dtype-agnostic rank rather than the raw column values (see _make_split in prepare.py).
+    This locks in that fix and its determinism, sourced from the six-journey smoke finding
+    that apply_month alone did not trigger a time split (docs/plans/v2-master-backlog.md
+    Appendix A, SEL-1)."""
+    months = ["2025-10", "2025-11", "2025-12", "2026-01"]
+    frame = pd.DataFrame({
+        "row_id": list(range(100)),
+        "apply_month": [months[i % len(months)] for i in range(100)],
+        "x": [i % 5 for i in range(100)],
+        "y": [i % 2 for i in range(100)],
+    })
+    backend, registry, dataset = _register_frame(tmp_path, frame)
+
+    result = prepare_modeling_frame(
+        registry,
+        backend,
+        dataset.id,
+        target_col="y",
+        feature_cols=["row_id", "x"],
+        split_col=None,
+        split_config={"test_size": 0.25, "oot_size": 0.2, "oot_by_time": "apply_month"},
+        passthrough_cols=["apply_month"],
+        seed=5,
+    )
+    out = backend.read_frame(registry.resolve_path(result.id))
+
+    counts = out["split"].value_counts().to_dict()
+    assert set(counts) == {"train", "test", "oot"}
+    assert counts["oot"] > 0
+    # OOT is carved from the most recent month(s) only.
+    assert set(out[out["split"] == "oot"]["apply_month"].unique()) == {"2026-01"}
+    assert not (out[out["split"] == "test"]["apply_month"] == "2026-01").any()
+
+    # deterministic given a fixed seed
+    again = prepare_modeling_frame(
+        registry,
+        backend,
+        dataset.id,
+        target_col="y",
+        feature_cols=["row_id", "x"],
+        split_col=None,
+        split_config={"test_size": 0.25, "oot_size": 0.2, "oot_by_time": "apply_month"},
+        passthrough_cols=["apply_month"],
+        seed=5,
+    )
+    out_again = backend.read_frame(registry.resolve_path(again.id))
+    assert (
+        out.sort_values("row_id")["split"].tolist()
+        == out_again.sort_values("row_id")["split"].tolist()
+    )
+
+
 def test_make_split_grouped_keeps_each_group_on_one_side():
     """Anti-leakage (spec §2): with group_cols, every group's near-duplicate rows
     land entirely in one split set — never straddling train/test."""
