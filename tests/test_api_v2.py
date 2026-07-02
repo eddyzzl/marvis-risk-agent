@@ -303,7 +303,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
         "backtests": 0,
         "sub_agents": 0,
     }
-    monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.agent.validation_app_service.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)

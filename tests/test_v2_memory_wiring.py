@@ -155,7 +155,7 @@ def test_agent_mode_autodrive_join_completion_writes_join_experience_via_real_ap
             return json.dumps({"action": "confirm", "reason": "命中率正常,继续"})
 
     monkeypatch.setattr(
-        "marvis.api._resolve_driver_agent_client",
+        "marvis.routers.validation_agent.resolve_driver_agent_client",
         lambda request, task, payload: _FakeLLM(),
     )
     client = _client(tmp_path)

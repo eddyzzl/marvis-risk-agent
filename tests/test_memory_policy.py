@@ -1,7 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-import marvis.api as api
+from marvis.agent import validation_app_service as vas
+from marvis.agent_memory.api_support import (
+    agent_memory_context_from_store as _agent_memory_context_from_store,
+)
 from marvis.db import init_db
 from marvis.memory_policy import (
     MemoryPolicySettings,
@@ -81,7 +84,7 @@ def test_context_gate_returns_none_when_reference_cross_task_off(tmp_path: Path)
     fake_store = SimpleNamespace(db_path=tmp_path / "marvis.sqlite")
     fake_task = SimpleNamespace(model_name="m", id="task-1")
 
-    result = api._agent_memory_context_from_store(
+    result = _agent_memory_context_from_store(
         fake_store,
         fake_task,
         stage="metrics",
@@ -102,14 +105,14 @@ def test_capture_gate_skips_when_auto_distill_off(tmp_path: Path, monkeypatch):
         called["extract"] = True
         raise AssertionError("auto_distill OFF must not capture")
 
-    monkeypatch.setattr(api, "extract_user_preference", _fail_extract)
+    monkeypatch.setattr(vas, "extract_user_preference", _fail_extract)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path))
         )
     )
 
-    api._capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
+    vas.capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
 
     assert called["extract"] is False
 
@@ -126,14 +129,14 @@ def test_capture_consults_policy_when_auto_distill_on(tmp_path: Path, monkeypatc
         called["extract"] = True
         return None  # no candidate -> no store write
 
-    monkeypatch.setattr(api, "extract_user_preference", _extract)
+    monkeypatch.setattr(vas, "extract_user_preference", _extract)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(settings=SimpleNamespace(workspace=tmp_path))
         )
     )
 
-    api._capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
+    vas.capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
 
     assert called["extract"] is True
 
@@ -157,7 +160,7 @@ def test_capture_dispatches_memory_after_save_when_hook_dispatcher_present(tmp_p
         )
     )
 
-    api._capture_user_preference_memory(
+    vas.capture_user_preference_memory(
         request,
         "task-1",
         {"content": "请记住：优先用KS指标对比。", "id": "msg-1"},
@@ -180,7 +183,7 @@ def test_capture_does_not_dispatch_when_no_candidate_extracted(tmp_path: Path, m
     fake_dispatcher = SimpleNamespace(
         dispatch=lambda event, payload, *, task_id: dispatched.append((event, payload, task_id))
     )
-    monkeypatch.setattr(api, "extract_user_preference", lambda *_a, **_k: None)
+    monkeypatch.setattr(vas, "extract_user_preference", lambda *_a, **_k: None)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -190,7 +193,7 @@ def test_capture_does_not_dispatch_when_no_candidate_extracted(tmp_path: Path, m
         )
     )
 
-    api._capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
+    vas.capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
 
     assert dispatched == []
 
@@ -373,7 +376,7 @@ def test_capture_sends_receipt_when_explicit_preference_hits_reserved_topic(tmp_
         )
     )
 
-    api._capture_user_preference_memory(
+    vas.capture_user_preference_memory(
         request,
         task.id,
         {"content": "请记住这个 skill：以后自动调用 auto-validator。", "id": "msg-1"},
@@ -419,7 +422,7 @@ def test_capture_sends_no_receipt_when_no_marker_present(tmp_path: Path):
         )
     )
 
-    api._capture_user_preference_memory(
+    vas.capture_user_preference_memory(
         request,
         task.id,
         {"content": "这个 skill 的 runtime 今天跑得挺快。", "id": "msg-2"},

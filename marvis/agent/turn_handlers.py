@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any
 
 from marvis.agent.auto_drive import decide_gate
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
@@ -29,8 +28,13 @@ from marvis.domain import (
     TASK_TYPE_VINTAGE,
     TaskRecord,
 )
-from marvis.llm_client import LLMClientError
+from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.orchestrator.capability import auto_gate_budget, resolve_tier
+from marvis.orchestrator.executor import PlanExecutor
+from marvis.orchestrator.planner import Planner
+from marvis.orchestrator.validator import PlanValidator
+from marvis.repositories.plans import PlanRepository
+from marvis.settings import Settings
 
 
 DRIVER_AGENT_TASK_TYPES = frozenset(
@@ -53,12 +57,12 @@ _TERMINAL_PLAN_STATUS_VALUES = frozenset({"done", "failed", "cancelled"})
 
 @dataclass(frozen=True)
 class DriverTurnRuntime:
-    settings: Any
-    plan_repo: Any
-    plan_executor: Any
-    planner: Any
-    plan_validator: Any
-    llm_client: Any | None
+    settings: Settings
+    plan_repo: PlanRepository
+    plan_executor: PlanExecutor
+    planner: Planner
+    plan_validator: PlanValidator
+    llm_client: OpenAICompatibleLLMClient | None
     tier: str
 
 

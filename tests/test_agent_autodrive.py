@@ -8,7 +8,7 @@ Two invariants are covered:
      the LLM auto-confirms each gate and the whole deterministic flow runs end-to-end
      in a single request — C1 file-role gate -> C2 join gate -> executed join.
 
-The LLM is injected at ``marvis.api._resolve_driver_agent_client``, so a FakeLLM
+The LLM is injected at ``marvis.routers.validation_agent.resolve_driver_agent_client``, so a FakeLLM
 drives the real FastAPI endpoints with no network and no LLM configuration.
 """
 
@@ -174,7 +174,7 @@ def test_agent_mode_strategy_and_vintage_without_llm_error(
 # -- invariant 2: with an LLM, agent mode auto-drives the gates ---------------
 def test_agent_mode_autodrives_join_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="confirm", reason="命中率正常,继续")
-    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _join_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "拼接自动", "validator": "qa", "source_dir": str(src),
@@ -329,7 +329,7 @@ def test_agent_autodrive_sizes_budget_from_active_plan_gate_count(monkeypatch):
 
 def test_agent_mode_halt_decision_stops_at_gate(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="halt", reason="命中率过低,请人工核对")
-    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _join_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "拼接暂停", "validator": "qa", "source_dir": str(src),
@@ -348,7 +348,7 @@ def test_agent_normal_mode_stops_at_first_gate(client: TestClient, tmp_path: Pat
     confirm, the agent runs to the FIRST gate and stops — it does NOT auto-drive the
     whole plan. (spec §6: 默认权限每个大步后停, 自动审查全自动.)"""
     fake = _FakeLLM(action="confirm", reason="结果正常,继续")
-    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _join_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "拼接默认权限", "validator": "qa", "source_dir": str(src),
@@ -367,7 +367,7 @@ def test_agent_normal_mode_stops_at_first_gate(client: TestClient, tmp_path: Pat
 
 def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="confirm", reason="策略规则可回测,继续")
-    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _strategy_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "策略自动",
@@ -391,7 +391,7 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
 
 def test_agent_mode_autodrives_vintage_to_completion(client: TestClient, tmp_path: Path, monkeypatch):
     fake = _FakeLLM(action="confirm", reason="字段已识别,继续")
-    monkeypatch.setattr("marvis.api._resolve_driver_agent_client", lambda request, task, payload: fake)
+    monkeypatch.setattr("marvis.routers.validation_agent.resolve_driver_agent_client", lambda request, task, payload: fake)
     src = _vintage_dir(tmp_path)
     task_id = client.post("/api/tasks", json={
         "model_name": "Vintage 自动",

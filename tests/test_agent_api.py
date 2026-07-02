@@ -31,14 +31,14 @@ def _client(tmp_path: Path) -> TestClient:
 
 
 def test_normalize_effort_falls_back_to_high():
-    from marvis.api import _normalize_effort
+    from marvis.agent.validation_app_service import normalize_effort
 
-    assert _normalize_effort("low") == "low"
-    assert _normalize_effort("Medium") == "medium"
-    assert _normalize_effort("high") == "high"
-    assert _normalize_effort("ultra") == "high"
-    assert _normalize_effort(None) == "high"
-    assert _normalize_effort("") == "high"
+    assert normalize_effort("low") == "low"
+    assert normalize_effort("Medium") == "medium"
+    assert normalize_effort("high") == "high"
+    assert normalize_effort("ultra") == "high"
+    assert normalize_effort(None) == "high"
+    assert normalize_effort("") == "high"
 
 
 def test_validation_agent_job_loop_lives_outside_api_module():
@@ -251,7 +251,7 @@ def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr("marvis.api.answer_chat_message", fake_answer_chat_message)
+    monkeypatch.setattr("marvis.routers.validation_agent.answer_chat_message", fake_answer_chat_message)
     client = _client(tmp_path)
     _configure_llm(client)
     task_id = _create_task(client, tmp_path)
@@ -294,7 +294,7 @@ def test_agent_chat_uses_relevant_memory_and_audits_use(tmp_path, monkeypatch):
 
 def test_agent_chat_persists_explicit_user_preference_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "marvis.api.answer_chat_message",
+        "marvis.routers.validation_agent.answer_chat_message",
         lambda **kwargs: ("已记住。", {"fallback": False}),
     )
     client = _client(tmp_path)
@@ -337,7 +337,7 @@ def test_agent_start_queues_streaming_opening_before_background_scan(
         queued.append((task_id, opening_message_id, acceptance_mode, stage_instruction))
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -435,11 +435,11 @@ def test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts(
         repo.update_agent_report_conclusions(task_id, REQUIRED_AGENT_CONCLUSIONS, expected_revision=0)
         return True
 
-    monkeypatch.setattr("marvis.api._open_agent_stage", fake_open_stage)
-    monkeypatch.setattr("marvis.api._run_agent_scan_stage", fake_scan_stage)
-    monkeypatch.setattr("marvis.api._run_agent_reproducibility_stage", fake_repro_stage)
-    monkeypatch.setattr("marvis.api._run_agent_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("marvis.api._run_agent_word_conclusion_stage", fake_word_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.open_agent_stage", fake_open_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_scan_stage", fake_scan_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_reproducibility_stage", fake_repro_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_word_conclusion_stage", fake_word_stage)
 
     _run_agent_validation_job(
         job_id,
@@ -478,7 +478,7 @@ def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
     job_id = repo.start_job(task_id, "agent")
 
     monkeypatch.setattr(
-        "marvis.api.compose_agent_start_message",
+        "marvis.agent.validation_app_service.compose_agent_start_message",
         lambda **_kwargs: ("开始验证材料。", {"fallback": True}),
     )
 
@@ -523,10 +523,10 @@ def test_agent_auto_accept_does_not_add_received_intro_when_auto_advancing(
         repo.update_agent_report_conclusions(task_id, REQUIRED_AGENT_CONCLUSIONS, expected_revision=0)
         return True
 
-    monkeypatch.setattr("marvis.api._run_agent_scan_stage", fake_scan_stage)
-    monkeypatch.setattr("marvis.api._run_agent_reproducibility_stage", fake_repro_stage)
-    monkeypatch.setattr("marvis.api._run_agent_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("marvis.api._run_agent_word_conclusion_stage", fake_word_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_scan_stage", fake_scan_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_reproducibility_stage", fake_repro_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_agent_word_conclusion_stage", fake_word_stage)
 
     _run_agent_validation_job(
         job_id,
@@ -568,7 +568,7 @@ def test_agent_auto_accept_dispatch_does_not_precreate_received_intro_for_next_s
     background_tasks = BackgroundTasks()
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         lambda *_args, **_kwargs: None,
     )
 
@@ -614,10 +614,10 @@ def test_agent_word_conclusions_auto_accept_confirms_and_generates_report(
             expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
         )
 
-    monkeypatch.setattr("marvis.api.generate_word_conclusions", fake_generate_word_conclusions)
-    monkeypatch.setattr("marvis.api.run_report_stage", fake_run_report_stage)
-    monkeypatch.setattr("marvis.api._agent_pipeline_settings", lambda _settings, _task: object())
-    monkeypatch.setattr("marvis.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
+    monkeypatch.setattr("marvis.agent.validation_app_service.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_run_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_pipeline_settings", lambda _settings, _task: object())
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
 
     assert _run_agent_word_conclusion_stage(
         repo,
@@ -662,8 +662,8 @@ def test_agent_word_conclusion_stage_passes_rewrite_instruction_to_llm(
         seen_instructions.append(kwargs.get("user_instruction"))
         return REQUIRED_AGENT_CONCLUSIONS, {"source": "test"}
 
-    monkeypatch.setattr("marvis.api.generate_word_conclusions", fake_generate_word_conclusions)
-    monkeypatch.setattr("marvis.api._agent_evidence_from_settings", lambda _settings, _task_id: {})
+    monkeypatch.setattr("marvis.agent.validation_app_service.generate_word_conclusions", fake_generate_word_conclusions)
+    monkeypatch.setattr("marvis.agent.validation_app_service.agent_evidence_from_settings_impl", lambda _settings, _task_id: {})
 
     assert _run_agent_word_conclusion_stage(
         repo,
@@ -1515,7 +1515,7 @@ def test_agent_question_about_validation_conclusion_does_not_restart_validation(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         lambda *args: queued.append(args),
     )
     client = _client(tmp_path)
@@ -1582,13 +1582,13 @@ def test_agent_start_message_runs_only_material_scan_and_waits_for_continue(
         "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("marvis.api._perform_scan_task", fake_scan)
+    monkeypatch.setattr("marvis.agent.validation_app_service.perform_scan_task", fake_scan)
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.agent.validation_app_service.run_notebook_stage",
         lambda **_kwargs: unexpected.append("notebook"),
     )
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.agent.validation_app_service.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -1667,12 +1667,12 @@ def test_agent_continue_from_scanned_runs_only_notebook_stage(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api._perform_scan_task",
+        "marvis.agent.validation_app_service.perform_scan_task",
         lambda *_args, **_kwargs: unexpected.append("scan"),
     )
-    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.agent.validation_app_service.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -1752,10 +1752,10 @@ def test_agent_continue_after_intervening_chat_dispatches_metrics_stage(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.agent.validation_app_service.run_notebook_stage",
         lambda **_kwargs: pytest.fail("notebook stage should not rerun"),
     )
-    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_metrics_stage", fake_metrics_stage)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -1981,12 +1981,12 @@ def test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api._perform_scan_task",
+        "marvis.agent.validation_app_service.perform_scan_task",
         lambda *_args, **_kwargs: unexpected.append("scan"),
     )
-    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.agent.validation_app_service.run_metrics_stage",
         lambda **_kwargs: unexpected.append("metrics"),
     )
     client = _client(tmp_path)
@@ -2088,9 +2088,9 @@ def test_agent_continue_retries_notebook_stage_after_notebook_failure(
         "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_notebook_stage", fake_notebook_stage)
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.agent.validation_app_service.run_metrics_stage",
         lambda **_kwargs: calls.append("metrics"),
     )
     client = _client(tmp_path)
@@ -2138,7 +2138,7 @@ def test_agent_stop_message_requests_active_agent_cancellation_without_llm_confi
 ):
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.agent.validation_app_service.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
     )
     client = _client(tmp_path)
@@ -2169,11 +2169,11 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
     requested_agent: list[str] = []
     requested_notebook: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_agent_cancellation",
+        "marvis.agent.validation_app_service.request_agent_cancellation",
         lambda task_id: requested_agent.append(task_id),
     )
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.agent.validation_app_service.request_notebook_cancellation",
         lambda task_id: requested_notebook.append(task_id) or True,
     )
     client = _client(tmp_path)
@@ -2198,7 +2198,7 @@ def test_agent_stop_endpoint_requests_active_agent_cancellation_without_user_mes
 
 def test_agent_stop_marks_scanned_task_stopped_without_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.agent.validation_app_service.request_notebook_cancellation",
         lambda _task_id: True,
     )
     client = _client(tmp_path)
@@ -2233,7 +2233,7 @@ def test_pipeline_cancel_resume_status_is_idempotent_and_stopped(tmp_path):
 
 def test_agent_stop_keeps_active_job_guard_until_worker_finishes(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.agent.validation_app_service.request_notebook_cancellation",
         lambda _task_id: True,
     )
     client = _client(tmp_path)
@@ -2515,7 +2515,7 @@ def test_agent_chat_confirm_report_draft_dispatches_report_without_llm_chat(
         "marvis.agent.service.OpenAICompatibleLLMClient",
         FakeLLMClient,
     )
-    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_report_stage)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -2586,7 +2586,7 @@ def test_agent_chat_confirm_report_draft_does_not_need_enabled_llm(tmp_path, mon
             expected={TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED},
         )
 
-    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.agent.validation_app_service.run_report_stage", fake_report_stage)
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
@@ -2635,7 +2635,7 @@ def test_agent_chat_confirm_report_draft_rejects_stale_revision_without_mutation
         },
     )
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.agent.validation_app_service.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     task_id = _create_task(client, tmp_path)
@@ -2687,7 +2687,7 @@ def test_agent_chat_confirm_ignores_freeform_assistant_report_headings(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.agent.validation_app_service.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2758,7 +2758,7 @@ def test_agent_chat_confirm_ignores_draft_after_report_was_confirmed(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.agent.validation_app_service.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2831,7 +2831,7 @@ def test_agent_chat_regenerate_report_creates_structured_draft_not_plain_chat(
         FakeLLMClient,
     )
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.agent.validation_app_service.run_report_stage",
         lambda **kwargs: report_calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -2978,7 +2978,7 @@ def test_agent_rerun_scan_resets_steps_without_deleting_history(
         )
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -3112,10 +3112,10 @@ def test_agent_rerun_material_completeness_after_stop_dispatches_scan(
         return "不应进入普通问答。", {"fallback": True}
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         fake_run_agent_validation_job,
     )
-    monkeypatch.setattr("marvis.api.answer_chat_message", fake_answer_chat_message)
+    monkeypatch.setattr("marvis.routers.validation_agent.answer_chat_message", fake_answer_chat_message)
     client = _client(tmp_path)
     client.put(
         "/api/settings/llm",
@@ -3194,7 +3194,7 @@ def test_agent_rerun_report_draft_resets_report_step_and_keeps_rewrite_instructi
         )
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         fake_run_agent_validation_job,
     )
     client = _client(tmp_path)
@@ -3267,7 +3267,7 @@ def test_agent_rerun_rejects_stage_that_has_not_been_reached(tmp_path, monkeypat
         pytest.fail("unreached rerun stage should not dispatch an agent job")
 
     monkeypatch.setattr(
-        "marvis.api._run_agent_validation_job",
+        "marvis.agent.validation_app_service.run_agent_validation_job",
         unexpected_dispatch,
     )
     client = _client(tmp_path)
@@ -3309,7 +3309,7 @@ def test_agent_report_confirm_writes_three_conclusions_and_dispatches_report(
 ):
     calls: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.agent.validation_app_service.run_report_stage",
         lambda **kwargs: calls.append(kwargs["task_id"]),
     )
     client = _client(tmp_path)
@@ -3387,7 +3387,7 @@ def test_agent_report_confirm_claims_job_before_mutating_conclusions(
         start_attempts.append((task_id, kind))
         raise HTTPException(status_code=409, detail="task already has an active stage")
 
-    monkeypatch.setattr("marvis.api._start_task_job", fail_start_job)
+    monkeypatch.setattr("marvis.agent.validation_app_service.start_task_job", fail_start_job)
     client = _client(tmp_path)
     task_id = _create_task(client, tmp_path)
     repo = TaskRepository(tmp_path / "marvis.sqlite")
