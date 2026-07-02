@@ -144,7 +144,13 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     )
     woe = runner.invoke(
         ToolRef("feature", "woe_encode"),
-        {"dataset_id": dataset.id, "features": ["x1"], "target_col": "y", "max_bins": 2},
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "max_bins": 2,
+            "allow_full_fit": True,
+        },
         task_id="task-feature",
     )
     onehot = runner.invoke(
@@ -154,17 +160,24 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     )
     normalized = runner.invoke(
         ToolRef("feature", "normalize"),
-        {"dataset_id": dataset.id, "columns": ["amount"], "method": "minmax"},
+        {"dataset_id": dataset.id, "columns": ["amount"], "method": "minmax", "allow_full_fit": True},
         task_id="task-feature",
     )
     imputed = runner.invoke(
         ToolRef("feature", "impute_missing"),
-        {"dataset_id": dataset.id, "columns": ["missing"], "strategy": "median"},
+        {"dataset_id": dataset.id, "columns": ["missing"], "strategy": "median", "allow_full_fit": True},
         task_id="task-feature",
     )
     capped = runner.invoke(
         ToolRef("feature", "cap_outliers"),
-        {"dataset_id": dataset.id, "columns": ["amount"], "method": "quantile", "lower_q": 0.0, "upper_q": 0.75},
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 0.75,
+            "allow_full_fit": True,
+        },
         task_id="task-feature",
     )
     crossed = runner.invoke(
@@ -241,6 +254,185 @@ def test_woe_encode_fits_on_non_holdout_rows_and_applies_to_all_rows(tmp_path):
     assert encoded.shape[0] == frame.shape[0]
     assert encoded.loc[0, "x_woe"] == pytest.approx(woe_map["woe_by_bin"][0])
     assert encoded.loc[4, "x_woe"] == pytest.approx(woe_map["woe_by_bin"][0])
+
+
+def test_woe_encode_without_split_raises_typed_error_unless_allow_full_fit(tmp_path):
+    """PREP-1: a fit-class tool with no split_col to exclude holdout rows must stop with
+    a typed error (mirrors the NaN-label gate), not silently pool-fit on everything."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    blocked = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {"dataset_id": dataset.id, "features": ["x1"], "target_col": "y", "max_bins": 2},
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "fit_requires_split"
+    assert blocked.error_detail["tool"] == "woe_encode"
+
+    confirmed = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "max_bins": 2,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["fit_split"] == "full"
+    assert confirmed.output["fit_rows"] == 8
+
+
+@pytest.mark.parametrize(
+    "tool_name,extra_inputs",
+    [
+        ("normalize", {"columns": ["amount"], "method": "minmax"}),
+        ("impute_missing", {"columns": ["missing"], "strategy": "median"}),
+        ("cap_outliers", {"columns": ["amount"], "method": "quantile", "lower_q": 0.0, "upper_q": 0.75}),
+    ],
+)
+def test_stat_transform_tools_without_split_raise_typed_error_unless_allow_full_fit(
+    tmp_path, tool_name, extra_inputs
+):
+    """PREP-1: impute/normalize/cap must also stop without a split_col (or allow_full_fit)."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    blocked = runner.invoke(
+        ToolRef("feature", tool_name),
+        {"dataset_id": dataset.id, **extra_inputs},
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "fit_requires_split"
+    assert blocked.error_detail["tool"] == tool_name
+
+    confirmed = runner.invoke(
+        ToolRef("feature", tool_name),
+        {"dataset_id": dataset.id, "allow_full_fit": True, **extra_inputs},
+        task_id="task-feature",
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["fit_split"] == "full"
+    assert confirmed.output["fit_rows"] == 8
+
+
+def test_woe_encode_default_holdout_excludes_test_and_oot(tmp_path):
+    """PREP-1: the default holdout changed from ("oot",) to ("test", "oot") — WOE fit
+    must never see test-split labels even without an explicit holdout_values override."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "x": [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        # test rows are flipped relative to train — if test leaked into the fit,
+        # the WOE direction for bin 0 would collapse toward 0 instead of staying > 1.
+        "y": [0, 0, 1, 1, 1, 1, 0, 0],
+        "split": ["train", "train", "train", "train", "test", "test", "oot", "oot"],
+    })
+    path = tmp_path / "woe_default_holdout.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x"],
+            "target_col": "y",
+            "method": "manual",
+            "breakpoints": [0.5],
+            "split_col": "split",
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["fit_split"] == "train"
+    assert result.output["fit_rows"] == 4
+    woe_map = result.output["woe_maps"]["x"]
+    # Hand-computed train-only WOE (train rows only: x=0→y=[0,0], x=1→y=[1,1]).
+    # bin0 (x<0.5): all good (y=0) -> woe = ln((1+0.5)/(0+0.5)) - ln((4+0.5)/(4+0.5))
+    good_bin0, bad_bin0 = 2, 0
+    good_bin1, bad_bin1 = 0, 2
+    total_good, total_bad = 2, 2
+    expected_woe0 = np.log((good_bin0 + 0.5) / (total_good + 0.5)) - np.log((bad_bin0 + 0.5) / (total_bad + 0.5))
+    expected_woe1 = np.log((good_bin1 + 0.5) / (total_good + 0.5)) - np.log((bad_bin1 + 0.5) / (total_bad + 0.5))
+    assert woe_map["woe_by_bin"][0] == pytest.approx(expected_woe0)
+    assert woe_map["woe_by_bin"][1] == pytest.approx(expected_woe1)
+
+
+def test_impute_normalize_cap_fit_only_on_train_rows_with_skewed_holdout(tmp_path):
+    """PREP-1: with split_col set, fill values / scaler params / capping bounds must be
+    computed from train rows only — verified against a hand-computed train-only stat,
+    on a fixture where train and test/oot distributions are deliberately skewed."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        # train: 1..6 (median 3.5); test/oot: wildly different values that would drag
+        # the pooled median/mean/bounds if they leaked into the fit.
+        "amount": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 500.0, 600.0],
+        "missing": [1.0, np.nan, 3.0, 4.0, 5.0, 6.0, np.nan, 900.0],
+        "split": ["train"] * 6 + ["test", "oot"],
+    })
+    path = tmp_path / "skewed_holdout.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "minmax",
+            "split_col": "split",
+        },
+        task_id="task-feature",
+    )
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["missing"],
+            "strategy": "median",
+            "split_col": "split",
+        },
+        task_id="task-feature",
+    )
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 1.0,
+            "split_col": "split",
+        },
+        task_id="task-feature",
+    )
+
+    for result in (normalized, imputed, capped):
+        assert result.ok is True, result.error
+        assert result.output["fit_split"] == "train"
+        assert result.output["fit_rows"] == 6
+
+    # Train-only hand-computed stats (rows 0-5 only: amount=[1..6], missing=[1,NaN,3,4,5,6]).
+    assert normalized.output["scaler_params"]["amount"]["min"] == 1.0
+    assert normalized.output["scaler_params"]["amount"]["max"] == 6.0
+    assert imputed.output["fill_values"]["missing"] == 4.0  # median of [1,3,4,5,6]
+    assert capped.output["bounds"]["amount"]["lower"] == 1.0
+    assert capped.output["bounds"]["amount"]["upper"] == 6.0
+
+    # Transform still applies to every row (holdout rows are transformed, not dropped).
+    normalized_frame = backend.read_frame(registry.resolve_path(normalized.output["result_dataset_id"]))
+    assert normalized_frame.shape[0] == frame.shape[0]
+    assert normalized_frame["amount"].iloc[-1] > 1.0  # holdout outlier scales past the [0,1] train range
+
+    capped_frame = backend.read_frame(registry.resolve_path(capped.output["result_dataset_id"]))
+    assert capped_frame["amount"].iloc[-1] == 6.0  # holdout outlier clipped to the train-fit upper bound
+    assert capped_frame["amount"].iloc[-2] == 6.0
 
 
 def test_feature_transform_tools_return_feature_error_for_missing_columns(tmp_path):

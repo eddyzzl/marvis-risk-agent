@@ -168,6 +168,7 @@ STANDARD_MODELING = WorkflowTemplate(
                 "dataset_id": "$ref:准备建模样本.output.result_dataset_id",
                 "features": "{slot:feature_cols}",
                 "target_col": "{slot:target_col}",
+                "split_col": "{slot:split_col}",
             },
             depends_on_titles=("准备建模样本",),
             post_checks=(PostCheck("nonempty", {"field": "selected"}),),
