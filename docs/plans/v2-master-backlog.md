@@ -70,8 +70,8 @@
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ✅ | PREP-1 | 四工具 train-only 拟合已落地（`bc537dba`）：woe/impute/normalize/cap 默认排除 ("test","oot")、无 split 抛 FitRequiresSplitError（allow_full_fit 逃生口）、fit_rows/fit_split 口径回显 | High/M | ✅ |
-| ⬜ | PREP-2 | 预处理器不随模型 artifact 落盘、打分期无法重放：变换原地覆盖同名列导致新数据打分静默错误 | High/L | ✅ |
-| ⬜ | PREP-3 | 类别特征全链路缺位：候选只取数值列、所有配方强转 float、无类别 WOE/target encoding/罕见类归并、CatBoost 未传 cat_features（与 FS-3 同主题，合并执行） | High/L | ✅ |
+| ✅ | PREP-2 | 预处理链已落盘可重放（`30b72ccb`）：`.preprocessing.json` sidecar（impute/cap/normalize/onehot）随派生数据集累计→训练时进 ModelArtifact→scorer/handoff notebook 重放；PMML 不含预处理已在 model card 诚实标注。尾巴：通用 woe_encode 链未入 sidecar（scorecard 已有专属重放）→并入波次四 PREP 余项 | High/L | ✅ |
+| ✅ | PREP-3 | 类别链路三层落地（`3ee2146d`/`982ae470`/`ca47fef4`）：excluded_categorical 显性化进 screen 门文案；categorical_woe_encode 工具（train-only+Laplace+rare 归并+未见类别先验 fallback）；CatBoost 原生 cat_features（含调参路径）；setup 提示不改默认 | High/L | ✅ |
 | ⬜ | PREP-4 | 哨兵值/特殊值（-999/-1/9999 类）无识别与处理机制，污染填充/标准化/截断/分箱 | Med/M | — |
 | ⬜ | PREP-6 | LR 配方裸训：无填充/标准化/截断，含 NaN 即崩；全平台无 log/偏态变换（与 SEL-3 同源，合并执行） | Med/S | — |
 | ⬜ | PREP-7 | 日期列信息全部丢弃：无 datediff/账龄/间隔/近期性派生路径 | Med/M | — |
@@ -85,7 +85,7 @@
 |---|---|---|---|---|
 | ✅ | FS-1 | 两模板已插入"精选特征"漏斗步（`c00032fe`）：IV≥0.02 → 相关去冗余 0.95（高 IV 胜出）→ 可选 VIF；门内 adjust 可调阈值；screen 加 top_k=200 兜底；含 2 强+3 噪声+1 冗余端到端回归（迭代剪枝/null-importance 归 roadmap-1d 长线备注） | High/M | ✅ |
 | ✅ | FS-2 | select_features 默认排除 test+oot、自动识别 SPLIT_COLUMN、typed error 兜底（`bc537dba`）；legacy 模板筛选步已接 split_col | Med/S | — |
-| ⬜ | FS-3 | 类别型特征被静默排除且无防泄漏类别编码（→ 与 PREP-3 合并执行） | Med/M | — |
+| ✅ | FS-3 | （随 PREP-3 落地）excluded_categorical 上报 + woe_encode_categorical 防泄漏编码 | Med/M | — |
 | ⬜ | FS-4 | 泄漏检测只有'合并样本单变量强度'一条线：无按 split 突变检测、无时间维度审计 | Med/M | — |
 | ⬜ | FS-5 | 特征衍生工作流最终筛选步骤筛的是原始列——新衍生列从未进入筛选 | Med/S | — |
 | ⬜ | FS-6 | 无按 split 的特征区分力衰减筛选（train vs test/OOT KS 衰减；与 DOM-7 PSI 缺口互补） | Med/S | — |
