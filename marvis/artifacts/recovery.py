@@ -13,6 +13,20 @@ from marvis.plugins.loader import compute_checksum
 
 
 _BACKUP_DIR_RE = re.compile(r"^\.(?P<name>[A-Za-z_][A-Za-z0-9_-]{0,127})\.[0-9a-f]{32}\.bak$")
+# File-level backups (StagedArtifact/RemovedPath) allow dots in the original
+# filename (e.g. ".model_meta.json.<hex32>.bak"), unlike the plugin/handoff
+# directory backups above whose names are plain identifiers.
+_BACKUP_FILE_RE = re.compile(r"^\.(?P<name>.+)\.[0-9a-f]{32}\.bak$")
+# Orphaned atomic-write scratch files (marvis.files.write_text_atomic): the
+# final target is untouched until the rename succeeds, so any leftover ".tmp"
+# sibling is always safe to delete outright.
+_TMP_FILE_RE = re.compile(r"^\.(?P<name>.+)\.[0-9a-f]{32}\.tmp$")
+# The plugin and validation_handoff directory-backup passes below only ever
+# match _BACKUP_DIR_RE (plain-identifier names). Any other staging site under
+# the datasets/tasks roots produces file-level backups (dots allowed in the
+# original name) or orphaned atomic-write .tmp siblings; both are recognized
+# purely by the strict ".<name>.<hex32>.<bak|tmp>" suffix, so a recursive scan
+# of just these two roots cannot mistake ordinary user data for a backup.
 
 
 @dataclass
@@ -22,6 +36,7 @@ class ArtifactRecoveryReport:
     removed_backups: int = 0
     restored_backups: int = 0
     removed_orphan_dirs: int = 0
+    removed_orphan_tmp_files: int = 0
     skipped_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -43,6 +58,10 @@ def reconcile_workspace_artifacts(settings) -> ArtifactRecoveryReport:
 
     _reconcile_plugin_backups(Path(settings.plugins_dir), PluginRepository(settings.db_path), report)
     _reconcile_validation_handoff_dirs(Path(settings.tasks_dir), TaskRepository(settings.db_path), report)
+
+    for root in _existing_roots([Path(settings.datasets_dir), Path(settings.tasks_dir)]):
+        _reconcile_generic_backups(root, report)
+        _remove_orphan_tmp_files(root, report)
     return report
 
 
@@ -176,3 +195,80 @@ def _restore_backup(backup_dir: Path, final_dir: Path) -> None:
         shutil.rmtree(final_dir)
     final_dir.parent.mkdir(parents=True, exist_ok=True)
     backup_dir.rename(final_dir)
+
+
+def _reconcile_generic_backups(root: Path, report: ArtifactRecoveryReport) -> None:
+    """Restore file/dir-level .bak backups left under the datasets/tasks roots.
+
+    StagedArtifact.promote() and RemovedPath.remove() both rename the prior
+    final content to a ".<name>.<hex32>.bak" sibling *before* the DB write that
+    commits the new state. A crash between that rename and the DB commit means
+    the DB never learns about the new content, so the pre-promote content in
+    .bak is the only state consistent with what was actually committed. There
+    is no cheap generic fingerprint to check for arbitrary dataset/task files
+    (unlike the plugin checksum path), so the backup is unconditionally
+    restored — this mirrors what StagedArtifact.rollback()/RemovedPath.rollback()
+    would have done had the process not crashed first.
+    """
+    if not root.exists():
+        return
+    candidates = sorted(
+        (path for path in root.rglob(".*.bak") if _looks_like_bak_name(path.name)),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
+    for backup_path in candidates:
+        if not backup_path.exists():
+            # Already handled as part of restoring an ancestor directory backup.
+            continue
+        name = _backup_file_final_name(backup_path)
+        if name is None:
+            continue
+        final_path = backup_path.with_name(name)
+        try:
+            _restore_generic_backup(backup_path, final_path)
+            report.restored_backups += 1
+        except Exception as exc:  # pragma: no cover - defensive, filesystem dependent
+            report.errors.append(f"failed to reconcile backup {backup_path}: {exc}")
+
+
+def _restore_generic_backup(backup_path: Path, final_path: Path) -> None:
+    if final_path.exists() or final_path.is_symlink():
+        if final_path.is_dir() and not final_path.is_symlink():
+            shutil.rmtree(final_path)
+        else:
+            final_path.unlink(missing_ok=True)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path.rename(final_path)
+
+
+def _remove_orphan_tmp_files(root: Path, report: ArtifactRecoveryReport) -> None:
+    """Delete orphaned .tmp siblings left by an interrupted write_text_atomic().
+
+    write_text_atomic() writes into ".<name>.<hex32>.tmp" and only replaces the
+    real target with `Path.replace`, which is atomic on the same filesystem. A
+    crash before that replace leaves the final target exactly as it was (or
+    absent); the .tmp scratch file is never observed by anything else and is
+    always safe to delete.
+    """
+    if not root.exists():
+        return
+    for tmp_path in sorted(root.rglob(".*.tmp"), reverse=True):
+        if not _TMP_FILE_RE.match(tmp_path.name):
+            continue
+        if not (tmp_path.is_file() or tmp_path.is_symlink()):
+            continue
+        try:
+            tmp_path.unlink(missing_ok=True)
+            report.removed_orphan_tmp_files += 1
+        except Exception as exc:  # pragma: no cover - defensive, filesystem dependent
+            report.errors.append(f"failed to remove orphan tmp file {tmp_path}: {exc}")
+
+
+def _looks_like_bak_name(name: str) -> bool:
+    return _BACKUP_DIR_RE.match(name) is not None or _BACKUP_FILE_RE.match(name) is not None
+
+
+def _backup_file_final_name(path: Path) -> str | None:
+    match = _BACKUP_DIR_RE.match(path.name) or _BACKUP_FILE_RE.match(path.name)
+    return match.group("name") if match else None
