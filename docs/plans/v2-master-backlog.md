@@ -212,10 +212,10 @@
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | UX-2 | Agent 模式时间线丢弃全部结构化门控件，调整被迫绕道弱 LLM 文本路由 | High/M | ✅ |
-| ⬜ | UX-4 | 特征筛选门表格在真实规模下不可用：无搜索/排序/汇总/批量（追踪器细则：threshold 滑块+top_k+chips+泄漏 override reason） | High/M | ✅ |
-| ⬜ | VD-1 | 门数据表是"裸表格"：验证侧图表语言未下沉 V2 证据面板 | High/M | ⚠️ |
-| ⬜ | VD-2 | 强制确认门无"门"的视觉形态：与普通气泡无差别 | High/M | ⚠️ |
-| ⬜ | VD-3 | 全站零加载骨架（skeleton/shimmer） | High/M | ⚠️ |
+| ✅ | UX-4 | 筛选表全面升级（`cdd5237d`）：搜索/七列排序/分类 chips/批量可见操作/50 行分页/已选计数/泄漏与嫌疑列强制 override 理由随确认提交 | High/M | ✅ |
+| ✅ | VD-1 | 图表语言下沉（`9a9eb2c8`）：数值列 databar、PSI 三段徽、KS/AUC 色阶、match_rate 条形、冠军行高亮+failed 灰化带原因、tabular-nums | High/M | ⚠️ |
+| ✅ | VD-2 | 门卡片形态落地（`5d9e7563`）：强调竖条+盾形图标+玻璃底+红旗警示区+"确认后将执行:<下一步>"后果文案 | High/M | ⚠️ |
+| ✅ | VD-3 | 骨架系统落地（`5e4189f7`）：块/行/表基元+reduced-motion 降级，接入任务切换/门表格/计划栏 | High/M | ⚠️ |
 | ⬜ | VD-4 | 校准可靠性曲线/分数分段数据已产出但前端无图表 | High/M | ✅ |
 | ⬜ | VD-5 | 吉祥物与 V2 事件零联动；真 logo 发光动画素材躺在 scripts/ 未接入 | Med/M | — |
 | ⬜ | UX-5 | replan/子 agent/loop 事件在 UI 完全不可见（+追踪器"plan rail 业务化状态"） | Med/M | — |
@@ -224,7 +224,7 @@
 | ⬜ | UX-11 | 中文文案标点制式不统一（半角/全角混排） | Low/S | — |
 | ⬜ | UX-12 | 材料上传无进度反馈 | Low/S | — |
 | ⬜ | VD-6 | setup/delivery 面板状态编码仅 1px 边框换色 | Med/S | — |
-| ⬜ | VD-7 | 筛选门表格 KS/IV 纯小数：无 databar/分档解读 | Med/S | — |
+| ✅ | VD-7 | KS/IV databar+IV 四档徽标+泄漏 watch 行警示边框（`c22da798`），全 token 化 | Med/S | — |
 | ⬜ | VD-8 | 暗色模式玻璃质感未对等 | Med/S | — |
 | ⬜ | VD-9 | databar/KPI/关键数字无入场动画（已有范式未复用） | Med/S | — |
 | ⬜ | PERF-7 | LLM 生成期零真实反馈：SSE 攒完才返回，前端假打字机 | Med/M | — |
