@@ -13,6 +13,7 @@ from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainRes
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     compute_multiclass_model_metrics,
+    model_params,
     split_modeling_frame,
 )
 
@@ -35,7 +36,7 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
 
     params = {
         **get_recipe("lgb_multiclass").default_params,
-        **config.params,
+        **model_params(config.params),
         "objective": "multiclass",
         "num_class": len(classes),
         "metric": "multi_logloss",

@@ -806,3 +806,103 @@ def _assert_registered_frame(repo, registry, backend, dataset_id: str, expected_
     frame = backend.read_frame(registry.resolve_path(dataset.id))
     for column in expected_columns:
         assert column in frame.columns
+
+
+def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_path):
+    """PREP-2: impute/cap/normalize/onehot must write a lineage sidecar next to the
+    derived dataset's parquet so a model trained downstream can replay the exact
+    fitted params at scoring time — not just echo them in the tool's JSON response."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["missing"],
+            "strategy": "median",
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert imputed.ok is True, imputed.error
+    imputed_chain = read_preprocessing_chain(registry.resolve_path(imputed.output["result_dataset_id"]))
+    assert imputed_chain == [
+        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"]}
+    ]
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": imputed.output["result_dataset_id"],
+            "columns": ["amount"],
+            "method": "quantile",
+            "lower_q": 0.0,
+            "upper_q": 1.0,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert capped.ok is True, capped.error
+    capped_chain = read_preprocessing_chain(registry.resolve_path(capped.output["result_dataset_id"]))
+    # Chain accumulates: impute step from the source dataset + this new cap step.
+    assert capped_chain == [
+        {"kind": "impute", "columns": ["missing"], "params": imputed.output["fill_values"]},
+        {"kind": "cap", "columns": ["amount"], "params": capped.output["bounds"]},
+    ]
+
+    normalized = runner.invoke(
+        ToolRef("feature", "normalize"),
+        {
+            "dataset_id": capped.output["result_dataset_id"],
+            "columns": ["amount"],
+            "method": "minmax",
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert normalized.ok is True, normalized.error
+    normalized_chain = read_preprocessing_chain(registry.resolve_path(normalized.output["result_dataset_id"]))
+    assert [step["kind"] for step in normalized_chain] == ["impute", "cap", "normalize"]
+
+    onehot = runner.invoke(
+        ToolRef("feature", "onehot_encode"),
+        {"dataset_id": dataset.id, "columns": ["cat"]},
+        task_id="task-feature",
+    )
+    assert onehot.ok is True, onehot.error
+    onehot_chain = read_preprocessing_chain(registry.resolve_path(onehot.output["result_dataset_id"]))
+    assert onehot_chain == [{"kind": "onehot", "columns": ["cat"], "params": onehot.output["mapping"]}]
+
+
+def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_path):
+    """WOE replay is handled separately (scorecard/woe_encode already replay their own
+    WOE maps) and cross_features derives new columns rather than transforming existing
+    ones in place — neither should be recorded in preprocessing_steps (PREP-2 scope)."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["x1"],
+            "target_col": "y",
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+    assert woe.ok is True, woe.error
+    assert read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"])) == []
+
+    crossed = runner.invoke(
+        ToolRef("feature", "cross_features"),
+        {"dataset_id": dataset.id, "recipe": [{"kind": "ratio", "num": "x1", "den": "x2"}]},
+        task_id="task-feature",
+    )
+    assert crossed.ok is True, crossed.error
+    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []

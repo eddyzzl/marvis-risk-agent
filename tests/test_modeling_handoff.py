@@ -82,7 +82,7 @@ def _create_source_task(repo: TaskRepository, source_dir: Path):
     )
 
 
-def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = ""):
+def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = "", preprocessing_steps=None):
     settings = build_settings(tmp_path / "workspace")
     init_db(settings.db_path)
     source_dir = tmp_path / "source"
@@ -113,6 +113,8 @@ def _seed_experiment(tmp_path: Path, *, sample_weight_col: str = ""):
     artifact_params = {"C": 1.0}
     if sample_weight_col:
         artifact_params["sample_weight_col"] = sample_weight_col
+    if preprocessing_steps:
+        artifact_params["preprocessing_steps"] = preprocessing_steps
     artifact = save_model(
         model,
         "lr",
@@ -181,6 +183,58 @@ def test_handoff_to_validation_exports_pmml_and_creates_v1_task(tmp_path):
     assert audit["target_ref"] == validation_task_id
     assert audit["detail"]["experiment_id"] == artifact.experiment_id
     assert audit["detail"]["artifact_id"] == artifact.id
+
+
+def test_scoring_notebook_replays_preprocessing_chain_when_artifact_has_one(tmp_path):
+    """PREP-2 regression (c): when the trained artifact carries a preprocessing_steps
+    chain, the generated handoff scoring notebook must contain a replay step (calling
+    apply_preprocessing_steps against the persisted chain) before scoring new raw data —
+    not just predict_proba on the raw dataframe."""
+    preprocessing_steps = [
+        {"kind": "impute", "columns": ["x1"], "params": {"x1": 0.5}},
+        {"kind": "normalize", "columns": ["x1"], "params": {"x1": {"min": 0.0, "max": 1.0, "feature_range": [0, 1]}}},
+    ]
+    settings, store, _source_task, dataset, artifact = _seed_experiment(
+        tmp_path, preprocessing_steps=preprocessing_steps,
+    )
+
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    validation_task = TaskRepository(settings.db_path).get_task(validation_task_id)
+    material_dir = Path(validation_task.source_dir)
+    precheck_notebook_contract(material_dir / "scoring_notebook.ipynb")
+    notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
+    source = notebook.cells[0].source
+    assert "from marvis.feature.preprocessing import apply_preprocessing_steps" in source
+    assert "RMC_PREPROCESSING_STEPS" in source
+    assert "apply_preprocessing_steps(dataframe, RMC_PREPROCESSING_STEPS)" in source
+    assert '"kind": "impute"' in source or "'kind': 'impute'" in source or "kind\": \"impute" in source
+
+
+def test_scoring_notebook_replay_is_a_no_op_without_a_preprocessing_chain(tmp_path):
+    """PREP-2 regression: an artifact with no preprocessing_steps still generates a
+    notebook that calls apply_preprocessing_steps (uniform code path), but with an
+    empty step list — a documented no-op, matching pre-PREP-2 scoring behaviour."""
+    settings, store, _source_task, dataset, artifact = _seed_experiment(tmp_path)
+
+    validation_task_id = handoff_to_validation(
+        store,
+        artifact,
+        sample_dataset_id=dataset.id,
+        settings=settings,
+    )
+
+    validation_task = TaskRepository(settings.db_path).get_task(validation_task_id)
+    material_dir = Path(validation_task.source_dir)
+    notebook = nbformat.read(material_dir / "scoring_notebook.ipynb", as_version=4)
+    source = notebook.cells[0].source
+    assert "apply_preprocessing_steps(dataframe, RMC_PREPROCESSING_STEPS)" in source
+    assert "RMC_PREPROCESSING_STEPS = json.loads('[]')" in source
 
 
 def test_handoff_to_validation_uses_connection_scoped_task_write(tmp_path, monkeypatch):

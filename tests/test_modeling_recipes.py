@@ -1108,3 +1108,125 @@ def test_build_modeling_proposal_rejects_target_type_recipe_mismatch(tmp_path):
             target_type="binary",
             recipes=["lgb_regressor"],
         )
+
+
+def test_model_artifact_scorer_replays_preprocessing_chain_on_new_raw_data(tmp_path):
+    """PREP-2 regression (a): impute+normalize -> train lr -> score new raw data with
+    _ModelArtifactScorer(replay_preprocessing=True) must equal manually applying the
+    same fitted impute/normalize transforms and then calling predict_proba directly —
+    i.e. scoring-time replay reproduces what "impute+normalize then predict" would do,
+    on data containing NaN and out-of-training-range values the model never saw raw."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps
+    from marvis.feature.transform import apply_scaler, impute_missing, minmax_normalize
+
+    rows = 120
+    raw_x1 = [((i * 37) % 101) / 100 for i in range(rows)]
+    raw_x1[3] = float("nan")
+    raw_x1[7] = float("nan")
+    frame = pd.DataFrame({
+        "x1": raw_x1,
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 80 + ["test"] * 25 + ["oot"] * 15,
+    })
+
+    # Fit impute (median) + normalize (minmax) on the train split only, exactly as
+    # feature.impute_missing / feature.normalize do.
+    train_mask = frame["split"] == "train"
+    _filled_fit, fill_value = impute_missing(frame.loc[train_mask, "x1"], strategy="median")
+    imputed_x1 = frame["x1"].fillna(fill_value)
+    fit_values = imputed_x1[train_mask].to_numpy(dtype=float)
+    _norm_fit, scaler_params = minmax_normalize(fit_values)
+    normalized_x1 = apply_scaler(imputed_x1.to_numpy(dtype=float), scaler_params, kind="minmax")
+
+    transformed = frame.copy()
+    transformed["x1"] = normalized_x1
+    path = tmp_path / "prep_chain_sample.parquet"
+    transformed.to_parquet(path, index=False)
+
+    preprocessing_steps = [
+        {"kind": "impute", "columns": ["x1"], "params": {"x1": fill_value}},
+        {"kind": "normalize", "columns": ["x1"], "params": {"x1": scaler_params}},
+    ]
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"preprocessing_steps": preprocessing_steps},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+    backend = DataBackend(tmp_path)
+    result = train_lr(backend, path, config, out_dir=tmp_path / "models_prep_chain")
+
+    # The chain survives onto the persisted artifact params (for scoring-time replay)
+    # but never leaked into the sklearn LogisticRegression constructor kwargs.
+    assert result.artifact.params["preprocessing_steps"] == preprocessing_steps
+
+    # New raw scoring data: NaN values and values outside the training min/max range —
+    # exactly the case that was silently wrong before PREP-2 (fed straight into predict).
+    new_raw = pd.DataFrame({
+        "x1": [float("nan"), -5.0, 0.4, 50.0],
+        "x2": [0.1, 0.2, 0.3, 0.4],
+    })
+
+    scorer = _ModelArtifactScorer(
+        result.artifact,
+        base_dir=tmp_path / "models_prep_chain",
+        replay_preprocessing=True,
+    )
+    replayed_scores = scorer.score(new_raw)
+
+    # Hand-computed expectation: apply the same fitted transforms, then predict_proba.
+    manually_transformed = apply_preprocessing_steps(new_raw, preprocessing_steps)
+    loaded_model = load_model(result.artifact, base_dir=tmp_path / "models_prep_chain")
+    expected_scores = loaded_model.predict_proba(manually_transformed[["x1", "x2"]])[:, 1].tolist()
+
+    assert replayed_scores == pytest.approx(expected_scores)
+
+    # Sanity: without replay (the default), predict on the raw untransformed frame
+    # is a DIFFERENT (silently wrong) answer — proving replay is not a no-op here.
+    unreplayed_scorer = _ModelArtifactScorer(result.artifact, base_dir=tmp_path / "models_prep_chain")
+    unreplayed_scores = unreplayed_scorer.score(new_raw.fillna(0.0))
+    assert unreplayed_scores != pytest.approx(replayed_scores)
+
+
+def test_model_artifact_scorer_without_preprocessing_chain_behaves_unchanged(tmp_path):
+    """PREP-2 regression (b): an artifact trained with no preprocessing_steps (the
+    pre-PREP-2 / historical-dataset case) must score identically regardless of the
+    replay_preprocessing flag — replay is a no-op when there is no chain to replay."""
+    rows = 60
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 40 + ["test"] * 12 + ["oot"] * 8,
+    })
+    path = tmp_path / "no_chain_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+    backend = DataBackend(tmp_path)
+    result = train_lr(backend, path, config, out_dir=tmp_path / "models_no_chain")
+
+    assert "preprocessing_steps" not in result.artifact.params
+
+    sample = frame.head(10)
+    no_replay = _ModelArtifactScorer(result.artifact, base_dir=tmp_path / "models_no_chain").score(sample)
+    with_replay = _ModelArtifactScorer(
+        result.artifact,
+        base_dir=tmp_path / "models_no_chain",
+        replay_preprocessing=True,
+    ).score(sample)
+
+    assert no_replay == pytest.approx(with_replay)

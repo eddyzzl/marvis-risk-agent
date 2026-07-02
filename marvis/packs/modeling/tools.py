@@ -21,6 +21,11 @@ from marvis.db import DatasetRepository, ModelingRepository
 from marvis.feature.candidates import candidate_numeric_features
 from marvis.feature.metrics import feature_metrics
 from marvis.feature.encode import woe_encode
+from marvis.feature.preprocessing import (
+    apply_preprocessing_steps,
+    read_preprocessing_chain,
+    sidecar_path,
+)
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.output.model_report import ModelReportPayload, render_model_report
@@ -750,13 +755,19 @@ def tool_train_model(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     recipe = str(inputs["recipe"])
+    train_params = _training_params(inputs)
+    preprocessing_steps = _preprocessing_steps_for_training(runtime, dataset.id)
+    if preprocessing_steps:
+        train_params["preprocessing_steps"] = preprocessing_steps
+    elif not _preprocessing_chain_traceable(runtime, dataset.id):
+        train_params["preprocessing_chain_traceable"] = False
     config = TrainConfig(
         dataset_id=dataset.id,
         features=tuple(str(item) for item in inputs["features"]),
         target_col=str(inputs["target_col"]),
         split_col=str(inputs["split_col"]),
         split_values=dict(inputs["split_values"]),
-        params=_training_params(inputs),
+        params=train_params,
         seed=int(inputs["seed"]),
         early_stopping_rounds=_optional_int(inputs.get("early_stopping_rounds")),
         recipe_id=recipe,
@@ -854,6 +865,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     dataset_path = runtime.registry.resolve_path(dataset.id)
     training_dataset = TrainingDataset.load(runtime.backend, dataset_path)
     training_backend = training_dataset.backend_adapter(runtime.backend)
+    preprocessing_steps = read_preprocessing_chain(dataset_path)
+    preprocessing_chain_traceable = bool(preprocessing_steps) or sidecar_path(dataset_path).exists()
 
     experiments: list[dict] = []
     for recipe in recipes:
@@ -865,6 +878,10 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             recipe_params = {**tuned_params, **control_params}
         else:
             recipe_params = dict(control_params)
+        if preprocessing_steps:
+            recipe_params["preprocessing_steps"] = preprocessing_steps
+        elif not preprocessing_chain_traceable:
+            recipe_params["preprocessing_chain_traceable"] = False
         early_stopping_rounds = (
             _TRAIN_MODELS_EARLY_STOPPING_ROUNDS
             if recipe in _EARLY_STOPPED_TREE_RECIPES
@@ -3420,6 +3437,32 @@ def _resolve_feature_cols(
     return inferred
 
 
+def _preprocessing_steps_for_training(runtime: "_Runtime", dataset_id: str) -> list[dict]:
+    """The accumulated preprocessing chain (PREP-2) for the modeling input dataset, read
+    from its lineage sidecar. Empty when the dataset has no traceable chain (e.g. a
+    historical dataset registered before this mechanism, or one built without any
+    impute/cap/normalize/onehot step) — the resulting model artifact then has no
+    preprocessing_steps and scoring-time replay is a no-op, matching pre-PREP-2 behavior."""
+    try:
+        dataset_path = runtime.registry.resolve_path(str(dataset_id))
+    except KeyError:
+        return []
+    return read_preprocessing_chain(dataset_path)
+
+
+def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool:
+    """Whether the modeling input dataset carries a preprocessing lineage sidecar at
+    all (PREP-2). False means the dataset predates this mechanism or was never derived
+    through a chain-tracking FEATURE/prepare_modeling_frame call — the model card
+    flags this explicitly ("预处理链不可追溯") rather than silently implying the model
+    has zero preprocessing."""
+    try:
+        dataset_path = runtime.registry.resolve_path(str(dataset_id))
+    except KeyError:
+        return False
+    return sidecar_path(dataset_path).exists()
+
+
 def _train_recipe(
     recipe: str,
     backend,
@@ -3530,6 +3573,22 @@ def _artifact_delivery_limitations(
             f"模型已进行 {method} 概率校准，但 PMML 产物不包含校准器；"
             "验证移交 Notebook 会加载 calibration.joblib 应用校准。"
         )
+    if (artifact.params or {}).get("preprocessing_steps"):
+        # PREP-2: PMML export intentionally does not embed the generic feature-pack
+        # preprocessing layer (impute/cap/normalize/onehot) — out of scope for this
+        # fix; only the platform scorer/handoff notebook replay it. Mirrors the
+        # calibration limitation above so the model card/capabilities never imply
+        # PMML alone reproduces this model's scores on new raw data.
+        limitations.append(
+            "模型训练前经过 impute/cap/normalize/onehot 等预处理；PMML 产物不包含该预处理层，"
+            "对新数据打分须使用平台内 scorer 或验证移交 Notebook（会自动重放预处理链）。"
+        )
+    elif (artifact.params or {}).get("preprocessing_chain_traceable") is False:
+        # PREP-2: the input dataset carried no lineage sidecar at all (predates this
+        # mechanism, or was never derived through a chain-tracking FEATURE/
+        # prepare_modeling_frame call) — flag explicitly rather than silently implying
+        # this model has zero preprocessing.
+        limitations.append("预处理链不可追溯：训练数据集无预处理血缘记录，无法确认打分重放是否完整。")
     return _unique_strings(limitations)
 
 
@@ -4319,7 +4378,14 @@ def _stress_product_rows(result) -> dict:
 
 
 class _ModelArtifactScorer:
-    def __init__(self, artifact: ModelArtifact, *, base_dir: Path, load_calibration: bool = True):
+    def __init__(
+        self,
+        artifact: ModelArtifact,
+        *,
+        base_dir: Path,
+        load_calibration: bool = True,
+        replay_preprocessing: bool = False,
+    ):
         self.artifact = artifact
         self.base_dir = Path(base_dir)
         self.model = load_model(artifact, base_dir=base_dir)
@@ -4328,6 +4394,13 @@ class _ModelArtifactScorer:
             if load_calibration
             else None
         )
+        # PREP-2: replay is opt-in. Existing report/stress-test/calibration call sites
+        # score the SAME already-transformed modeling frame the model was trained on
+        # (impute/cap/normalize already applied in place), so replaying again would
+        # double-apply a non-idempotent transform like zscore/minmax normalize and
+        # silently corrupt those scores. Only a caller scoring genuinely new raw data
+        # (e.g. a future score_dataset tool) should pass replay_preprocessing=True.
+        self.replay_preprocessing = bool(replay_preprocessing)
 
     def score(self, dataframe: pd.DataFrame, *, use_calibration: bool = True) -> list[float]:
         scores = np.asarray(self.raw_score(dataframe), dtype=float)
@@ -4336,6 +4409,7 @@ class _ModelArtifactScorer:
         return [float(value) for value in scores]
 
     def raw_score(self, dataframe: pd.DataFrame) -> list[float]:
+        dataframe = self._replay_preprocessing(dataframe)
         features = list(self.artifact.feature_list)
         if self.artifact.algorithm == "xgb" and not hasattr(self.model, "predict_proba"):
             import xgboost as xgb
@@ -4355,6 +4429,7 @@ class _ModelArtifactScorer:
     def scorecard_points(self, dataframe: pd.DataFrame) -> list[float] | None:
         if self.artifact.algorithm != "scorecard" or not isinstance(self.model, dict):
             return None
+        dataframe = self._replay_preprocessing(dataframe)
         params = dict(self.model.get("params") or {})
         if "factor" not in params or "offset" not in params:
             return None
@@ -4369,6 +4444,20 @@ class _ModelArtifactScorer:
         )
         scores = float(params["offset"]) - float(params["factor"]) * logits
         return [float(value) for value in scores]
+
+    def _replay_preprocessing(self, dataframe: pd.DataFrame) -> pd.DataFrame:
+        """Replay this artifact's persisted preprocessing chain (PREP-2) before scoring,
+        so predict-time input matches the exact impute/cap/normalize/onehot transforms
+        the model was trained on — the fix for silent scoring drift on new raw data.
+        No-op unless the caller opted in via replay_preprocessing=True (see __init__),
+        or when the artifact carries no chain (e.g. a pre-PREP-2 artifact, or one
+        trained straight off a dataset with no traceable lineage)."""
+        if not self.replay_preprocessing:
+            return dataframe
+        steps = self.artifact.params.get("preprocessing_steps") if self.artifact.params else None
+        if not steps:
+            return dataframe
+        return apply_preprocessing_steps(dataframe, list(steps))
 
 
 def _report_bin_table(
