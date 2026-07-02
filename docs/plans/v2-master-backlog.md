@@ -239,7 +239,7 @@
 | ✅ | GAP-3 | 审计读取面落地（`b9dfcd3f`）：GET /api/audit 多维过滤+分页、CSV 流式导出、任务审计时间线端点、新索引 idx_audit_target_ref_at；15 个新测试 | High/M | — |
 | ⬜ | GAP-4 | 数据字典/列业务语义层在 V2 全链路缺位 | High/M | — |
 | ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
-| ⬜ | TST-3 | Playwright e2e 是假 e2e：喂 canned JSON 不走真 FastAPI 且 CI 跳过 | High/M | ✅ |
+| ✅ | TST-3 | 真 e2e 落地（`1978319c`）：真 `marvis serve` 子进程全旅程（JOIN→standard_modeling 全门→PMML），三连跑确定性验证（~30s/次，e2e marker） | High/M | ✅ |
 | ⬜ | TST-4 | 隔离/资源护栏测试全是 mock 断言：真杀/真 OOM 零验证（INV-6） | High/M | ✅ |
 | ⬜ | ARCH-1 | api.py 拆分停在"搬家"：legacy_api 反向调用 36 处私有函数 | High/M | ⚠️ |
 | ⬜ | ARCH-2 | packs/modeling/tools.py 4386 行新 god file | High/M | ⚠️ |
@@ -253,7 +253,7 @@
 | ⬜ | TST-6 | redaction 过度/漏 masking；会话转录整体不脱敏 | Med/M | — |
 | ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
 | ✅ | TST-8 | CI security job（pip-audit+bandit -ll，continue-on-error 观察期，`22299d71`）；首扫：pip-audit 零漏洞、bandit 42 中危（40×B608 f-string SQL 等）**留待 FIN-2 审查裁决** | Med/S | — |
-| ⬜ | TST-9 | 并发路径零测试：轮询读 vs 长写事务争用 | Med/M | — |
+| ✅ | TST-9 | 并发测试落地（`ecb2506e`）并挖出 3 个真 bug（confirm_step 无双确认守卫、start_job TOCTOU 裸 IntegrityError、DuckDB 全局连接并发上传竞态），已以 xfail 复现入库，修复分支 fix/concurrency-bugs 进行中 | Med/M | ✅ |
 | ⬜ | ARCH-4 | 五个 run_*_driver_turn 成片复制粘贴（~330 行同构） | Med/M | — |
 | ⬜ | ARCH-5 | 插件 worker 协议无版本握手；子进程反向 import 拖入 DB 链 | Med/M | — |
 | ⬜ | ARCH-6 | pipeline.py 2090 行 god file 且 0 条日志 | Med/M | — |
