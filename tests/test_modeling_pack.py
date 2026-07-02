@@ -3331,3 +3331,316 @@ def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
     assert metrics["test_mae"] is not None
     assert metrics["test_ks"] is None
     assert metrics["test_auc"] is None
+
+
+# -- LT-1: exporter edge cases + end-to-end selection_policy report language ---------
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "LT-1 bug (distinct from the SEL-7 warning-propagation xfail below): "
+        "chaining impute_missing -> cap_outliers on the SAME column and then "
+        "replaying that chain at scoring time (_ModelArtifactScorer / handoff "
+        "notebook path) crashes. tool_impute_missing's _apply_impute uses "
+        "Series.fillna(), whose backing numpy array can come back "
+        "WRITEABLE=False in pandas 2.x; _apply_cap "
+        "(marvis/feature/preprocessing.py's _apply_cap) then does an in-place "
+        "`values[mask] = np.clip(...)` on `pd.to_numeric(out[column], "
+        "errors='coerce').to_numpy(dtype=float)`, which returns that same "
+        "read-only view rather than a fresh writable array, raising "
+        "`ValueError: assignment destination is read-only`. Reproduced in total "
+        "isolation with a 4-row fillna() + to_numeric().to_numpy(dtype=float) "
+        "round trip -- not specific to parquet I/O or this fixture's shape. Any "
+        "real pipeline chaining impute then cap on one column will hit this the "
+        "moment a human (or handoff notebook) tries to score new raw data."
+    ),
+)
+def test_train_model_persists_combined_impute_cap_woe_chain_and_exports_pmml_consistently(tmp_path):
+    """LT-1: chains ALL THREE preprocessing kinds (impute -> cap -> woe) before
+    train_model, not just one at a time (existing coverage only exercises impute
+    alone or woe alone). The fitted artifact must carry all three steps in order,
+    PMML export must still succeed (lr stays PMML-supported) with the standard
+    "PMML 不包含该预处理层" limitation attached, and the raw-data scorer replay
+    (apply_preprocessing_steps chaining impute->cap->woe) must match scoring the
+    already-transformed dataset directly -- proof the full chain round-trips, not
+    just a single preprocessing kind."""
+    runner, _plugin_registry, registry, backend, settings, task = _runtime(tmp_path)
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [None if i % 37 == 0 else ((i * 37) % 101) / 100 * 50 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "raw_chain.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="raw_sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {"dataset_id": dataset.id, "columns": ["x1"], "strategy": "median", "split_col": "split"},
+        task_id=task.id,
+    )
+    assert imputed.ok is True, imputed.error
+
+    capped = runner.invoke(
+        ToolRef("feature", "cap_outliers"),
+        {
+            "dataset_id": imputed.output["result_dataset_id"],
+            "columns": ["x1"],
+            "method": "iqr",
+            "split_col": "split",
+        },
+        task_id=task.id,
+    )
+    assert capped.ok is True, capped.error
+
+    woe = runner.invoke(
+        ToolRef("feature", "woe_encode"),
+        {
+            "dataset_id": capped.output["result_dataset_id"],
+            "features": ["x1"],
+            "target_col": "y",
+            "split_col": "split",
+        },
+        task_id=task.id,
+    )
+    assert woe.ok is True, woe.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": woe.output["result_dataset_id"],
+            "recipe": "lr",
+            "features": ["x1_woe", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact is not None
+    steps = artifact.params["preprocessing_steps"]
+    assert [step["kind"] for step in steps] == ["impute", "cap", "woe"]
+    assert steps[0]["columns"] == ["x1"]
+    assert steps[1]["columns"] == ["x1"]
+    assert steps[2]["columns"] == ["x1"]
+
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": woe.output["result_dataset_id"],
+            "actions": ["export_pmml"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    capabilities = post_training.output["capabilities"]
+    assert capabilities["pmml_supported"] is True
+    assert any("预处理" in item and "PMML" in item for item in capabilities["limitations"])
+
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    replay_scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
+    raw_frame = pd.read_parquet(registry.resolve_path(dataset.id))  # pre-chain raw data
+    raw_scores = replay_scorer.score(raw_frame, use_calibration=False)
+    assert len(raw_scores) == rows
+    assert all(0.0 <= score <= 1.0 for score in raw_scores)
+
+    already_transformed_scorer = _ModelArtifactScorer(artifact, base_dir=base_dir)
+    chained_frame = backend.read_frame(registry.resolve_path(woe.output["result_dataset_id"]))
+    already_encoded_scores = already_transformed_scorer.score(chained_frame, use_calibration=False)
+    assert raw_scores == already_encoded_scores
+
+
+@pytest.mark.slow
+def test_post_training_action_exports_pmml_for_single_feature_model(tmp_path):
+    """LT-1: an edge case none of the existing post_training_action tests cover --
+    a champion trained on exactly ONE input feature. export_pmml must still succeed
+    (the pypmml round trip and the delivery/model-card payload shape must not assume
+    len(feature_list) >= 2), and feature_count in the model card must read 1."""
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    assert post_training.output["pmml_path"]
+    assert Path(post_training.output["pmml_path"]).exists()
+    assert post_training.output["capabilities"]["pmml_supported"] is True
+    assert post_training.output["model_card"]["feature_count"] == 1
+    assert post_training.output["model_card"]["feature_preview"] == ["x1"]
+
+
+def test_select_experiment_selects_among_partially_compliant_candidates_without_override(tmp_path):
+    """LT-1: end-to-end (tool facade, not the _pick_best_comparison_row_with_policy
+    unit) coverage of the selection_policy "部分满足" path -- some candidates satisfy
+    require_pmml/require_handoff and some don't, no override is requested, and the
+    caller did not pin selected_experiment_id. select_experiment must silently narrow
+    to the compliant subset and auto-select the best of THOSE (never raising, never
+    needing allow_policy_override), and the gate-facing selection_reason text must
+    say so in the existing report-language convention (locks current wording, see
+    select_tools._selection_policy_requested/_pick_best_comparison_row_with_policy
+    line ~117: "按 {metric} 在满足交付/审批策略的候选中自动选择。")."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "catboost"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {},
+            "seed": 23,
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    store = ExperimentStore(settings.db_path)
+    lgb_experiment_id = next(
+        exp_id for exp_id in trained.output["experiment_ids"] if store.get(exp_id).recipe_id == "lgb"
+    )
+    catboost_experiment_id = next(
+        exp_id for exp_id in trained.output["experiment_ids"] if store.get(exp_id).recipe_id == "catboost"
+    )
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+            "selection_policy": {"require_pmml": True, "require_handoff": True},
+        },
+        task_id=task.id,
+    )
+
+    # catboost is not PMML/handoff-eligible -- only lgb is compliant -- so the
+    # policy narrows the arena to lgb without ever needing an override.
+    assert selected.ok is True, selected.error
+    assert selected.output["selected_experiment_id"] == lgb_experiment_id
+    assert selected.output["selected_experiment_id"] != catboost_experiment_id
+    assert selected.output["policy_decision"]["status"] == "accepted"
+    assert selected.output["policy_decision"]["policy_candidate_count"] == 1
+    assert selected.output["policy_decision"]["evaluated_candidates"] == 2
+    assert "满足交付/审批策略的候选中自动选择" in selected.output["selection_reason"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "LT-1 bug: _selection_policy_decision computes SEL-7 overfit_warning/"
+        "sanity_warning (select_tools.py's _selection_policy_quality_warnings) at "
+        "selection time, but tool_post_training_action's _model_card_limitations "
+        "(delivery_tools.py) only reads selection_policy_decision['violations'], "
+        "never ['warnings'] -- so a champion flagged as overfit at selection never "
+        "shows that warning anywhere a reviewer actually reads (model card "
+        "limitations / approval package markdown). The warning is computed and then "
+        "silently dropped on the floor before reaching any human-facing artifact."
+    ),
+)
+def test_post_training_action_model_card_surfaces_sel7_overfit_warning(tmp_path):
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    rows = 240
+    # A deliberately overfit-shaped frame: train perfectly separable, test/oot much
+    # weaker, so overfit_train_test_gap on the trained champion exceeds SEL-7's
+    # default 0.10 warn threshold and _selection_policy_quality_warnings fires an
+    # "overfit_warning" at selection time.
+    frame = pd.DataFrame({
+        "x1": [0.0 if i % 2 == 0 else 1.0 for i in range(140)]
+        + [((i * 37) % 101) / 100 for i in range(100)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [i % 2 for i in range(140)] + [1 if i % 7 in {0, 1, 2} else 0 for i in range(100)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "overfit_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="modeling_sample")
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+            "params": {"n_estimators": 400, "max_depth": 12, "min_child_samples": 1, "num_leaves": 255},
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": [trained.output["experiment_id"]],
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    warnings = selected.output["policy_decision"]["warnings"]
+    assert any(item["code"] == "overfit_warning" for item in warnings), (
+        f"fixture did not actually produce an overfit gap above threshold: {warnings}"
+    )
+
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": selected.output["selected_experiment_id"],
+            "sample_dataset_id": dataset.id,
+            "actions": [],
+            "selection_policy_decision": selected.output["policy_decision"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+
+    # The SEL-7 overfit_warning message text must reach the model card's
+    # limitations (what a human reviewer actually reads) -- today it does not.
+    assert any(
+        "过拟合风险" in item for item in post_training.output["model_card"]["limitations"]
+    )
