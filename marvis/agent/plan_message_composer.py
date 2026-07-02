@@ -70,6 +70,13 @@ class PlanMessageComposer:
             meta["modeling_setup"] = rendered.modeling_setup
         if rendered.model_delivery is not None:
             meta["model_delivery"] = rendered.model_delivery
+        if rendered.red_flags:
+            # AGT-9: deterministic modeling red flags (computed in
+            # gate_adapters.render_gate_dependencies straight from the tuning /
+            # select-experiment dependency outputs) ride alongside the existing
+            # screen/dedup metadata so auto_drive._extract_red_flags can surface
+            # them in the 【平台红旗 checklist】 without re-parsing table strings.
+            meta["red_flags"] = rendered.red_flags
         meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage("gate", "\n\n".join(parts), meta)
 

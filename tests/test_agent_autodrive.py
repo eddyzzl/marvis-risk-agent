@@ -912,6 +912,30 @@ def test_decide_gate_omits_red_flag_section_for_clean_gate():
     assert "平台红旗 checklist" not in fake.calls[0]["user_prompt"]
 
 
+def test_decide_gate_injects_deterministic_modeling_red_flags_from_meta():
+    """AGT-9: _extract_red_flags reads meta['red_flags'] (deterministically
+    computed by the composer for the tuning-config/select-experiment gates)
+    directly into the 【平台红旗 checklist】, ahead of the legacy table-string
+    parsing."""
+    fake = _FakeLLM()
+    gate = {
+        "content": "已训练并对比候选实验",
+        "metadata": {
+            "red_flags": [
+                "调参 trial 中最大 train-test KS 差为 0.150(> 0.10),存在过拟合迹象。",
+                "训练阶段有 1 个候选算法失败(catboost),对比范围不完整。",
+            ],
+        },
+    }
+
+    decide_gate(fake, gate=gate)
+
+    prompt = fake.calls[0]["user_prompt"]
+    assert "平台红旗 checklist" in prompt
+    assert "存在过拟合迹象" in prompt
+    assert "候选算法失败" in prompt
+
+
 def test_decide_gate_retries_once_after_unparseable_reply():
     fake = _SequencedLLM(["not json", '{"action":"confirm","reason":"重试后可解析"}'])
     gate = {"content": "调参结果完成", "metadata": {}}

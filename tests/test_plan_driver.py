@@ -1245,6 +1245,59 @@ def test_plan_overview_message_carries_gate_envelope():
     assert msg.metadata["gate_envelope"]["allowed_actions"] == ["confirm", "replan", "clarify", "halt"]
 
 
+def test_gate_message_attaches_deterministic_select_experiment_red_flags():
+    """AGT-9: a gate whose dependencies include tune_hyperparameters/train_models
+    outputs gets meta['red_flags'] computed deterministically (train-test
+    overfit gap, thin champion/runner-up margin, any failed candidate) —
+    without the LLM ever having to do that arithmetic itself."""
+    outputs = {
+        "tune": {"trials": [{"train_ks": 0.55, "test_ks": 0.40}]},
+        "train": {
+            "experiments": [
+                {"recipe": "lgb", "metrics": {"test_ks": 0.400}},
+                {"recipe": "xgb", "metrics": {"test_ks": 0.399}},
+            ],
+            "failed": [{"recipe": "catboost", "error": "boom"}],
+        },
+    }
+    plan = Plan(
+        id="plan-1", task_id="task-1", goal="modeling", source="template",
+        template_id="modeling", autonomy_level=1,
+        steps=[
+            _step("tune", index=0, tool="tune_hyperparameters"),
+            _step("train", index=1, tool="train_models", depends_on=["tune"]),
+            _step(
+                "select", index=2, tool="select_experiment",
+                depends_on=["tune", "train"], needs_confirmation=True,
+            ),
+        ],
+    )
+    composer = PlanMessageComposer(load_output=lambda step_id: outputs.get(step_id))
+
+    msg = composer.gate_message(plan, plan.steps[2], run_seq=0)
+
+    red_flags = msg.metadata.get("red_flags") or []
+    assert any("过拟合迹象" in flag for flag in red_flags)
+    assert any("冠军与亚军" in flag for flag in red_flags)
+    assert any("候选算法失败" in flag and "catboost" in flag for flag in red_flags)
+
+
+def test_gate_message_omits_red_flags_key_when_nothing_trips():
+    plan = Plan(
+        id="plan-1", task_id="task-1", goal="modeling", source="template",
+        template_id="modeling", autonomy_level=1,
+        steps=[_step("screen", index=0, tool="screen_features", needs_confirmation=True)],
+    )
+    composer = PlanMessageComposer(load_output=lambda _step_id: {
+        "selected": ["sig1"], "leakage": [], "suspected": [], "unusable": [],
+        "ranked": [], "scores": {}, "n_screened": 1,
+    })
+
+    msg = composer.gate_message(plan, plan.steps[0], run_seq=0)
+
+    assert "red_flags" not in msg.metadata
+
+
 def test_render_screen_shows_metric_columns_and_buckets():
     """Enriched screen render: per-feature KS/IV/missing columns + leakage/suspected/
     unusable buckets with reasons (not just a list of feature names)."""

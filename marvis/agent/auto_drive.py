@@ -246,6 +246,14 @@ def _extract_red_flags(gate: dict) -> list[str]:
     flags: list[str] = []
     meta = gate.get("metadata") if isinstance(gate.get("metadata"), dict) else {}
     content = str(gate.get("content") or "")
+
+    # AGT-9: prefer the composer-computed deterministic red flags (modeling
+    # tuning-config / select-experiment gates, and any future gate that starts
+    # populating meta['red_flags']) over parsing table strings — this is a
+    # structured, INV-1-safe source, not a legacy fallback.
+    structured = [str(item) for item in meta.get("red_flags") or [] if str(item).strip()]
+    flags.extend(structured)
+
     if "行数发生变化" in content or ("膨胀" in content and "⚠" in content):
         flags.append("拼接执行后行数发生变化或存在膨胀提示")
 
