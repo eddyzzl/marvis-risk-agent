@@ -282,24 +282,6 @@ def test_concurrent_double_confirm_over_http_yields_exactly_one_success(tmp_path
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Real bug found by this test (TST-9c), not fixed here per task scope "
-        "(reported separately to avoid colliding with in-flight branches): "
-        "concurrent CSV uploads to the same task race on DuckDB's process-wide "
-        "implicit default connection. marvis/data/registry.py's "
-        "register_from_upload -> profile_dataset/DataBackend.sample_rows/"
-        "row_count (marvis/data/backend.py) all call duckdb.sql(...), which "
-        "per DuckDB's Python API reuses ONE shared global connection for the "
-        "whole process (see marvis/data/backend.py:83's own docstring: "
-        "'the process-wide default DuckDB connection'). Two upload requests "
-        "profiling concurrently deterministically raise "
-        "duckdb.InvalidInputException('Attempting to execute an unsuccessful "
-        "or closed pending query result'). Reproduced deterministically "
-        "across 3 consecutive runs."
-    ),
-    strict=True,
-)
 def test_concurrent_uploads_to_same_task_do_not_cross_contaminate(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

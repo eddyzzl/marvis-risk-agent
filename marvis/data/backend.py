@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from numbers import Integral, Real
@@ -47,16 +46,22 @@ DUCKDB_NUMERIC_TYPES = {
 # workspace-scoped location -- on a single machine that also runs training
 # subprocesses and (often) a local LLM, that starves everything else and, once
 # a large JOIN exceeds the worker's RLIMIT, fails as an opaque process death
-# instead of spilling to disk. Configure the shared default connection (the one
-# every ``duckdb.sql(...)`` call in this module implicitly uses) once with
-# conservative, overridable settings instead.
+# instead of spilling to disk. Apply conservative, overridable settings to every
+# DuckDB connection this module opens instead.
+#
+# TST-9c: those connections are now per-operation (``duckdb.connect()``), NOT the
+# single process-wide implicit default connection ``duckdb.sql(...)`` reuses.
+# Concurrent uploads to the same task each profile their own file, and the shared
+# default connection serialized to one in-flight query at a time -- a second
+# thread issuing ``duckdb.sql(...)`` while the first's pending result was open
+# raised ``InvalidInputException('Attempting to execute an unsuccessful or closed
+# pending query result')``. A fresh connection per operation removes that shared
+# mutable state; the runtime config is applied to each new connection so the
+# PERF-8 memory_limit/threads/temp_directory guarantees still hold.
 DUCKDB_MEMORY_LIMIT_ENV = "MARVIS_DUCKDB_MEMORY_LIMIT"
 DUCKDB_THREADS_ENV = "MARVIS_DUCKDB_THREADS"
 DEFAULT_DUCKDB_MEMORY_LIMIT = "4GB"
 DUCKDB_TEMP_DIR_NAME = ".duckdb_tmp"
-
-_duckdb_config_lock = threading.Lock()
-_duckdb_configured_temp_dirs: set[str] = set()
 
 
 def default_duckdb_threads() -> int:
@@ -67,7 +72,7 @@ def default_duckdb_threads() -> int:
 
 
 def duckdb_runtime_config(temp_directory: Path) -> dict[str, str]:
-    """The PRAGMA values actually applied to the shared default connection, so
+    """The PRAGMA values applied to every connection this module opens, so
     callers (health/audit endpoints) can report what is in effect."""
     return {
         "memory_limit": os.environ.get(DUCKDB_MEMORY_LIMIT_ENV, DEFAULT_DUCKDB_MEMORY_LIMIT),
@@ -79,33 +84,40 @@ def duckdb_runtime_config(temp_directory: Path) -> dict[str, str]:
 
 
 def configure_duckdb_defaults(temp_directory: Path) -> dict[str, str]:
-    """Idempotently apply memory_limit / threads / temp_directory PRAGMAs to the
-    process-wide default DuckDB connection (the one ``duckdb.sql(...)`` uses).
-    Safe to call from multiple DataBackend instances / threads: guarded by a lock
-    and skipped once a given temp_directory has already been configured, so
-    concurrent threadpool requests (PERF-1) never race on ``SET`` statements."""
-    key = str(temp_directory)
-    if key in _duckdb_configured_temp_dirs:
-        return duckdb_runtime_config(temp_directory)
-    with _duckdb_config_lock:
-        if key in _duckdb_configured_temp_dirs:
-            return duckdb_runtime_config(temp_directory)
-        temp_directory.mkdir(parents=True, exist_ok=True)
-        config = duckdb_runtime_config(temp_directory)
-        duckdb.sql(f"SET memory_limit={sql_string_literal(config['memory_limit'])}")
-        duckdb.sql(f"SET threads={int(config['threads'])}")
-        duckdb.sql(f"SET temp_directory={sql_string_literal(config['temp_directory'])}")
-        _duckdb_configured_temp_dirs.add(key)
-        return config
+    """Ensure the workspace-scoped temp_directory exists and return the runtime
+    config that will be applied to each new connection. No longer mutates a shared
+    process-wide connection (TST-9c): configuration is applied per connection by
+    :func:`connect_duckdb`, so this is just the one filesystem side effect plus the
+    resolved config, and is safe to call repeatedly from any thread."""
+    temp_directory.mkdir(parents=True, exist_ok=True)
+    return duckdb_runtime_config(temp_directory)
 
 
-def duckdb_health() -> dict[str, object]:
-    """Current effective PRAGMA values on the shared default connection, for
-    ``/api/health`` (PERF-8 audit visibility)."""
-    rows = duckdb.sql(
-        "SELECT name, value FROM duckdb_settings() "
-        "WHERE name IN ('memory_limit', 'threads', 'temp_directory')"
-    ).fetchall()
+def connect_duckdb(temp_directory: Path) -> duckdb.DuckDBPyConnection:
+    """Open a fresh in-memory DuckDB connection with the PERF-8 runtime config
+    applied. Each operation gets its own connection so concurrent callers never
+    share the single implicit default connection's mutable pending-result state
+    (TST-9c). The caller owns the connection and must close it (use ``with``)."""
+    config = duckdb_runtime_config(temp_directory)
+    conn = duckdb.connect(database=":memory:")
+    try:
+        conn.execute(f"SET memory_limit={sql_string_literal(config['memory_limit'])}")
+        conn.execute(f"SET threads={int(config['threads'])}")
+        conn.execute(f"SET temp_directory={sql_string_literal(config['temp_directory'])}")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def duckdb_health(temp_directory: Path) -> dict[str, object]:
+    """Effective PRAGMA values on a connection opened the same way this module's
+    operations open theirs, for ``/api/health`` (PERF-8 audit visibility)."""
+    with connect_duckdb(temp_directory) as conn:
+        rows = conn.execute(
+            "SELECT name, value FROM duckdb_settings() "
+            "WHERE name IN ('memory_limit', 'threads', 'temp_directory')"
+        ).fetchall()
     settings = {str(name): str(value) for name, value in rows}
     return {
         "duckdb_memory_limit": settings.get("memory_limit", ""),
@@ -137,7 +149,10 @@ def csv_rel(path: Path) -> str:
 class DataBackend:
     def __init__(self, datasets_root: Path):
         self._root = Path(datasets_root)
-        configure_duckdb_defaults(self._root.parent / DUCKDB_TEMP_DIR_NAME)
+        self._temp_directory = self._root.parent / DUCKDB_TEMP_DIR_NAME
+        # Ensures the workspace-scoped DuckDB spill directory exists up front; the
+        # runtime config itself is applied per operation by self._connect() (TST-9c).
+        configure_duckdb_defaults(self._temp_directory)
         # PERF-4: a plain in-process dict, scoped to THIS DataBackend instance's lifetime
         # (one per request/job -- see routers/data.py, turn_handlers.py, packs/*/tools.py).
         # It is never persisted or shared across instances, so there is no cross-request
@@ -167,6 +182,13 @@ class DataBackend:
             # error; do not cache under a fake identity.
             return (path.as_posix(), -1, -1)
 
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        """A fresh, PERF-8-configured DuckDB connection scoped to a single
+        operation. Never the shared implicit default connection (TST-9c), so
+        concurrent DataBackend operations can't collide on one connection's
+        pending-result state. Use as a context manager so it is always closed."""
+        return connect_duckdb(self._temp_directory)
+
     def row_count(self, path: Path) -> int:
         path = self._resolve_path(path)
         return self._memo("row_count", path, compute=lambda: self._row_count_uncached(path))
@@ -174,9 +196,10 @@ class DataBackend:
     def _row_count_uncached(self, path: Path) -> int:
         suffix = path.suffix.lower()
         if suffix in SUPPORTED_DUCKDB_SUFFIXES:
-            row = duckdb.sql(
-                f"SELECT count(*) FROM {self._duckdb_rel(path)}",
-            ).fetchone()
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"SELECT count(*) FROM {self._duckdb_rel(path)}",
+                ).fetchone()
             return int(row[0])
         if suffix == ".feather":
             import pyarrow.feather as feather
@@ -193,7 +216,8 @@ class DataBackend:
         return self._memo("numeric_columns", path, compute=lambda: self._numeric_columns_uncached(path))
 
     def _numeric_columns_uncached(self, path: Path) -> set[str]:
-        rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
+        with self._connect() as conn:
+            rows = conn.execute(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
         return {str(row[0]) for row in rows if _is_duckdb_numeric_type(str(row[1]))}
 
     def conflict_report(
@@ -238,10 +262,11 @@ class DataBackend:
             f"GROUP BY {keys_select_sql} "
             "HAVING count(*) > 1"
         )
-        count_row = duckdb.sql(
-            "SELECT count(*) AS n_keys, coalesce(sum(__n), 0) AS n_rows "
-            f"FROM ({duplicate_groups})"
-        ).fetchone()
+        with self._connect() as conn:
+            count_row = conn.execute(
+                "SELECT count(*) AS n_keys, coalesce(sum(__n), 0) AS n_rows "
+                f"FROM ({duplicate_groups})"
+            ).fetchone()
         n_conflict_keys = int(count_row[0] or 0)
         n_conflict_rows = int(count_row[1] or 0)
         if n_conflict_keys == 0:
@@ -260,21 +285,22 @@ class DataBackend:
             join_condition = " AND ".join(
                 f"f_key.{alias} IS NOT DISTINCT FROM d.{alias}" for alias in key_aliases
             )
-            sample_rows = duckdb.sql(
-                "WITH duplicate_keys AS ("
-                # duplicate_groups already projects the transformed keys under their
-                # aliases, so re-select the aliases here (not the raw expressions again —
-                # the raw source column no longer exists in this subquery's output).
-                f"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} "
-                f"LIMIT {int(sample_key_limit)}"
-                "), feature_with_keys AS ("
-                f"SELECT f.*, {keys_sql} FROM {self._duckdb_rel(path)} f"
-                ") "
-                f"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) "
-                "FROM feature_with_keys f_key "
-                f"JOIN duplicate_keys d ON {join_condition} "
-                f"LIMIT {int(row_limit)}"
-            ).df()
+            with self._connect() as conn:
+                sample_rows = conn.execute(
+                    "WITH duplicate_keys AS ("
+                    # duplicate_groups already projects the transformed keys under their
+                    # aliases, so re-select the aliases here (not the raw expressions again —
+                    # the raw source column no longer exists in this subquery's output).
+                    f"SELECT {keys_select_sql} FROM ({duplicate_groups}) ORDER BY {keys_select_sql} "
+                    f"LIMIT {int(sample_key_limit)}"
+                    "), feature_with_keys AS ("
+                    f"SELECT f.*, {keys_sql} FROM {self._duckdb_rel(path)} f"
+                    ") "
+                    f"SELECT f_key.* EXCLUDE ({', '.join(key_aliases)}) "
+                    "FROM feature_with_keys f_key "
+                    f"JOIN duplicate_keys d ON {join_condition} "
+                    f"LIMIT {int(row_limit)}"
+                ).df()
             frame = self.with_transformed_key_columns(sample_rows, key_pairs)
             transformed_keys = transformed_key_names(key_pairs)
             _deduped, sample_report = two_level_dedup(frame, transformed_keys)
@@ -292,15 +318,16 @@ class DataBackend:
             f"d.{sql_identifier(col, allowed_columns)}"
             for col in key_columns
         )
-        sample_rows = duckdb.sql(
-            "WITH duplicate_keys AS ("
-            f"SELECT {keys_sql} FROM ({duplicate_groups}) ORDER BY {keys_sql} "
-            f"LIMIT {int(sample_key_limit)}"
-            ") "
-            f"SELECT f.* FROM {self._duckdb_rel(path)} f "
-            f"JOIN duplicate_keys d ON {join_condition} "
-            f"LIMIT {int(row_limit)}"
-        ).df()
+        with self._connect() as conn:
+            sample_rows = conn.execute(
+                "WITH duplicate_keys AS ("
+                f"SELECT {keys_sql} FROM ({duplicate_groups}) ORDER BY {keys_sql} "
+                f"LIMIT {int(sample_key_limit)}"
+                ") "
+                f"SELECT f.* FROM {self._duckdb_rel(path)} f "
+                f"JOIN duplicate_keys d ON {join_condition} "
+                f"LIMIT {int(row_limit)}"
+            ).df()
         _deduped, sample_report = two_level_dedup(sample_rows, list(key_columns))
         return ConflictReport(
             key_columns=tuple(str(col) for col in key_columns),
@@ -318,7 +345,8 @@ class DataBackend:
     def _column_names_uncached(self, path: Path) -> list[str]:
         suffix = path.suffix.lower()
         if suffix in SUPPORTED_DUCKDB_SUFFIXES:
-            rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
+            with self._connect() as conn:
+                rows = conn.execute(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
             return [str(row[0]) for row in rows]
         if suffix == ".feather":
             import pyarrow.feather as feather
@@ -350,7 +378,8 @@ class DataBackend:
             if nrows is not None:
                 cols_sql = self._select_columns_sql(selected, allowed_columns)
                 query = f"SELECT {cols_sql} FROM {parquet_rel(path)} LIMIT {int(nrows)}"
-                return duckdb.sql(query).df()
+                with self._connect() as conn:
+                    return conn.execute(query).df()
             return pd.read_parquet(path, columns=selected)
         if suffix == ".feather":
             frame = pd.read_feather(path, columns=selected)
@@ -377,7 +406,8 @@ class DataBackend:
                 f"SELECT * FROM {self._duckdb_rel(path)} "
                 f"USING SAMPLE reservoir({int(n)} ROWS) REPEATABLE ({int(seed)})"
             )
-            return duckdb.sql(query).df()
+            with self._connect() as conn:
+                return conn.execute(query).df()
         return self.read_frame(path).sample(n=int(n), random_state=int(seed))
 
     def distinct_count(
@@ -416,7 +446,8 @@ class DataBackend:
                 f"SELECT DISTINCT {cols_sql} FROM {self._duckdb_rel(path)}"
                 ")"
             )
-            return int(duckdb.sql(query).fetchone()[0])
+            with self._connect() as conn:
+                return int(conn.execute(query).fetchone()[0])
         if key_pairs is not None:
             frame = self.with_transformed_key_columns(self.read_frame(path), key_pairs)
             return int(frame[transformed_key_names(key_pairs)].drop_duplicates().shape[0])
@@ -486,7 +517,8 @@ class DataBackend:
             f"LEFT JOIN ({feature_rel}) b ON {on_sql}"
             f") TO {sql_string_literal(out_path.as_posix())} (FORMAT parquet)"
         )
-        duckdb.sql(query)
+        with self._connect() as conn:
+            conn.execute(query)
         result_rows = self.row_count(out_path)
         anchor_rows = self.row_count(anchor_path)
         # The sample must stay 1:1 (spec §7): assert strict equality, catching BOTH
@@ -718,7 +750,7 @@ class DataBackend:
                 f"ON a.__key = f.__key) AS __matched_{index}"
             )
         query = "WITH " + ", ".join(ctes) + " SELECT " + ", ".join(selects)
-        with duckdb.connect(database=":memory:") as conn:
+        with self._connect() as conn:
             conn.register("anchor_sample", anchor_frame)
             row = conn.execute(query).fetchone()
         sampled = int(anchor_frame.shape[0])
@@ -774,7 +806,7 @@ class DataBackend:
             f"WHERE {anchor_not_null} AND __matched_key IS NOT NULL"
             ") FROM joined a"
         )
-        with duckdb.connect(database=":memory:") as conn:
+        with self._connect() as conn:
             conn.register("anchor_sample", anchor_frame)
             matched = conn.execute(query).fetchone()[0]
         return int(matched), int(anchor_frame.shape[0])
@@ -1195,6 +1227,7 @@ __all__ = [
     "SUPPORTED_DUCKDB_SUFFIXES",
     "SUPPORTED_FRAME_SUFFIXES",
     "configure_duckdb_defaults",
+    "connect_duckdb",
     "csv_rel",
     "duckdb_health",
     "duckdb_runtime_config",
