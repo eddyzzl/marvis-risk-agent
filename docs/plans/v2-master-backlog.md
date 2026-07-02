@@ -156,7 +156,7 @@
 
 | 状态 | ID | 事项 | 影响/工作量 |
 |---|---|---|---|
-| ⬜ | S2 | 策略开发主线：tradeoff 升级 + design_cutoff_bands + STRATEGY_DEVELOPMENT 模板（新 id）+ 采纳门（StrategyRepository 版本加列）+ 决策表/策略文档交付物 | 5–8天 |
+| ✅ | S2 | 按 spec 四 commit 落地（Commit2=`24578b3f`/Commit3=`cf7f47de`/Commit4=`1dbf91b1`+版本化持久化 commit）：strategies 版本/状态/谱系列+strategy_artifacts 表（原子采纳 CAS+自动退役）、design_cutoff_bands 五类红旗、tradeoff 可行域、compare 2×2、adopt 强制门+决策表 CSV+监控计划 JSON、STRATEGY_DEVELOPMENT 七步四门模板、strategy_experience 记忆 kind+ARCH-4 发现的 MEM-1 kwargs 缺口修复；133 验证于合并树 | 5–8天 |
 | ⬜ | DOM-12 | （并入 S2）运营点约束不可行时静默回退；fuzzy 拒绝推断忽略逐件分数 | Low/S |
 | ⬜ | S3 | 组合分析套件：**前置 NEW-1 cum_bad_rate**；新建 packs/analysis（已拍板）；vintage/roll-rate 升级 + flow/migration + segment_profile + PORTFOLIO_ANALYSIS + 表现期契约（含 balance/EAD）+ 合成表现数据生成脚本（兼解 UX-9） | 5–8天 |
 | ⬜ | DOM-8 | （并入 S3）Roll-rate 缺月盲视、无余额口径、period 硬编码 | Med/M |
@@ -238,9 +238,9 @@
 | ✅ | GAP-2 | purge_task 同事务清理全资产+引用计数保护+task.delete 审计+purge-preview 端点+删除框摘要（`caf21fe7`/`2988c155`） | High/M | — |
 | ✅ | GAP-3 | 审计读取面落地（`b9dfcd3f`）：GET /api/audit 多维过滤+分页、CSV 流式导出、任务审计时间线端点、新索引 idx_audit_target_ref_at；15 个新测试 | High/M | — |
 | ✅ | GAP-4 | 数据字典全链路（`fbda4883`）：agent/data_dictionary.py 统一识别/注册/查询，四个 setup 流通用注册、筛选门与 JOIN C1/去重门带业务含义标注、LLM 门决策 prompt 注入紧凑字典上下文、handoff dictionary.csv 用真实业务名；端到端测试 | High/M | ✅ |
-| ⬜ | TST-2 | 上传全量入内存 + Excel/CSV 无大小护栏（吸收 roadmap-1e：本地路径注册摄入） | High/M | ✅ |
+| ✅ | TST-2 | 流式上传+护栏（`c0e4b593`：8MB 分块、CSV 2GB/Excel 500MB/200万行可配、Content-Length+流式累计双保险、Excel read_only 预检）+ 本地路径注册端点（`12792c1c`：loopback 守卫/防遍历/白名单/复制入 workspace/content_hash 幂等/硬审计）；其分支全量 2488 通过 | High/M | ✅ |
 | ✅ | TST-3 | 真 e2e 落地（`1978319c`）：真 `marvis serve` 子进程全旅程（JOIN→standard_modeling 全门→PMML），三连跑确定性验证（~30s/次，e2e marker） | High/M | ✅ |
-| ⬜ | TST-4 | 隔离/资源护栏测试全是 mock 断言：真杀/真 OOM 零验证（INV-6） | High/M | ✅ |
+| ✅ | TST-4 | 真进程验证落地（`677064bb`）：真 OOM 进程树杀+审计 peak、含孙进程的进程组杀、子进程 env 白名单真回显、notebook kernel 真杀；检测力经"故意弄坏"自证；无生产 bug | High/M | ✅ |
 | ✅ | ARCH-1 | legacy shim 拆除（`e3a7d6f5`/`4f6b845e`）：36 处私有 seam 迁入新 agent/validation_app_service.py 公有面，routers 直连、_agent_api()/legacy_api 服务定位器删除、api.py 955→184 行、DriverTurnRuntime 全类型化；routers/ 内 legacy_api 引用归零 | High/M | ✅ |
 | ✅ | ARCH-2 | modeling tools 拆 13 子模块（`5103dede`：prepare/feature/train/select/calibrate/delivery/monitor/report_tools+_common/_runtime/scoring 等），tools.py 保留聚合门面、对外 import 面不变；B6h 字典代码已随合并迁至 feature_tools | High/M | ✅ |
 | ⬜ | GAP-5 | 共享主机 loopback 全信任（装插件=任意代码执行） | Med/S | — |
