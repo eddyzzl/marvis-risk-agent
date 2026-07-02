@@ -112,6 +112,26 @@ def recommend_operating_point(
     return max(feasible, key=lambda point: point.approval_rate)
 
 
+def tradeoff_feasible_flags(
+    points: list[TradeoffPoint],
+    *,
+    max_bad_rate: float | None = None,
+    min_approval_rate: float | None = None,
+) -> list[bool]:
+    """Per-point feasibility against the risk/approval constraints. A point is
+    feasible when its bad rate is within max_bad_rate and its approval rate meets
+    min_approval_rate; either bound absent means that dimension is unconstrained."""
+    flags: list[bool] = []
+    for point in points:
+        ok = True
+        if max_bad_rate is not None and point.bad_rate > float(max_bad_rate):
+            ok = False
+        if min_approval_rate is not None and point.approval_rate < float(min_approval_rate):
+            ok = False
+        flags.append(ok)
+    return flags
+
+
 def _cutoff_values(scores: pd.Series, cutoffs: list[float] | None) -> list[float]:
     if cutoffs is not None:
         return sorted({float(cutoff) for cutoff in cutoffs})
@@ -157,4 +177,4 @@ def _ratio(numerator: float, denominator: float) -> float:
     return 0.0 if denominator == 0 else float(numerator / denominator)
 
 
-__all__ = ["recommend_operating_point", "tradeoff_view"]
+__all__ = ["recommend_operating_point", "tradeoff_feasible_flags", "tradeoff_view"]

@@ -14,12 +14,18 @@ from marvis.data.labels import resolve_labeled_frame
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, StrategyRepository
 from marvis.packs.strategy.backtest import backtest_strategy
+from marvis.packs.strategy.bands import design_cutoff_bands
+from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import BacktestResult, Strategy
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.strategy import build_strategy, infer_strategy_rule_direction
-from marvis.packs.strategy.tradeoff import recommend_operating_point, tradeoff_view
+from marvis.packs.strategy.tradeoff import (
+    recommend_operating_point,
+    tradeoff_feasible_flags,
+    tradeoff_view,
+)
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
 from marvis.settings import build_settings
 
@@ -189,27 +195,145 @@ def tool_tradeoff_view(inputs: dict, ctx) -> dict:
         score_direction=score_direction,
         confirm_direction_conflict=bool(inputs.get("confirm_direction_conflict")),
     )
+    max_bad_rate = _optional_float(inputs.get("max_bad_rate"))
+    min_approval_rate = _optional_float(inputs.get("min_approval_rate"))
+    feasible_flags = tradeoff_feasible_flags(
+        points, max_bad_rate=max_bad_rate, min_approval_rate=min_approval_rate
+    )
+    red_flags: list[dict] = []
     recommended = None
-    if points:
+    if points and any(feasible_flags):
         recommended = recommend_operating_point(
-            points,
+            [point for point, ok in zip(points, feasible_flags, strict=True) if ok],
             objective=str(inputs.get("objective") or "max_profit"),
-            max_bad_rate=_optional_float(inputs.get("max_bad_rate")),
+            max_bad_rate=max_bad_rate,
+        )
+    elif points and (max_bad_rate is not None or min_approval_rate is not None):
+        red_flags.append(
+            {
+                "code": "infeasible_constraints",
+                "level": "red",
+                "message": "在给定 max_bad_rate/min_approval_rate 约束下没有可行 cutoff。",
+            }
         )
     direction_check = check_score_direction(
         pd.to_numeric(frame[score_col], errors="raise").to_numpy(dtype=float),
         pd.to_numeric(frame[target_col], errors="raise").to_numpy(dtype=float),
         declared_direction=effective_direction,
     )
+    point_rows = []
+    for point, feasible in zip(points, feasible_flags, strict=True):
+        row = _jsonable(point)
+        row["feasible"] = bool(feasible)
+        point_rows.append(row)
     result = {
-        "points": [_jsonable(point) for point in points],
+        "points": point_rows,
         "recommended": _jsonable(recommended),
         "nan_labels_dropped": nan_labels_dropped,
         "score_direction": effective_direction,
+        "red_flags": red_flags,
     }
     if direction_check.status != "skipped":
         result["direction_diagnostics"] = _jsonable(direction_check)
     return result
+
+
+def tool_design_cutoff_bands(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    score_col = str(inputs["score_col"])
+    target_col = str(inputs["target_col"])
+    score_direction = normalize_score_direction(_optional_str(inputs.get("score_direction")))
+    effective_direction = score_direction or "higher_is_better"
+    red_flags: list[dict] = []
+    # Direction self-check (S1a): a conflict is a red flag and blocks unless the
+    # caller confirms, mirroring tradeoff_view's confirm_direction_conflict gate.
+    direction_check = check_score_direction(
+        pd.to_numeric(frame[score_col], errors="raise").to_numpy(dtype=float),
+        pd.to_numeric(frame[target_col], errors="raise").to_numpy(dtype=float),
+        declared_direction=effective_direction,
+    )
+    if direction_check.status == "conflict" and not bool(inputs.get("confirm_direction_conflict")):
+        from marvis.data.errors import ScoreDirectionConflictError
+
+        raise ScoreDirectionConflictError(
+            tool="design_cutoff_bands",
+            score_col=score_col,
+            target_col=target_col,
+            declared_direction=effective_direction,
+            implied_direction=direction_check.implied_direction,
+            corr=direction_check.corr,
+            n_labeled=direction_check.n,
+        )
+    if direction_check.status == "conflict":
+        red_flags.append(
+            {
+                "code": "direction_conflict",
+                "level": "red",
+                "message": (
+                    f"分数方向自检冲突：声明 {effective_direction}，数据隐含 "
+                    f"{direction_check.implied_direction}（corr={direction_check.corr:.3f}）。"
+                ),
+            }
+        )
+    result = design_cutoff_bands(
+        frame,
+        score_col=score_col,
+        target_col=target_col,
+        score_direction=effective_direction,
+        n_bands=int(inputs.get("n_bands", 5)),
+        band_edges=[float(edge) for edge in inputs["band_edges"]]
+        if inputs.get("band_edges") is not None
+        else None,
+        objective=str(inputs.get("objective") or "max_profit"),
+        max_bad_rate=_optional_float(inputs.get("max_bad_rate")),
+        min_approval_rate=_optional_float(inputs.get("min_approval_rate")),
+        profit_params=_optional_profit_params(inputs.get("profit_params")),
+        ead_col=_optional_str(inputs.get("ead_col")),
+        pd_col=_optional_str(inputs.get("pd_col")),
+    )
+    red_flags.extend(_jsonable(flag) for flag in result.red_flags)
+    if nan_labels_dropped:
+        red_flags.append(
+            {
+                "code": "nan_labels_dropped",
+                "level": "amber",
+                "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+            }
+        )
+    return {
+        "bands": [_jsonable(band) for band in result.bands],
+        "band_edges": [float(edge) for edge in result.band_edges],
+        "recommended_rules": [dict(rule) for rule in result.recommended_rules],
+        "red_flags": red_flags,
+        "score_direction": effective_direction,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
+
+
+def tool_compare_strategies(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    strategy = _strategy(runtime, str(inputs["strategy_id"]))
+    baseline = _strategy(runtime, str(inputs["baseline_strategy_id"]))
+    frame = _dataset_frame(runtime, str(inputs["dataset_id"]))
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, str(inputs["target_col"]), drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    result = compare_strategies(
+        frame,
+        strategy,
+        baseline,
+        target_col=str(inputs["target_col"]),
+        profit_params=_optional_profit_params(inputs.get("profit_params")),
+        ead_col=_optional_str(inputs.get("ead_col")),
+        pd_col=_optional_str(inputs.get("pd_col")),
+    )
+    payload = _jsonable(result)
+    payload["nan_labels_dropped"] = nan_labels_dropped
+    return payload
 
 
 class _Runtime:
