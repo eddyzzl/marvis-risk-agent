@@ -70,15 +70,15 @@
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ✅ | PREP-1 | 四工具 train-only 拟合已落地（`bc537dba`）：woe/impute/normalize/cap 默认排除 ("test","oot")、无 split 抛 FitRequiresSplitError（allow_full_fit 逃生口）、fit_rows/fit_split 口径回显 | High/M | ✅ |
-| ✅ | PREP-2 | 预处理链已落盘可重放（`30b72ccb`）：`.preprocessing.json` sidecar（impute/cap/normalize/onehot）随派生数据集累计→训练时进 ModelArtifact→scorer/handoff notebook 重放；PMML 不含预处理已在 model card 诚实标注。尾巴：通用 woe_encode 链未入 sidecar（scorecard 已有专属重放）→并入波次四 PREP 余项 | High/L | ✅ |
+| ✅ | PREP-2 | 预处理链已落盘可重放（`30b72ccb`）：`.preprocessing.json` sidecar（impute/cap/normalize/onehot）随派生数据集累计→训练时进 ModelArtifact→scorer/handoff notebook 重放；PMML 不含预处理已在 model card 诚实标注。尾巴已闭环：woe/categorical_woe 入 sidecar 且 scorer/handoff 统一重放（`c2d95fd9`） | High/L | ✅ |
 | ✅ | PREP-3 | 类别链路三层落地（`3ee2146d`/`982ae470`/`ca47fef4`）：excluded_categorical 显性化进 screen 门文案；categorical_woe_encode 工具（train-only+Laplace+rare 归并+未见类别先验 fallback）；CatBoost 原生 cat_features（含调参路径）；setup 提示不改默认 | High/L | ✅ |
-| ⬜ | PREP-4 | 哨兵值/特殊值（-999/-1/9999 类）无识别与处理机制，污染填充/标准化/截断/分箱 | Med/M | — |
-| ⬜ | PREP-6 | LR 配方裸训：无填充/标准化/截断，含 NaN 即崩；全平台无 log/偏态变换（与 SEL-3 同源，合并执行） | Med/S | — |
-| ⬜ | PREP-7 | 日期列信息全部丢弃：无 datediff/账龄/间隔/近期性派生路径 | Med/M | — |
-| ⬜ | PREP-8 | 缺失指示变量（missing indicator）全平台缺失 | Med/S | — |
-| ⬜ | PREP-5 | 数值编码类别（邮编/行业代码）被当连续值进入连续分箱 | Med/S | — |
-| ⬜ | PREP-9 | 分箱缺最小箱占比约束：极小箱 WOE 时点间不稳 | Low/S | — |
-| ⬜ | PREP-10 | aggregate_feature 组统计在含 test/OOT 的全量数据上池化计算，且无最小组样本约束 | Low/S | — |
+| ✅ | PREP-4 | detect_sentinel_values 落地并打通 impute/cap/normalize/bin/woe（`9fc22a46`），screen 门带 sentinel 提示 | Med/M | — |
+| 🔄 | PREP-6 | （随 W4c 的 SEL-3/TUNE-8 落地中：LR sklearn Pipeline） | Med/S | — |
+| ✅ | PREP-7 | derive_date_features 工具落地（`9f8220d1`）：days_since/month/months_on_book，opt-in | Med/M | — |
+| ✅ | PREP-8 | impute_missing 支持 add_indicators（`1dfffdcb`），指示列入重放链 | Med/S | — |
+| ✅ | PREP-5 | suspected_categorical 启发式落地并进 screen 注记（`b2d266fd`），不改默认行为 | Med/S | — |
+| ✅ | PREP-9 | min_bin_pct=0.05 贯通等频/卡方分箱与 scorecard/select/tune 路径（`750a55f7`） | Low/S | — |
+| ✅ | PREP-10 | fit_mask+min_group_size=30+target_col 硬拒绝（`bd26b000`，FS-11 泄漏通道一半随之关闭） | Low/S | — |
 
 #### 特征筛选深度
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
