@@ -1,5 +1,6 @@
 import argparse
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 import re
 import subprocess
@@ -27,6 +28,10 @@ def main(argv: list[str] | None = None) -> None:
             _print_version()
         elif args.command == "eval-llm":
             _eval_llm(args)
+        elif args.command == "backup":
+            _backup(args)
+        elif args.command == "restore":
+            _restore(args)
         else:
             _serve(_apply_serve_defaults(args))
     except RuntimeError as exc:
@@ -95,6 +100,52 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to a previous eval-llm JSON report; exits non-zero on regression",
+    )
+
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Create a consistent backup archive of a workspace",
+    )
+    backup_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace directory to back up (defaults to the profile default, e.g. ./workspace)",
+    )
+    backup_parser.add_argument(
+        "--out",
+        "--output",
+        dest="output",
+        type=Path,
+        default=None,
+        help="Output archive path (defaults to marvis-backup-<timestamp>.tar.gz in the current directory)",
+    )
+    backup_parser.add_argument(
+        "--profile",
+        default="",
+        help="Profile name used to resolve the default --workspace, same as serve --profile",
+    )
+    backup_parser.add_argument(
+        "--include-datasets",
+        action="store_true",
+        help="Also archive workspace/datasets (large; excluded by default)",
+    )
+
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="Restore a workspace from a backup archive created by `marvis backup`",
+    )
+    restore_parser.add_argument("archive", type=Path, help="Backup archive path (.tar.gz)")
+    restore_parser.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="Target workspace directory to restore into",
+    )
+    restore_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the target workspace if it already exists and is not empty",
     )
 
     return parser.parse_args(argv)
@@ -227,6 +278,43 @@ def _eval_llm(args: argparse.Namespace) -> None:
         print(f"regression_ok={report['regression_ok']}")
         for problem in report.get("regression_problems", []):
             print(f"  - {problem}")
+
+
+def _backup(args: argparse.Namespace) -> None:
+    from marvis.backup import BackupError, create_backup
+
+    workspace = args.workspace or _profile_defaults(getattr(args, "profile", "")).workspace
+    workspace = Path(workspace).expanduser().resolve()
+    output_path = args.output or Path(
+        f"marvis-backup-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}.tar.gz"
+    )
+    try:
+        result = create_backup(workspace, output_path, include_datasets=args.include_datasets)
+    except BackupError as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    print(f"MARVIS backup written to {result.output_path}")
+    print(
+        f"files={result.manifest['file_count']} "
+        f"include_datasets={result.manifest['include_datasets']} "
+        f"marvis_version={result.manifest['marvis_version']}"
+    )
+
+
+def _restore(args: argparse.Namespace) -> None:
+    from marvis.backup import BackupError, restore_backup
+
+    try:
+        manifest = restore_backup(args.archive, args.workspace, force=args.force)
+    except BackupError as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    print(f"MARVIS backup restored to {args.workspace}")
+    print(
+        f"files={manifest['file_count']} "
+        f"backed_up_at={manifest['created_at']} "
+        f"marvis_version={manifest['marvis_version']}"
+    )
 
 
 def _parse_feature_columns(value: str) -> list[str]:

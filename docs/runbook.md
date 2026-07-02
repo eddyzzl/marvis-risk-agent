@@ -122,6 +122,30 @@ python -m pip install -e .
 
 完成后，后续升级可使用 `marvis update`。
 
+## 备份与迁移
+
+所有任务、审计记录、实验与记忆都存放在单个 SQLite 文件（`workspace/marvis.sqlite`，WAL 模式）加上 `workspace/` 下的文件树中。**服务运行时直接 `cp -r workspace/` 是不安全的**：WAL 模式下最近提交的事务可能还没有被 checkpoint 回主数据库文件，naive 拷贝会得到一份「看起来完整、实际缺尾」的数据库副本。
+
+使用内置的备份命令，它通过 SQLite 在线备份 API（`sqlite3.Connection.backup()`）生成一致性快照，可以在服务运行时安全执行：
+
+```bash
+marvis backup --workspace ./workspace --out marvis-backup-2026-07-02.tar.gz
+```
+
+默认不包含 `workspace/datasets`（体积较大且可从原始文件重新生成）；如需一并备份：
+
+```bash
+marvis backup --workspace ./workspace --out full-backup.tar.gz --include-datasets
+```
+
+恢复到新目录（目标目录必须为空，否则需要 `--force` 覆盖）：
+
+```bash
+marvis restore marvis-backup-2026-07-02.tar.gz --workspace ./workspace-restored
+```
+
+恢复后可直接 `marvis serve --workspace ./workspace-restored` 启动；已有的启动期 reconcile 逻辑会像处理一次非正常关机那样清理残留的未完成写入产物。
+
 ## 直接 CLI 跑流水线（无需 Web）
 
 ```bash
