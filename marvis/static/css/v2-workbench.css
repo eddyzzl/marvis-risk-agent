@@ -1905,15 +1905,63 @@
 .screen-table .screen-pick {
   accent-color: var(--button-primary-bg);
 }
+.screen-table .screen-num-plain {
+  font-variant-numeric: tabular-nums;
+}
+/* VD-7: mini databars for KS/IV reuse the shared .databar/.databar-fill primitive
+   (styles.css) so the visual language matches the report metric tables. */
+.screen-table .databar.screen-databar {
+  display: inline-block;
+  min-width: 72px;
+  height: 18px;
+}
+.screen-table .databar.screen-databar .databar-label {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 6px;
+  font-variant-numeric: tabular-nums;
+}
+.iv-tier-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.iv-tier-badge[data-tier="none"] {
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+}
+.iv-tier-badge[data-tier="weak"] {
+  background: var(--metric-databar-neutral, var(--surface-subtle));
+  color: var(--metric-inverse-text, var(--text-primary));
+}
+.iv-tier-badge[data-tier="medium"] {
+  background: var(--success-subtle);
+  color: var(--success);
+}
+.iv-tier-badge[data-tier="strong"] {
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
 /* hard-cut coloring: leakage / suspected / unusable rows stand out from the keep set */
 .screen-row.screen-leakage {
   background: var(--danger-subtle);
+  border-left: 3px solid var(--danger);
 }
 .screen-row.screen-suspected {
   background: var(--warning-subtle);
+  border-left: 3px solid var(--warning);
 }
 .screen-row.screen-unusable {
   color: var(--text-muted);
+}
+/* watch-band rows (leakage_watch/ks_decay_watch/psi_watch/split_shift): informational,
+   not a hard cut, so a lighter warning border rather than a tinted background. */
+.screen-row.screen-watch:not(.screen-leakage):not(.screen-suspected) {
+  border-left: 3px solid var(--warning);
 }
 .screen-empty-row td {
   text-align: center;

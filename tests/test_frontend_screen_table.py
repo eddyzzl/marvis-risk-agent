@@ -1252,6 +1252,83 @@ def test_screen_table_leakage_pick_requires_override_reason_before_confirm():
     assert output == "ok"
 
 
+def test_screen_table_databar_widths_are_proportional_to_values():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { renderScreenGateTable } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        const screen = {
+          selected: ["low_feat", "high_feat"],
+          leakage: [],
+          suspected: [],
+          unusable: [],
+          scores: {
+            low_feat: { ks: 0.1, iv: 0.05 },
+            high_feat: { ks: 0.4, iv: 0.2 },
+          },
+          n_screened: 2,
+          thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+        };
+        const message = { id: "bar-msg", metadata: { step_id: "gate-bar", screen } };
+        const html = renderScreenGateTable(message, { interactive: true });
+        const fractions = [...html.matchAll(/--fraction:([0-9.]+)/g)].map((m) => Number(m[1]));
+        // KS column: 0.1/0.4 = 0.25, 0.4/0.4 = 1; IV column: 0.05/0.2 = 0.25, 0.2/0.2 = 1
+        assert.deepEqual(fractions, [0.25, 0.25, 1, 1]);
+        assert.equal(html.includes("screen-databar"), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_iv_tier_badges_and_visual_hierarchy_css():
+    output = _run_node(
+        """
+        import assert from "node:assert/strict";
+        import { ivTier, ivTooltipText, renderScreenGateTable } from "./marvis/static/js/v2/screen_gate_controller.js";
+
+        assert.equal(ivTier(0.01).tier, "none");
+        assert.equal(ivTier(0.05).tier, "weak");
+        assert.equal(ivTier(0.2).tier, "medium");
+        assert.equal(ivTier(0.35).tier, "strong");
+        assert.equal(ivTier(null), null);
+        assert.equal(ivTooltipText(0.6).includes("建议结合 KS/业务口径复核是否存在泄漏"), true);
+
+        const screen = {
+          selected: ["strong_feat"],
+          leakage: [],
+          suspected: [],
+          unusable: [],
+          scores: { strong_feat: { ks: 0.3, iv: 0.35 } },
+          n_screened: 1,
+          thresholds: { leakage_ks: 0.9, max_missing_rate: 0.95 },
+        };
+        const message = { id: "tier-msg", metadata: { step_id: "gate-tier", screen } };
+        const html = renderScreenGateTable(message, { interactive: true });
+        assert.equal(html.includes('data-tier="strong"'), true);
+        process.stdout.write("ok");
+        """
+    )
+    assert output == "ok"
+
+
+def test_screen_table_visual_hierarchy_css_tokens_only():
+    css = _read("css/v2-workbench.css")
+    start = css.index("/* §4 interactive feature-screening selection table")
+    end = css.index("/* §4 join dedup picker", start)
+    screen_css = css[start:end]
+    assert ".iv-tier-badge" in screen_css
+    assert ".screen-row.screen-leakage" in screen_css
+    assert "border-left: 3px solid var(--danger)" in screen_css
+    assert "border-left: 3px solid var(--warning)" in screen_css
+    assert ".screen-databar" in screen_css
+    assert "font-variant-numeric: tabular-nums" in screen_css
+    assert "text-align: right" in screen_css
+    # no ad-hoc hex/rgb colors — everything routes through existing --* tokens
+    assert "#" not in screen_css
+
+
 def test_dedup_picker_renderer_and_branch_are_wired():
     app_js = _read("app.js")
     module_js = _read("js/v2/join_gate_controller.js")

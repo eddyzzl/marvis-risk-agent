@@ -1,4 +1,5 @@
 import { escapeHtml } from "../ui-utils.js";
+import { columnFractions } from "../render-metrics.js";
 
 export function screenNum(value) {
   const n = Number(value);
@@ -8,6 +9,33 @@ export function screenNum(value) {
 export function screenPct(value) {
   const n = Number(value);
   return value === null || value === undefined || Number.isNaN(n) ? "n/a" : (n * 100).toFixed(1) + "%";
+}
+
+// VD-7: IV tier convention — <0.02 no predictive power, 0.02-0.1 weak, 0.1-0.3
+// medium, >0.3 strong (and worth a leakage double-check at very high values).
+// Presentation-only reference bands; the backend screen result (INV-1) remains
+// the sole source of truth for which features are actually dropped.
+const IV_TIERS = [
+  { max: 0.02, tier: "none", label: "无区分力" },
+  { max: 0.1, tier: "weak", label: "弱" },
+  { max: 0.3, tier: "medium", label: "中等" },
+  { max: Infinity, tier: "strong", label: "强" },
+];
+
+export function ivTier(value) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) return null;
+  return IV_TIERS.find((band) => n < band.max) || IV_TIERS[IV_TIERS.length - 1];
+}
+
+export function ivTooltipText(value) {
+  const n = Number(value);
+  if (value === null || value === undefined || Number.isNaN(n)) {
+    return "IV · 无数据\n参考分档：<0.02 无区分力 · 0.02-0.1 弱 · 0.1-0.3 中等 · >0.3 强（>0.5 建议复核是否泄漏）";
+  }
+  const band = ivTier(n);
+  const highNote = n > 0.5 ? "\n△ 数值偏高，建议结合 KS/业务口径复核是否存在泄漏" : "";
+  return `IV ${n.toFixed(4)}\n当前：${band.label}\n参考分档：<0.02 无区分力 · 0.02-0.1 弱 · 0.1-0.3 中等 · >0.3 强${highNote}`;
 }
 
 // UX-4: page size for the simple pagination fallback at real credit-data scale
@@ -190,19 +218,38 @@ function sortableHeader(label, key, state) {
   return `<th><button type="button" class="screen-sort-btn" data-screen-sort="${escapeHtml(key)}" aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}${sortIndicator(state, key)}</button></th>`;
 }
 
-function renderRow(row) {
-  const rowClasses = ["screen-row", "screen-" + row.category];
+function databarCell(value, fraction, tip) {
+  const text = screenNum(value);
+  if (fraction === null || fraction === undefined || Number.isNaN(fraction)) {
+    return `<span class="screen-num-plain">${escapeHtml(text)}</span>`;
+  }
+  return `<span class="databar screen-databar" data-tip="${escapeHtml(tip)}" style="--fraction:${Math.max(0, Math.min(1, fraction)).toFixed(4)}">`
+    + `<span class="databar-fill"></span>`
+    + `<span class="databar-label">${escapeHtml(text)}</span>`
+    + `</span>`;
+}
+
+function ivTierBadge(value) {
+  const band = ivTier(value);
+  if (!band) return "";
+  return `<span class="iv-tier-badge" data-tier="${escapeHtml(band.tier)}" title="${escapeHtml(ivTooltipText(value))}">${escapeHtml(band.label)}</span>`;
+}
+
+function renderRow(row, fractions, index) {
+  const rowClasses = [`screen-row`, `screen-${row.category}`];
   if (row.isWatch) rowClasses.push("screen-watch");
+  const ksTip = `KS ${screenNum(row.ks)}`;
+  const ivTip = ivTooltipText(row.iv);
   return `<tr class="${rowClasses.join(" ")}" data-screen-feature="${escapeHtml(row.name)}">
       <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" value="${escapeHtml(row.name)}"${row.checked ? " checked" : ""}${row.disabled ? " disabled" : ""} /></td>
       <td class="screen-feat">${escapeHtml(row.name)}</td>
-      <td class="screen-num">${escapeHtml(screenNum(row.ks))}</td>
-      <td class="screen-num">${escapeHtml(screenNum(row.iv))}</td>
+      <td class="screen-num">${databarCell(row.ks, fractions.ks.get(index), ksTip)}</td>
+      <td class="screen-num">${databarCell(row.iv, fractions.iv.get(index), ivTip)}${ivTierBadge(row.iv)}</td>
       <td class="screen-num">${escapeHtml(screenPct(row.missingRate))}</td>
       <td class="screen-num">${escapeHtml(screenPct(row.coverage))}</td>
       <td class="screen-num">${escapeHtml(screenNum(row.ksDecay))}</td>
       <td class="screen-num">${escapeHtml(screenNum(row.psiSplit))}</td>
-      <td>${badges[row.category] || ""}${row.isWatch ? '<span class="screen-badge watch">watch</span>' : ''}</td>
+      <td>${badges[row.category] || ""}${row.isWatch ? '<span class="screen-badge watch">watch</span>' : ""}</td>
     </tr>`;
 }
 
@@ -242,7 +289,14 @@ function tableBodyHtml(message, options = {}) {
   const page = Math.min(Math.max(1, state.page), totalPages);
   state.page = page;
   const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-  const rowsHtml = pageRows.map((row) => renderRow(row)).join("");
+  // Databar fractions are normalized across the *filtered* set that is actually
+  // visible, using the shared render-metrics.js column-max normalization so the
+  // bar language matches the report tables (VD-7/VD-1).
+  const ksRows = filtered.map((row) => [row.ks]);
+  const ivRows = filtered.map((row) => [row.iv]);
+  const fractions = { ks: columnFractions(ksRows, 0), iv: columnFractions(ivRows, 0) };
+  const pageStartIndex = (page - 1) * PAGE_SIZE;
+  const rowsHtml = pageRows.map((row, i) => renderRow(row, fractions, pageStartIndex + i)).join("");
   const selectedCount = allRows.filter((row) => row.checked).length;
   const checkedLeakage = allRows.some((row) => row.checked && (row.category === "leakage" || row.category === "suspected"));
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
