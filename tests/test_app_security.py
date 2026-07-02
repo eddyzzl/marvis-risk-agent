@@ -1,10 +1,12 @@
 import json
+import os
 from pathlib import Path
+import re
 
 from fastapi.testclient import TestClient
 
 from marvis import __version__
-from marvis.app import _is_local_client, create_app
+from marvis.app import _is_local_client, _static_asset_version, create_app
 from marvis.data.backend import DUCKDB_TEMP_DIR_NAME
 from marvis.db import PluginRepository, connect, init_db
 
@@ -296,3 +298,69 @@ def test_index_replaces_static_asset_version_placeholder(tmp_path):
     assert response.status_code == 200
     assert f"static/app.js?v={__version__}-" in response.text
     assert "__MARVIS_STATIC_VERSION__" not in response.text
+
+
+def test_static_asset_version_changes_when_any_v2_module_changes(tmp_path):
+    # PERF-9 regression: the version hash used to be derived from a
+    # hardcoded 4-file allowlist (app.js/styles.css/welcome.css/
+    # v2-workbench.css), so editing any js/v2/*.js controller left the
+    # version string -- and therefore the cache-busted URL -- unchanged,
+    # and browsers could keep running the stale module indefinitely.
+    static_dir = tmp_path / "static"
+    (static_dir / "js" / "v2").mkdir(parents=True)
+    (static_dir / "app.js").write_text("// app", encoding="utf-8")
+    (static_dir / "js" / "v2" / "screen_gate_controller.js").write_text(
+        "// original", encoding="utf-8"
+    )
+
+    before = _static_asset_version(static_dir)
+
+    edited = static_dir / "js" / "v2" / "screen_gate_controller.js"
+    edited.write_text("// edited", encoding="utf-8")
+    os.utime(edited, (edited.stat().st_atime, edited.stat().st_mtime + 5))
+
+    after = _static_asset_version(static_dir)
+
+    assert before != after
+
+
+def test_static_import_map_covers_every_js_module_and_is_valid_json(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+    html = response.text
+
+    assert "__MARVIS_STATIC_IMPORT_MAP__" not in html
+    start = html.index('<script type="importmap">') + len('<script type="importmap">')
+    end = html.index("</script>", start)
+    import_map = json.loads(html[start : end])
+
+    real_static_dir = Path(__file__).resolve().parents[1] / "marvis" / "static"
+    js_files = sorted(p.name for p in (real_static_dir / "js").glob("*.js"))
+    v2_files = sorted(p.name for p in (real_static_dir / "js" / "v2").glob("*.js"))
+
+    for name in js_files:
+        assert f"./js/{name}" in import_map["imports"]
+        assert import_map["imports"][f"./js/{name}"].startswith(f"static/js/{name}?v=")
+    for name in v2_files:
+        assert f"./js/v2/{name}" in import_map["imports"]
+        assert import_map["scopes"]["static/js/v2/"][f"./{name}"].startswith(
+            f"static/js/v2/{name}?v="
+        )
+
+
+def test_static_response_cache_control_depends_on_version_query_param(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    unversioned = client.get("/static/app.js")
+    assert unversioned.status_code == 200
+    assert unversioned.headers["cache-control"] == "no-cache"
+
+    index_html = client.get("/").text
+    m = re.search(r'src="(static/app\.js\?v=[^"]+)"', index_html)
+    assert m is not None
+    versioned = client.get("/" + m.group(1))
+    assert versioned.status_code == 200
+    assert versioned.headers["cache-control"] == "public, max-age=31536000, immutable"

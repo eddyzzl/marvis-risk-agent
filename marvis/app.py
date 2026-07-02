@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import logging
 from pathlib import Path
 import os
@@ -89,12 +90,11 @@ _NAMED_LOCAL_HOSTS = {"localhost", "testclient"}
 _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
 _TRUSTED_PROXY_ENV = "MARVIS_TRUSTED_PROXY_HOSTS"
 _FORWARDED_CLIENT_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
-_STATIC_VERSION_FILES = (
-    "app.js",
-    "styles.css",
-    "css/welcome.css",
-    "css/v2-workbench.css",
-)
+# PERF-9: cache busting must cover every JS/CSS asset the frontend can load,
+# not just the 4 entry files -- the version hash below is derived from a live
+# rglob (see _static_asset_version) so newly added js/ or css/ files are
+# picked up automatically; this constant only documents the globs scanned.
+_STATIC_VERSION_GLOBS = ("*.js", "*.css")
 
 
 def _has_configured_llm(workspace: Path) -> bool:
@@ -164,15 +164,64 @@ def _is_public_read_path(path: str) -> bool:
 
 
 def _static_asset_version(static_dir: Path) -> str:
+    # PERF-9: scan every JS/CSS file under static/ (recursively, so js/v2/*
+    # and any future subdirectory are included) instead of a hardcoded
+    # 4-file allowlist -- editing any module now changes the version string,
+    # eliminating the "changed a v2 module, browser kept the old file"
+    # staleness window described in the review.
     mtimes = []
-    for relative_path in _STATIC_VERSION_FILES:
-        try:
-            mtimes.append((static_dir / relative_path).stat().st_mtime_ns)
-        except OSError:
-            continue
+    for glob in _STATIC_VERSION_GLOBS:
+        for path in static_dir.rglob(glob):
+            try:
+                mtimes.append(path.stat().st_mtime_ns)
+            except OSError:
+                continue
     if not mtimes:
         return __version__
     return f"{__version__}-{max(mtimes)}"
+
+
+def _static_import_map(static_dir: Path, version: str) -> str:
+    # PERF-9: app.js and every js/v2/*.js controller import sibling modules
+    # via bare relative specifiers (e.g. "./js/api.js", "../ui-utils.js")
+    # with no version query string, so bumping _static_asset_version alone
+    # does not change the URL the browser fetches those modules from --
+    # only the entry point (app.js) gets a fresh URL, while everything it
+    # imports keeps resolving to the same unversioned path and can keep
+    # running stale code after an upgrade. A browser-native import map
+    # rewrites every "./js/*.js" / "../*.js" specifier actually used in the
+    # tree to a `?v=<version>` URL, so editing any module changes the URL
+    # for every module that (transitively) imports it -- without editing
+    # app.js's or the controllers' source, which a large slice of the
+    # frontend test suite greps verbatim (test_frontend_shell_static.py's
+    # import inventory, etc.) and would otherwise break wholesale.
+    js_dir = static_dir / "js"
+    v2_dir = js_dir / "v2"
+    js_files = sorted(p.name for p in js_dir.glob("*.js") if p.is_file())
+    v2_files = sorted(p.name for p in v2_dir.glob("*.js") if p.is_file()) if v2_dir.is_dir() else []
+
+    def versioned(relative: str) -> str:
+        return f"static/{relative}?v={version}"
+
+    # Scope for modules importing from static/ itself (app.js).
+    top_imports = {f"./js/{name}": versioned(f"js/{name}") for name in js_files}
+    top_imports.update({f"./js/v2/{name}": versioned(f"js/v2/{name}") for name in v2_files})
+
+    # Scope for modules importing from static/js/ (e.g. create-task-dialog.js).
+    js_scope_imports = {f"./{name}": versioned(f"js/{name}") for name in js_files}
+
+    # Scope for modules importing from static/js/v2/ (e.g. plan_rail_controller.js).
+    v2_scope_imports = {f"./{name}": versioned(f"js/v2/{name}") for name in v2_files}
+    v2_scope_imports.update({f"../{name}": versioned(f"js/{name}") for name in js_files})
+
+    import_map = {
+        "imports": top_imports,
+        "scopes": {
+            "static/js/": js_scope_imports,
+            "static/js/v2/": v2_scope_imports,
+        },
+    }
+    return json.dumps(import_map, ensure_ascii=False, separators=(",", ":"))
 
 
 def _is_local_only_path(path: str) -> bool:
@@ -251,6 +300,26 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
                 )
         return await call_next(request)
 
+    @app.middleware("http")
+    async def _static_cache_control(request, call_next):
+        response = await call_next(request)
+        # PERF-9: every /static/* response now gets an explicit Cache-Control
+        # instead of relying on StaticFiles' implicit (browser-heuristic)
+        # caching. Requests that carry the app's ?v= cache-busting query
+        # param are safe to cache for a year (the query string changes
+        # whenever any JS/CSS file changes, see _static_asset_version); any
+        # other /static request -- old cached HTML still pointing at an
+        # unversioned URL, or a transitively-imported module reached without
+        # a version param -- gets no-cache so the browser always revalidates
+        # against the file's ETag/Last-Modified instead of silently reusing
+        # a stale copy.
+        if request.url.path.startswith("/static/"):
+            if request.url.query and "v=" in request.url.query:
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+        return response
+
     app.include_router(api_router)
     app.include_router(agent_memory_router)
     app.include_router(llm_router)
@@ -317,7 +386,11 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     @app.get("/")
     def index(request: Request) -> HTMLResponse:
         index_html = (static_dir / "index.html").read_text(encoding="utf-8")
-        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", _static_asset_version(static_dir))
+        static_version = _static_asset_version(static_dir)
+        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", static_version)
+        index_html = index_html.replace(
+            "__MARVIS_STATIC_IMPORT_MAP__", _static_import_map(static_dir, static_version)
+        )
         branding = load_branding(settings.workspace)
         if not _is_local_client(_effective_client_host(request)):
             branding = dict(DEFAULT_BRANDING)

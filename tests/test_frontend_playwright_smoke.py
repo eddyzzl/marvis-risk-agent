@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from marvis.app import _static_asset_version, _static_import_map
+
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("MARVIS_RUN_PLAYWRIGHT_SMOKE") != "1",
@@ -53,7 +55,7 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path in {"/", "/index.html"}:
-            self._send_file(ROOT / "marvis/static/index.html", content_type="text/html; charset=utf-8")
+            self._send_index_html()
             return
         if path.startswith("/static/"):
             self._send_file(ROOT / "marvis/static" / path.removeprefix("/static/"))
@@ -103,6 +105,26 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_index_html(self) -> None:
+        # Mirrors marvis.app's "/" route: the real app replaces
+        # __MARVIS_STATIC_VERSION__ / __MARVIS_STATIC_IMPORT_MAP__ before
+        # serving index.html, so this smoke harness must do the same or the
+        # <script type="importmap"> tag ships the literal placeholder text,
+        # which is not valid JSON and fails to parse in a real browser.
+        static_dir = ROOT / "marvis/static"
+        index_html = (static_dir / "index.html").read_text(encoding="utf-8")
+        static_version = _static_asset_version(static_dir)
+        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", static_version)
+        index_html = index_html.replace(
+            "__MARVIS_STATIC_IMPORT_MAP__", _static_import_map(static_dir, static_version)
+        )
+        body = index_html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
