@@ -75,6 +75,48 @@ marvis serve --host 127.0.0.1 --port 8000 --workspace .\workspace
 
 WSL2 中运行时，页面里的材料目录也要填写 Linux/WSL 路径，例如 `/mnt/c/Users/<you>/Downloads/project`，不要填写 `C:\Users\...`。
 
+## 共享主机部署：JupyterHub / 多用户服务器
+
+MARVIS 的默认信任模型是"回环地址（127.0.0.1）即可信"——这在单人笔记本上成立，但 CLI 本身建议的 JupyterHub 部署方式恰恰是一台**多用户共享服务器**：同一台机器上其他已登录用户的进程同样能连到 `127.0.0.1:8000`，默认会被判定为本地可信客户端，从而获得读取全部借款人明细、删除任务、安装插件（插件在服务账号下执行任意代码）等全部权限。
+
+如果部署在共享主机 / 多账号 Linux 服务器上，按需组合下面三个环境变量：
+
+### `MARVIS_LOCAL_TOKEN`：本地写操作令牌（推荐，最先配置）
+
+设置后，所有非 `GET` 请求（包括来自 `127.0.0.1` 的请求）都必须在 `X-Marvis-Token` 请求头中带上该值，否则返回 403。未设置时行为不变（当前单人体验不受影响）。
+
+```bash
+export MARVIS_LOCAL_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+marvis serve --host 127.0.0.1 --port 8000 --workspace ./workspace
+```
+
+浏览器打开首页（`GET /`）时，服务端会把该令牌注入页面（`<body data-marvis-local-token>`），前端 `api()` 封装自动在后续所有非 `GET` 请求上回传 `X-Marvis-Token`。该令牌只在本机客户端访问首页时下发，即使同时开启了 `MARVIS_ALLOW_REMOTE_READ`，远程客户端也读不到它。
+
+这只是一层轻量防护：任何能读到 `MARVIS_LOCAL_TOKEN` 环境变量或首页 HTML 源码的本机用户仍然可以拿到令牌。真正的隔离需要更彻底的方案（例如监听 Unix domain socket 并设置 0700 权限，目前尚未实现）或系统级用户隔离（容器/虚拟机）。
+
+### `MARVIS_ALLOW_REMOTE_READ`：允许非本机客户端只读访问
+
+默认情况下，非本机（非回环地址）客户端只能访问 `/`、`/api/health` 和 `/static/`。设置为 `1`/`true` 后，非本机客户端可以读取任务、数据集等只读 API，但系统设置（`/api/settings*`）、品牌配置（`/api/branding`、`/branding/*`）和 `MARVIS_LOCAL_TOKEN` 本身依然只对本机客户端可见。所有写操作（非 `GET`）无论是否开启该变量，始终只允许本机客户端发起。
+
+```bash
+export MARVIS_ALLOW_REMOTE_READ=1
+```
+
+### `MARVIS_TRUSTED_PROXY_HOSTS`：反向代理场景下的真实客户端识别
+
+如果通过 JupyterHub 的 `/proxy/<port>/` 或其他同机反向代理访问，直连的 TCP 对端会是代理自身的回环地址，这会让每个远程请求都"看起来"像本机请求。将代理自身的地址加入该变量后，中间件会改为信任 `X-Forwarded-For` 头中的真实客户端地址来做本地/远程判定，避免代理误把所有远程访问放行为本地权限：
+
+```bash
+export MARVIS_TRUSTED_PROXY_HOSTS="127.0.0.1"
+```
+
+多个可信代理地址用逗号分隔。未在该列表中的回环对端携带的转发头会被直接忽略（fail closed），不会被当作本地请求。
+
+### 三者的组合建议
+
+- 单人笔记本：三者都不需要设置，维持当前行为。
+- 团队共享的 JupyterHub 服务器：至少设置 `MARVIS_LOCAL_TOKEN`；如果通过反向代理访问，还需要设置 `MARVIS_TRUSTED_PROXY_HOSTS`；`MARVIS_ALLOW_REMOTE_READ` 按是否需要跨机器只读查看再决定，不开启也不影响本机通过代理正常使用。
+
 ## 多 worktree / 多版本同时启动
 
 多个 worktree 同时启动时，端口和 workspace 都要分开，避免访问错版本或共用 SQLite/任务产物。profile 会自动选择默认值：

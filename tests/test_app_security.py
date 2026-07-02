@@ -382,3 +382,112 @@ def test_static_response_cache_control_depends_on_version_query_param(tmp_path):
     versioned = client.get("/" + m.group(1))
     assert versioned.status_code == 200
     assert versioned.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_local_token_unset_preserves_default_local_write_access(tmp_path):
+    # GAP-5 default: MARVIS_LOCAL_TOKEN unset -> unchanged single-user
+    # behavior, no header required from a local client.
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code != 403
+
+
+def test_local_write_without_token_is_rejected_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_local_write_with_wrong_token_is_rejected_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={}, headers={"X-Marvis-Token": "wrong"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_local_write_with_correct_token_is_accepted_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={}, headers={"X-Marvis-Token": "s3cr3t-token"})
+
+    assert response.status_code != 403
+
+
+def test_local_token_does_not_gate_safe_get_requests(tmp_path, monkeypatch):
+    # GET stays token-free even when MARVIS_LOCAL_TOKEN is configured, so
+    # the index page (which hands the token to the frontend) is reachable
+    # without already holding it.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/api/tasks")
+
+    assert response.status_code == 200
+
+
+def test_local_token_also_blocks_other_local_users_not_just_remote_clients(tmp_path, monkeypatch):
+    # GAP-5's actual threat model: on a shared JupyterHub-style host, any
+    # other logged-in user's process is also a loopback peer and would
+    # otherwise be treated as fully trusted. The token check must apply
+    # regardless of the is_local verdict.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("127.0.0.1", 43210))
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_index_embeds_local_token_for_local_client_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'data-marvis-local-token="s3cr3t-token"' in response.text
+    assert "__MARVIS_LOCAL_TOKEN__" not in response.text
+
+
+def test_index_omits_local_token_for_remote_client_even_with_remote_read_enabled(tmp_path, monkeypatch):
+    # The token must never be handed to a remote reader -- that would let a
+    # remote client mint itself write access, defeating the entire point of
+    # the token gate.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    monkeypatch.setenv("MARVIS_ALLOW_REMOTE_READ", "1")
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "s3cr3t-token" not in response.text
+    assert 'data-marvis-local-token=""' in response.text
+
+
+def test_index_omits_local_token_when_unset(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'data-marvis-local-token=""' in response.text

@@ -90,6 +90,39 @@ def test_notebook_worker_env_strips_host_secrets(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env
 
 
+def test_run_notebook_passes_env_allowlist_to_kernel_client(tmp_path: Path, monkeypatch):
+    # TST-7: the live interactive-modeling kernel previously inherited the
+    # full host os.environ with no filtering, unlike the isolated batch
+    # worker and the plugin/draft subprocess worker which both already use
+    # an env allowlist. execute_notebook must now pass the same
+    # _notebook_worker_env() allowlist through to NotebookClient.execute so
+    # jupyter_client launches the kernel subprocess with a filtered env
+    # (sensitive host secrets such as API keys must not be visible to
+    # user-authored notebook code).
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-should-not-reach-kernel")
+    notebook_path = tmp_path / "source.ipynb"
+    executed_path = tmp_path / "executed.ipynb"
+    log_path = tmp_path / "run.log"
+    nbformat.write(nbformat.v4.new_notebook(), notebook_path)
+    captured = {}
+
+    class FakeNotebookClient:
+        def __init__(self, notebook, timeout, kernel_name):
+            pass
+
+        def execute(self, *, cwd, env=None):
+            captured["env"] = env
+
+    monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
+
+    result = run_notebook(notebook_path, executed_path, log_path, timeout=60)
+
+    assert result.succeeded is True
+    assert captured["env"] is not None
+    assert "OPENAI_API_KEY" not in captured["env"]
+    assert captured["env"] == _notebook_worker_env()
+
+
 def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
     notebook_path = tmp_path / "source.ipynb"
     executed_path = tmp_path / "executed.ipynb"
@@ -102,7 +135,7 @@ def test_run_notebook_uses_configured_kernel_name(tmp_path: Path, monkeypatch):
             captured["timeout"] = timeout
             captured["kernel_name"] = kernel_name
 
-        def execute(self, *, cwd):
+        def execute(self, *, cwd, env=None):
             captured["cwd"] = cwd
 
     monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
@@ -181,7 +214,7 @@ def test_run_notebook_uses_explicit_execution_cwd(tmp_path: Path, monkeypatch):
         def __init__(self, notebook, timeout, kernel_name, **callbacks):
             pass
 
-        def execute(self, *, cwd):
+        def execute(self, *, cwd, env=None):
             captured["cwd"] = cwd
 
     monkeypatch.setattr("marvis.notebooks.NotebookClient", FakeNotebookClient)
@@ -220,7 +253,7 @@ def test_run_notebook_streams_step_progress_file(tmp_path: Path, monkeypatch):
             self.notebook = notebook
             self.callbacks = callbacks
 
-        def execute(self, *, cwd):
+        def execute(self, *, cwd, env=None):
             progress_snapshots.append(json.loads(progress_path.read_text(encoding="utf-8")))
             self.callbacks["on_cell_start"](cell=self.notebook.cells[1], cell_index=1)
             progress_snapshots.append(json.loads(progress_path.read_text(encoding="utf-8")))
@@ -288,7 +321,7 @@ def test_run_notebook_defers_step_elapsed_until_next_cell_or_return(
             self.notebook = notebook
             self.callbacks = callbacks
 
-        def execute(self, *, cwd):
+        def execute(self, *, cwd, env=None):
             self.callbacks["on_cell_start"](cell=self.notebook.cells[1], cell_index=1)
             self.callbacks["on_cell_executed"](cell=self.notebook.cells[1], cell_index=1)
             self.callbacks["on_cell_complete"](cell=self.notebook.cells[1], cell_index=1)
@@ -925,7 +958,7 @@ def test_run_notebook_stops_kernel_when_rss_exceeds_limit(
         def __init__(self, notebook, timeout, kernel_name, **callbacks):
             self.km = FakeKernelManager()
 
-        def execute(self, *, cwd):
+        def execute(self, *, cwd, env=None):
             deadline = time.monotonic() + 2.0
             while not calls["shutdowns"] and time.monotonic() < deadline:
                 time.sleep(0.01)

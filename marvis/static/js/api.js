@@ -61,6 +61,18 @@ function requestBodyOptions(body, headers = {}) {
   };
 }
 
+// GAP-5: when the server is started with MARVIS_LOCAL_TOKEN set, the index
+// page embeds it into <body data-marvis-local-token>. Non-GET requests must
+// echo it back via X-Marvis-Token or the shared-host access guard rejects
+// them (see marvis/app.py _local_access_guard). Left blank (the default,
+// MARVIS_LOCAL_TOKEN unset), this header is simply omitted and behavior is
+// unchanged.
+function localToken() {
+  return typeof document !== "undefined" ? document.body?.dataset?.marvisLocalToken || "" : "";
+}
+
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 export async function api(endpoint, options = {}) {
   const normalizedEndpoint = endpoint.startsWith("/") || endpoint.startsWith("http")
     ? endpoint
@@ -70,6 +82,11 @@ export async function api(endpoint, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (body !== undefined && !isFormData && !hasContentType(headers)) {
     headers["Content-Type"] = "application/json";
+  }
+  const method = (options.method || "GET").toUpperCase();
+  const token = localToken();
+  if (token && !SAFE_METHODS.has(method) && !("X-Marvis-Token" in headers)) {
+    headers["X-Marvis-Token"] = token;
   }
   const response = await fetch(normalizedEndpoint, {
     ...options,
