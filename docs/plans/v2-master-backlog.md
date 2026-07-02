@@ -219,11 +219,11 @@
 | ✅ | VD-3 | 骨架系统落地（`5e4189f7`）：块/行/表基元+reduced-motion 降级，接入任务切换/门表格/计划栏 | High/M | ⚠️ |
 | ⬜ | VD-4 | 校准可靠性曲线/分数分段数据已产出但前端无图表 | High/M | ✅ |
 | ✅ | VD-5 | 发光资产已用真 logo alpha 蒙版重建（`cfed1796`，PIL 高斯 halo 不重绘像素）+吉祥物接 V2 门/红旗/完成事件；**设置项默认关闭，待用户视觉验收后再默认开** | Med/M | — |
-| ⬜ | UX-5 | replan/子 agent/loop 事件在 UI 完全不可见（+追踪器"plan rail 业务化状态"） | Med/M | — |
-| ⬜ | UX-6 | 去重门缺决策依据：conflict_columns 被前端丢弃 | Med/M | — |
-| ⬜ | UX-10 | 等待/确认微文案不准：『计划生成中…』误导、确认按钮不带后果 | Med/S | — |
-| ⬜ | UX-11 | 中文文案标点制式不统一（半角/全角混排） | Low/S | — |
-| ⬜ | UX-12 | 材料上传无进度反馈 | Low/S | — |
+| ✅ | UX-5 | plan rail 渲染 loop_events（replan/no_progress+介入捷径）+重规划计数徽+活跃子 agent 行（`89452d8e`） | Med/M | — |
+| ✅ | UX-6 | 冲突列+真实冲突值样例+first/last 语义说明+"排除该特征表"出口（`9d9cb996`；"按时间列取最新"策略记为后续） | Med/M | — |
+| ✅ | UX-10 | "等待确认：<步骤>"与真生成态区分+按工具定制后果文案（`67412a57`） | Med/S | — |
+| ✅ | UX-11 | 22 文件用户可见文案全角化（`893f8404`，LLM prompt/代码/正则不动） | Low/S | — |
+| ✅ | UX-12 | XHR upload.onprogress 实时百分比（>10MB 显示，`1959915d`） | Low/S | — |
 | ✅ | VD-6 | 状态三通道（底色+语义 SVG 图标+边框，`4137593a`），色弱可辨 | Med/S | — |
 | ✅ | VD-7 | KS/IV databar+IV 四档徽标+泄漏 watch 行警示边框（`c22da798`），全 token 化 | Med/S | — |
 | ✅ | VD-8 | dark 玻璃立体感恢复（`bbd38165`）：双 inset 高光/阴影 token 化、hero-glow 提到 0.16-0.18 | Med/S | — |
