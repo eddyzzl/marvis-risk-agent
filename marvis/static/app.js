@@ -6235,15 +6235,35 @@ function previewWordReport() {
   openWordPreviewDialog();
 }
 
+async function loadTaskPurgeSummaryText(taskId) {
+  try {
+    const preview = await api(`api/tasks/${taskId}/purge-preview`);
+    const summary = preview && preview.purge_summary ? preview.purge_summary : null;
+    if (!summary) return "";
+    const parts = [];
+    if (summary.datasets) parts.push(`数据集 ${summary.datasets}`);
+    if (summary.joins) parts.push(`JOIN ${summary.joins}`);
+    if (summary.plans) parts.push(`计划 ${summary.plans}`);
+    if (summary.experiments) parts.push(`实验 ${summary.experiments}`);
+    if (summary.model_artifacts) parts.push(`模型产物 ${summary.model_artifacts}`);
+    if (summary.strategies) parts.push(`策略 ${summary.strategies}`);
+    if (!parts.length) return "";
+    return `\n\n将一并清理：${parts.join("、")}。`;
+  } catch (error) {
+    return "";
+  }
+}
+
 async function deleteTask(task) {
   if (!task || taskBusyAction(task.id)) return;
   if (taskServerBusyAction(task)) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
+  const purgeSummaryText = await loadTaskPurgeSummaryText(task.id);
   const confirmed = await showPlatformConfirm({
     title: "删除任务",
-    message: `确认删除任务「${taskDisplayName(task)}」？删除后将移除任务记录和本地输出文件，不能撤销。`,
+    message: `确认删除任务「${taskDisplayName(task)}」？删除后将移除任务记录和本地输出文件，不能撤销。${purgeSummaryText}`,
     confirmText: "删除",
     cancelText: "取消",
     tone: "danger",
