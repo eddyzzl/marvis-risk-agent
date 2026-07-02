@@ -89,12 +89,15 @@ def decide_gate(client, *, gate: dict) -> dict:
     prompt = _format_gate(gate)
     envelope = extract_gate_envelope(gate)
     allowed_actions = envelope.allowed_actions
+    schema = _gate_decision_schema(allowed_actions)
     raw = client.complete(
         system_prompt=_system_prompt(allowed_actions),
         user_prompt=prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
+        json_schema=schema,
         stream=False,
+        caller="gate",
     )
     decision, ok = _parse_decision(raw, allowed_actions=allowed_actions)
     decision = _apply_safety_policy(decision, envelope)
@@ -110,13 +113,38 @@ def decide_gate(client, *, gate: dict) -> dict:
         user_prompt=retry_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
+        json_schema=schema,
         stream=False,
+        caller="gate",
     )
     return _apply_safety_policy(parse_decision(raw, allowed_actions=allowed_actions), envelope)
 
 
 def _system_prompt(allowed_actions: tuple[str, ...]) -> str:
     return _SYSTEM_TEMPLATE.format(allowed_actions=", ".join(allowed_actions))
+
+
+def _gate_decision_schema(allowed_actions: tuple[str, ...]) -> dict:
+    """Skeleton json_schema for a gate decision; the validator still owns detail."""
+    return {
+        "name": "gate_decision",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": list(allowed_actions)},
+                "reason": {"type": "string"},
+                "params": {"type": "object"},
+                "selection": {"type": "array"},
+                "dedup_strategies": {"type": "object"},
+                "replan_goal": {"type": "string"},
+                "clarifying_question": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["action", "reason"],
+            "additionalProperties": True,
+        },
+    }
 
 
 def _format_gate(gate: dict) -> str:

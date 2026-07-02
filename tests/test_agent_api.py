@@ -3464,3 +3464,46 @@ def test_agent_report_preview_requires_confirmed_agent_conclusions(tmp_path):
     assert preview.status_code == 409
     assert download.status_code == 409
     assert "请先确认三段报告结论" in preview.json()["detail"]
+
+
+def test_stream_agent_message_throttles_db_writes():
+    from marvis.agent.validation_messages import stream_agent_message
+
+    class _SpyRepo:
+        def __init__(self):
+            self.update_calls = 0
+            self.last_content = ""
+
+        def update_agent_message(self, message_id, *, content, metadata=None):
+            self.update_calls += 1
+            self.last_content = content
+            return {
+                "id": message_id,
+                "content": content,
+                "metadata": metadata or {},
+            }
+
+    repo = _SpyRepo()
+    delta_count = 200
+
+    def producer(on_delta):
+        for _ in range(delta_count):
+            on_delta("x")
+        return "x" * delta_count, {}
+
+    result = stream_agent_message(
+        repo,
+        "msg-1",
+        task_id="task-1",
+        model_profile={"model_id": "m1", "display_name": "d", "model_name": "n"},
+        producer=producer,
+        raise_if_cancelled=lambda _task_id: None,
+    )
+
+    # Final content is complete and correct.
+    assert result["content"] == "x" * delta_count
+    assert repo.last_content == "x" * delta_count
+    # Writes are throttled: far fewer DB updates than deltas emitted.
+    assert repo.update_calls < delta_count
+    # 200 single-char deltas (< 512 chars, sub-second) => only the final flush.
+    assert repo.update_calls <= 2

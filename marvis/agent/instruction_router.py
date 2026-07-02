@@ -32,6 +32,22 @@ _SYSTEM = (
     '{"action":"confirm|adjust|replan|clarify","params":{},"constraint":"","reason":"一句话中文"}。'
 )
 
+_ROUTE_SCHEMA = {
+    "name": "gate_instruction_route",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": list(_ACTIONS)},
+            "params": {"type": "object"},
+            "constraint": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["action", "params", "constraint", "reason"],
+        "additionalProperties": True,
+    },
+}
+
 
 def route_instruction(client, *, gate_context, instruction, tables=None):
     """Ask the injected LLM to classify one free-text gate instruction."""
@@ -41,7 +57,9 @@ def route_instruction(client, *, gate_context, instruction, tables=None):
         user_prompt=prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
+        json_schema=_ROUTE_SCHEMA,
         stream=False,
+        caller="router",
     )
     route, ok = _parse_route(raw)
     if ok:
@@ -57,7 +75,9 @@ def route_instruction(client, *, gate_context, instruction, tables=None):
         user_prompt=retry_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
+        json_schema=_ROUTE_SCHEMA,
         stream=False,
+        caller="router",
     )
     return parse_route(raw)
 

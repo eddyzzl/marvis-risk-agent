@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 from marvis.agent.orchestrator import AgentValidationCancelled
@@ -95,6 +96,10 @@ def add_and_stream_agent_message(
     )
 
 
+_STREAM_FLUSH_INTERVAL_SECONDS = 0.5
+_STREAM_FLUSH_CHARS = 512
+
+
 def stream_agent_message(
     repo,
     message_id: str,
@@ -106,17 +111,30 @@ def stream_agent_message(
 ) -> dict:
     parts: list[str] = []
     streaming_metadata = {**model_metadata(model_profile), "streaming": True}
+    flush_state = {"last_flush": time.monotonic(), "chars_since_flush": 0}
 
     def on_delta(delta: str) -> None:
         if not delta:
             return
+        # Cancellation must stay responsive on every delta; only the DB write is
+        # throttled. The frontend already polls the full message on an interval,
+        # so per-delta persistence has no consumer and only amplifies writes.
         raise_if_cancelled(task_id)
         parts.append(delta)
-        repo.update_agent_message(
-            message_id,
-            content="".join(parts),
-            metadata=streaming_metadata,
-        )
+        flush_state["chars_since_flush"] += len(delta)
+        now = time.monotonic()
+        elapsed = now - flush_state["last_flush"]
+        if (
+            elapsed >= _STREAM_FLUSH_INTERVAL_SECONDS
+            or flush_state["chars_since_flush"] >= _STREAM_FLUSH_CHARS
+        ):
+            repo.update_agent_message(
+                message_id,
+                content="".join(parts),
+                metadata=streaming_metadata,
+            )
+            flush_state["last_flush"] = now
+            flush_state["chars_since_flush"] = 0
 
     try:
         raise_if_cancelled(task_id)
