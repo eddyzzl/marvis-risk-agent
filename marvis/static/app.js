@@ -5220,12 +5220,14 @@ function handleModelingWeightAdjustClick(event) {
 }
 
 function modelingSetupControllerContext() {
+  const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
     api,
     agentAcceptanceModeValue,
     setActionStatus,
     setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -5248,12 +5250,14 @@ function handleC1ConfirmClick(event) {
 }
 
 function joinGateControllerContext() {
+  const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
     api,
     agentAcceptanceModeValue,
     setActionStatus,
     setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -5284,12 +5288,14 @@ function handleScreenConfirmClick(event) {
 }
 
 function screenGateControllerContext() {
+  const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
     api,
     agentAcceptanceModeValue,
     setActionStatus,
     setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,
@@ -5328,11 +5334,13 @@ function handleDriverConfirmClick(event) {
 }
 
 function driverConfirmControllerContext() {
+  const capturedTaskId = selectedTaskId;
   return {
     getSelectedTaskId: () => selectedTaskId,
     api,
     setActionStatus,
     setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
       agentMessages = messages || agentMessages;
     },
     renderAgentConversation,

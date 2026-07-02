@@ -8627,6 +8627,88 @@ def test_scroll_to_manual_workflow_section_captures_task_id():
     assert "if (selectedTaskId !== targetTaskId) return;" in body
 
 
+def test_gate_controller_context_factories_capture_task_id_before_write_back():
+    """UX-3: a driver turn is a synchronous long request; the user can switch
+    to a different task while task A's confirmation POST is still pending. If
+    A's response resolves after the switch, its setAgentMessages callback
+    must not overwrite the globals now backing task B's panel. Each of the
+    four *ControllerContext() factories must capture selectedTaskId at
+    creation time and compare against the live value before writing back.
+    """
+    app_js = _read_static("app.js")
+    for factory in (
+        "function modelingSetupControllerContext",
+        "function joinGateControllerContext",
+        "function screenGateControllerContext",
+        "function driverConfirmControllerContext",
+    ):
+        body = _slice_function(app_js, factory)
+        assert "const capturedTaskId = selectedTaskId;" in body, (
+            f"{factory} must capture selectedTaskId at creation time so a "
+            "later write-back can detect a task switch."
+        )
+        assert "if (selectedTaskId !== capturedTaskId) return;" in body, (
+            f"{factory}'s setAgentMessages must guard against writing a "
+            "finished task's messages into a different task's panel."
+        )
+
+
+def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally():
+    """Behavioral counterpart to the static guard check above: simulate
+    creating a controller context while task A is selected, switching to
+    task B, then having task A's pending request resolve. The resulting
+    setAgentMessages(...) call must be a no-op against the live globals.
+    """
+    app_js = _read_static("app.js")
+    context_bodies = "\n".join(
+        _slice_function(app_js, factory)
+        for factory in (
+            "function modelingSetupControllerContext",
+            "function joinGateControllerContext",
+            "function screenGateControllerContext",
+            "function driverConfirmControllerContext",
+        )
+    )
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-A';",
+            "let agentMessages = [];",
+            "function api() {}",
+            "function agentAcceptanceModeValue() { return 'manual'; }",
+            "function setActionStatus() {}",
+            "function renderAgentConversation() {}",
+            context_bodies,
+            "const results = {};",
+            "for (const [name, factory] of Object.entries({"
+            " modelingSetupControllerContext,"
+            " joinGateControllerContext,"
+            " screenGateControllerContext,"
+            " driverConfirmControllerContext,"
+            "})) {",
+            "  selectedTaskId = 'task-A';",
+            "  agentMessages = ['seed'];",
+            "  const ctx = factory();",
+            "  selectedTaskId = 'task-B';",
+            "  ctx.setAgentMessages(['A-turn-finished-late']);",
+            "  results[name] = agentMessages.slice();",
+            "}",
+            "process.stdout.write(JSON.stringify(results));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    results = json.loads(result.stdout)
+    for name, agent_messages in results.items():
+        assert agent_messages == ["seed"], (
+            f"{name}: a task-A response resolving after switching to task B "
+            f"must not overwrite agentMessages (got {agent_messages!r})."
+        )
+
+
 def test_recompute_agent_auto_scroll_follow_toggles_on_position():
     """Any wheel that leaves the bottom must drop follow-mode to false, even
     if the user only nudged up by a few pixels. Returning to the bottom (or
