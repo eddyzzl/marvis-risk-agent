@@ -1,5 +1,6 @@
 import json
 
+from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.reviewer import FinalReview, Reviewer
 from marvis.plugins.manifest import ToolRef
@@ -171,6 +172,22 @@ def test_reviewer_final_review_prompt_carries_real_metric_values():
     prompt = llm.calls[0]["user_prompt"]
     assert "0.4123" in prompt
     assert "0.71" in prompt
+
+
+def test_reviewer_llm_critique_skips_cleanly_when_no_llm_configured():
+    # AGT-6: manual mode (no LLM configured) previously rendered a deterministic
+    # "failed" llm_critic verdict with a raw exception message on every step. It
+    # must instead skip cleanly: passed=True, status="skipped", so it doesn't
+    # drown real deterministic failures in critique noise.
+    def factory():
+        raise LLMSettingsError("请先在设置中配置至少一个启用的大模型")
+
+    verdict = Reviewer(factory).llm_critique(_step([]), {"echoed": "hi"}, "finish")
+
+    assert verdict.reviewer == "llm_critic"
+    assert verdict.passed is True
+    assert verdict.status == "skipped"
+    assert verdict.reasons == ["skipped: no LLM configured"]
 
 
 def test_reviewer_llm_critique_marks_unparseable_reply_as_soft_warning():

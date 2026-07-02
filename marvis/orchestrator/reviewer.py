@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from marvis.agent.json_reply import load_json_object
+from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStep,
@@ -53,6 +54,21 @@ class Reviewer:
         )
 
     def llm_critique(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict:
+        # AGT-6: no LLM configured is the common manual-mode case, not a failure —
+        # every step used to deterministically render a "failed" llm_critic verdict
+        # (a full English exception message) purely because settings had no model
+        # enabled. Skip cleanly instead: passed=True, status="skipped", so manual
+        # mode doesn't drown real deterministic failures in critique noise.
+        try:
+            llm = self._llm_factory()
+        except LLMSettingsError:
+            return ReviewVerdict(
+                reviewer="llm_critic",
+                passed=True,
+                reasons=["skipped: no LLM configured"],
+                at=_now_iso(),
+                status="skipped",
+            )
         try:
             prompt = json.dumps(
                 {
@@ -63,7 +79,7 @@ class Reviewer:
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            raw = self._llm_factory().complete(
+            raw = llm.complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 stream=False,

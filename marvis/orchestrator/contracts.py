@@ -50,6 +50,11 @@ class ReviewVerdict:
     passed: bool
     reasons: list[str]
     at: str
+    # AGT-6: "skipped" marks a verdict that was never actually evaluated (no LLM
+    # configured, or the step didn't meet the critique trigger surface) — distinct
+    # from a real pass/fail so the frontend and review_warnings counters can tell
+    # "nothing to see here" apart from "a reviewer looked and found nothing wrong".
+    status: str = "evaluated"
 
 
 @dataclass
@@ -276,6 +281,7 @@ def _review_verdict_to_dict(verdict: ReviewVerdict) -> dict[str, Any]:
         "passed": verdict.passed,
         "reasons": list(verdict.reasons),
         "at": verdict.at,
+        "status": verdict.status,
     }
 
 
@@ -285,6 +291,7 @@ def _review_verdict_from_dict(payload: dict[str, Any]) -> ReviewVerdict:
         passed=bool(payload["passed"]),
         reasons=[str(item) for item in payload.get("reasons") or []],
         at=str(payload["at"]),
+        status=str(payload.get("status") or "evaluated"),
     )
 
 

@@ -95,10 +95,15 @@ export function stepStatusBadge(status) {
 }
 
 export function reviewVerdictHtml(verdicts = []) {
-  if (!verdicts.length) {
+  // AGT-6: a "skipped" verdict (no LLM configured, or the step didn't meet the
+  // critique trigger surface) was never actually evaluated — render nothing for
+  // it instead of a misleading pass/warning badge, so manual mode (no LLM) does
+  // not show a screen full of "警告 llm critique unavailable" noise.
+  const evaluated = verdicts.filter((verdict) => verdict.status !== "skipped");
+  if (!evaluated.length) {
     return "";
   }
-  const items = verdicts.map((verdict) => {
+  const items = evaluated.map((verdict) => {
     const reviewer = classToken(verdict.reviewer, "reviewer");
     const passed = Boolean(verdict.passed);
     const hardFail = reviewer === "deterministic" && !passed;
