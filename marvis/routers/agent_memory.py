@@ -13,6 +13,8 @@ from marvis.agent_memory.distillation import DistillationEngine
 from marvis.agent_memory.evolution import EvolutionManager
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.db import TaskRepository
+from marvis.llm_client import OpenAICompatibleLLMClient
+from marvis.llm_settings import resolve_llm_model
 
 
 router = APIRouter(prefix="/api", tags=["agent-memory"])
@@ -105,8 +107,12 @@ def consolidate_agent_memory(
     category: str | None = None,
 ) -> dict:
     store = AgentMemoryStore(request.app.state.settings.db_path)
+    workspace = request.app.state.settings.workspace
     scheduler = ConsolidationScheduler(
-        DistillationEngine(store),
+        DistillationEngine(
+            store,
+            llm_factory=lambda: OpenAICompatibleLLMClient(resolve_llm_model(workspace)),
+        ),
         EvolutionManager(store),
         store,
         async_mode=False,
