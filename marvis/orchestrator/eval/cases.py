@@ -171,6 +171,20 @@ INITIAL_EVAL_CASES: tuple[EvalCase, ...] = (
             "offline": True,
             "tool_outputs": {},
         },
+        # LLM-2/TST-1 finding: PlanValidator._check_determinism_checks only
+        # forces a range post_check when the LLM's chosen tool's own
+        # output_schema declares metric fields (ks/auc/...). It does nothing
+        # when the LLM instead picks a tool with a non-metric schema (e.g.
+        # "_sample.echo") and embeds a fabricated number in that step's
+        # inputs/reasoning -- there is no structural check for that path
+        # today, only the PLAN_SYS prompt instruction "你不计算任何指标".
+        # Tracked here rather than silently patched (out of scope for this
+        # eval-harness change; belongs to the validator/guardrail owners).
+        expected_failure=(
+            "no deterministic validator/parser guard blocks a plan step whose "
+            "tool has a non-metric output_schema from being used to smuggle a "
+            "fabricated metric value; only prompt wording defends this path"
+        ),
     ),
 )
 

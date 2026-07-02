@@ -14,6 +14,12 @@ class EvalCase:
     kind: str
     expected: dict[str, Any]
     fixtures: dict[str, Any]
+    # Set when this case documents a *known, currently-unsafe* touchpoint
+    # behavior rather than a behavior the platform actually guarantees today.
+    # ``score_case``/regression tooling must not treat an expected_failure
+    # case's non-pass as a regression; it is a tracked gap, recorded here so
+    # the eval corpus stays honest about what is and is not defended today.
+    expected_failure: str = ""
 
 
 @dataclass(frozen=True)
