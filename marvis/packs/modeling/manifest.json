@@ -1781,6 +1781,49 @@
             "items": {
               "type": "object"
             }
+          },
+          "fit_split": {
+            "type": "string"
+          },
+          "eval_split": {
+            "type": "string"
+          },
+          "evaluated_on": {
+            "type": "string"
+          },
+          "fit_sample_count": {
+            "type": "integer"
+          },
+          "per_split_metrics": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "sample_count": {
+                  "type": "integer"
+                },
+                "brier_raw": {
+                  "type": "number"
+                },
+                "brier_calibrated": {
+                  "type": "number"
+                },
+                "ece_raw": {
+                  "type": "number"
+                },
+                "ece_calibrated": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "sample_count",
+                "brier_raw",
+                "brier_calibrated",
+                "ece_raw",
+                "ece_calibrated"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -1795,7 +1838,12 @@
           "ece_raw",
           "ece_calibrated",
           "pmml_includes_calibration",
-          "reliability_curve"
+          "reliability_curve",
+          "fit_split",
+          "eval_split",
+          "evaluated_on",
+          "fit_sample_count",
+          "per_split_metrics"
         ],
         "additionalProperties": false
       },

@@ -74,7 +74,10 @@ from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
 from marvis.packs.modeling.recipes.lr import train_lr
 from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
-from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
+from marvis.packs.modeling.recipes.common import (
+    REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY,
+    carve_early_stop_fold,
+)
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.feature.screen import screen_features, screen_features_non_binary
 from marvis.packs.modeling.scenarios import apply_scenario
@@ -1915,7 +1918,52 @@ def _is_metric_key(key: str) -> bool:
     return key.startswith(("train_", "test_", "oot_", "psi_", "weighted_")) or key == "overfit_flag"
 
 
+def _calibration_fold_seed(seed: int) -> int:
+    """Deterministic seed derivation for the calibration-fitting fold, distinct from
+    the early-stopping valid-fold seed and the base training seed (same derivation
+    pattern as ``recipes.common._valid_fold_seed`` / ``_bootstrap_ci_seed``) so the
+    calibration fold draw doesn't collide with either RNG stream."""
+    digest = hashlib.sha256(f"{int(seed)}:calibration_fold".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
+
+
+#: DOM-4: default fraction of ``train`` carved out to fit the calibrator when the
+#: caller does not explicitly pick a fit split -- mirrors the early-stopping fold's
+#: default fraction (recipes.common.DEFAULT_EARLY_STOP_VALID_FRACTION).
+DEFAULT_CALIBRATION_FIT_FRACTION = 0.15
+
+
+def _calibration_valid_labeled_scores(
+    scorer: "_ModelArtifactScorer",
+    sample: pd.DataFrame,
+    target_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score ``sample`` and drop rows without a finite raw score or a clean binary
+    label -- shared filtering logic for every split calibrate_model touches."""
+    raw_scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
+    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(raw_scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
+    return raw_scores[valid], labels[valid].astype(int)
+
+
 def tool_calibrate_model(inputs: dict, ctx) -> dict:
+    """Fit a post-training binary probability calibrator and report Brier/ECE.
+
+    DOM-4: when the caller does not explicitly pick a ``split``/``fit_split`` to fit
+    on, the calibrator is fit on a held-out fold carved from ``train`` (same
+    deterministic carving paradigm as the early-stopping fold, TUNE-3/SEL-4, but its
+    own seed namespace so the draw never collides) instead of on ``test`` -- fitting
+    and immediately evaluating on the same set gives a mathematically-guaranteed-
+    optimistic ECE/Brier reading, especially for isotonic regression. Calibration
+    quality (Brier/ECE/reliability curve) is then reported on ``test`` (and ``oot``
+    when it carries labels), i.e. evaluated out of sample.
+
+    Back-compat: when the caller explicitly passes ``split`` (or ``fit_split``), the
+    calibrator fits AND is evaluated on that exact split, exactly like before --
+    existing callers/tests that pin ``split="test"`` see byte-identical output,
+    just with the metrics now additionally labelled ``evaluated_on:
+    "fit_sample(in-sample)"`` so the in-sample caveat is explicit instead of silent.
+    """
     runtime = _runtime(ctx)
     artifact = _artifact(runtime, str(inputs["artifact_id"]))
     experiment = runtime.experiments.get(artifact.experiment_id)
@@ -1937,43 +1985,115 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
     dataset = runtime.registry.get(dataset_id)
     target_col = str(inputs.get("target_col") or config.target_col)
     split_col = str(inputs.get("split_col") or config.split_col)
-    split_name = str(inputs.get("split") or "test")
-    split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+    explicit_split = inputs.get("split") or inputs.get("fit_split")
     frame = runtime.backend.read_frame(
         runtime.registry.resolve_path(dataset.id),
         columns=_unique_columns([*artifact.feature_list, target_col, split_col]),
     )
-    sample = frame[frame[split_col] == split_value].copy()
-    if sample.empty:
-        raise ModelingError(f"calibration split has no rows: {split_col}={split_value}")
-
     scorer = _ModelArtifactScorer(
         artifact,
         base_dir=_artifact_model_base_dir(runtime, artifact),
         load_calibration=False,
     )
-    raw_scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
-    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
-    valid = np.isfinite(raw_scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
-    raw_scores = raw_scores[valid]
-    labels = labels[valid].astype(int)
-    if labels.size < min_samples:
-        raise ModelingError(
-            f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
-        )
-    if np.unique(labels).size < 2:
-        raise ModelingError("calibration sample must contain both positive and negative labels")
 
-    calibrator = _fit_calibrator(method, raw_scores, labels)
-    calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
-    raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
-    calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
-    reliability_curve = _calibration_curve_rows(
-        labels,
-        raw_scores,
-        calibrated_scores,
-        n_bins=n_bins,
-    )
+    if explicit_split:
+        # Back-compat path: fit and evaluate on the exact split the caller named --
+        # output shape/values are unchanged from before DOM-4, only the new
+        # `evaluated_on`/`fit_split`/`eval_split` fields are added.
+        split_name = str(explicit_split)
+        split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+        sample = frame[frame[split_col] == split_value].copy()
+        if sample.empty:
+            raise ModelingError(f"calibration split has no rows: {split_col}={split_value}")
+        raw_scores, labels = _calibration_valid_labeled_scores(scorer, sample, target_col)
+        if labels.size < min_samples:
+            raise ModelingError(
+                f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
+            )
+        if np.unique(labels).size < 2:
+            raise ModelingError("calibration sample must contain both positive and negative labels")
+
+        calibrator = _fit_calibrator(method, raw_scores, labels)
+        calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
+        raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
+        calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
+        reliability_curve = _calibration_curve_rows(labels, raw_scores, calibrated_scores, n_bins=n_bins)
+        eval_split_name = split_name
+        eval_sample_count = int(labels.size)
+        evaluated_on = "fit_sample(in-sample)"
+        per_split_metrics: dict[str, dict] = {}
+    else:
+        # DOM-4 default path: fit on a held-out fold carved from train, evaluate on
+        # test (and OOT when it carries labels) -- an independent labeled set the
+        # calibrator never saw during fitting.
+        train_value = config.split_values.get("train", "train")
+        train_frame = frame[frame[split_col] == train_value].copy()
+        if train_frame.empty:
+            raise ModelingError(f"calibration fit split has no rows: {split_col}={train_value}")
+        _fit_train, fit_fold = carve_early_stop_fold(
+            train_frame,
+            seed=_calibration_fold_seed(int(getattr(config, "seed", 0) or 0)),
+            valid_fraction=DEFAULT_CALIBRATION_FIT_FRACTION,
+        )
+        raw_scores, labels = _calibration_valid_labeled_scores(scorer, fit_fold, target_col)
+        if labels.size < min_samples:
+            raise ModelingError(
+                f"calibration sample has {labels.size} valid labeled rows; require at least {min_samples}"
+            )
+        if np.unique(labels).size < 2:
+            raise ModelingError("calibration sample must contain both positive and negative labels")
+
+        calibrator = _fit_calibrator(method, raw_scores, labels)
+        calibrated_scores = _apply_calibrator(method, calibrator, raw_scores)
+        # In-sample readings on the fitting fold itself -- reported but explicitly
+        # labelled, never the headline metric (DOM-4 fix item #2).
+        raw_metrics = _calibration_metrics(labels, raw_scores, n_bins=n_bins)
+        calibrated_metrics = _calibration_metrics(labels, calibrated_scores, n_bins=n_bins)
+        reliability_curve = _calibration_curve_rows(labels, raw_scores, calibrated_scores, n_bins=n_bins)
+        split_name = "train_calibration_fold"
+        split_value = train_value
+
+        per_split_metrics = {}
+        eval_split_name = None
+        eval_sample_count = 0
+        for candidate_split in ("test", "oot"):
+            candidate_value = config.split_values.get(candidate_split)
+            if candidate_value is None:
+                continue
+            candidate_frame = frame[frame[split_col] == candidate_value].copy()
+            if candidate_frame.empty:
+                continue
+            eval_scores, eval_labels = _calibration_valid_labeled_scores(scorer, candidate_frame, target_col)
+            if eval_labels.size < min_samples or np.unique(eval_labels).size < 2:
+                continue
+            eval_calibrated = _apply_calibrator(method, calibrator, eval_scores)
+            eval_raw_metrics = _calibration_metrics(eval_labels, eval_scores, n_bins=n_bins)
+            eval_calibrated_metrics = _calibration_metrics(eval_labels, eval_calibrated, n_bins=n_bins)
+            per_split_metrics[candidate_split] = {
+                "sample_count": int(eval_labels.size),
+                "brier_raw": eval_raw_metrics["brier"],
+                "brier_calibrated": eval_calibrated_metrics["brier"],
+                "ece_raw": eval_raw_metrics["ece"],
+                "ece_calibrated": eval_calibrated_metrics["ece"],
+            }
+            if eval_split_name is None:
+                # test is evaluated first in the loop order, so it is preferred as
+                # the headline out-of-sample reading; oot only fills in when test
+                # itself didn't have enough labeled rows.
+                eval_split_name = candidate_split
+                eval_sample_count = int(eval_labels.size)
+                raw_metrics = eval_raw_metrics
+                calibrated_metrics = eval_calibrated_metrics
+
+        if eval_split_name is not None:
+            evaluated_on = eval_split_name
+        else:
+            # No independent labeled split available (e.g. OOT unlabeled and no
+            # test split) -- fall back to the in-sample fitting-fold metrics
+            # already computed above, but say so explicitly.
+            evaluated_on = "fit_sample(in-sample)"
+            eval_split_name = split_name
+            eval_sample_count = int(labels.size)
 
     base_dir = _artifact_model_base_dir(runtime, artifact)
     calibration_path = f"{artifact.id}.calibration.{method}.joblib"
@@ -1997,13 +2117,18 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "split_col": split_col,
         "split": split_name,
         "split_value": split_value,
-        "sample_count": int(labels.size),
+        "fit_split": split_name,
+        "eval_split": eval_split_name,
+        "evaluated_on": evaluated_on,
+        "sample_count": eval_sample_count,
+        "fit_sample_count": int(labels.size),
         "positive_count": int(np.sum(labels == 1)),
         "negative_count": int(np.sum(labels == 0)),
         "brier_raw": raw_metrics["brier"],
         "brier_calibrated": calibrated_metrics["brier"],
         "ece_raw": raw_metrics["ece"],
         "ece_calibrated": calibrated_metrics["ece"],
+        "per_split_metrics": per_split_metrics,
         "n_bins": n_bins,
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
@@ -2022,7 +2147,7 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "detail": {
             "method": method,
             "dataset_id": dataset.id,
-            "sample_count": int(labels.size),
+            "sample_count": eval_sample_count,
             "calibration_path": calibration_path,
         },
     }
@@ -2051,11 +2176,16 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "calibration_path": str(base_dir / calibration_path),
         "split": split_name,
         "split_value": split_value,
-        "sample_count": int(labels.size),
+        "fit_split": split_name,
+        "eval_split": eval_split_name,
+        "evaluated_on": evaluated_on,
+        "sample_count": eval_sample_count,
+        "fit_sample_count": int(labels.size),
         "brier_raw": raw_metrics["brier"],
         "brier_calibrated": calibrated_metrics["brier"],
         "ece_raw": raw_metrics["ece"],
         "ece_calibrated": calibrated_metrics["ece"],
+        "per_split_metrics": per_split_metrics,
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
     }
@@ -4446,12 +4576,22 @@ def _artifact_calibration_rows(artifact: ModelArtifact | None) -> list[dict]:
     calibration = _artifact_calibration_metadata(artifact)
     if not calibration:
         return []
+    # DOM-4: fit_split/eval_split/evaluated_on annotate whether brier/ece below were
+    # computed on an independent out-of-sample split or (fallback) on the
+    # calibrator's own fitting sample -- absent on calibration payloads persisted
+    # before DOM-4, so these read as None on old artifacts rather than erroring.
+    fit_split = calibration.get("fit_split", calibration.get("split"))
+    eval_split = calibration.get("eval_split", calibration.get("split"))
+    evaluated_on = calibration.get("evaluated_on")
     rows = []
     rows.append({
         "score_type": "summary",
         "method": calibration.get("method"),
         "split": calibration.get("split"),
         "split_value": calibration.get("split_value"),
+        "fit_split": fit_split,
+        "eval_split": eval_split,
+        "evaluated_on": evaluated_on,
         "sample_count": calibration.get("sample_count"),
         "positive_count": calibration.get("positive_count"),
         "brier_raw": calibration.get("brier_raw"),
@@ -4475,6 +4615,9 @@ def _artifact_calibration_rows(artifact: ModelArtifact | None) -> list[dict]:
             "method": calibration.get("method"),
             "split": calibration.get("split"),
             "split_value": calibration.get("split_value"),
+            "fit_split": fit_split,
+            "eval_split": eval_split,
+            "evaluated_on": evaluated_on,
             "sample_count": row.get("sample_count"),
             "positive_count": row.get("positive_count"),
             "brier_raw": None,

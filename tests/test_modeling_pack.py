@@ -700,6 +700,140 @@ def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
     assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.calibrate") == []
 
 
+def test_calibrate_model_default_fits_on_held_out_fold_and_evaluates_out_of_sample(tmp_path):
+    """DOM-4: without an explicit split/fit_split, calibrate_model must fit the
+    calibrator on a fold carved out of train (never test/oot) and report Brier/ECE
+    computed on test (an independent labeled set the calibrator never saw), not on
+    its own fitting sample -- the old default (fit AND evaluate on test) gave a
+    mathematically-guaranteed-optimistic reading."""
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"max_iter": 200},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    calibrated = runner.invoke(
+        ToolRef("modeling", "calibrate_model"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": dataset.id,
+            "method": "sigmoid",
+            "min_samples": 15,
+            "n_bins": 5,
+        },
+        task_id=task.id,
+    )
+    assert calibrated.ok is True, calibrated.error
+    out = calibrated.output
+
+    # Evaluation happened out of sample (on test, since it has enough labeled rows),
+    # never on the calibrator's own fitting fold.
+    assert out["fit_split"] == "train_calibration_fold"
+    assert out["eval_split"] == "test"
+    assert out["evaluated_on"] == "test"
+    assert out["sample_count"] == 60  # full test split size from _register_modeling_sample
+    assert 0 < out["fit_sample_count"] < 140  # a fraction of train, not all of it
+    assert "test" in out["per_split_metrics"]
+    assert "oot" in out["per_split_metrics"]
+    for split_metrics in out["per_split_metrics"].values():
+        assert split_metrics["ece_raw"] >= 0.0
+        assert split_metrics["ece_calibrated"] >= 0.0
+
+    # The fitting fold must be disjoint from the split it is evaluated against:
+    # replay the same deterministic carve used inside the tool and confirm no
+    # fitting-fold row index appears in the test split's row range.
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    train_frame = frame[frame["split"] == "train"].copy()
+    from marvis.packs.modeling.recipes.common import carve_early_stop_fold
+    from marvis.packs.modeling.tools import _calibration_fold_seed, DEFAULT_CALIBRATION_FIT_FRACTION
+
+    config_seed = 23  # matches the seed passed to train_model above
+    _fit_train, fit_fold = carve_early_stop_fold(
+        train_frame,
+        seed=_calibration_fold_seed(config_seed),
+        valid_fraction=DEFAULT_CALIBRATION_FIT_FRACTION,
+    )
+    test_frame = frame[frame["split"] == "test"]
+    assert set(fit_fold.index).isdisjoint(set(test_frame.index))
+    assert len(fit_fold) == out["fit_sample_count"]
+
+    # The report's "概率校准" sheet carries the fit/eval-split annotation so a
+    # reader can tell the metrics were computed out of sample.
+    report = runner.invoke(
+        ToolRef("modeling", "generate_model_report"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "dataset_id": dataset.id,
+        },
+        task_id=task.id,
+    )
+    assert report.ok is True, report.error
+    calibration_rows = report.output["calibration"]
+    assert calibration_rows[0]["fit_split"] == "train_calibration_fold"
+    assert calibration_rows[0]["eval_split"] == "test"
+    assert calibration_rows[0]["evaluated_on"] == "test"
+
+
+def test_calibrate_model_explicit_split_still_reports_in_sample_caveat(tmp_path):
+    """DOM-4 back-compat: an explicit split (the pre-DOM-4 default behaviour) still
+    fits AND evaluates on that same split -- output values are unchanged from
+    before DOM-4 -- but is now explicitly labelled in-sample instead of silently
+    presented as if it were an independent evaluation."""
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"max_iter": 200},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    calibrated = runner.invoke(
+        ToolRef("modeling", "calibrate_model"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": dataset.id,
+            "method": "sigmoid",
+            "split": "test",
+            "min_samples": 20,
+            "n_bins": 5,
+        },
+        task_id=task.id,
+    )
+    assert calibrated.ok is True, calibrated.error
+    out = calibrated.output
+    assert out["split"] == "test"
+    assert out["fit_split"] == "test"
+    assert out["eval_split"] == "test"
+    assert out["evaluated_on"] == "fit_sample(in-sample)"
+    assert out["sample_count"] == 60
+    assert out["fit_sample_count"] == 60
+    assert out["per_split_metrics"] == {}
+
+
 def _register_segment_sample(registry, tmp_path, task_id: str):
     """SEL-8 fixture: a channel column where channel B carries a much weaker
     signal than channel A -- large per-segment KS/AUC spread is the expected,
