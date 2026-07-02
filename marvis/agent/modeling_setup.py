@@ -54,6 +54,9 @@ class ModelingProposal:
     sample_weight_diagnostics: list[dict] = field(default_factory=list)
     business_columns: dict[str, object] = field(default_factory=dict)
     feature_dictionary_id: str = ""
+    # Auto-split config for flows where the split can only happen inside the plan
+    # (joined modeling: the frame does not exist until 执行拼接). {} = passthrough.
+    split_config: dict[str, object] = field(default_factory=dict)
 
     def template_slots(self) -> dict:
         selection_policy = _default_selection_policy(self.target_type)
@@ -71,7 +74,7 @@ class ModelingProposal:
                 "seed": self.seed,
                 "holdout_values": self.holdout_values,
                 "target_type": self.target_type,
-                "split_config": {},
+                "split_config": dict(self.split_config),
                 "sample_weight_col": self.sample_weight_col,
                 "sample_weight_candidates": list(self.sample_weight_candidates),
                 "sample_weight_diagnostics": list(self.sample_weight_diagnostics),
@@ -223,6 +226,7 @@ def build_modeling_proposal(
         notes.append("回归任务（连续型目标）：指标用 RMSE/MAE/R2,不计算坏率/KS/AUC。")
     elif target_type == "multiclass":
         notes.append("多分类任务：指标用 macro-AUC/logloss/准确率,不计算坏率/KS。")
+    auto_split_config: dict[str, object] = {}
     if setup.split_col:
         dataset_id = dataset.id
         split_col = setup.split_col
@@ -234,6 +238,9 @@ def build_modeling_proposal(
         split_values = {}
         counts = {}
         group_cols = _detect_group_cols(dataset)
+        # The joined frame does not exist yet, so the split must run inside the plan:
+        # make_split(split_col="") generates it from this config after 执行拼接.
+        auto_split_config = {"test_size": 0.25, "group_cols": group_cols}
         grouping = f"(按 `{group_cols[0]}` 分组防泄漏)" if group_cols else "(逐行随机)"
         notes.append(
             f"多文件建模将在拼接后自动 75/25 分组随机切 train/test{grouping};"
@@ -286,6 +293,7 @@ def build_modeling_proposal(
         sample_weight_diagnostics=weight_diagnostics,
         business_columns=business_columns,
         feature_dictionary_id=feature_dictionary_id,
+        split_config=auto_split_config,
     )
 
 

@@ -321,9 +321,8 @@
             "type": "integer"
           },
           "split_col": {
-            "type": "string",
-            "minLength": 1
-          }
+          "type": "string"
+        }
         },
         "required": [
           "dataset_id",

@@ -481,6 +481,66 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     assert "extra_score" in split_output["feature_cols"]
 
 
+def test_modeling_multiple_files_without_split_column_auto_splits_after_join(
+    client: TestClient, tmp_path: Path
+):
+    """Join + no split column: the joined frame does not exist at setup time, so the
+    plan's make_split step must generate the split (split_col="" + split_config) instead
+    of failing template validation with `$.split_col: '' should be non-empty`."""
+    src = tmp_path / "join_nosplit"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(7)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "sig1": rng.normal(size=n),
+        "sig2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+    }).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "extra_score": np.linspace(0, 1, n),
+    }).to_parquet(src / "feature_table.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "多表无切分", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    c1 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert c1["metadata"]["join_c1"]["anchor_id"]
+
+    # C1 confirm used to 409 here: plan validation rejected split_col="".
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (overview.get("metadata") or {}).get("error"), overview["content"]
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    plan = plans[-1]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    assert split_step.inputs.get("split_col") == ""
+    assert split_step.inputs.get("split_config", {}).get("test_size") == 0.25
+
+    # Drive through join and split to prove make_split really generates the split.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    join_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert join_gate["metadata"].get("kind") == "gate"
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert split_gate["metadata"].get("kind") == "gate", split_gate["content"]
+    plan = client.app.state.plan_repo.load_plan(plan.id)
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    split_output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert "extra_score" in split_output["feature_cols"]
+    counts = (split_output.get("sample_analysis") or {}).get("split_counts") or {}
+    assert set(counts) == {"train", "test"} and all(v > 0 for v in counts.values())
+
+
 def test_modeling_without_split_auto_generates_grouped_split(client: TestClient, tmp_path: Path):
     """No split column → make_split generates a grouped train/test split (no fabricated
     OOT) and modeling proceeds to the plan-overview gate, instead of erroring."""
