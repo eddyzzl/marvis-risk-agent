@@ -49,6 +49,31 @@ def _join_dir_with_conflicts(root: Path, n: int = 50) -> Path:
     return src
 
 
+def _join_dir_with_dictionary(root: Path, n: int = 50) -> Path:
+    """Like _join_dir but with a 字典.csv naming the join key columns (GAP-4): the
+    C1/C2 gates should annotate `id_no`/`id_no_md5` with their business meaning
+    instead of showing only the bare column codes. Reuses _join_dir's exact phone-
+    number-shaped key values (the join engine's fingerprint/alignment heuristics are
+    tuned to that shape) but under a column name that avoids marvis.redaction.
+    _SENSITIVE_KEY_RE (mobile/phone) — that regex matches on the dict *key* (the
+    column name) at plan-output persistence, so a mobile/phone-named key column
+    would scrub the dictionary map's values wholesale, same as any real sensitive
+    field would be. This test is about the dictionary-lookup wiring, not redaction."""
+    src = root / "join_with_dictionary"
+    src.mkdir(parents=True, exist_ok=True)
+    ids = [f"138{i:08d}" for i in range(n)]
+    pd.DataFrame({"id_no": ids, "bad_flag": [i % 2 for i in range(n)]}).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "id_no_md5": [hashlib.md5(i.encode()).hexdigest() for i in ids],
+        "balance": list(range(n)),
+    }).to_parquet(src / "features.parquet")
+    pd.DataFrame({
+        "特征名": ["id_no", "id_no_md5", "bad_flag", "balance"],
+        "含义": ["客户标识", "客户标识哈希", "是否坏账", "账户余额"],
+    }).to_csv(src / "字典.csv", index=False)
+    return src
+
+
 def _last_assistant(messages: list[dict]) -> dict:
     return [m for m in messages if m["role"] == "assistant"][-1]
 
@@ -98,6 +123,37 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "拼接执行完成" in done["content"]
     assert "1:1 保持" in done["content"]
+
+
+def test_data_join_c2_gate_annotates_key_columns_with_dictionary_meaning(client: TestClient, tmp_path: Path):
+    """GAP-4: when the task's materials include a data dictionary (字典.csv), the C2
+    diagnostics gate's "匹配键" cell should carry the business meaning next to the
+    raw column code, and the dictionary should register as its own dataset."""
+    src = _join_dir_with_dictionary(tmp_path)
+    resp = client.post("/api/tasks", json={
+        "model_name": "拼接字典测试",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "data_join",
+        "run_mode": "manual",
+    })
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["id"]
+
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接诊断完成" in gate["content"]
+    diagnostics_table = next(
+        t for t in gate["metadata"].get("tables", []) if t["title"].startswith("拼接诊断")
+    )
+    keys_cell = diagnostics_table["rows"][0][diagnostics_table["columns"].index("匹配键")]
+    assert "客户标识" in keys_cell
+
+    datasets = client.get(f"/api/tasks/{task_id}/datasets").json()["datasets"]
+    assert any(d["role"] == "feature_dictionary" for d in datasets)
 
 
 def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path: Path):

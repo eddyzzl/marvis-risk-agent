@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from marvis.agent.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
@@ -57,6 +58,10 @@ def build_feature_proposal(
     registry, backend, task_id: str, source_dir, *, metrics=None
 ) -> FeatureProposal:
     datasets = _resolve_datasets(registry, task_id, source_dir)
+    # GAP-4: register a data-dictionary material (if present) as a dataset, same
+    # detection the modeling setup flow already does. Best-effort/side-effect
+    # only — never blocks feature-analysis setup when no dictionary exists.
+    resolve_data_dictionary_id(registry, task_id, source_dir)
     joined = len(datasets) > 1
     if joined:
         ranked = propose_roles(datasets)

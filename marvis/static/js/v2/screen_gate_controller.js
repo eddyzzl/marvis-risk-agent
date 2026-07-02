@@ -79,6 +79,7 @@ function getState(messageId) {
 }
 
 function buildRows(screen, interactive) {
+  const dictionary = screen.dictionary && typeof screen.dictionary === "object" ? screen.dictionary : {};
   const scores = screen.scores && typeof screen.scores === "object" ? screen.scores : {};
   const selectedSet = new Set((screen.selected || []).map((value) => String(value)));
   const watchSet = new Set();
@@ -122,6 +123,7 @@ function buildRows(screen, interactive) {
       disabled: category === "unusable" || !interactive, // constant/sparse: no signal to select; also disabled when read-only
       isWatch: watchSet.has(name),
       isCategorical: categoricalSet.has(name),
+      businessName: dictionary[name] || "",
     });
   };
   for (const feature of screen.selected || []) pushRow(feature, undefined, "keep");
@@ -214,8 +216,14 @@ function sortIndicator(state, key) {
   return state.sortDir === "asc" ? " ▲" : " ▼";
 }
 
+const NUMERIC_SORT_KEYS = new Set(["ks", "iv", "missing_rate", "coverage", "ks_decay", "psi_split"]);
+
 function sortableHeader(label, key, state) {
-  return `<th><button type="button" class="screen-sort-btn" data-screen-sort="${escapeHtml(key)}" aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}${sortIndicator(state, key)}</button></th>`;
+  // Numeric headers get a dedicated class (not positional nth-child) so the
+  // right-align rule in v2-workbench.css still lines up even when the
+  // optional "业务含义" column shifts every later <th> over by one.
+  const headerClass = NUMERIC_SORT_KEYS.has(key) ? ' class="screen-num-header"' : "";
+  return `<th${headerClass}><button type="button" class="screen-sort-btn" data-screen-sort="${escapeHtml(key)}" aria-label="按${escapeHtml(label)}排序">${escapeHtml(label)}${sortIndicator(state, key)}</button></th>`;
 }
 
 function databarCell(value, fraction, tip) {
@@ -235,14 +243,18 @@ function ivTierBadge(value) {
   return `<span class="iv-tier-badge" data-tier="${escapeHtml(band.tier)}" title="${escapeHtml(ivTooltipText(value))}">${escapeHtml(band.label)}</span>`;
 }
 
-function renderRow(row, fractions, index) {
+function renderRow(row, fractions, index, hasDictionary) {
   const rowClasses = [`screen-row`, `screen-${row.category}`];
   if (row.isWatch) rowClasses.push("screen-watch");
   const ksTip = `KS ${screenNum(row.ks)}`;
   const ivTip = ivTooltipText(row.iv);
+  const businessNameCell = hasDictionary
+    ? `<td class="screen-meaning" title="${escapeHtml(row.businessName)}">${row.businessName ? escapeHtml(row.businessName) : '<span class="screen-meaning-empty">-</span>'}</td>`
+    : "";
   return `<tr class="${rowClasses.join(" ")}" data-screen-feature="${escapeHtml(row.name)}">
       <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" value="${escapeHtml(row.name)}"${row.checked ? " checked" : ""}${row.disabled ? " disabled" : ""} /></td>
       <td class="screen-feat">${escapeHtml(row.name)}</td>
+      ${businessNameCell}
       <td class="screen-num">${databarCell(row.ks, fractions.ks.get(index), ksTip)}</td>
       <td class="screen-num">${databarCell(row.iv, fractions.iv.get(index), ivTip)}${ivTierBadge(row.iv)}</td>
       <td class="screen-num">${escapeHtml(screenPct(row.missingRate))}</td>
@@ -295,8 +307,9 @@ function tableBodyHtml(message, options = {}) {
   const ksRows = filtered.map((row) => [row.ks]);
   const ivRows = filtered.map((row) => [row.iv]);
   const fractions = { ks: columnFractions(ksRows, 0), iv: columnFractions(ivRows, 0) };
+  const hasDictionary = allRows.some((row) => row.businessName);
   const pageStartIndex = (page - 1) * PAGE_SIZE;
-  const rowsHtml = pageRows.map((row, i) => renderRow(row, fractions, pageStartIndex + i)).join("");
+  const rowsHtml = pageRows.map((row, i) => renderRow(row, fractions, pageStartIndex + i, hasDictionary)).join("");
   const selectedCount = allRows.filter((row) => row.checked).length;
   const checkedLeakage = allRows.some((row) => row.checked && (row.category === "leakage" || row.category === "suspected"));
   const disabledAttr = interactive ? "" : " disabled aria-disabled=\"true\"";
@@ -314,13 +327,14 @@ function tableBodyHtml(message, options = {}) {
     selectedCount,
     checkedLeakage,
     disabledAttr,
+    hasDictionary,
   };
 }
 
 export function renderScreenGateTable(message, options = {}) {
   const built = tableBodyHtml(message, options);
   if (!built) return "";
-  const { screen, messageId, interactive, state, totalCounts, totalPages, page, rowsHtml, selectedCount, checkedLeakage, disabledAttr } = built;
+  const { screen, messageId, interactive, state, totalCounts, totalPages, page, rowsHtml, selectedCount, checkedLeakage, disabledAttr, hasDictionary } = built;
   const gateStepId = message?.metadata?.step_id ? String(message.metadata.step_id) : "";
   const thresholds = screen.thresholds && typeof screen.thresholds === "object" ? screen.thresholds : {};
   const leakageKs = thresholds.leakage_ks ?? 0.4;
@@ -361,8 +375,8 @@ export function renderScreenGateTable(message, options = {}) {
     ${bulkHtml}
     <div class="screen-table-scroll">
       <table class="screen-table">
-        <thead><tr><th>选</th>${sortableHeader("特征", "name", state)}${sortableHeader("KS", "ks", state)}${sortableHeader("IV", "iv", state)}${sortableHeader("缺失率", "missing_rate", state)}${sortableHeader("覆盖率", "coverage", state)}${sortableHeader("KS衰减", "ks_decay", state)}${sortableHeader("PSI", "psi_split", state)}<th>类别</th></tr></thead>
-        <tbody>${rowsHtml || '<tr class="screen-empty-row"><td colspan="9">没有匹配的特征</td></tr>'}</tbody>
+        <thead><tr><th>选</th>${sortableHeader("特征", "name", state)}${hasDictionary ? "<th>业务含义</th>" : ""}${sortableHeader("KS", "ks", state)}${sortableHeader("IV", "iv", state)}${sortableHeader("缺失率", "missing_rate", state)}${sortableHeader("覆盖率", "coverage", state)}${sortableHeader("KS衰减", "ks_decay", state)}${sortableHeader("PSI", "psi_split", state)}<th>类别</th></tr></thead>
+        <tbody>${rowsHtml || `<tr class="screen-empty-row"><td colspan="${hasDictionary ? 10 : 9}">没有匹配的特征</td></tr>`}</tbody>
       </table>
     </div>
     ${paginationHtml(page, totalPages)}

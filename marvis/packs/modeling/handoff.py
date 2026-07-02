@@ -10,7 +10,10 @@ from typing import Any
 
 import nbformat
 
+from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
+from marvis.data.backend import DataBackend
+from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, TaskRepository
 from marvis.domain import TASK_TYPE_VALIDATION, TaskCreate, TaskStatus
 from marvis.packs.modeling.artifact import export_pmml, persist_model_meta
@@ -68,7 +71,11 @@ def handoff_to_validation(
         artifact_base_dir=artifact_base_dir,
         material_dir=staged_materials.path,
     )
-    _write_dictionary(staged_materials.path / DICTIONARY_NAME, artifact.feature_list)
+    _write_dictionary(
+        staged_materials.path / DICTIONARY_NAME,
+        artifact.feature_list,
+        _handoff_business_names(settings, experiment.task_id),
+    )
     _write_scoring_notebook(
         staged_materials.path / SCORING_NOTEBOOK_NAME,
         artifact=artifact,
@@ -181,7 +188,11 @@ def create_challenger_backtest_task(
         artifact_base_dir=artifact_base_dir,
         material_dir=staged_materials.path,
     )
-    _write_dictionary(staged_materials.path / DICTIONARY_NAME, artifact.feature_list)
+    _write_dictionary(
+        staged_materials.path / DICTIONARY_NAME,
+        artifact.feature_list,
+        _handoff_business_names(settings, experiment.task_id),
+    )
     _write_scoring_notebook(
         staged_materials.path / SCORING_NOTEBOOK_NAME,
         artifact=artifact,
@@ -375,12 +386,32 @@ def _time_col(params: dict[str, Any]) -> str:
     return str(params.get("time_col") or "apply_month")
 
 
-def _write_dictionary(path: Path, feature_list: tuple[str, ...]) -> None:
+def _write_dictionary(path: Path, feature_list: tuple[str, ...], business_names: dict[str, str] | None = None) -> None:
+    """GAP-4: pass through the task's real data dictionary (feature -> business name)
+    when one is registered; falls back to the historical fixed placeholder "建模特征"
+    for any feature the dictionary doesn't name (or when no dictionary is registered
+    at all — the pre-fix behavior, unchanged)."""
+    names = business_names or {}
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["特征名", "类别"])
         writer.writeheader()
         for feature in feature_list:
-            writer.writerow({"特征名": feature, "类别": "建模特征"})
+            writer.writerow({"特征名": feature, "类别": names.get(feature) or "建模特征"})
+
+
+def _handoff_business_names(settings, task_id: str) -> dict[str, str]:
+    """Best-effort {feature: business_name} lookup for the task's registered data
+    dictionary (GAP-4). Returns {} on any failure or when none is registered — never
+    blocks a handoff/backtest package build."""
+    try:
+        backend = DataBackend(settings.datasets_dir)
+        registry = DatasetRegistry(DatasetRepository(settings.db_path), backend, settings.datasets_dir)
+        dictionary_id = first_data_dictionary_id(registry.list_for_task(task_id))
+        if not dictionary_id:
+            return {}
+        return load_business_names(backend, registry, dictionary_id)
+    except Exception:
+        return {}
 
 
 def _write_scoring_notebook(

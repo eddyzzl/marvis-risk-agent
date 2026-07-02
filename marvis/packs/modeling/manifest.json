@@ -553,6 +553,9 @@
           "sentinel_notice": {
             "type": "string"
           },
+          "dictionary": {
+            "type": "object"
+          },
           "split_shift": {
             "type": "array",
             "items": {

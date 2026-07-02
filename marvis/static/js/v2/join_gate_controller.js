@@ -166,12 +166,23 @@ export function handleC1ConfirmClick(event, context = {}) {
 // disagreeing columns doesn't blow out the picker layout.
 const DEDUP_CONFLICT_COLUMNS_DISPLAY_CAP = 5;
 
-function dedupConflictColumnsHtml(feature) {
+// GAP-4: when the task has a registered data dictionary, each conflicting column
+// name carries a title tooltip with its business meaning; falls back to the bare
+// column name (unchanged behavior) when no dictionary entry exists.
+function dedupColumnLabel(column, dictionary) {
+  const meaning = dictionary && typeof dictionary === "object" ? dictionary[column] : "";
+  return meaning
+    ? `<span class="dedup-conflict-column" title="${escapeHtml(String(meaning))}">${escapeHtml(column)}</span>`
+    : escapeHtml(column);
+}
+
+function dedupConflictColumnsHtml(feature, dictionary) {
   const columns = Array.isArray(feature?.conflict_columns) ? feature.conflict_columns : [];
   if (!columns.length) return "";
   const shown = columns.slice(0, DEDUP_CONFLICT_COLUMNS_DISPLAY_CAP);
   const more = columns.length > shown.length ? ` 等 ${columns.length} 列` : "";
-  return `<div class="dedup-conflict-columns">冲突列：${escapeHtml(shown.join("、"))}${more}</div>`;
+  const labels = shown.map((column) => dedupColumnLabel(column, dictionary)).join("、");
+  return `<div class="dedup-conflict-columns">冲突列：${labels}${more}</div>`;
 }
 
 // UX-6: one real conflicting-value example per feature (e.g. "k=138... 时 balance
@@ -211,7 +222,7 @@ export function renderDedupPicker(message, options = {}) {
           return `<option value="${escapeHtml(value)}">${escapeHtml(DEDUP_STRATEGY_LABELS[value] || value)}</option>`;
         })
         .join("");
-      const evidence = dedupConflictColumnsHtml(feature) + dedupExampleHtml(feature);
+      const evidence = dedupConflictColumnsHtml(feature, dedup.dictionary) + dedupExampleHtml(feature);
       // UX-6: "排除该特征表" — an exit for a table whose conflicts are too dirty to
       // resolve with first/last. Submits the same free-text instruction channel the
       // driver already routes adjust/replan through (agent mode acts on it; manual

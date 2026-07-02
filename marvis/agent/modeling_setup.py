@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from marvis.agent.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.join_setup import propose_roles
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
@@ -134,7 +135,6 @@ _BUSINESS_COLUMN_ALIASES = {
     "drawdown_amount_col": ("drawdown_amount", "drawdown", "支用金额", "提款金额", "放款支用金额"),
     "credit_limit_col": ("credit_limit", "limit", "授信额度", "额度", "信用额度"),
 }
-_FEATURE_DICTIONARY_ROLES = frozenset({"feature_dictionary", FileRole.DATA_DICTIONARY.value})
 
 
 def build_modeling_proposal(
@@ -291,7 +291,7 @@ def build_modeling_proposal(
         notes.append(f"算法:{'/'.join(recipe_list)}（多算法训练后按 {_selection_metric_label(target_type)} 取最优）。")
     else:
         notes.append(f"算法:`{recipe_list[0]}`（可选 {'/'.join(_SUPPORTED_RECIPES)}）。")
-    feature_dictionary_id = _resolve_feature_dictionary_id(registry, task_id, source_dir)
+    feature_dictionary_id = resolve_data_dictionary_id(registry, task_id, source_dir)
     if business_columns:
         notes.append("已识别建模报告业务列，将生成样本分析/Vintage/金额分箱/低定价等可用章节。")
     if feature_dictionary_id:
@@ -371,30 +371,6 @@ def _is_mob_observe_column(column: str) -> bool:
     normalized = column.strip().lower().replace("_", "").replace("-", "")
     suffix = normalized[3:] if normalized.startswith("mob") else ""
     return bool(suffix) and suffix[0].isdigit()
-
-
-def _resolve_feature_dictionary_id(registry, task_id: str, source_dir) -> str:
-    existing = _first_feature_dictionary(registry.list_for_task(task_id))
-    if existing:
-        return existing
-    if source_dir is None:
-        return ""
-    for artifact in scan_source_dir(Path(source_dir)):
-        if artifact.role == FileRole.DATA_DICTIONARY:
-            dataset = registry.register_from_upload(
-                task_id,
-                Path(artifact.path),
-                role="feature_dictionary",
-            )
-            return dataset.id
-    return ""
-
-
-def _first_feature_dictionary(datasets) -> str:
-    for dataset in datasets:
-        if str(getattr(dataset, "role", "")) in _FEATURE_DICTIONARY_ROLES:
-            return str(dataset.id)
-    return ""
 
 
 def _derive_target_type(recipe_list: list[str]) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from marvis.agent.data_dictionary import resolve_data_dictionary_id
 from marvis.agent.sample_setup import detect_setup
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
@@ -65,6 +66,10 @@ def build_vintage_proposal(
     time_col: str | None = None,
 ) -> VintageProposal:
     dataset = _resolve_dataset(registry, task_id, source_dir)
+    # GAP-4: register a data-dictionary material (if present) as a dataset, same
+    # detection the modeling setup flow already does. Best-effort/side-effect
+    # only — never blocks vintage setup when no dictionary exists.
+    resolve_data_dictionary_id(registry, task_id, source_dir)
     path = registry.resolve_path(dataset.id)
     columns = backend.column_names(path)
     cohort_col = _resolve_named_col(columns, time_col, _COHORT_HINTS)
