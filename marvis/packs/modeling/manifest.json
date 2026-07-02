@@ -537,6 +537,18 @@
           "sentinel_notice": {
             "type": "string"
           },
+          "split_shift": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "leakage_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
           "note": {
             "type": "string"
           }

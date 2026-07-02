@@ -501,6 +501,10 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     }
     if suspected_categorical:
         payload["suspected_categorical"] = suspected_categorical
+    if result.split_shift:
+        payload["split_shift"] = [[feature, delta, reason] for feature, delta, reason in result.split_shift]
+    if result.leakage_watch:
+        payload["leakage_watch"] = [[feature, ks, reason] for feature, ks, reason in result.leakage_watch]
     if result.sentinel_columns:
         payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
         payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)

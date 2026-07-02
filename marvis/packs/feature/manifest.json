@@ -106,6 +106,8 @@
           "suspected_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
           "sentinel_columns": {"type": "object"},
           "sentinel_notice": {"type": "string"},
+          "split_shift": {"type": "array", "items": {"type": "array"}},
+          "leakage_watch": {"type": "array", "items": {"type": "array"}},
           "note": {"type": "string"}
         },
         "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],

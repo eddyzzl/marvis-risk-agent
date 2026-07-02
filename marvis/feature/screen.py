@@ -33,6 +33,19 @@ _SUSPECTED_OUTPUT = re.compile(
     re.IGNORECASE,
 )
 
+# FS-4 watch-band: pooled-dev KS below the hard ``leakage_ks`` gate but at or above this
+# floor is strong enough to be conditional/partial leakage (a field that only leaks in
+# part of the population or is a non-linear near-copy of the label), so it is surfaced for
+# confirmation instead of passing silently as a high-ranked feature.
+LEAKAGE_WATCH_LOW = 0.30
+# FS-4 split-shift: a per-feature |ks_train - ks_test| above this flags a migration-type
+# leak (weak in-sample, anomalously strong in a later split) that the pooled KS averages away.
+SPLIT_SHIFT_THRESHOLD = 0.15
+# FS-4/FS-6 default non-holdout split labels used to derive the train vs test masks for
+# per-split KS. A dataset whose split_col carries none of these yields no per-split flags.
+_TRAIN_VALUES = ("train",)
+_TEST_VALUES = ("test",)
+
 
 @dataclass(frozen=True)
 class ScreenResult:
@@ -53,6 +66,15 @@ class ScreenResult:
     """Columns with a suspected sentinel/special value (PREP-4): {feature: [(value, share), ...]}.
     Purely informational (screen_features never drops or auto-treats these) so the caller
     can prompt for a sentinel_values confirmation before fitting impute/cap/normalize/bin/woe."""
+    split_shift: tuple[tuple[str, float, str], ...] = ()
+    """FS-4 split-shift suspicions: features whose |ks_train - ks_test| exceeds
+    ``SPLIT_SHIFT_THRESHOLD`` — a migration-type / conditional-leakage signal (a field
+    backfilled or redefined over time) that the pooled-dev KS gate cannot see. Purely
+    informational: (feature, |ks_train - ks_test|, reason)."""
+    leakage_watch: tuple[tuple[str, float, str], ...] = ()
+    """FS-4 watch-band: features whose pooled-dev KS lands in [LEAKAGE_WATCH_LOW, leakage_ks)
+    — strong-but-below the hard leakage gate, surfaced for confirmation rather than blocked:
+    (feature, ks, reason)."""
 
 
 def _dev_mask(
@@ -68,6 +90,25 @@ def _dev_mask(
     split = frame[split_col].astype("string")
     held = split.isin(list(holdout_values)).to_numpy(na_value=False)
     return ~held
+
+
+def _split_value_masks(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    train_values: tuple[str, ...] = _TRAIN_VALUES,
+    test_values: tuple[str, ...] = _TEST_VALUES,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """FS-4/FS-6 per-split masks: rows labelled train vs test in ``split_col`` (holdout
+    labels like OOT are neither). Returns ``(None, None)`` when ``split_col`` is absent or
+    either split is empty, so callers simply produce no per-split KS (never an error)."""
+    if not split_col or split_col not in frame.columns:
+        return None, None
+    split = frame[split_col].astype("string")
+    train_mask = split.isin(list(train_values)).to_numpy(na_value=False)
+    test_mask = split.isin(list(test_values)).to_numpy(na_value=False)
+    if not train_mask.any() or not test_mask.any():
+        return None, None
+    return train_mask, test_mask
 
 
 def screen_features(
@@ -99,6 +140,11 @@ def screen_features(
     target = base[target_col].to_numpy(dtype=float)
     dev = _dev_mask(base, split_col, holdout_values)
     target_dev = target[dev]
+    # FS-4/FS-6: per-split (train vs test) target vectors for split-shift + KS-decay
+    # detection. None when the dataset has no usable train/test split (no per-split flags).
+    train_mask, test_mask = _split_value_masks(base, split_col)
+    target_train = target[train_mask] if train_mask is not None else None
+    target_test = target[test_mask] if test_mask is not None else None
 
     scores: dict[str, dict[str, float | None]] = {}
     leakage: list[tuple[str, float, str]] = []
@@ -106,6 +152,8 @@ def screen_features(
     unusable: list[tuple[str, str]] = []
     clean: list[tuple[str, float]] = []
     sentinel_columns: dict[str, list[tuple[float, float]]] = {}
+    split_shift: list[tuple[str, float, str]] = []
+    leakage_watch: list[tuple[str, float, str]] = []
 
     for start in range(0, len(feats), max(1, batch_size)):
         batch = feats[start : start + batch_size]
@@ -127,9 +175,36 @@ def screen_features(
                 continue
             ks = feature_ks(v_dev, target_dev)
             scores[col] = {"ks": ks, "missing_rate": missing_rate, "unique_count": unique}
+            # FS-4/FS-6: per-split train vs test KS (only when both splits exist). Recorded
+            # for every screened column so the split-shift flag and KS-decay report share it.
+            ks_train = ks_test = None
+            if target_train is not None and target_test is not None:
+                ks_train = feature_ks(values[train_mask], target_train)
+                ks_test = feature_ks(values[test_mask], target_test)
+                scores[col]["ks_train"] = ks_train
+                scores[col]["ks_test"] = ks_test
             if ks >= leakage_ks:
                 leakage.append((col, ks, f"univariate KS {ks:.3f} >= {leakage_ks} — suspected target leakage"))
                 continue
+            # FS-4 split-shift: a big train/test KS gap on a below-gate feature is a
+            # migration-type / conditional-leakage signal the pooled KS averages away.
+            if ks_train is not None and ks_test is not None:
+                delta = abs(ks_train - ks_test)
+                if delta > SPLIT_SHIFT_THRESHOLD:
+                    split_shift.append((
+                        col,
+                        delta,
+                        f"split_shift: |ks_train {ks_train:.3f} - ks_test {ks_test:.3f}| = "
+                        f"{delta:.3f} > {SPLIT_SHIFT_THRESHOLD} — confirm the field is stable over time",
+                    ))
+            # FS-4 watch-band: strong-but-below the hard gate — informational, not blocked.
+            if ks >= LEAKAGE_WATCH_LOW:
+                leakage_watch.append((
+                    col,
+                    ks,
+                    f"leakage_watch: univariate KS {ks:.3f} in [{LEAKAGE_WATCH_LOW}, {leakage_ks}) "
+                    "— strong single-variable signal, confirm it is not partial/conditional leakage",
+                ))
             if _SUSPECTED_OUTPUT.search(col):
                 suspected.append((col, ks, "name looks like a model output/score — confirm it is an allowed input"))
             clean.append((col, ks))
@@ -163,6 +238,8 @@ def screen_features(
         scores=scores,
         n_screened=len(scores) + len(unusable),
         sentinel_columns=sentinel_columns,
+        split_shift=tuple(sorted(split_shift, key=lambda z: z[1], reverse=True)),
+        leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
     )
 
 
