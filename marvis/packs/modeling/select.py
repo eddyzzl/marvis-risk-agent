@@ -12,7 +12,7 @@ from marvis.feature.correlation import correlation_matrix, find_collinear_pairs,
 from marvis.feature.encode import woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
-from marvis.feature.metrics import feature_ks, feature_metrics
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_ks, feature_metrics
 from marvis.packs.modeling.prepare import SPLIT_COLUMN
 
 
@@ -169,18 +169,27 @@ def _select_features_raw(
             frame[feature].to_numpy(dtype=float),
             target,
             feature=feature,
+            bins=DEFAULT_IV_BINS,
         )
-        scores[feature] = {"iv": float(metrics.iv), "ks": float(metrics.ks), "space": "raw"}
+        # FS-9: record the binning convention (equal-frequency, DEFAULT_IV_BINS bins) so
+        # this IV is comparable against the WOE-space chimerge convention (see below).
+        scores[feature] = {
+            "iv": float(metrics.iv),
+            "ks": float(metrics.ks),
+            "space": "raw",
+            "iv_binning": f"equal_frequency_{DEFAULT_IV_BINS}",
+        }
         if metrics.iv < iv_min:
             dropped.append((feature, f"low IV {metrics.iv:.3f}"))
         else:
             kept.append(feature)
 
+    warnings: list[str] = []
     kept, dropped = _drop_collinear(frame, features, kept, dropped, scores, corr_max, label="")
-    kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="")
+    kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="", warnings=warnings)
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
     return SelectionResult(
-        tuple(kept), tuple(dropped), scores, nan_labels_dropped,
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped, tuple(warnings),
         fit_rows=fit_rows, fit_split=fit_split,
     )
 
@@ -227,24 +236,31 @@ def _select_features_woe(
         woe = woe_result_from_binning(binning)
         encoded[feature] = woe_encode(frame, feature, woe).to_numpy(dtype=float)
         directions[feature] = resolved_direction
+        # FS-9: record the binning convention — this path always uses chimerge with
+        # max_bins bins (a different convention than the raw-space equal-frequency default;
+        # the 0.02 iv_min threshold means different things under each, so record which was
+        # used rather than silently mixing them).
         scores[feature] = {
             "iv": float(binning.total_iv),
             "ks": float(feature_ks(encoded[feature].to_numpy(dtype=float), target)),
             "space": "woe",
             "monotonic_direction": resolved_direction,
             "bin_count": len(binning.bins),
+            "iv_binning": f"chimerge_{max_bins}",
         }
         if binning.total_iv < iv_min:
             dropped.append((feature, f"low WOE IV {binning.total_iv:.3f}"))
         else:
             kept.append(feature)
 
+    warnings: list[str] = []
     kept, dropped = _drop_collinear(encoded, features, kept, dropped, scores, corr_max, label="WOE ")
-    kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ")
+    kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ", warnings=warnings)
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
-    warnings = tuple(_woe_sign_warnings(encoded, kept, target_arr, scores, directions) if sign_check else ())
+    if sign_check:
+        warnings.extend(_woe_sign_warnings(encoded, kept, target_arr, scores, directions))
     return SelectionResult(
-        tuple(kept), tuple(dropped), scores, nan_labels_dropped, warnings,
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped, tuple(warnings),
         fit_rows=fit_rows, fit_split=fit_split,
     )
 
@@ -281,15 +297,31 @@ def _drop_high_vif(
     vif_max: float,
     *,
     label: str,
+    warnings: list[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
     vifs = vif(frame, kept)
     for feature in features:
         if feature in vifs:
-            scores.setdefault(feature, {})["vif"] = float(vifs[feature])
+            # FS-8: keep None (VIF unavailable) visible instead of coercing to a number.
+            value = vifs[feature]
+            scores.setdefault(feature, {})["vif"] = None if value is None else float(value)
+    skipped = 0
     for feature, value in vifs.items():
-        if value > vif_max and feature in kept:
+        if feature not in kept:
+            continue
+        # FS-8: VIF unavailable (insufficient complete-row sample) -> do NOT drop and do
+        # NOT compare None; record that the gate was skipped for this feature.
+        if value is None:
+            skipped += 1
+            continue
+        if value > vif_max:
             kept.remove(feature)
             dropped.append((feature, f"high {label}VIF {value:.1f}"))
+    if skipped:
+        warnings.append(
+            f"{label}VIF 样本不足（完整行数不足 max(30, 2×特征数)），"
+            f"已跳过 {skipped} 个特征的 VIF 门（其 vif 记为 None）"
+        )
     return kept, dropped
 
 

@@ -87,7 +87,8 @@
           "leakage_ks": {"type": "number"},
           "max_missing_rate": {"type": "number"},
           "top_k": {"type": "integer", "minimum": 1},
-          "batch_size": {"type": "integer", "minimum": 1}
+          "batch_size": {"type": "integer", "minimum": 1},
+          "max_ks_decay": {"type": "number"}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
@@ -106,6 +107,9 @@
           "suspected_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
           "sentinel_columns": {"type": "object"},
           "sentinel_notice": {"type": "string"},
+          "split_shift": {"type": "array", "items": {"type": "array"}},
+          "leakage_watch": {"type": "array", "items": {"type": "array"}},
+          "ks_decay_watch": {"type": "array", "items": {"type": "array"}},
           "note": {"type": "string"}
         },
         "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],

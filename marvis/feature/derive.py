@@ -14,6 +14,11 @@ from marvis.feature.metrics import feature_metrics
 ALLOWED_CROSS_OPS = {"add", "sub", "mul", "div", "ratio"}
 ALLOWED_AGGS = {"mean", "max", "min", "std", "sum", "count"}
 ALLOWED_DATE_KINDS = {"datediff", "month", "tenure_months"}
+# FS-11: single-column transform operators (log1p/rank). Time-window operators like
+# diff/ratio_over_time need a per-entity ordering/history concept that this platform's
+# one-row-per-entity sample-table architecture does not have (no panel/history column
+# exists anywhere in marvis.data or marvis.feature) — scoped out until that exists.
+ALLOWED_TRANSFORMS = {"log1p", "rank"}
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 CROSS_SYS = (
     "你基于特征的业务含义推荐值得交叉的特征对和运算，给出理由。"
@@ -58,6 +63,41 @@ def cross_arithmetic(
         out[f"{col_a}_div_{col_b}"] = left / denominator
     if "ratio" in ops:
         out[f"{col_a}_ratio_{col_b}"] = left / denominator
+
+    _assert_no_conflicts(df, out)
+    return df.assign(**out), list(out.keys())
+
+
+def transform_feature(
+    df: pd.DataFrame,
+    col: str,
+    transforms: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    """Single-column transform operators (FS-11): ``log1p`` and ``rank``.
+
+    Deterministic, no groupby, no target read -- there is no target-leakage surface here
+    (unlike ``aggregate_feature``'s group-level statistics), so no ``target_col`` guard is
+    needed. ``log1p`` follows the platform's "missing over wrong" convention (see
+    ``cross_arithmetic``'s divide-by-zero -> NaN handling): ``np.log1p`` on a value <= -1
+    is mathematically undefined (would be -inf or complex), so those inputs are masked to
+    NaN before the transform rather than silently producing -inf. ``rank`` is a fractional
+    rank in [0, 1] (average rank on ties, NaN stays NaN) -- a monotonic, scale-free
+    recoding that is often more robust to outliers/skew than the raw value.
+    """
+    _assert_columns(df, [col])
+    if not transforms:
+        raise FeatureError("transform ops must not be empty")
+    invalid = [op for op in transforms if op not in ALLOWED_TRANSFORMS]
+    if invalid:
+        raise FeatureError(f"unsupported transform ops: {', '.join(invalid)}")
+
+    values = pd.to_numeric(df[col], errors="raise")
+    out = {}
+    if "log1p" in transforms:
+        safe = values.where(values > -1)  # <= -1 -> NaN (missing over wrong), not -inf
+        out[f"{col}__log1p"] = np.log1p(safe)
+    if "rank" in transforms:
+        out[f"{col}__rank"] = values.rank(pct=True)
 
     _assert_no_conflicts(df, out)
     return df.assign(**out), list(out.keys())
@@ -252,6 +292,8 @@ def derive_batch(
             )
         elif kind == "ratio":
             out, cols = cross_arithmetic(out, str(item["num"]), str(item["den"]), ["ratio"])
+        elif kind == "transform":
+            out, cols = transform_feature(out, str(item["col"]), list(item["ops"]))
         else:
             raise FeatureError(f"unsupported derive recipe kind: {kind}")
         repeated = set(new_cols).intersection(cols)
@@ -417,6 +459,7 @@ def _op_from_col(col: str, col_a: str, col_b: str) -> str:
 
 __all__ = [
     "ALLOWED_DATE_KINDS",
+    "ALLOWED_TRANSFORMS",
     "CROSS_SYS",
     "CrossRecommendation",
     "aggregate_feature",
@@ -426,4 +469,5 @@ __all__ = [
     "derive_date_features",
     "evaluate_crosses",
     "recommend_feature_crosses",
+    "transform_feature",
 ]

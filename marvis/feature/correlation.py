@@ -46,13 +46,27 @@ def safe_correlation(x: np.ndarray, y: np.ndarray) -> float:
 _VIF_CAP = 1e9
 
 
-def vif(df: pd.DataFrame, features: list[str]) -> dict[str, float]:
-    result = {feature: 0.0 for feature in features}
+def vif(df: pd.DataFrame, features: list[str]) -> dict[str, float | None]:
+    """Variance-inflation factors from the listwise-complete rows of ``features``.
+
+    Returns ``None`` for every feature (FS-8) when the complete-row intersection is too
+    small — ``len(clean) < max(30, 2 * len(usable))`` — instead of silently returning 0.0.
+    On a high-missing credit wide table the complete-row intersection is routinely near-empty,
+    which would make the VIF gate a no-op; ``None`` lets the caller report "VIF unavailable"
+    rather than quietly skip collinearity removal.
+    """
+    result: dict[str, float | None] = {feature: 0.0 for feature in features}
     # Exclude entirely-NaN columns from the design matrix; otherwise a single all-NaN
     # feature empties the listwise-dropped frame and would zero EVERY feature's VIF.
     usable = [feature for feature in features if df[feature].notna().any()]
     clean = df[usable].dropna()
     if clean.empty or len(usable) < 2:
+        return result
+    # FS-8: too few complete rows -> the estimate is either empty (gate silently disabled)
+    # or fit on a handful of rows (unstable). Signal "unavailable" for the usable columns.
+    if len(clean) < max(30, 2 * len(usable)):
+        for feature in usable:
+            result[feature] = None
         return result
     for feature in usable:
         others = [item for item in usable if item != feature]

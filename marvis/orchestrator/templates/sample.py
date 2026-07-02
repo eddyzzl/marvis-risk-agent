@@ -1041,16 +1041,18 @@ FEATURE_DERIVATION = WorkflowTemplate(
             post_checks=(PostCheck("nonempty", {"field": "metrics"}),),
         ),
         StepTemplate(
-            # spec form B §4: leakage-aware screening yields the selected feature set the
-            # downstream model should use (the title's "筛选" was previously unimplemented).
+            # spec form B §4 + FS-5: leakage-aware screening runs on the DERIVED dataset over
+            # the union of base + newly derived columns, so the derived columns actually enter
+            # the leakage/redundancy screen (previously it re-screened the original dataset and
+            # base columns, so the derived columns never reached selection).
             title="特征筛选",
             tool_ref=ToolRef("feature", "screen_features"),
             inputs_template={
-                "dataset_id": "{slot:dataset_id}",
-                "features": "{slot:feature_cols}",
+                "dataset_id": "$ref:衍生特征.output.result_dataset_id",
+                "features": ["{slot:feature_cols}", "$ref:衍生特征.output.new_columns"],
                 "target_col": "{slot:target_col}",
             },
-            depends_on_titles=("分析衍生特征",),
+            depends_on_titles=("衍生特征", "分析衍生特征"),
             post_checks=(),
             phase="特征分析",
         ),

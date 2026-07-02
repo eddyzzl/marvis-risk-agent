@@ -169,6 +169,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=int(top_k) if top_k is not None else None,
         batch_size=int(inputs.get("batch_size", 500)),
+        max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
     )
     payload = {
         "selected": list(result.selected),
@@ -182,6 +183,12 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     }
     if suspected_categorical:
         payload["suspected_categorical"] = suspected_categorical
+    if result.split_shift:
+        payload["split_shift"] = [[feature, delta, reason] for feature, delta, reason in result.split_shift]
+    if result.leakage_watch:
+        payload["leakage_watch"] = [[feature, ks, reason] for feature, ks, reason in result.leakage_watch]
+    if result.ks_decay_watch:
+        payload["ks_decay_watch"] = [[feature, decay, reason] for feature, decay, reason in result.ks_decay_watch]
     if result.sentinel_columns:
         payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
         payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
@@ -256,6 +263,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         runtime.registry.resolve_path(dataset.id),
         features=features,
         target_col=str(inputs["target_col"]),
+        target_type=str(inputs.get("target_type") or "continuous"),
         split_col=str(inputs["split_col"]) if inputs.get("split_col") else None,
         holdout_values=tuple(str(value) for value in holdout) if holdout else ("oot",),
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
@@ -760,7 +768,7 @@ def _resolve_feature_cols(
     target_col: str,
     split_col: str | None = None,
 ) -> list[str]:
-    provided = [str(item) for item in (features or []) if str(item).strip()]
+    provided = _flatten_feature_cols(features)
     if provided:
         return provided
     dataset = runtime.registry.get(str(dataset_id))
@@ -773,6 +781,22 @@ def _resolve_feature_cols(
     if not inferred:
         raise FeatureError("未找到可用候选特征列;请检查拼接结果或指定特征列。")
     return inferred
+
+
+def _flatten_feature_cols(features) -> list[str]:
+    """Flatten a features input that may be a union of lists (FS-5): a workflow can pass
+    ``features=[<base cols>, <$ref new_columns>]`` which resolves to nested lists; screen
+    them together as one de-duplicated flat set (input order preserved)."""
+    flat: list[str] = []
+    seen: set[str] = set()
+    for item in (features or []):
+        candidates = item if isinstance(item, (list, tuple)) else [item]
+        for candidate in candidates:
+            name = str(candidate).strip()
+            if name and name not in seen:
+                seen.add(name)
+                flat.append(name)
+    return flat
 
 
 def _read_frame(

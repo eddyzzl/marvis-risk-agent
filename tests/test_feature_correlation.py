@@ -34,10 +34,13 @@ def test_correlation_matrix_and_collinear_pairs():
 
 
 def test_vif_and_correlation_report_shape():
+    # >= max(30, 2*features) complete rows so the FS-8 insufficient-sample guard passes.
+    n = 40
+    x1 = np.arange(1, n + 1, dtype=float)
     frame = pd.DataFrame({
-        "x1": [1, 2, 3, 4],
-        "x2": [2, 4, 6, 8],
-        "x3": [1, 1, 2, 3],
+        "x1": x1,
+        "x2": 2 * x1,                       # perfectly collinear with x1
+        "x3": (np.arange(n) * 7 % 11).astype(float),
     })
 
     values = vif(frame, ["x1", "x2", "x3"])
@@ -57,7 +60,9 @@ def test_vif_is_json_safe_under_perfect_collinearity():
     response setting) — i.e. no Infinity leaks to the HTTP/browser layer."""
     import json
 
-    frame = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [2.0, 4.0, 6.0, 8.0]})
+    n = 40
+    a = np.arange(1, n + 1, dtype=float)
+    frame = pd.DataFrame({"a": a, "b": 2 * a})
     values = vif(frame, ["a", "b"])
     assert all(math.isfinite(v) for v in values.values())
     json.dumps(values, allow_nan=False)  # would raise ValueError if any value were inf
@@ -66,11 +71,24 @@ def test_vif_is_json_safe_under_perfect_collinearity():
 def test_vif_all_nan_column_does_not_zero_other_features():
     """One entirely-NaN feature must not collapse the listwise-dropped frame and zero
     every other feature's VIF — the NaN column is excluded from the design instead."""
+    n = 40
+    a = np.arange(1, n + 1, dtype=float)
     frame = pd.DataFrame({
-        "a": [1.0, 2.0, 3.0, 4.0],
-        "b": [2.0, 4.0, 6.0, 8.0],          # perfectly collinear with a
-        "dead": [np.nan, np.nan, np.nan, np.nan],
+        "a": a,
+        "b": 2 * a,                         # perfectly collinear with a
+        "dead": np.full(n, np.nan),
     })
     values = vif(frame, ["a", "b", "dead"])
     assert values["dead"] == 0.0            # unusable column → 0, not an error
     assert values["a"] >= 1e6 and values["b"] >= 1e6  # real collinearity still detected
+
+
+def test_vif_returns_none_when_complete_rows_insufficient():
+    """FS-8: fewer than max(30, 2*features) listwise-complete rows must return None for
+    the usable features (VIF unavailable) instead of silently zeroing the gate."""
+    frame = pd.DataFrame({
+        "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "b": [2.0, 4.0, 6.0, 8.0, 10.0],
+    })
+    values = vif(frame, ["a", "b"])
+    assert values["a"] is None and values["b"] is None

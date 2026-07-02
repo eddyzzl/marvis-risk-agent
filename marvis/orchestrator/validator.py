@@ -224,7 +224,16 @@ def _is_ref(value) -> bool:
 
 
 def _is_deferred_input(value) -> bool:
-    return _is_ref(value) or _is_slot_placeholder(value)
+    if _is_ref(value) or _is_slot_placeholder(value):
+        return True
+    # A container (e.g. FS-5's features union list `[{slot:feature_cols}, $ref:...]`) is
+    # deferred if any element is — its final shape is only known after ref/slot resolution,
+    # so it cannot be schema-validated at plan time.
+    if isinstance(value, (list, tuple)):
+        return any(_is_deferred_input(item) for item in value)
+    if isinstance(value, dict):
+        return any(_is_deferred_input(item) for item in value.values())
+    return False
 
 
 def _relax_required(input_schema: dict, step_inputs: dict) -> dict:
