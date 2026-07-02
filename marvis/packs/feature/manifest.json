@@ -393,7 +393,8 @@
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
           "allow_full_fit": {"type": "boolean"},
-          "sentinel_values": {"type": ["array", "object"]}
+          "sentinel_values": {"type": ["array", "object"]},
+          "add_indicators": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns", "strategy"],
         "additionalProperties": false
@@ -404,7 +405,8 @@
           "result_dataset_id": {"type": "string"},
           "fill_values": {"type": "object"},
           "fit_rows": {"type": "integer", "minimum": 0},
-          "fit_split": {"type": "string", "enum": ["train", "full"]}
+          "fit_split": {"type": "string", "enum": ["train", "full"]},
+          "indicator_columns": {"type": "array", "items": {"type": "string"}}
         },
         "required": ["result_dataset_id", "fill_values"],
         "additionalProperties": false

@@ -13,7 +13,7 @@ turn ``preprocessing_steps`` back into concrete column transforms.
 
 A ``PreprocessingStep`` is a plain, JSON-safe dict:
 
-    {"kind": "impute" | "cap" | "normalize" | "onehot",
+    {"kind": "impute" | "cap" | "normalize" | "onehot" | "missing_indicator",
      "columns": [...],
      "params": {...}}
 
@@ -22,6 +22,14 @@ bounds / scaler_params / mapping), keyed by column name so ``kind`` +
 ``columns`` + ``params`` fully describes the transform. WOE is intentionally
 excluded -- scorecard/woe_encode already replay their own WOE maps and are not
 duplicated here (see module docstring in tools.py).
+
+``missing_indicator`` (PREP-8) is emitted alongside ``impute`` when
+``add_indicators=true`` is passed to ``impute_missing``: ``params[column]`` is
+the derived indicator column name (e.g. ``col__was_missing``). It is appended
+as its own step *before* the paired ``impute`` step in the chain, so replay
+computes the 0/1 "was this value missing" flag from the pre-fill NaN mask
+first, then imputes -- reproducing the same indicator the platform derived at
+fit time instead of silently dropping the missingness signal.
 """
 
 from __future__ import annotations
@@ -108,6 +116,8 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
             out = _apply_normalize(out, columns, params)
         elif kind == "onehot":
             out = _apply_onehot(out, columns, params)
+        elif kind == "missing_indicator":
+            out = _apply_missing_indicator(out, columns, params)
         else:
             raise FeatureError(f"unsupported preprocessing step kind: {kind!r}")
     return out
@@ -122,6 +132,22 @@ def _apply_impute(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.D
         if isinstance(value, dict) and "value" in value:
             value = value["value"]
         out[column] = out[column].fillna(value)
+    return out
+
+
+def _apply_missing_indicator(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay missing-indicator columns (PREP-8): ``params[column]`` is the indicator
+    column name (e.g. ``col__was_missing``). Must run *before* the ``impute`` step
+    that fills ``column`` -- ``tool_impute_missing`` always appends the
+    ``missing_indicator`` step ahead of the paired ``impute`` step in the chain."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        indicator_col = params.get(column)
+        if not indicator_col:
+            continue
+        out[str(indicator_col)] = out[column].isna().astype(int)
     return out
 
 

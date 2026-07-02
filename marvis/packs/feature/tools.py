@@ -33,7 +33,7 @@ from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
 from marvis.feature.preprocessing import (
-    append_step,
+    read_preprocessing_chain,
     sidecar_path,
     write_preprocessing_chain,
 )
@@ -561,10 +561,13 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
     out = frame.copy()
     fill_values = {}
+    indicators = {}
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
     fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
     sentinel_values = _sentinel_values_for(inputs, columns)
+    add_indicators = bool(inputs.get("add_indicators"))
+    indicator_columns: list[str] = []
     for column in columns:
         column_sentinels = sentinel_values.get(column)
         _filled_fit, value = impute_missing(
@@ -574,21 +577,37 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
             sentinel_values=column_sentinels,
         )
         masked = mask_sentinel_values(out[column], column_sentinels)
+        if add_indicators and masked.isna().any():
+            # PREP-8: preserve the "missing" signal that plain imputation erases —
+            # a col__was_missing 0/1 column, guarded against colliding with an
+            # existing column name.
+            indicator_name = _unique_column_name(f"{column}__was_missing", out.columns)
+            out[indicator_name] = masked.isna().astype(int)
+            indicators[column] = indicator_name
+            indicator_columns.append(indicator_name)
         out[column] = masked.fillna(value)
         fill_values[column] = value
+    preprocessing_steps = []
+    if indicators:
+        # Ordered before "impute" so replay computes the pre-fill NaN mask first.
+        preprocessing_steps.append(
+            {"kind": "missing_indicator", "columns": list(indicators), "params": _jsonable(indicators)}
+        )
+    preprocessing_steps.append({"kind": "impute", "columns": columns, "params": _jsonable(fill_values)})
     result = _register_frame(
         runtime,
         out,
         dataset,
         ctx,
         "impute",
-        preprocessing_step={"kind": "impute", "columns": columns, "params": _jsonable(fill_values)},
+        preprocessing_steps=preprocessing_steps,
     )
     return {
         "result_dataset_id": result.id,
         "fill_values": _jsonable(fill_values),
         "fit_rows": int(fit_mask.sum()),
         "fit_split": fit_split,
+        "indicator_columns": indicator_columns,
     }
 
 
@@ -653,6 +672,18 @@ def _sentinel_values_for(inputs: dict, columns: list[str]) -> dict[str, list[flo
         }
     flat = [float(v) for v in raw]
     return {column: flat for column in columns} if flat else {}
+
+
+def _unique_column_name(candidate: str, existing) -> str:
+    """A column name guaranteed not to collide with ``existing`` (PREP-8): appends
+    an incrementing numeric suffix (``_2``, ``_3``, ...) until it is unique."""
+    existing_set = set(str(column) for column in existing)
+    if candidate not in existing_set:
+        return candidate
+    suffix = 2
+    while f"{candidate}_{suffix}" in existing_set:
+        suffix += 1
+    return f"{candidate}_{suffix}"
 
 
 def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str) -> tuple[np.ndarray, str]:
@@ -748,29 +779,38 @@ def _register_frame(
     suffix: str,
     *,
     preprocessing_step: dict[str, Any] | None = None,
+    preprocessing_steps: list[dict[str, Any]] | None = None,
 ):
     out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}.parquet"
     uow = ArtifactUnitOfWork()
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         frame.to_parquet(artifact.path, index=False)
+        steps_to_append = list(preprocessing_steps or [])
         if preprocessing_step is not None:
-            # PREP-2: persist the accumulated preprocessing chain (source dataset's
-            # chain + this new step) as a sidecar next to the derived parquet, so a
-            # model trained downstream can replay every fit param at scoring time
-            # instead of only seeing it in this tool's JSON response. Staged via the
-            # same unit of work as the parquet so both promote/commit atomically.
+            steps_to_append.append(preprocessing_step)
+        if steps_to_append:
+            # PREP-2/PREP-8: persist the accumulated preprocessing chain (source
+            # dataset's chain + these new steps, in order) as a sidecar next to the
+            # derived parquet, so a model trained downstream can replay every fit
+            # param at scoring time instead of only seeing it in this tool's JSON
+            # response. Staged via the same unit of work as the parquet so both
+            # promote/commit atomically.
             source_path = None
             try:
                 source_path = runtime.registry.resolve_path(source_dataset.id)
             except KeyError:
                 source_path = None
-            chain = append_step(
-                source_path,
-                kind=str(preprocessing_step["kind"]),
-                columns=list(preprocessing_step["columns"]),
-                params=preprocessing_step["params"],
-            )
+            chain = read_preprocessing_chain(source_path) if source_path else []
+            for step in steps_to_append:
+                chain = [
+                    *chain,
+                    {
+                        "kind": str(step["kind"]),
+                        "columns": [str(c) for c in step["columns"]],
+                        "params": step["params"],
+                    },
+                ]
             sidecar_name = sidecar_path(Path(out_path.name)).name
             sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
             write_preprocessing_chain(sidecar_artifact.path, chain)

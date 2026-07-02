@@ -1008,6 +1008,107 @@ def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_pat
     assert onehot_chain == [{"kind": "onehot", "columns": ["cat"], "params": onehot.output["mapping"]}]
 
 
+def test_impute_missing_add_indicators_emits_was_missing_columns_and_sidecar_step(tmp_path):
+    """PREP-8: add_indicators=true must emit a col__was_missing 0/1 column per column
+    that actually had missing values, record a missing_indicator step (ordered before
+    the paired impute step) in the preprocessing chain sidecar, and replay identically
+    via apply_preprocessing_steps on new raw data."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, np.nan, 3.0, np.nan, 5.0],
+        "complete": [1.0, 2.0, 3.0, 4.0, 5.0],  # never missing -> no indicator column
+    })
+    path = tmp_path / "indicator.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount", "complete"],
+            "strategy": "median",
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == ["amount__was_missing"]
+
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["amount__was_missing"].tolist() == [0, 1, 0, 1, 0]
+    assert derived_frame["amount"].tolist() == [1.0, 3.0, 3.0, 3.0, 5.0]  # median of [1,3,5]
+    assert "complete__was_missing" not in derived_frame.columns
+
+    chain = read_preprocessing_chain(registry.resolve_path(result.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["missing_indicator", "impute"]
+    assert chain[0]["params"] == {"amount": "amount__was_missing"}
+
+    # Replay on fresh raw data reproduces the same indicator + fill.
+    replayed = apply_preprocessing_steps(frame, chain)
+    assert replayed["amount__was_missing"].tolist() == [0, 1, 0, 1, 0]
+    assert replayed["amount"].tolist() == [1.0, 3.0, 3.0, 3.0, 5.0]
+
+
+def test_impute_missing_add_indicators_avoids_column_name_collision(tmp_path):
+    """PREP-8: if col__was_missing already exists, the indicator name gets a numeric
+    suffix rather than silently overwriting the existing column."""
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "amount": [1.0, np.nan, 3.0],
+        "amount__was_missing": [9, 9, 9],  # pre-existing column with that exact name
+    })
+    path = tmp_path / "collision.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["amount"],
+            "strategy": "median",
+            "add_indicators": True,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == ["amount__was_missing_2"]
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert derived_frame["amount__was_missing"].tolist() == [9, 9, 9]  # untouched
+    assert derived_frame["amount__was_missing_2"].tolist() == [0, 1, 0]
+
+
+def test_impute_missing_without_add_indicators_omits_indicator_columns(tmp_path):
+    """add_indicators defaults to false -- no behavior change for existing callers."""
+    from marvis.feature.preprocessing import read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({"amount": [1.0, np.nan, 3.0]})
+    path = tmp_path / "no_indicator.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {"dataset_id": dataset.id, "columns": ["amount"], "strategy": "median", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["indicator_columns"] == []
+    derived_frame = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert "amount__was_missing" not in derived_frame.columns
+    chain = read_preprocessing_chain(registry.resolve_path(result.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["impute"]
+
+
 def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_path):
     """WOE replay is handled separately (scorecard/woe_encode already replay their own
     WOE maps) and cross_features derives new columns rather than transforming existing
