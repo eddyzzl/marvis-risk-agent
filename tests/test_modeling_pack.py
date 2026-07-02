@@ -19,6 +19,7 @@ from marvis.domain import TaskCreate
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling import tools as modeling_tools
+from marvis.packs.modeling import train_tools as modeling_train_tools
 from marvis.packs.modeling.tools import _ModelArtifactScorer, _effective_seed
 from marvis.plugins.loader import load_builtin_packs
 from marvis.plugins.manifest import ToolRef
@@ -1796,7 +1797,7 @@ def test_train_models_isolates_a_single_recipe_failure(tmp_path, monkeypatch: py
             raise ValueError("synthetic lr training failure")
         return real_train_recipe(recipe, backend, dataset_path, config, out_dir=out_dir)
 
-    monkeypatch.setattr(modeling_tools, "_train_recipe", flaky_train_recipe)
+    monkeypatch.setattr(modeling_train_tools, "_train_recipe", flaky_train_recipe)
 
     out = modeling_tools.tool_train_models(
         {
@@ -1845,7 +1846,7 @@ def test_train_models_raises_when_every_recipe_fails(tmp_path, monkeypatch: pyte
     def always_fails(recipe, backend, dataset_path, config, *, out_dir):
         raise ValueError(f"synthetic {recipe} failure")
 
-    monkeypatch.setattr(modeling_tools, "_train_recipe", always_fails)
+    monkeypatch.setattr(modeling_train_tools, "_train_recipe", always_fails)
 
     with pytest.raises(ValueError, match="synthetic lr failure"):
         modeling_tools.tool_train_models(

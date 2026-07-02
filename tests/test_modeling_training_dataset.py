@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from marvis.packs.modeling import tools as modeling_tools
+from marvis.packs.modeling import train_tools as modeling_train_tools
 from marvis.packs.modeling.contracts import ModelArtifact, ModelMetrics, TrainConfig, TrainResult
 from marvis.packs.modeling.report_compute import BusinessColumns
 
@@ -135,8 +136,8 @@ def test_train_models_uses_training_dataset_cache_for_multiple_recipes(tmp_path,
             experiment_id="",
         )
 
-    monkeypatch.setattr(modeling_tools, "_runtime", fake_runtime)
-    monkeypatch.setattr(modeling_tools, "_train_recipe", fake_train_recipe)
+    monkeypatch.setattr(modeling_train_tools, "_runtime", fake_runtime)
+    monkeypatch.setattr(modeling_train_tools, "_train_recipe", fake_train_recipe)
 
     out = modeling_tools.tool_train_models(
         {
