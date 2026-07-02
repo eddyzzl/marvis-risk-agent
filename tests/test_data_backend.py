@@ -1,12 +1,17 @@
 import hashlib
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pytest
 
 from marvis.data.backend import (
+    DUCKDB_MEMORY_LIMIT_ENV,
+    DUCKDB_THREADS_ENV,
     DataBackend,
     csv_rel,
+    default_duckdb_threads,
+    duckdb_health,
     parquet_rel,
     sql_identifier,
     sql_string_literal,
@@ -501,3 +506,57 @@ def test_python_match_rate_date_fallback_uses_same_formats_as_duckdb_join(tmp_pa
         sample_n=10,
         seed=0,
     ) == (0, 1)
+
+
+
+def _duckdb_setting(name: str) -> str:
+    row = duckdb.sql(
+        f"SELECT value FROM duckdb_settings() WHERE name = '{name}'"
+    ).fetchone()
+    return str(row[0]) if row is not None else ""
+
+
+def test_data_backend_configures_duckdb_memory_limit_threads_and_temp_directory(
+    tmp_path, monkeypatch
+):
+    """PERF-8 regression: constructing a DataBackend must apply memory_limit,
+    threads, and a workspace-scoped temp_directory to the shared default DuckDB
+    connection instead of leaving DuckDB's own defaults in place (~80% of RAM,
+    all cores, no durable spill directory)."""
+    monkeypatch.delenv(DUCKDB_MEMORY_LIMIT_ENV, raising=False)
+    monkeypatch.delenv(DUCKDB_THREADS_ENV, raising=False)
+    datasets_root = tmp_path / "workspace" / "datasets"
+    datasets_root.mkdir(parents=True)
+
+    DataBackend(datasets_root)
+
+    expected_temp_dir = tmp_path / "workspace" / ".duckdb_tmp"
+    assert expected_temp_dir.is_dir()
+    assert _duckdb_setting("temp_directory") == str(expected_temp_dir)
+    assert _duckdb_setting("threads") == str(default_duckdb_threads())
+    # DuckDB reports memory_limit in a human-readable unit (e.g. "3.7 GiB" for the
+    # "4GB" default), so assert it moved off the library's own huge default rather
+    # than an exact string match.
+    memory_limit = _duckdb_setting("memory_limit")
+    assert memory_limit != ""
+    assert "GiB" in memory_limit or "GB" in memory_limit
+    gib_value = float(memory_limit.split()[0])
+    assert gib_value <= 8.0
+
+    health = duckdb_health()
+    assert health["duckdb_temp_directory"] == str(expected_temp_dir)
+    assert health["duckdb_threads"] == str(default_duckdb_threads())
+    assert health["duckdb_memory_limit"] == memory_limit
+
+
+def test_data_backend_honors_duckdb_env_var_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv(DUCKDB_MEMORY_LIMIT_ENV, "777MB")
+    monkeypatch.setenv(DUCKDB_THREADS_ENV, "3")
+    datasets_root = tmp_path / "workspace" / "datasets"
+    datasets_root.mkdir(parents=True)
+
+    DataBackend(datasets_root)
+
+    assert _duckdb_setting("threads") == "3"
+    memory_limit = _duckdb_setting("memory_limit")
+    assert "MiB" in memory_limit or "MB" in memory_limit

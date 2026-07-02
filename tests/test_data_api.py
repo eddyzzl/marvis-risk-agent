@@ -1,13 +1,18 @@
+import asyncio
 import hashlib
 import json
+import time
 
+import httpx
 import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from marvis.api import router
+from marvis.app import create_app
 from marvis.data.backend import DataBackend
+from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
@@ -728,3 +733,57 @@ def test_join_api_keeps_task_dataset_boundaries(tmp_path):
     )
 
     assert response.status_code == 404
+
+
+
+@pytest.mark.asyncio
+async def test_sync_join_execute_does_not_block_event_loop_for_health_polling(tmp_path, monkeypatch):
+    """PERF-1 regression: propose/confirm/execute run heavy sync work inside plain
+    ``def`` endpoints so FastAPI offloads them to a worker thread; a slow synchronous
+    join execute must not freeze the single-process event loop that ``/api/health``
+    polling depends on. A monkeypatched sleep stands in for "heavy sync work" so the
+    assertion is deterministic instead of depending on a real dataset being slow
+    enough on any given machine (DuckDB joins are fast even at millions of rows)."""
+    app = create_app(tmp_path)
+    settings = app.state.settings
+    task, plan = _confirmed_join_plan(TestClient(app), settings, tmp_path)
+
+    real_execute = JoinEngine.execute_join_plan
+
+    def _slow_execute_join_plan(self, join_plan_id, *, out_dir):
+        time.sleep(1.5)
+        return real_execute(self, join_plan_id, out_dir=out_dir)
+
+    monkeypatch.setattr(JoinEngine, "execute_join_plan", _slow_execute_join_plan)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # Timed from BEFORE the join is even dispatched: if the join endpoint blocked
+        # the event loop, the 0.2s head-start sleep below would itself absorb the
+        # entire 1.5s block (since nothing else can run on a monopolized loop), making
+        # a health_start timestamp taken *after* the head start a no-op measurement
+        # that always looks fast. Measuring from here is what actually catches a
+        # regression back to `async def` + synchronous heavy work.
+        overall_start = time.monotonic()
+        join_task = asyncio.create_task(
+            client.post(f"/api/joins/{plan['join_plan_id']}/execute")
+        )
+        # Give the join request a head start so it is genuinely in flight (occupying
+        # its worker thread) before health is polled.
+        await asyncio.sleep(0.2)
+
+        health_response = await client.get("/api/health")
+        health_elapsed = time.monotonic() - overall_start
+
+        assert health_response.status_code == 200
+        # health should return right after the 0.2s head start (the join keeps
+        # running in its own worker thread); a regression back to `async def` +
+        # synchronous heavy work would make this take >=1.5s (the full join sleep)
+        # instead, so 1.0s is a guardrail that is generous for CI jitter yet tight
+        # enough to fail hard on that regression. The <2s target from the spec is
+        # even more generous still and would not reliably catch this bug.
+        assert health_elapsed < 1.0
+
+        join_response = await join_task
+        assert join_response.status_code == 200
+        assert join_response.json()["result_dataset_id"]

@@ -23,6 +23,7 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
+from marvis.data.backend import DataBackend, duckdb_health
 from marvis.db import DraftRepository, PlanRepository, PluginRepository, init_db, sqlite_health
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
@@ -227,7 +228,15 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"status": "ok", **sqlite_health(settings.db_path)}
+        # Constructing DataBackend applies the DuckDB memory_limit / threads /
+        # temp_directory PRAGMAs (PERF-8) if this process has not touched a
+        # dataset yet, so health always reports the actually-effective config.
+        DataBackend(settings.datasets_dir)
+        return {
+            "status": "ok",
+            **sqlite_health(settings.db_path),
+            **duckdb_health(),
+        }
 
     @app.get("/branding/assets/{asset_path:path}")
     def branding_asset(asset_path: str) -> FileResponse:
