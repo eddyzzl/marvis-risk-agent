@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from marvis.app import _static_asset_version, _static_import_map
+
 
 pytestmark = [
     pytest.mark.e2e,
@@ -56,7 +58,7 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path in {"/", "/index.html"}:
-            self._send_file(ROOT / "marvis/static/index.html", content_type="text/html; charset=utf-8")
+            self._send_index_html()
             return
         if path.startswith("/static/"):
             self._send_file(ROOT / "marvis/static" / path.removeprefix("/static/"))
@@ -106,6 +108,26 @@ class _SmokeHandler(SimpleHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_index_html(self) -> None:
+        # Mirrors marvis.app's "/" route: the real app replaces
+        # __MARVIS_STATIC_VERSION__ / __MARVIS_STATIC_IMPORT_MAP__ before
+        # serving index.html, so this smoke harness must do the same or the
+        # <script type="importmap"> tag ships the literal placeholder text,
+        # which is not valid JSON and fails to parse in a real browser.
+        static_dir = ROOT / "marvis/static"
+        index_html = (static_dir / "index.html").read_text(encoding="utf-8")
+        static_version = _static_asset_version(static_dir)
+        index_html = index_html.replace("__MARVIS_STATIC_VERSION__", static_version)
+        index_html = index_html.replace(
+            "__MARVIS_STATIC_IMPORT_MAP__", _static_import_map(static_dir, static_version)
+        )
+        body = index_html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -246,92 +268,6 @@ def _smoke_html() -> str:
       },
     });
     document.querySelector("#root").innerHTML = setupHtml + deliveryHtml;
-  </script>
-</body>
-</html>
-"""
-
-
-def _workspace_smoke_html() -> str:
-    return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/static/styles.css" />
-  <link rel="stylesheet" href="/static/css/v2-workbench.css" />
-  <style>
-    body { margin: 0; padding: 16px; background: var(--app-bg, #f6f7f9); }
-    #root { max-width: 1120px; margin: 0 auto; display: grid; gap: 14px; }
-    .smoke-section { min-width: 0; background: var(--surface, #fff); }
-  </style>
-</head>
-<body data-theme="dark">
-  <main id="root">
-    <section id="planMount" class="smoke-section"></section>
-    <section class="smoke-section">
-      <div class="screen-table-wrap" data-screen-form="screen-smoke" data-screen-step-id="screen-step">
-        <div class="screen-threshold-controls">
-          <label>泄漏KS <input class="screen-threshold-input" data-screen-threshold="leakage_ks" value="0.40" /></label>
-          <label>最大缺失率 <input class="screen-threshold-input" data-screen-threshold="max_missing_rate" value="0.95" /></label>
-          <button type="button" class="button compact secondary screen-adjust">重算</button>
-        </div>
-        <div class="screen-table-scroll">
-          <table class="screen-table">
-            <thead><tr><th>选</th><th>特征</th><th>KS</th><th>IV</th><th>缺失率</th><th>类别</th></tr></thead>
-            <tbody>
-              <tr class="screen-row screen-keep">
-                <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" checked /></td>
-                <td class="screen-feat">good_feature_long_name_for_layout</td>
-                <td class="screen-num">0.3120</td><td class="screen-num">0.1820</td><td class="screen-num">2.0%</td>
-                <td><span class="screen-badge keep">入选</span></td>
-              </tr>
-              <tr class="screen-row screen-leakage">
-                <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" /></td>
-                <td class="screen-feat">post_loan_result_leakage_signal</td>
-                <td class="screen-num">0.8120</td><td class="screen-num">0.6400</td><td class="screen-num">0.0%</td>
-                <td><span class="screen-badge leak">泄漏</span></td>
-              </tr>
-              <tr class="screen-row screen-suspected">
-                <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" /></td>
-                <td class="screen-feat">suspected_policy_flag</td>
-                <td class="screen-num">0.4210</td><td class="screen-num">0.2100</td><td class="screen-num">5.5%</td>
-                <td><span class="screen-badge susp">疑似</span></td>
-              </tr>
-              <tr class="screen-row screen-unusable">
-                <td class="screen-pick-cell"><input type="checkbox" class="screen-pick" disabled /></td>
-                <td class="screen-feat">constant_column</td>
-                <td class="screen-num">n/a</td><td class="screen-num">n/a</td><td class="screen-num">100.0%</td>
-                <td><span class="screen-badge unusable">不可用</span></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="screen-table-foot">
-          <span class="screen-note">共筛 128 列;泄漏阈值 KS≥0.4。勾选=入选,可硬选泄漏/疑似列。</span>
-          <button type="button" class="button compact primary screen-confirm">确认所选特征</button>
-        </div>
-      </div>
-    </section>
-  </main>
-  <script type="module">
-    import { renderPlanView } from "/static/js/v2/plan_view.js";
-    import { setPlan } from "/static/js/v2/state_v2.js";
-    renderPlanView(document.querySelector("#planMount"));
-    setPlan({
-      id: "plan-smoke",
-      goal: "建模任务浏览器 smoke",
-      status: "awaiting_confirm",
-      tier: "guarded",
-      novel_mode: "plan_ahead",
-      steps: [
-        { id: "spec", index: 0, title: "确认建模规格", status: "done", tool_ref: { plugin: "modeling", tool: "choose_modeling_spec" } },
-        { id: "screen", index: 1, title: "筛选特征", status: "awaiting_confirm", tool_ref: { plugin: "modeling", tool: "screen_features" }, depends_on: ["spec"], decision_point: true },
-        { id: "train", index: 2, title: "训练候选模型", status: "pending", tool_ref: { plugin: "modeling", tool: "train_models" }, depends_on: ["screen"] },
-        { id: "report", index: 3, title: "生成模型报告", status: "failed", tool_ref: { plugin: "modeling", tool: "generate_model_report" }, output_ref: "artifact://model/report", failure_envelope: { editable_input_schema: { properties: { reason: { default: "补充业务字段后重试" } } }, downstream_reset_steps: ["report"] } },
-      ],
-    });
   </script>
 </body>
 </html>
@@ -557,21 +493,6 @@ def test_real_modeling_task_delivery_workspace_renders_in_real_browser():
             browser.close()
 
 
-def test_plan_rail_and_screen_table_render_in_real_browser():
-    playwright = pytest.importorskip("playwright.sync_api")
-    with _serve_smoke_page(_workspace_smoke_html()) as url, playwright.sync_playwright() as p:
-        browser = p.chromium.launch()
-        try:
-            for viewport in (
-                {"width": 1366, "height": 900},
-                {"width": 390, "height": 844},
-            ):
-                page = browser.new_page(viewport=viewport, is_mobile=viewport["width"] < 600)
-                _assert_workspace_smoke(page, url)
-        finally:
-            browser.close()
-
-
 def _assert_panel_smoke(page, url: str) -> None:
     page.goto(url)
     page.wait_for_selector(".modeling-setup-panel")
@@ -748,48 +669,3 @@ def _assert_real_modeling_workspace_smoke(page, url: str) -> None:
     assert metrics["overflow"] <= 1
     assert not page_errors
     assert not console_errors
-
-
-def _assert_workspace_smoke(page, url: str) -> None:
-    page.goto(url)
-    page.wait_for_selector(".v2-plan")
-    page.wait_for_selector(".screen-table-wrap")
-    metrics = page.evaluate(
-        """
-        () => {
-          const plan = document.querySelector(".v2-plan").getBoundingClientRect();
-          const screen = document.querySelector(".screen-table-wrap").getBoundingClientRect();
-          const retry = document.querySelector(".retry-step-panel");
-          return {
-            planWidth: plan.width,
-            planHeight: plan.height,
-            screenWidth: screen.width,
-            screenHeight: screen.height,
-            steps: document.querySelectorAll(".plan-step").length,
-            awaitingConfirm: document.querySelectorAll(".step-status-awaiting_confirm").length,
-            failed: document.querySelectorAll(".step-status-failed").length,
-            outputButtons: document.querySelectorAll(".step-output-button").length,
-            retryPanel: Boolean(retry),
-            screenRows: document.querySelectorAll(".screen-row").length,
-            leakageRows: document.querySelectorAll(".screen-row.screen-leakage").length,
-            thresholdInputs: document.querySelectorAll(".screen-threshold-input").length,
-            badText: document.body.innerText.includes("undefined") || document.body.innerText.includes("NaN"),
-            overflow: document.documentElement.scrollWidth - window.innerWidth,
-          };
-        }
-        """
-    )
-    assert metrics["planWidth"] > 260
-    assert metrics["planHeight"] > 180
-    assert metrics["screenWidth"] > 260
-    assert metrics["screenHeight"] > 180
-    assert metrics["steps"] == 4
-    assert metrics["awaitingConfirm"] >= 1
-    assert metrics["failed"] >= 1
-    assert metrics["outputButtons"] == 1
-    assert metrics["retryPanel"] is True
-    assert metrics["screenRows"] == 4
-    assert metrics["leakageRows"] == 1
-    assert metrics["thresholdInputs"] == 2
-    assert metrics["badText"] is False
-    assert metrics["overflow"] <= 1

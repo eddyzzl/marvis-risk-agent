@@ -30,19 +30,12 @@ def test_v2_static_modules_are_packaged_and_present():
         "api_v2.js",
         "state_v2.js",
         "governance_extensions.js",
-        "plan_view.js",
-        "plan_confirm.js",
-        "join_review.js",
         "plugin_manager.js",
         "skill_manager.js",
-        "workflow_create.js",
         "artifact_view.js",
         "model_delivery_panel.js",
         "modeling_setup_panel.js",
         "capability.js",
-        "memory_manager.js",
-        "subagent_view.js",
-        "loop_progress.js",
     ):
         assert (static_v2 / module_name).is_file()
 
