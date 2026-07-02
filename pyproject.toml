@@ -54,6 +54,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "e2e: real-process end-to-end journeys (uvicorn subprocess); slow, excluded by default",
+  "slow: slow tests (heavy training, real subprocess/concurrency); excluded by default",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
