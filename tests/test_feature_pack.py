@@ -1167,6 +1167,50 @@ def test_screen_features_reports_suspected_categorical_numeric_codes(tmp_path):
     assert "region_code" in result.output["selected"]
 
 
+def test_bin_feature_defaults_to_min_bin_pct_and_can_be_overridden(tmp_path):
+    """PREP-9: bin_feature/woe_encode default to min_bin_pct=0.05, merging any bin
+    below 5% share; callers can override (e.g. back to 0.0 for the old behavior)."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    rng = np.random.default_rng(3)
+    values = np.concatenate([rng.uniform(0, 100, 950), rng.uniform(50, 51, 50)])
+    target = (values > 50).astype(int)
+    frame = pd.DataFrame({"amount": values, "y": target})
+    path = tmp_path / "min_bin_pct.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    default_result = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "chimerge",
+            "max_bins": 10,
+        },
+        task_id="task-feature",
+    )
+    assert default_result.ok is True, default_result.error
+    default_shares = [row["count"] / 1000 for row in default_result.output["bins"]]
+    assert min(default_shares) >= 0.05 - 1e-9
+
+    unconstrained_result = runner.invoke(
+        ToolRef("feature", "bin_feature"),
+        {
+            "dataset_id": dataset.id,
+            "feature": "amount",
+            "target_col": "y",
+            "method": "chimerge",
+            "max_bins": 10,
+            "min_bin_pct": 0.0,
+        },
+        task_id="task-feature",
+    )
+    assert unconstrained_result.ok is True, unconstrained_result.error
+    unconstrained_shares = [row["count"] / 1000 for row in unconstrained_result.output["bins"]]
+    assert min(unconstrained_shares) < 0.05
+
+
 def test_derive_date_features_tool_creates_derived_dataset(tmp_path):
     """PREP-7: derive_date_features is opt-in (not part of any default template)
     and must produce deterministic datediff/month/tenure columns registered as a

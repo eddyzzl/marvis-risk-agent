@@ -211,7 +211,9 @@ def _select_features_woe(
     directions: dict[str, str] = {}
     for feature in features:
         values = frame[feature].to_numpy(dtype=float)
-        edges = chimerge_edges(values, target_arr, max_bins=max_bins)
+        # PREP-9: minimum bin share (5%) keeps WOE/IV estimates stable, consistent
+        # with the scorecard training path (recipes/scorecard.py::_fit_woe_maps).
+        edges = chimerge_edges(values, target_arr, max_bins=max_bins, min_bin_pct=0.05)
         resolved_direction = "not_enforced"
         if enforce_monotonic:
             resolved_direction = monotonic_direction(

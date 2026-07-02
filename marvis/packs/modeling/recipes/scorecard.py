@@ -125,7 +125,9 @@ def _fit_woe_maps(
     directions = {}
     for feature in config.features:
         values = train[feature].to_numpy(dtype=float)
-        edges = chimerge_edges(values, target, max_bins=max_bins)
+        # PREP-9: minimum bin share (5%) keeps WOE estimates stable across time
+        # periods instead of leaving a chimerge-surviving 1-2% bin to drift on OOT.
+        edges = chimerge_edges(values, target, max_bins=max_bins, min_bin_pct=0.05)
         if enforce_monotonic:
             resolved_direction = monotonic_direction(values, target, edges, direction=direction)
             edges = monotonic_edges(values, target, edges, direction=resolved_direction)

@@ -841,14 +841,20 @@ def _edges_for(frame: pd.DataFrame, inputs: dict, ctx) -> np.ndarray:
     values = frame[feature].to_numpy(dtype=float)
     method = str(inputs.get("method") or "equal_frequency")
     max_bins = int(inputs.get("max_bins") or inputs.get("bins") or 10)
+    # PREP-9: minimum bin share (default 5%) merges small bins so WOE stays stable
+    # across time periods; only meaningful for the frequency-driven methods below
+    # (equal_width/manual/tree already control bin size some other way).
+    min_bin_pct = float(inputs.get("min_bin_pct", 0.05))
     if method in {"equal_frequency", "quantile"}:
-        return equal_frequency_edges(values, max_bins)
+        return equal_frequency_edges(values, max_bins, min_bin_pct=min_bin_pct)
     if method == "equal_width":
         return equal_width_edges(values, max_bins)
     if method == "manual":
         return manual_edges([float(item) for item in inputs.get("breakpoints") or []])
     if method == "chimerge":
-        return chimerge_edges(values, _target_values(frame, target_col), max_bins=max_bins)
+        return chimerge_edges(
+            values, _target_values(frame, target_col), max_bins=max_bins, min_bin_pct=min_bin_pct
+        )
     if method == "tree":
         return tree_edges(values, _target_values(frame, target_col), max_bins=max_bins, seed=int(ctx.seed or 0))
     raise FeatureError("method must be equal_frequency, equal_width, manual, chimerge, or tree")

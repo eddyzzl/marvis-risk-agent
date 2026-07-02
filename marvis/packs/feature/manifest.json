@@ -135,7 +135,8 @@
           "monotonic_direction": {"type": "string", "enum": ["auto", "increasing", "decreasing"]},
           "seed": {"type": "integer"},
           "drop_nan_labels": {"type": "boolean"},
-          "sentinel_values": {"type": "array", "items": {"type": "number"}}
+          "sentinel_values": {"type": "array", "items": {"type": "number"}},
+          "min_bin_pct": {"type": "number", "minimum": 0, "maximum": 1}
         },
         "required": ["dataset_id", "feature", "target_col", "method"],
         "additionalProperties": false
@@ -251,7 +252,8 @@
           "allow_full_fit": {"type": "boolean"},
           "seed": {"type": "integer"},
           "drop_nan_labels": {"type": "boolean"},
-          "sentinel_values": {"type": ["array", "object"]}
+          "sentinel_values": {"type": ["array", "object"]},
+          "min_bin_pct": {"type": "number", "minimum": 0, "maximum": 1}
         },
         "required": ["dataset_id", "features", "target_col"],
         "additionalProperties": false
