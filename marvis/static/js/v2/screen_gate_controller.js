@@ -84,12 +84,37 @@ function screenGateContext(context = {}) {
     setActionStatus: context.setActionStatus || (() => {}),
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
+    pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    resetFetchThrottle: context.resetFetchThrottle || (() => {}),
+    renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
   };
 }
 
-export async function submitScreenThresholdAdjust(button, context = {}) {
+// UX-1: screen-gate submissions rerun the driver turn (now job-wrapped, REL-1)
+// and can take a while (recompute screening / retrain downstream). Give
+// immediate busy feedback, poll agent messages so intermediate step content
+// streams in, and force the plan rail to re-fetch on a short interval.
+function withDriverTurnBusyFeedback(taskId, context, run) {
+  const { setActionStatus, pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper } = context;
+  setActionStatus("正在执行下一步…", "busy");
+  let planRailTimer = null;
+  if (typeof setInterval === "function") {
+    planRailTimer = setInterval(() => {
+      resetFetchThrottle(taskId);
+      renderWorkflowStepper({ force: true });
+    }, 1500);
+  }
+  const stopPlanRailTicker = () => {
+    if (planRailTimer !== null) clearInterval(planRailTimer);
+    resetFetchThrottle(taskId);
+    renderWorkflowStepper({ force: true });
+  };
+  return run(pollAgentMessagesUntilSettled).finally(stopPlanRailTicker);
+}
+
+export async function submitScreenThresholdAdjust(button, rawContext = {}) {
   const wrap = button.closest(".screen-table-wrap");
-  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(context);
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(rawContext);
   if (!wrap || !taskId || typeof api !== "function") return;
   if (wrap.dataset.screenReadonly === "true") {
     setActionStatus("这是历史筛选结果,请使用最新待确认步骤调整。", "error");
@@ -118,27 +143,33 @@ export async function submitScreenThresholdAdjust(button, context = {}) {
     return;
   }
   button.disabled = true;
+  const context = screenGateContext(rawContext);
   try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "调整筛选阈值",
-        adjust_params: adjustParams,
-        expected_step_id: expectedStepId,
-        acceptance_mode: acceptanceMode,
-      }),
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: "调整筛选阈值",
+          adjust_params: adjustParams,
+          expected_step_id: expectedStepId,
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
     });
-    setAgentMessages(result.messages);
-    renderAgentConversation();
   } catch (error) {
     button.disabled = false;
     setActionStatus(error?.message || "重算特征筛选失败", "error");
   }
 }
 
-export async function submitScreenSelection(button, context = {}) {
+export async function submitScreenSelection(button, rawContext = {}) {
   const wrap = button.closest(".screen-table-wrap");
-  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(context);
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = screenGateContext(rawContext);
   if (!wrap || !taskId || typeof api !== "function") return;
   if (wrap.dataset.screenReadonly === "true") {
     setActionStatus("这是历史筛选结果,请使用最新待确认步骤确认。", "error");
@@ -158,18 +189,24 @@ export async function submitScreenSelection(button, context = {}) {
     return;
   }
   button.disabled = true;
+  const context = screenGateContext(rawContext);
   try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "确认",
-        selection,
-        expected_step_id: expectedStepId,
-        acceptance_mode: acceptanceMode,
-      }),
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: "确认",
+          selection,
+          expected_step_id: expectedStepId,
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
     });
-    setAgentMessages(result.messages);
-    renderAgentConversation();
   } catch (error) {
     button.disabled = false;
     setActionStatus(error?.message || "确认所选特征失败", "error");

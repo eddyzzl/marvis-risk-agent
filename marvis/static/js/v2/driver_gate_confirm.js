@@ -29,26 +29,53 @@ function driverConfirmContext(context = {}) {
     setActionStatus: context.setActionStatus || (() => {}),
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
+    pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    resetFetchThrottle: context.resetFetchThrottle || (() => {}),
+    renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
   };
 }
 
+// UX-1: the backend now runs the whole driver turn inside a task job (REL-1), so
+// this click can be minutes long (tune_hyperparameters/train_model). Give
+// immediate feedback (busy pill), keep polling agent messages so intermediate
+// step messages appear as the turn runs, and force the plan rail to re-fetch on
+// a short interval so the running step's ring/elapsed time stays live instead of
+// looking frozen until the request finally resolves.
 export async function submitDriverConfirm(button, context = {}) {
-  const { taskId, api, setActionStatus, setAgentMessages, renderAgentConversation } = driverConfirmContext(context);
+  const {
+    taskId, api, setActionStatus, setAgentMessages, renderAgentConversation,
+    pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper,
+  } = driverConfirmContext(context);
   if (!taskId || typeof api !== "function") return;
   const expectedStepId = button?.getAttribute?.("data-expected-step-id") || "";
   const body = { content: "确认" };
   if (expectedStepId) body.expected_step_id = expectedStepId;
   button.disabled = true;
+  setActionStatus("正在执行下一步…", "busy");
+  let planRailTimer = null;
+  if (typeof setInterval === "function") {
+    planRailTimer = setInterval(() => {
+      resetFetchThrottle(taskId);
+      renderWorkflowStepper({ force: true });
+    }, 1500);
+  }
   try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
+    const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
       method: "POST",
       body: JSON.stringify(body),
     });
+    const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+    const result = await requestPromise;
+    await streamPollPromise;
     setAgentMessages(result.messages);
     renderAgentConversation();
   } catch (error) {
     button.disabled = false;
     setActionStatus(error?.message || "确认失败", "error");
+  } finally {
+    if (planRailTimer !== null) clearInterval(planRailTimer);
+    resetFetchThrottle(taskId);
+    renderWorkflowStepper({ force: true });
   }
 }
 

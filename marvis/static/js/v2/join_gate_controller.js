@@ -14,7 +14,33 @@ function joinGateContext(context = {}) {
     setActionStatus: context.setActionStatus || (() => {}),
     setAgentMessages: context.setAgentMessages || (() => {}),
     renderAgentConversation: context.renderAgentConversation || (() => {}),
+    pollAgentMessagesUntilSettled: context.pollAgentMessagesUntilSettled || (() => Promise.resolve()),
+    resetFetchThrottle: context.resetFetchThrottle || (() => {}),
+    renderWorkflowStepper: context.renderWorkflowStepper || (() => {}),
   };
+}
+
+// UX-1: the driver turn triggered by these gate submissions now runs inside a
+// task job (REL-1) and can take minutes (execute_join / retrain downstream of an
+// adjust). Give immediate busy feedback, poll agent messages so intermediate
+// step content streams in, and force the plan rail to re-fetch on a short
+// interval so the running step doesn't look frozen.
+function withDriverTurnBusyFeedback(taskId, context, run) {
+  const { setActionStatus, pollAgentMessagesUntilSettled, resetFetchThrottle, renderWorkflowStepper } = context;
+  setActionStatus("正在执行下一步…", "busy");
+  let planRailTimer = null;
+  if (typeof setInterval === "function") {
+    planRailTimer = setInterval(() => {
+      resetFetchThrottle(taskId);
+      renderWorkflowStepper({ force: true });
+    }, 1500);
+  }
+  const stopPlanRailTicker = () => {
+    if (planRailTimer !== null) clearInterval(planRailTimer);
+    resetFetchThrottle(taskId);
+    renderWorkflowStepper({ force: true });
+  };
+  return run(pollAgentMessagesUntilSettled).finally(stopPlanRailTicker);
 }
 
 export function renderJoinC1Form(message) {
@@ -72,9 +98,9 @@ export function renderJoinC1Form(message) {
   </div>`;
 }
 
-export async function submitC1Assignment(button, context = {}) {
+export async function submitC1Assignment(button, rawContext = {}) {
   const form = button.closest(".c1-form");
-  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(context);
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
   const anchorIds = [];
   const featureIds = [];
@@ -93,16 +119,22 @@ export async function submitC1Assignment(button, context = {}) {
   }
   const targetCol = form.querySelector(".c1-target")?.value || "";
   button.disabled = true;
+  const context = joinGateContext(rawContext);
   try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
-        acceptance_mode: acceptanceMode,
-      }),
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: "[C1]" + JSON.stringify({ anchor_id: anchorIds[0], anchor_ids: anchorIds, feature_ids: featureIds, target_col: targetCol }),
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
     });
-    setAgentMessages(result.messages);
-    renderAgentConversation();
   } catch (error) {
     button.disabled = false;
     setActionStatus(error?.message || "确认角色失败", "error");
@@ -152,9 +184,9 @@ export function renderDedupPicker(message) {
   </div>`;
 }
 
-export async function submitDedupStrategies(button, context = {}) {
+export async function submitDedupStrategies(button, rawContext = {}) {
   const form = button.closest(".dedup-picker");
-  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(context);
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
   if (!form || !taskId || typeof api !== "function") return;
   const dedupStrategies = {};
   for (const select of form.querySelectorAll(".dedup-strategy")) {
@@ -167,18 +199,24 @@ export async function submitDedupStrategies(button, context = {}) {
     return;
   }
   button.disabled = true;
+  const context = joinGateContext(rawContext);
   try {
-    const result = await api(`/api/tasks/${taskId}/agent/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: "确认",
-        dedup_strategies: dedupStrategies,
-        expected_step_id: expectedStepId,
-        acceptance_mode: acceptanceMode,
-      }),
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: "确认",
+          dedup_strategies: dedupStrategies,
+          expected_step_id: expectedStepId,
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
     });
-    setAgentMessages(result.messages);
-    renderAgentConversation();
   } catch (error) {
     button.disabled = false;
     setActionStatus(error?.message || "应用去重失败", "error");
