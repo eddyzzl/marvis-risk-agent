@@ -1158,6 +1158,100 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["best_recipe"] in {"lgb", "lr"}
     assert out["target_type"] == "binary"
     assert out["selection_metric"] == "test_ks(overfit-penalized)"
+    assert out["failed"] == []
+
+
+def test_train_models_isolates_a_single_recipe_failure(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """TUNE-8/SEL-3: one recipe's failure (e.g. a data quirk only that algorithm
+    chokes on) is recorded as a failed candidate and the batch continues -- the
+    other recipes' experiments are still trained, attached, and returned, and the
+    champion is picked from the survivors. Previously the whole train_models call
+    aborted (raise inside the per-recipe try/except), losing every already-
+    trained recipe's result even though it succeeded. Calls tool_train_models
+    directly (like test_training_attach_failure_rolls_back_unattached_artifact_files
+    above) since ToolRunner executes tools in a subprocess, where an in-process
+    monkeypatch of _train_recipe would not be visible."""
+    _runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+
+    real_train_recipe = modeling_tools._train_recipe
+
+    def flaky_train_recipe(recipe, backend, dataset_path, config, *, out_dir):
+        if recipe == "lr":
+            raise ValueError("synthetic lr training failure")
+        return real_train_recipe(recipe, backend, dataset_path, config, out_dir=out_dir)
+
+    monkeypatch.setattr(modeling_tools, "_train_recipe", flaky_train_recipe)
+
+    out = modeling_tools.tool_train_models(
+        {
+            "dataset_id": dataset.id,
+            "recipes": ["lgb", "lr"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        ctx,
+    )
+
+    assert {exp["recipe"] for exp in out["experiments"]} == {"lgb"}
+    assert len(out["failed"]) == 1
+    assert out["failed"][0]["recipe"] == "lr"
+    assert "synthetic lr training failure" in out["failed"][0]["error"]
+    assert out["best_recipe"] == "lgb"
+    assert out["best_experiment_id"] in out["experiment_ids"]
+
+    store = ExperimentStore(settings.db_path)
+    experiments = store.list_for_task(task.id)
+    assert {experiment.status for experiment in experiments} == {"trained", "failed"}
+
+
+def test_train_models_raises_when_every_recipe_fails(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """TUNE-8/SEL-3: failure isolation still surfaces a hard error when there is
+    no surviving candidate at all -- silently returning an empty comparison would
+    be worse than the old all-or-nothing raise. Re-raises the last recipe's
+    original exception (not a generic wrapper), so an infrastructure failure
+    (e.g. an audit-log write failure, see
+    test_training_attach_failure_rolls_back_unattached_artifact_files) still
+    surfaces with its real type/message instead of being masked as "recipe
+    training failed"."""
+    _runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+
+    def always_fails(recipe, backend, dataset_path, config, *, out_dir):
+        raise ValueError(f"synthetic {recipe} failure")
+
+    monkeypatch.setattr(modeling_tools, "_train_recipe", always_fails)
+
+    with pytest.raises(ValueError, match="synthetic lr failure"):
+        modeling_tools.tool_train_models(
+            {
+                "dataset_id": dataset.id,
+                "recipes": ["lgb", "lr"],
+                "features": ["x1", "x2"],
+                "target_col": "y",
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+                "seed": 23,
+            },
+            ctx,
+        )
 
 
 def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_path):

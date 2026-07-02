@@ -929,6 +929,8 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     preprocessing_chain_traceable = bool(preprocessing_steps) or sidecar_path(dataset_path).exists()
 
     experiments: list[dict] = []
+    failed: list[dict] = []
+    last_exc: Exception | None = None
     for recipe in recipes:
         if per_recipe_params is not None:
             recipe_params = {**per_recipe_params.get(recipe, {}), **control_params}
@@ -973,11 +975,21 @@ def tool_train_models(inputs: dict, ctx) -> dict:
                 out_dir=artifact_dir,
             )
             runtime.experiments.attach_result(experiment_id, result)
-        except Exception:
+        except Exception as exc:
+            # TUNE-8/SEL-3: one recipe's failure (e.g. a data issue only that
+            # algorithm chokes on) no longer aborts the whole multi-algorithm
+            # comparison -- it's recorded as a failed candidate and the batch
+            # continues, so the other recipes' results are never lost.
             if result is not None:
                 _cleanup_unattached_artifact(result.artifact, artifact_dir, meta_snapshot)
             runtime.experiments.set_status(experiment_id, "failed")
-            raise
+            failed.append({
+                "experiment_id": experiment_id,
+                "recipe": recipe,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            last_exc = exc
+            continue
         experiment = runtime.experiments.get(experiment_id)
         experiments.append({
             "experiment_id": experiment_id,
@@ -985,6 +997,16 @@ def tool_train_models(inputs: dict, ctx) -> dict:
             "metrics": _jsonable(experiment.metrics) or {},
         })
 
+    if not experiments:
+        # Every recipe failed: nothing survived to compare, so this must be a hard
+        # error, not a silently empty result -- re-raise the last recipe's original
+        # exception (not a generic wrapper) so infrastructure failures (e.g. an
+        # audit-log write failure, as opposed to a genuine per-recipe training
+        # issue) still surface with their real type/message for callers/tests
+        # that match on it.
+        if last_exc is not None:
+            raise last_exc
+        raise ModelingError("all requested recipes failed to train")
     best, selection_metric = _pick_best_experiment(experiments, target_type=target_type)
     return {
         "experiments": experiments,
@@ -993,6 +1015,7 @@ def tool_train_models(inputs: dict, ctx) -> dict:
         "best_recipe": best["recipe"],
         "target_type": target_type,
         "selection_metric": selection_metric,
+        "failed": failed,
     }
 
 

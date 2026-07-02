@@ -260,6 +260,47 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     )
 
 
+def test_train_lr_handles_missing_feature_values_via_impute_scale_pipeline(tmp_path):
+    """PREP-6/SEL-3: LR is now an impute(median)->scale->LogisticRegression
+    Pipeline (mirroring mlp.py), so feature NaNs no longer crash sklearn's fit --
+    previously LogisticRegression().fit() raised on any missing value."""
+    rows = 180
+    x1 = [((i * 37) % 101) / 100 for i in range(rows)]
+    for index in range(0, rows, 11):
+        x1[index] = float("nan")
+    frame = pd.DataFrame({
+        "x1": x1,
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 100 + ["test"] * 50 + ["oot"] * 30,
+    })
+    path = tmp_path / "lr_nan_sample.parquet"
+    frame.to_parquet(path, index=False)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    backend = DataBackend(tmp_path)
+    result = train_lr(backend, path, config, out_dir=tmp_path / "models_lr_nan")
+
+    assert result.artifact.algorithm == "lr"
+    assert result.metrics.test_auc is not None
+    from sklearn.pipeline import Pipeline
+
+    from marvis.packs.modeling.artifact import load_model as _load_model
+
+    model = _load_model(result.artifact, base_dir=tmp_path / "models_lr_nan")
+    assert isinstance(model, Pipeline)
+    assert list(model.named_steps) == ["impute", "scale", "lr"]
+
+
 def test_train_mlp_writes_artifact_and_is_seed_reproducible(tmp_path):
     rows = 180
     frame = pd.DataFrame({
