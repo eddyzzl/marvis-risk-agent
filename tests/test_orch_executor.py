@@ -277,6 +277,47 @@ def test_plan_executor_runs_linear_plan_resolves_refs_and_finalizes(tmp_path):
     assert evidence["parent_output_refs"] == ["metrics:step-1:v1"]
 
 
+def test_plan_executor_run_stops_cleanly_when_plan_cancelled_between_steps(tmp_path):
+    # REL-5: a cancel request (POST /api/plans/{id}/cancel) can land between
+    # two step executions inside the same run() call — each _execute_step is
+    # itself uninterruptible mid-tool-invocation, so the checkpoint has to be
+    # the top of the main loop. Without it, the loop would try another
+    # _set_plan_status transition on an already-CANCELLED plan and raise
+    # IllegalPlanTransition instead of returning cleanly.
+    plan = _plan(
+        _step("step-1", inputs={"message": "hi"}),
+        _step(
+            "step-2",
+            index=1,
+            inputs={"message": "again"},
+            depends_on=["step-1"],
+        ),
+    )
+    repo = _repo(tmp_path, plan)
+
+    class CancelAfterFirstStepRunner:
+        def __init__(self):
+            self._tools = FakeTools()
+            self.calls = []
+
+        def invoke(self, ref, inputs, *, task_id):
+            self.calls.append((ref, inputs, task_id))
+            if len(self.calls) == 1:
+                repo.set_plan_status("plan-1", PlanStatus.CANCELLED)
+            return _ok({"echoed": inputs.get("message")})
+
+    runner = CancelAfterFirstStepRunner()
+
+    result = _executor(repo, runner).run("plan-1")
+
+    assert result.status == PlanStatus.CANCELLED
+    assert len(runner.calls) == 1
+    loaded = repo.load_plan("plan-1")
+    assert loaded.status == PlanStatus.CANCELLED
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert loaded.steps[1].status == StepStatus.PENDING
+
+
 def test_plan_executor_evidence_records_tool_manifest_and_artifacts(tmp_path):
     plan = _plan(
         _step(

@@ -284,6 +284,42 @@ def test_plan_confirm_run_step_confirm_and_cancel_endpoints(tmp_path):
     assert cancelled.json()["plan"]["status"] == "cancelled"
 
 
+def test_plan_cancel_releases_active_job_for_task(tmp_path):
+    # REL-5: cancel_plan flips the plan to CANCELLED (the checkpoint the
+    # executor's run() loop recognizes), but a job row already RUNNING for the
+    # same task would otherwise keep idx_jobs_active_task locked until that
+    # in-flight run() call happens to notice on its own. The endpoint should
+    # release it immediately instead of leaving the task wedged.
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.RUNNING, task_id=task_id))
+    task_repo = TaskRepository(repo.db_path)
+    job_id = task_repo.start_job(task_id, "plan")
+    task_repo.mark_job_running(job_id)
+    assert task_repo.task_has_active_job(task_id) is True
+
+    cancelled = client.post("/api/plans/plan-1/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["plan"]["status"] == "cancelled"
+    assert task_repo.task_has_active_job(task_id) is False
+    assert _job_statuses(repo.db_path) == ["cancelled"]
+
+
+def test_plan_cancel_without_active_job_still_succeeds(tmp_path):
+    client = _client(tmp_path)
+    repo = client.app.state.plan_repo
+    task_id = _create_task(repo.db_path)
+    repo.create_plan(_plan(status=PlanStatus.CONFIRMED, task_id=task_id))
+
+    cancelled = client.post("/api/plans/plan-1/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["plan"]["status"] == "cancelled"
+    assert _job_statuses(repo.db_path) == []
+
+
 def test_plan_run_records_cancelled_job_when_executor_returns_cancelled(tmp_path):
     client = _client(tmp_path)
     repo = client.app.state.plan_repo

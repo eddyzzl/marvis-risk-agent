@@ -318,7 +318,13 @@ class JoinEngine:
         )
         self._repo.update_join_spec_with_audit(join_plan_id, spec, audit=audit)
 
-    def execute_join_plan(self, join_plan_id: str, *, out_dir: Path) -> Dataset:
+    def execute_join_plan(
+        self,
+        join_plan_id: str,
+        *,
+        out_dir: Path,
+        cancel_token=None,
+    ) -> Dataset:
         plan = self._repo.load_join_plan(join_plan_id)
         if any(not join.confirmed for join in plan.joins):
             raise JoinNotConfirmedError("all joins must be confirmed before execute")
@@ -329,6 +335,12 @@ class JoinEngine:
         artifact_store = TransactionalArtifactStore(Path(out_dir))
         staged_artifacts = []
         for spec in plan.joins:
+            # Cooperative cancel checkpoint (REL-5): between feature joins is
+            # the only safe rollback point — mid-left_join there is no partial
+            # state to roll back cleanly, so the check sits here rather than
+            # inside the DuckDB call.
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
             if (
                 not spec.diagnostics.feature_key_unique
                 and spec.dedup_strategy in (None, "abort")

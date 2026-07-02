@@ -79,6 +79,14 @@ class PlanExecutor:
 
         while True:
             plan = self._repo.load_plan(plan_id)
+            if plan.status == PlanStatus.CANCELLED:
+                # Cooperative cancel checkpoint (REL-5): a cancel request can
+                # land between two step executions (each _execute_step call is
+                # itself uninterruptible mid-tool-invocation). Recognize the
+                # externally-applied CANCELLED status here instead of trying
+                # another _set_plan_status transition, which would raise
+                # IllegalPlanTransition since CANCELLED has no further moves.
+                return ExecutionResult(plan.id, PlanStatus.CANCELLED, None, None)
             failed = [step for step in plan.steps if step.status == StepStatus.FAILED]
             if failed:
                 no_progress_step = None

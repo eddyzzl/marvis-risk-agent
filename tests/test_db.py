@@ -612,6 +612,49 @@ def test_update_task_status_missing_raises_key_error(tmp_path):
         )
 
 
+def test_init_db_migrates_pre_heartbeat_jobs_table(tmp_path):
+    # REL-5: simulate a database created before jobs.heartbeat_at existed —
+    # init_db must add the column via _ensure_column without touching existing
+    # rows, so an upgrade doesn't lose in-flight job state.
+    db_path = tmp_path / "app.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_message TEXT NOT NULL DEFAULT '',
+                error_name TEXT,
+                error_value TEXT,
+                traceback TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                log_path TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs(id, task_id, kind, status, created_at)
+            VALUES ('job-1', 'task-1', 'join', 'running', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        assert "heartbeat_at" in columns
+        row = conn.execute(
+            "SELECT status, heartbeat_at FROM jobs WHERE id = 'job-1'"
+        ).fetchone()
+    assert row["status"] == "running"
+    assert row["heartbeat_at"] is None
+
+
 def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)

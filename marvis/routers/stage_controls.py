@@ -8,6 +8,7 @@ from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
 from marvis.domain import TaskStatus
 from marvis.files import write_text_atomic
+from marvis.job_cancellation import request_job_cancellation
 from marvis.notebook_cancellation import request_notebook_cancellation
 from marvis.pipeline import _metrics_cancel_marker_path
 
@@ -71,6 +72,34 @@ def cancel_task_report(task_id: str, request: Request) -> dict:
         "status": "accepted",
         "message": "report cancellation requested; poll GET /api/tasks/{task_id}",
     }
+
+
+@router.post("/tasks/{task_id}/join/cancel", status_code=202)
+def cancel_task_join(task_id: str, request: Request) -> dict:
+    """Cooperative cancel for a running join execution job (REL-5). Unlike
+    notebook/metrics/report (which interrupt a kernel or watch a marker file),
+    execute_join_plan has no external process to signal — this flips an
+    in-memory JobCancellationToken that the join engine checks between feature
+    joins (marvis/data/join_engine.py), the only safe rollback boundary."""
+    repo = _repo(request)
+    get_task_or_404(repo, task_id)
+    job_id = _active_job_id(repo, task_id, "join")
+    if job_id is None:
+        raise HTTPException(status_code=409, detail="task has no active join job")
+    request_job_cancellation(job_id)
+    return {
+        "task_id": task_id,
+        "job_id": job_id,
+        "status": "accepted",
+        "message": "join cancellation requested; poll GET /api/tasks/{task_id}",
+    }
+
+
+def _active_job_id(repo: TaskRepository, task_id: str, kind: str) -> str | None:
+    job = repo.get_latest_job(task_id, kind=kind)
+    if job is None or job.get("status") not in {"queued", "running"}:
+        return None
+    return str(job["id"])
 
 
 def _write_metrics_cancel_marker(task_dir: Path) -> None:

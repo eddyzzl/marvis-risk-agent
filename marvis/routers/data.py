@@ -17,6 +17,12 @@ from marvis.api_data_payloads import (
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.api_stage_helpers import start_task_job
 from marvis.api_task_helpers import dispatch_platform_hook
+from marvis.job_cancellation import (
+    JobCancelled,
+    register_job_cancellation,
+    unregister_job_cancellation,
+)
+from marvis.job_heartbeat import heartbeat_job
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import KeyPair
@@ -372,11 +378,17 @@ async def execute_join_plan(
     task_repo = TaskRepository(request.app.state.settings.db_path)
     job_id = start_task_job(task_repo, plan.task_id, "join")
     task_repo.mark_job_running(job_id)
+    cancel_token = register_job_cancellation(job_id)
     try:
-        result = join_engine.execute_join_plan(
-            join_plan_id,
-            out_dir=request.app.state.settings.datasets_dir / plan.task_id / "joins",
-        )
+        with heartbeat_job(task_repo, job_id):
+            result = join_engine.execute_join_plan(
+                join_plan_id,
+                out_dir=request.app.state.settings.datasets_dir / plan.task_id / "joins",
+                cancel_token=cancel_token,
+            )
+    except JobCancelled:
+        task_repo.finish_job(job_id, status="cancelled")
+        raise HTTPException(status_code=409, detail="join execution cancelled") from None
     except (JoinNotConfirmedError, DedupRequiredError, FanOutError) as exc:
         task_repo.finish_job(
             job_id,
@@ -404,6 +416,8 @@ async def execute_join_plan(
         raise
     else:
         task_repo.finish_job(job_id, status="succeeded")
+    finally:
+        unregister_job_cancellation(job_id, cancel_token)
     return {
         "result_dataset_id": result.id,
         "anchor_rows": anchor.row_count,
@@ -425,12 +439,17 @@ def _run_join_execute_job(
     backend = DataBackend(datasets_dir)
     registry = DatasetRegistry(repo_data, backend, datasets_dir)
     join_engine = JoinEngine(backend, ColumnAligner(backend), registry, repo_data)
+    cancel_token = register_job_cancellation(job_id)
     try:
-        plan = repo_data.load_join_plan(join_plan_id)
-        join_engine.execute_join_plan(
-            join_plan_id,
-            out_dir=Path(datasets_dir) / plan.task_id / "joins",
-        )
+        with heartbeat_job(task_repo, job_id):
+            plan = repo_data.load_join_plan(join_plan_id)
+            join_engine.execute_join_plan(
+                join_plan_id,
+                out_dir=Path(datasets_dir) / plan.task_id / "joins",
+                cancel_token=cancel_token,
+            )
+    except JobCancelled:
+        task_repo.finish_job(job_id, status="cancelled")
     except Exception as exc:
         task_repo.finish_job(
             job_id,
@@ -441,3 +460,5 @@ def _run_join_execute_job(
         )
     else:
         task_repo.finish_job(job_id, status="succeeded")
+    finally:
+        unregister_job_cancellation(job_id, cancel_token)

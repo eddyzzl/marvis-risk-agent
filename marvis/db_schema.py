@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MIGRATION_TABLES = frozenset({
     "tasks",
+    "jobs",
     "plans",
     "plan_steps",
     "plan_step_outputs",
@@ -186,6 +187,12 @@ def init_db(db_path: Path) -> None:
                 FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             )
             """
+        )
+        _ensure_column(
+            conn,
+            table="jobs",
+            column="heartbeat_at",
+            definition="TEXT",
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, kind, status)"

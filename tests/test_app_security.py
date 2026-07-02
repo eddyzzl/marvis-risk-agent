@@ -124,6 +124,7 @@ def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
+        "stuck_jobs": 0,
         "sqlite_journal_mode": "delete",
         "sqlite_wal_degraded": True,
         "sqlite_busy_timeout_ms": 5000,

@@ -50,6 +50,11 @@ from marvis.plugins.hooks import HookDispatcher
 from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
+from marvis.job_watchdog import (
+    JobHeartbeatWatchdog,
+    heartbeat_timeout_seconds,
+    sweep_heartbeat_lost_jobs,
+)
 from marvis.recovery import reclaim_running_plans, reclaim_stale_running_tasks
 from marvis.routers.agent_memory import router as agent_memory_router
 from marvis.routers.artifacts import router as artifacts_router
@@ -176,13 +181,18 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     _configure_orchestrator(app, settings)
+    task_repo = TaskRepository(settings.db_path)
     reclaim_running_plans(
         app.state.plan_repo,
         app.state.reviewer,
         app.state.hook_dispatcher,
         app.state.harness_state,
-        TaskRepository(settings.db_path),
+        task_repo,
     )
+    sweep_heartbeat_lost_jobs(task_repo)
+    job_watchdog = JobHeartbeatWatchdog(task_repo)
+    job_watchdog.start()
+    app.state.job_watchdog = job_watchdog
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
@@ -241,7 +251,14 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"status": "ok", **sqlite_health(settings.db_path)}
+        stuck_jobs = task_repo.count_heartbeat_stale_running_jobs(
+            older_than_seconds=heartbeat_timeout_seconds()
+        )
+        return {
+            "status": "ok",
+            "stuck_jobs": stuck_jobs,
+            **sqlite_health(settings.db_path),
+        }
 
     @app.get("/branding/assets/{asset_path:path}")
     def branding_asset(asset_path: str) -> FileResponse:

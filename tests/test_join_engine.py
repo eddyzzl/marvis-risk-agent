@@ -9,6 +9,7 @@ from marvis.data.contracts import Dataset, KeyPair
 from marvis.data.errors import DataBackendError, DedupRequiredError, FanOutError, JoinNotConfirmedError
 from marvis.data.join_engine import JoinEngine
 from marvis.data.schema_infer import infer_dataset_schema
+from marvis.job_cancellation import JobCancelled, JobCancellationToken
 
 
 class FakeRegistry:
@@ -198,6 +199,75 @@ def test_join_engine_proposes_confirms_and_executes_unique_hash_join(tmp_path):
     assert repo.audits[1]["detail"]["provenance"] == [
         {"feature_dataset_id": feature.id, "columns": ["credit_limit"]}
     ]
+
+
+def test_join_engine_execute_respects_cooperative_cancel_token(tmp_path):
+    # REL-5: execute_join_plan has no process/kernel to interrupt, so
+    # cancellation is cooperative — the caller flips a JobCancellationToken and
+    # the engine checks it at the per-feature-join loop boundary (the only safe
+    # rollback point, since a left_join in progress has no partial state).
+    engine, registry, repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry,
+        tmp_path,
+        "anchor",
+        pd.DataFrame({"mobile": ["13800138000", "13900139000"], "score": [0.1, 0.2]}),
+    )
+    feature = _write_dataset(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [
+                hashlib.md5(value.encode()).hexdigest()
+                for value in ["13800138000", "13900139000"]
+            ],
+            "credit_limit": [1000, 2000],
+        }),
+    )
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+
+    token = JobCancellationToken(job_id="job-1")
+    token.cancel()
+
+    with pytest.raises(JobCancelled):
+        engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined", cancel_token=token)
+
+    # Nothing was written and the plan was never marked executed — the
+    # checkpoint fires before any left_join runs.
+    assert repo.load_join_plan(plan.id).status == "draft"
+    assert list((tmp_path / "joined").glob("*.parquet")) == []
+
+
+def test_join_engine_execute_ignores_cancel_token_when_not_cancelled(tmp_path):
+    engine, registry, repo = _engine(tmp_path)
+    anchor = _write_dataset(
+        registry,
+        tmp_path,
+        "anchor",
+        pd.DataFrame({"mobile": ["13800138000", "13900139000"], "score": [0.1, 0.2]}),
+    )
+    feature = _write_dataset(
+        registry,
+        tmp_path,
+        "feature",
+        pd.DataFrame({
+            "phone_md5": [
+                hashlib.md5(value.encode()).hexdigest()
+                for value in ["13800138000", "13900139000"]
+            ],
+            "credit_limit": [1000, 2000],
+        }),
+    )
+    plan = engine.propose_join_plan(anchor.id, [feature.id], "task-1")
+    engine.confirm_join_spec(plan.id, feature.id, dedup_strategy=None)
+
+    token = JobCancellationToken(job_id="job-1")
+    result = engine.execute_join_plan(plan.id, out_dir=tmp_path / "joined", cancel_token=token)
+
+    assert result.row_count == anchor.row_count
+    assert repo.load_join_plan(plan.id).status == "executed"
 
 
 def test_join_engine_diagnoses_composite_keys_with_per_pair_match_methods(tmp_path):

@@ -13,6 +13,7 @@ from marvis.api_task_payloads import normalized_status_reason
 from marvis.db import TaskRepository
 from marvis.domain import TASK_STATUS_REASON_USER_CANCELLED, TaskRecord
 from marvis.execution_environment import load_execution_environment
+from marvis.job_heartbeat import heartbeat_job
 from marvis.pipeline import PipelineSettings
 from marvis.state_machine import ConflictError
 
@@ -56,7 +57,8 @@ def run_stage_job(
         task_id=task_id_text,
     )
     try:
-        stage_func(**kwargs)
+        with heartbeat_job(repo, job_id):
+            stage_func(**kwargs)
     except Exception as exc:
         repo.finish_job(
             job_id,
