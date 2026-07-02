@@ -54,6 +54,12 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "--strict-markers"
+markers = [
+  "slow: real training/real subprocess/JVM-warm-up tests that take more than ~5s",
+  "e2e: tests that start a real service (FastAPI app, browser, etc.)",
+  "llm: LLM evaluation/eval-set tests",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

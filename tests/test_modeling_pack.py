@@ -320,6 +320,7 @@ def test_training_attach_failure_rolls_back_unattached_artifact_files(
     assert [artifact.id for artifact in artifacts] == [baseline_artifact_id]
 
 
+@pytest.mark.slow
 def test_train_model_persists_preprocessing_chain_and_flags_pmml_boundary(tmp_path):
     """PREP-2 end-to-end: feature.impute_missing (train-only fit) on a dataset with
     NaN values -> modeling.train_model on the derived dataset must carry the fitted
@@ -453,6 +454,7 @@ def test_train_model_persists_woe_preprocessing_chain_and_scorer_replays_it(tmp_
     assert raw_scores == already_encoded_scores
 
 
+@pytest.mark.slow
 def test_train_model_without_preprocessing_chain_flags_untraceable_on_model_card(tmp_path):
     """PREP-2 (d): a model trained straight off a historical dataset (no lineage
     sidecar at all) must get an explicit '预处理链不可追溯' model-card note, distinct
@@ -493,6 +495,7 @@ def test_train_model_without_preprocessing_chain_flags_untraceable_on_model_card
     )
 
 
+@pytest.mark.slow
 def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
     runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
@@ -852,6 +855,7 @@ def _register_segment_sample(registry, tmp_path, task_id: str):
     return registry.register_existing(path, task_id=task_id, role="modeling_sample")
 
 
+@pytest.mark.slow
 def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_path):
     """SEL-8 (scoped-down diagnostic): segment_value_evaluation scores ONE
     already-trained model (no new training) and reports pooled KS/AUC plus a
@@ -928,6 +932,7 @@ def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_p
     assert evaluated_again.output["pooled"] == out["pooled"]
 
 
+@pytest.mark.slow
 def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_path):
     """SEL-8: any segment below min_group_rows is folded into __default__
     rather than getting an unreliable few-row KS/AUC row of its own -- with the
@@ -978,6 +983,7 @@ def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_p
     assert evaluated.output["segment_ks_spread"] == 0.0
 
 
+@pytest.mark.slow
 def test_segment_value_evaluation_requires_binary_target_and_known_segment_column(tmp_path):
     """SEL-8: clear config errors instead of silent misbehaviour -- an unknown
     segment_col and (separately) a non-binary target both raise."""
@@ -1086,6 +1092,7 @@ def test_train_model_applies_top_level_monotone_constraints_for_tree_models(tmp_
         assert artifact.params["monotone_constraints"] == expected_constraints
 
 
+@pytest.mark.slow
 def test_modeling_pack_tools_round_trip_via_runner(tmp_path):
     runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
@@ -1381,6 +1388,7 @@ def test_train_model_allows_scoring_only_oot(tmp_path):
     assert result.output["metrics"]["oot_auc"] is None
 
 
+@pytest.mark.slow
 def test_tune_hyperparameters_supports_all_binary_recipes(tmp_path):
     """TUNE-1: the two-stage random search now runs for every BINARY_MODELING_RECIPES
     family, not just lgb. xgb/catboost get tree-recipe spaces with early-stopping
@@ -1651,6 +1659,7 @@ def test_train_models_default_scenario_still_selects_by_ks(tmp_path):
         assert store.get(experiment_id).config.eval_metric == "ks_auc"
 
 
+@pytest.mark.slow
 def test_train_models_reports_deterministic_ks_bootstrap_confidence_intervals(tmp_path):
     """SEL-5: every trained experiment carries a bootstrap 95% CI for test_ks (and
     oot_ks when OOT is present), and the interval is a pure function of the
@@ -1697,6 +1706,7 @@ def test_train_models_reports_deterministic_ks_bootstrap_confidence_intervals(tm
     assert metrics_a["oot_ks_ci_low"] <= metrics_a["oot_ks"] <= metrics_a["oot_ks_ci_high"]
 
 
+@pytest.mark.slow
 def test_compare_and_select_experiment_surface_ks_ci_overlap_note(tmp_path):
     """SEL-5: when two candidates' test_ks bootstrap CIs overlap, compare_experiments
     and select_experiment both surface a "within sampling error" hint -- the
@@ -1851,6 +1861,7 @@ def test_train_models_raises_when_every_recipe_fails(tmp_path, monkeypatch: pyte
         )
 
 
+@pytest.mark.slow
 def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_path):
     """TUNE-4: select_experiment defaults refit_on_train_plus_test=True -- the
     champion's frozen hyperparameters get retrained on train+test combined (test's
@@ -1914,6 +1925,7 @@ def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_pat
     assert set(refit_artifact.feature_list) == {"x1", "x2"}
 
 
+@pytest.mark.slow
 def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champion(tmp_path):
     """TUNE-4 escape hatch: refit_on_train_plus_test=False keeps the pre-refit
     train-only champion exactly as select_experiment always returned it."""
@@ -1958,6 +1970,7 @@ def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champio
     assert selected.output["selected_experiment_id"] == trained.output["experiment_id"]
 
 
+@pytest.mark.slow
 def test_multi_algorithm_pipeline_tunes_every_recipe_before_training(tmp_path):
     """TUNE-1/SEL-2 end-to-end: configure_tuning -> tune_hyperparameters(recipes=[...])
     -> train_models is a fair arena. Every recipe in the comparison gets its own
@@ -2067,6 +2080,7 @@ def test_multi_algorithm_pipeline_tunes_every_recipe_before_training(tmp_path):
     assert experiments["lr"].config.early_stopping_rounds is None
 
 
+@pytest.mark.slow
 def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     runner, _pr, registry, backend, settings, task = _runtime(tmp_path)
     rows = 180
@@ -2334,6 +2348,7 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "## 入模特征" in markdown_text
 
 
+@pytest.mark.slow
 def test_train_models_accepts_ensemble_as_opt_in_participant(tmp_path):
     """SEL-6: ensemble is a legal recipe id in the multi-algorithm arena when
     explicitly requested (opt-in participant), but never appears unless the

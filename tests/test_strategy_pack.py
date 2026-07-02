@@ -89,6 +89,7 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
     assert "write:backtest" in backtest_tool.side_effects
 
 
+@pytest.mark.slow
 def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     runner, _plugin_registry, registry, task = _runtime(tmp_path)
     dataset = _register_strategy_sample(registry, tmp_path, task.id)

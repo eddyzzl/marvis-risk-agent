@@ -903,6 +903,7 @@ def test_generate_scorecard_report_keeps_pd_and_points_separate(tmp_path):
     assert base_row["points"] > 100
 
 
+@pytest.mark.slow
 def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
     runner, settings, task, dataset = _report_runner(tmp_path)
     lr_experiment = _train_report_experiment(runner, task, dataset, "lr", {"max_iter": 200})

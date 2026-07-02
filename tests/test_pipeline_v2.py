@@ -592,6 +592,7 @@ def test_metrics_stage_shows_named_internal_progress_steps(tmp_path: Path):
     ]
 
 
+@pytest.mark.slow
 def test_pipeline_end_to_end(tmp_path: Path):
     project = _build_project(tmp_path)
     workspace = tmp_path / "workspace"
@@ -2119,6 +2120,7 @@ def test_load_sample_supports_excel_files(tmp_path: Path):
     assert sample.to_dict(orient="list") == {"x1": [1, 2], "y": [0, 1]}
 
 
+@pytest.mark.slow
 def test_staged_pipeline_isolated_mode_executes_notebook_once(tmp_path: Path):
     # PERF-3 regression: the default isolated-mode staged pipeline must run
     # the user notebook exactly once. Before the fix, the metrics stage

@@ -21,10 +21,13 @@ from urllib.parse import urlparse
 import pytest
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("MARVIS_RUN_PLAYWRIGHT_SMOKE") != "1",
-    reason="Set MARVIS_RUN_PLAYWRIGHT_SMOKE=1 to run browser smoke tests.",
-)
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.skipif(
+        os.environ.get("MARVIS_RUN_PLAYWRIGHT_SMOKE") != "1",
+        reason="Set MARVIS_RUN_PLAYWRIGHT_SMOKE=1 to run browser smoke tests.",
+    ),
+]
 
 
 ROOT = Path(__file__).resolve().parents[1]

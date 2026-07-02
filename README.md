@@ -197,6 +197,18 @@ ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
 
+Tests are tiered with pytest markers (`slow`, `e2e`, `llm`). For fast local
+iteration, run only the fast tier (excludes real-training/real-subprocess
+tests and browser e2e smoke tests):
+
+```bash
+python -m pytest -m "not slow and not e2e" -q
+# or
+scripts/check --fast
+```
+
+CI always runs the full, untiered suite; `--fast` is a local-only speedup.
+
 ## Release Push
 
 Use the release helper instead of raw `git push` when publishing a new public version. Run it **after** the feature, fix, or documentation changes have been verified and committed. The helper requires a clean worktree and creates a separate version bump commit plus an annotated tag.

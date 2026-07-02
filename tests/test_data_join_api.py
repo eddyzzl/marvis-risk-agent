@@ -100,6 +100,7 @@ def test_data_join_conversation_end_to_end(client: TestClient, tmp_path: Path):
     assert "1:1 保持" in done["content"]
 
 
+@pytest.mark.slow
 def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path: Path):
     """§4 join dedup picker: a non-unique feature key leaves confirm_join awaiting a
     strategy; the C2 gate surfaces it via metadata.dedup; posting a per-feature
@@ -151,6 +152,7 @@ def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path:
     assert "1:1 保持" in done["content"]
 
 
+@pytest.mark.slow
 def test_data_join_dedup_text_instruction_resolves_conflicts(client: TestClient, tmp_path: Path):
     """Manual-mode TEXT resolution of a same-key conflict when no §4 picker is wired: the C2
     gate surfaces the conflict + the 「去重 first/last」 hint, and replying with that text
