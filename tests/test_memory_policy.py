@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import marvis.api as api
+from marvis.db import init_db
 from marvis.memory_policy import (
     MemoryPolicySettings,
     _memory_policy_path,
@@ -135,6 +136,63 @@ def test_capture_consults_policy_when_auto_distill_on(tmp_path: Path, monkeypatc
     api._capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
 
     assert called["extract"] is True
+
+
+def test_capture_dispatches_memory_after_save_when_hook_dispatcher_present(tmp_path: Path):
+    init_db(tmp_path / "marvis.sqlite")
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+    dispatched = []
+    fake_dispatcher = SimpleNamespace(
+        dispatch=lambda event, payload, *, task_id: dispatched.append((event, payload, task_id))
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                settings=SimpleNamespace(workspace=tmp_path, db_path=tmp_path / "marvis.sqlite"),
+                hook_dispatcher=fake_dispatcher,
+            )
+        )
+    )
+
+    api._capture_user_preference_memory(
+        request,
+        "task-1",
+        {"content": "请记住：优先用KS指标对比。", "id": "msg-1"},
+    )
+
+    assert len(dispatched) == 1
+    event, payload, task_id = dispatched[0]
+    assert event == "memory.after_save"
+    assert payload["task_id"] == "task-1"
+    assert payload["memory_type"] == "user_preference"
+    assert task_id == "task-1"
+
+
+def test_capture_does_not_dispatch_when_no_candidate_extracted(tmp_path: Path, monkeypatch):
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+    dispatched = []
+    fake_dispatcher = SimpleNamespace(
+        dispatch=lambda event, payload, *, task_id: dispatched.append((event, payload, task_id))
+    )
+    monkeypatch.setattr(api, "extract_user_preference", lambda *_a, **_k: None)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                settings=SimpleNamespace(workspace=tmp_path, db_path=tmp_path / "marvis.sqlite"),
+                hook_dispatcher=fake_dispatcher,
+            )
+        )
+    )
+
+    api._capture_user_preference_memory(request, "task-1", {"content": "x", "id": "1"})
+
+    assert dispatched == []
 
 
 def test_pipeline_metrics_success_capture_skipped_when_auto_distill_off(

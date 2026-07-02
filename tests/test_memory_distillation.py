@@ -178,6 +178,36 @@ def test_distillation_model_experience_carries_months_covered_range(tmp_path):
     assert distillations[0].structured["months_covered"] == {"min": "202503", "max": "202601"}
 
 
+def test_distill_category_logs_and_counts_group_failures_instead_of_swallowing(tmp_path, caplog):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    store.create(
+        MemoryCandidate(
+            memory_type="user_preference",
+            summary="正常偏好经验。",
+            payload={"preference": "正常偏好经验。"},
+            source_task_id="task-ok",
+        )
+    )
+    engine = DistillationEngine(store)
+    original_distill_group = engine._distill_group
+
+    def _boom(category, scope_key, members):
+        if scope_key == "user_preference:general":
+            raise RuntimeError("boom")
+        return original_distill_group(category, scope_key, members)
+
+    engine._distill_group = _boom
+
+    with caplog.at_level("WARNING"):
+        results = engine.distill_category("user_preference")
+
+    assert results == []
+    assert engine.last_error_count == 1
+    assert any("distill group failed" in record.message for record in caplog.records)
+
+
 class _BrokenLLM:
     def complete(self, **_kwargs):
         raise RuntimeError("unavailable")

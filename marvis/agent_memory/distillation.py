@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
+import logging
 import uuid
 from typing import Any
 
 from marvis.agent_memory.models import normalize_memory_type
 from marvis.agent_memory.policy import classify_distillation_payload
+
+
+logger = logging.getLogger(__name__)
 
 
 CONFIDENCE_THRESHOLDS = {"high": 4, "medium": 2}
@@ -106,16 +110,25 @@ class DistillationEngine:
         self._store = store
         self._llm_factory = llm_factory
         self._policy = policy
+        self.last_error_count = 0
 
     def distill_category(self, category: str) -> list[MemoryDistillation]:
         normalized = normalize_memory_type(category)
         entries = self._store.list_entries(memory_type=normalized, status="active", limit=2000)
         groups = self._group_by_scope(entries)
         results = []
+        self.last_error_count = 0
         for scope_key, members in groups.items():
             try:
                 distilled = self._distill_group(normalized, scope_key, members)
             except Exception:
+                self.last_error_count += 1
+                logger.warning(
+                    "distill group failed: category=%s scope=%s",
+                    normalized,
+                    scope_key,
+                    exc_info=True,
+                )
                 continue
             if distilled is not None:
                 results.append(distilled)

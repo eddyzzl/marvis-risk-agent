@@ -20,6 +20,7 @@ def capture_user_preference_memory(
     message: dict,
     *,
     extractor=extract_user_preference,
+    hook_dispatcher=None,
 ) -> None:
     # Memory policy gate (auto_distill): this function performs AUTOMATIC per-turn
     # capture of user messages as memory candidates. When the flag is OFF the user
@@ -38,7 +39,7 @@ def capture_user_preference_memory(
         return
     store = AgentMemoryStore(settings.db_path)
     try:
-        store.create(
+        entry = store.create(
             replace(
                 candidate,
                 source_task_id=task_id,
@@ -48,6 +49,37 @@ def capture_user_preference_memory(
     except Exception as exc:
         logger.warning(
             "failed to save user preference memory for task %s: %s",
+            task_id,
+            exc,
+        )
+        return
+    if entry.status == "active":
+        dispatch_memory_after_save(hook_dispatcher, task_id=task_id, memory_type=entry.memory_type)
+
+
+def dispatch_memory_after_save(
+    hook_dispatcher,
+    *,
+    task_id: str | None,
+    memory_type: str,
+) -> None:
+    # The 'memory.after_save' consolidation trigger (CONSOLIDATION_TRIGGERS)
+    # previously had zero emit call sites: it was declared but never fired, so
+    # V2-only workflows -- which never touch the V1.1 validation.completed /
+    # report.after_generate hooks -- could accumulate raw memories forever
+    # without ever being distilled. This fires it from every active-memory
+    # capture point instead.
+    if hook_dispatcher is None or not task_id:
+        return
+    try:
+        hook_dispatcher.dispatch(
+            "memory.after_save",
+            {"task_id": task_id, "memory_type": memory_type},
+            task_id=task_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "memory.after_save hook dispatch failed for task %s: %s",
             task_id,
             exc,
         )

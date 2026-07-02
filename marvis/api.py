@@ -797,6 +797,7 @@ def _capture_user_preference_memory(
         task_id,
         message,
         extractor=extract_user_preference,
+        hook_dispatcher=getattr(request.app.state, "hook_dispatcher", None),
     )
 
 

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import logging
 import threading
 
 from marvis.agent_memory.models import MEMORY_TYPES, normalize_memory_type
+
+
+logger = logging.getLogger(__name__)
 
 
 CONSOLIDATION_TRIGGERS = {"validation.completed", "report.after_generate", "memory.after_save"}
@@ -45,19 +49,23 @@ class ConsolidationScheduler:
         for category in selected:
             normalized = normalize_memory_type(category)
             try:
-                result[normalized] = self._consolidate(normalized)
+                count, errors = self._consolidate(normalized)
             except Exception:
-                result[normalized] = 0
+                logger.warning("consolidation failed for category %s", normalized, exc_info=True)
+                result[normalized] = {"count": 0, "errors": 1}
+                continue
+            result[normalized] = {"count": count, "errors": errors}
         return result
 
-    def _consolidate(self, category: str) -> int:
+    def _consolidate(self, category: str) -> tuple[int, int]:
         count = 0
         candidates = self._distill.distill_category(category)
         for candidate in candidates:
             self._evolve.upsert_with_evolution(candidate)
             count += 1
+        errors = getattr(self._distill, "last_error_count", 0)
         self._store.mark_consolidated(category, at=_now_iso())
-        return count
+        return count, errors
 
     def _recently_consolidated(self, category: str) -> bool:
         last = self._store.last_consolidated_at(category)
@@ -74,6 +82,7 @@ class ConsolidationScheduler:
             try:
                 func()
             except Exception:
+                logger.warning("synchronous consolidation run failed", exc_info=True)
                 return
             return
         thread = threading.Thread(target=_safe_call, args=(func,), daemon=True)
@@ -95,7 +104,7 @@ def _safe_call(func) -> None:
     try:
         func()
     except Exception:
-        return
+        logger.warning("background consolidation run failed", exc_info=True)
 
 
 def _now() -> datetime:

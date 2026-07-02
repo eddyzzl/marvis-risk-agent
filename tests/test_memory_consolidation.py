@@ -70,7 +70,9 @@ def test_consolidation_event_respects_auto_distill_policy(tmp_path):
 
     assert store.get_active_distillation("field_convention:target_col") is None
     assert store.last_consolidated_at("field_convention") is None
-    assert scheduler.consolidate_all(["field_convention"]) == {"field_convention": 1}
+    assert scheduler.consolidate_all(["field_convention"]) == {
+        "field_convention": {"count": 1, "errors": 0}
+    }
     assert store.get_active_distillation("field_convention:target_col") is not None
 
 
@@ -86,7 +88,9 @@ def test_consolidate_all_returns_counts_and_failures_do_not_escape(tmp_path):
     )
 
     scheduler.on_event("memory.after_save", {"memory_type": "field_convention"})
-    assert scheduler.consolidate_all(["field_convention"]) == {"field_convention": 0}
+    assert scheduler.consolidate_all(["field_convention"]) == {
+        "field_convention": {"count": 0, "errors": 1}
+    }
 
 
 def test_app_registers_memory_consolidation_hooks(tmp_path):

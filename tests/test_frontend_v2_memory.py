@@ -120,7 +120,7 @@ def test_memory_handlers_load_detail_rollback_consolidate_and_filter():
           },
           consolidateMemory: async (category) => {
             calls.push(["consolidateMemory", category]);
-            return { consolidated: { [category]: 1 } };
+            return { consolidated: { [category]: { count: 1, errors: 0 } } };
           },
           refreshMemories: async (query) => calls.push(["refreshMemories", query]),
           confirmRollback: (id) => {
