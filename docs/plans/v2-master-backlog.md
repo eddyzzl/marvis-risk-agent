@@ -267,13 +267,13 @@
 | ⬜ | UX-8 | 8 个 v2 前端模块（~2200 行）线上死代码双 UI 栈（含 settings-ia 阶段5 残留清理） | Med/M | — |
 | ⬜ | VD-10 | join_review/plan_view/loop_progress/subagent_view 运行时零挂载 | Med/S | — |
 | ⬜ | VD-11 | 设计 token 剩余缺口：radius 塌缩、spacing/type scale 为零（radius 调整须先出对比稿由用户拍板；含追踪器"legacy hex 清理"） | Med/L | — |
-| ⬜ | LLM-4 | 多模型配置只有存储没有路由 | Med/M | — |
-| ⬜ | LLM-5 | 无上下文窗口预算防线 | Med/M | — |
+| ✅ | LLM-4 | role_overrides 按 caller 分级路由（`20f5da11`）：planner/critic/router/gate/distill 可各指模型，默认不配=现状 | Med/M | — |
+| ✅ | LLM-5 | context_window/max_tokens 进 profile+预检预算+typed error（`049c6164`）；gate 内容/planner catalog/记忆注入三触点接截断 | Med/M | — |
 | ✅ | LLM-6 | 终文剥离 <think> 段后再抽 JSON（`572c6e33`，流式期直通、落库剥离） | Med/M | — |
 | ✅ | LLM-7 | 超时/连接错误指数退避重试一次（`367aa13f`），审计记 retry | Med/S | — |
 | ✅ | LLM-8 | draft 授权接 JSON 抽取+错误回灌重试（`b642a308`） | Med/S | — |
 | ✅ | LLM-9 | 落库节流 ≥500ms/≥512 字符+终稿完整落库（`91d3b1e1`） | Med/S | — |
-| ⬜ | LLM-10 | 系统提示词散落 13 模块无版本标识 | Low/M | — |
+| ✅ | LLM-10 | llm_prompts 注册表收敛 14 个提示词带版本（`049c6164`），usage 记录 prompt_name/version | Low/M | — |
 
 ## 12. 长线追踪（不阻塞完全体 v1；⏸️ 需写明理由）
 
