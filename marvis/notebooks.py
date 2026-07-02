@@ -152,6 +152,18 @@ class NotebookExecutionSession:
             self._raise_if_cancelled()
             kwargs: dict[str, Any] = {
                 "cwd": str(self.execution_cwd or self.notebook_path.parent),
+                # TST-7: this is the live interactive-modeling kernel path.
+                # The isolated batch worker (_run_notebook_in_subprocess) and
+                # the plugin/draft subprocess worker (_worker_env in
+                # plugins/runner.py) both already launch with an env
+                # allowlist; this was the one remaining path that inherited
+                # the full host os.environ (including LLM/DB secrets)
+                # straight into user-authored notebook code. jupyter_client's
+                # KernelManager.start_kernel forwards an explicit env=
+                # through to the kernel subprocess launch, replacing (not
+                # merging with) os.environ -- nbclient threads **kwargs from
+                # client.execute() down to start_kernel() on first start.
+                "env": _notebook_worker_env(),
             }
             if keep_alive:
                 kwargs["cleanup_kc"] = False
