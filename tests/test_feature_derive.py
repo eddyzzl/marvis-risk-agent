@@ -13,6 +13,7 @@ from marvis.feature.derive import (
     derive_date_features,
     evaluate_crosses,
     recommend_feature_crosses,
+    transform_feature,
 )
 from marvis.feature.errors import FeatureError
 
@@ -193,6 +194,56 @@ def test_derive_rejects_invalid_recipes_and_conflicts():
 
     with pytest.raises(FeatureError, match="unsupported"):
         derive_batch(frame, [{"kind": "unknown"}])
+
+
+def test_transform_feature_log1p_masks_values_at_or_below_negative_one():
+    """FS-11: log1p follows the 'missing over wrong' convention — values <= -1 (where
+    log1p is mathematically undefined) become NaN instead of -inf/complex."""
+    frame = pd.DataFrame({"x": [-5.0, -1.0, -0.5, 0.0, 1.0, 3.0]})
+
+    derived, cols = transform_feature(frame, "x", ["log1p"])
+
+    assert cols == ["x__log1p"]
+    assert np.isnan(derived["x__log1p"].iloc[0])  # -5 <= -1 -> NaN
+    assert np.isnan(derived["x__log1p"].iloc[1])  # -1 <= -1 -> NaN
+    assert derived["x__log1p"].iloc[2] == pytest.approx(np.log1p(-0.5))
+    assert derived["x__log1p"].iloc[3] == pytest.approx(0.0)
+    assert derived["x__log1p"].iloc[5] == pytest.approx(np.log1p(3.0))
+
+
+def test_transform_feature_rank_is_fractional_and_preserves_nan():
+    """FS-11: rank is a fractional (percentile) rank in [0, 1]; NaN inputs stay NaN."""
+    frame = pd.DataFrame({"x": [30.0, 10.0, 20.0, np.nan]})
+
+    derived, cols = transform_feature(frame, "x", ["rank"])
+
+    assert cols == ["x__rank"]
+    assert derived["x__rank"].iloc[1] == pytest.approx(1 / 3)   # smallest -> lowest rank
+    assert derived["x__rank"].iloc[2] == pytest.approx(2 / 3)
+    assert derived["x__rank"].iloc[0] == pytest.approx(1.0)     # largest -> rank 1.0
+    assert np.isnan(derived["x__rank"].iloc[3])
+
+
+def test_transform_feature_rejects_unsupported_ops_and_conflicts():
+    frame = pd.DataFrame({"x": [1.0, 2.0], "x__log1p": [0.0, 0.0]})
+
+    with pytest.raises(FeatureError, match="unsupported"):
+        transform_feature(frame, "x", ["diff"])
+
+    with pytest.raises(FeatureError, match="already exist"):
+        transform_feature(frame, "x", ["log1p"])
+
+
+def test_derive_batch_dispatches_transform_kind():
+    """FS-11: derive_batch wires kind == 'transform' the same way it wires cross/agg/ratio,
+    so tool_cross_features's pass-through recipe list already supports it."""
+    frame = pd.DataFrame({"x": [0.0, 1.0, 3.0]})
+
+    derived, cols = derive_batch(frame, [{"kind": "transform", "col": "x", "ops": ["log1p", "rank"]}])
+
+    assert cols == ["x__log1p", "x__rank"]
+    assert derived["x__log1p"].tolist() == pytest.approx([0.0, np.log1p(1.0), np.log1p(3.0)])
+
 
 def test_derive_date_features_datediff_month_and_tenure():
     frame = pd.DataFrame({
