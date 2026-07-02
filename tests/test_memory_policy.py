@@ -277,3 +277,63 @@ def test_pipeline_failure_capture_runs_when_auto_distill_on(
     )
 
     assert called["extract"] is True
+
+
+def test_pipeline_failure_capture_downgrades_prior_task_memory(tmp_path: Path):
+    # MEM-7 negative feedback loop, exercised end to end (real store, no
+    # monkeypatching): an active field_convention memory captured earlier for
+    # this task must have its confidence stepped down and a negative_feedback
+    # audit event recorded once the task reaches its FAILED terminal state --
+    # a stale prior tied to a failed run is worse than no prior at all.
+    import marvis.pipeline as pipeline
+    from marvis.agent_memory.models import MemoryCandidate
+    from marvis.agent_memory.store import AgentMemoryStore
+    from marvis.db import init_db
+
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    save_memory_policy(
+        tmp_path,
+        MemoryPolicySettings(reference_cross_task=True, auto_distill=True),
+    )
+    store = AgentMemoryStore(db_path)
+    prior = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="字段口径：目标字段=bad_flag",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-1",
+            confidence="high",
+        ),
+        task_id="task-1",
+    )
+    fake_repo = SimpleNamespace(db_path=db_path)
+
+    pipeline._capture_agent_memory_for_failure(
+        repo=fake_repo, task_id="task-1", failure_kind="metrics", message="boom"
+    )
+
+    downgraded = store.get_entry(prior.id, audit=False)
+    assert downgraded.confidence == "medium"
+    events = store.list_events(prior.id)
+    negative_events = [event for event in events if event["event_type"] == "negative_feedback"]
+    assert len(negative_events) == 1
+    assert negative_events[0]["task_id"] == "task-1"
+    assert negative_events[0]["details"]["reason"] == "task_failed:metrics"
+
+    # The failure-record candidates this same call creates (task_experience /
+    # validation_pitfall describing *this* failure) must NOT be immediately
+    # self-downgraded -- the downgrade pass runs before they are created.
+    failure_records = [
+        entry
+        for entry in store.list_entries(source_task_id="task-1", limit=50)
+        if entry.id != prior.id
+    ]
+    assert failure_records
+    task_experience_entries = [e for e in failure_records if e.memory_type == "task_experience"]
+    assert task_experience_entries
+    assert all(e.confidence == "medium" for e in task_experience_entries)
+    assert all(
+        not any(ev["event_type"] == "negative_feedback" for ev in store.list_events(e.id))
+        for e in task_experience_entries
+    )

@@ -6753,6 +6753,7 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert 'data-agent-memory-action="inspect"' in memory_panel_js
     assert 'data-agent-memory-action="disable"' in memory_panel_js
     assert 'data-agent-memory-action="enable"' in memory_panel_js
+    assert 'data-agent-memory-action="not_useful"' in memory_panel_js
     assert 'data-agent-memory-action="delete"' in memory_panel_js
     assert 'data-agent-memory-action="rollback"' in memory_panel_js
     assert 'data-agent-memory-action="load_more"' in memory_panel_js
@@ -6769,6 +6770,8 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in memory_panel_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in memory_panel_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in memory_panel_js
+    assert '`api/agent-memory/${encodeURIComponent(memoryId)}/negative-feedback`' in memory_panel_js
+    assert 'async function reportNotUseful' in memory_panel_js
     assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in memory_panel_js
     assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js

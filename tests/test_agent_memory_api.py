@@ -504,3 +504,62 @@ def test_memory_api_lists_references_attached_to_agent_message(tmp_path):
 
     assert response.status_code == 200, response.text
     assert response.json()["memory_references"][0]["id"] == memory.id
+
+
+def test_memory_api_records_negative_feedback_and_downgrades_confidence(tmp_path):
+    # MEM-7b: the memory management panel's lightweight "this memory is
+    # unhelpful/wrong" action, one POST, no request body required.
+    client = _client(tmp_path)
+    memory = _create_model_memory(tmp_path)
+
+    response = client.post(f"/api/agent-memory/{memory.id}/negative-feedback")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["memory"]["confidence"] == "medium"
+    negative_events = [
+        event for event in payload["events"] if event["event_type"] == "negative_feedback"
+    ]
+    assert len(negative_events) == 1
+    assert negative_events[0]["details"]["reason"] == "user_reported"
+
+
+def test_memory_api_negative_feedback_accepts_custom_reason(tmp_path):
+    client = _client(tmp_path)
+    memory = _create_model_memory(tmp_path)
+
+    response = client.post(
+        f"/api/agent-memory/{memory.id}/negative-feedback",
+        params={"reason": "KS 数字和实际验证结果对不上"},
+    )
+
+    assert response.status_code == 200, response.text
+    events = response.json()["events"]
+    negative_events = [event for event in events if event["event_type"] == "negative_feedback"]
+    assert negative_events[0]["details"]["reason"] == "KS 数字和实际验证结果对不上"
+
+
+def test_memory_api_negative_feedback_returns_404_for_missing_memory(tmp_path):
+    client = _client(tmp_path)
+
+    response = client.post("/api/agent-memory/missing-id/negative-feedback")
+
+    assert response.status_code == 404
+
+
+def test_memory_api_negative_feedback_rejects_terminal_memory(tmp_path):
+    client = _client(tmp_path)
+    store = AgentMemoryStore(tmp_path / "marvis.sqlite")
+    rejected = store.create(
+        MemoryCandidate(
+            memory_type="task_experience",
+            summary="OPENAI_API_KEY=sk-test-secret-value",
+            payload={"raw": "OPENAI_API_KEY=sk-test-secret-value"},
+            source_task_id="task-secret",
+        )
+    )
+
+    response = client.post(f"/api/agent-memory/{rejected.id}/negative-feedback")
+
+    assert response.status_code == 422
+    assert "terminal" in response.json()["detail"]

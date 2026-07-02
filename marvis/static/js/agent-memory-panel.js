@@ -135,6 +135,9 @@ export function createAgentMemoryPanelController({
               : `<button class="button compact secondary" type="button" data-agent-memory-action="disable" data-agent-memory-id="${escapeHtml(memoryId)}">停用</button>`,
         isDistillation || isTerminal
           ? ""
+          : `<button class="button compact secondary" type="button" data-agent-memory-action="not_useful" data-agent-memory-id="${escapeHtml(memoryId)}">这条没用/有误</button>`,
+        isDistillation || isTerminal
+          ? ""
           : `<button class="button compact secondary danger" type="button" data-agent-memory-action="delete" data-agent-memory-id="${escapeHtml(memoryId)}">删除</button>`,
         "</div>",
         "</article>",
@@ -258,6 +261,25 @@ export function createAgentMemoryPanelController({
     await loadItems();
   }
 
+  async function reportNotUseful(memoryId) {
+    if (!memoryId) return;
+    const confirmed = await showPlatformConfirm({
+      title: "反馈记忆质量",
+      message: "标记这条记忆没用或有误？系统会降低它的可信度，减少后续被检索引用的机会。",
+      confirmText: "确认反馈",
+      cancelText: "取消",
+      tone: "warning",
+    });
+    if (!confirmed) return;
+    const payload = await api(
+      `api/agent-memory/${encodeURIComponent(memoryId)}/negative-feedback`,
+      { method: "POST" }
+    );
+    renderDetail(payload?.memory || null, payload?.events || []);
+    await loadItems();
+    setStatus("已记录反馈，该记忆可信度已下调。", "success");
+  }
+
   async function remove(memoryId) {
     if (!memoryId) return;
     const confirmed = await showPlatformConfirm({
@@ -300,6 +322,7 @@ export function createAgentMemoryPanelController({
       inspect,
       disable,
       enable,
+      not_useful: reportNotUseful,
       delete: remove,
       load_more: loadMoreItems,
       rollback: rollbackDistillation,
@@ -334,6 +357,7 @@ export function createAgentMemoryPanelController({
     loadMoreItems,
     renderDetail,
     renderItems,
+    reportNotUseful,
     remove,
     rollbackDistillation,
     setStatus,

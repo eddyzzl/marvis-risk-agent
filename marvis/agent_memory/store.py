@@ -33,7 +33,12 @@ AUDIT_EVENT_TYPES = (
     "enable",
     "delete",
     "reject",
+    "negative_feedback",
 )
+# Confidence downgrade ladder driven by negative feedback (task failures, user
+# "not useful/wrong" reports). Purely a retrieval-ranking signal: it shifts
+# which memories get recalled/injected, never a deterministic metric (INV-4).
+CONFIDENCE_DOWNGRADE_LADDER = {"high": "medium", "medium": "low", "low": "very_low"}
 DISTILLATION_AUDIT_EVENT_TYPES = (
     "create",
     "use",
@@ -691,6 +696,82 @@ class AgentMemoryStore:
                 message_id=message_id,
                 details={"use_reason": use_reason},
             )
+
+    def record_negative_feedback(
+        self,
+        entry_id: str,
+        *,
+        task_id: str | None = None,
+        message_id: str | None = None,
+        reason: str = "",
+        downgrade: bool = True,
+    ) -> MemoryEntry:
+        """Audit a negative signal against a memory entry: a task that used it
+        ended FAILED, or a user flagged it as unhelpful/incorrect. Always
+        writes a 'negative_feedback' audit event; when downgrade=True (the
+        default) also steps the entry's confidence down one tier so future
+        retrieval scoring naturally deprioritizes it (INV-4: this only shifts
+        which memories get recalled/injected, it never touches deterministic
+        metrics).
+        """
+        now = _now()
+        with connect(self.db_path) as conn:
+            entry = self._select_entry(conn, entry_id, include_deleted=False)
+            if entry["status"] == "rejected":
+                raise ValueError("rejected memory entries are terminal")
+            current_confidence = str(entry["confidence"] or "medium").strip().lower()
+            next_confidence = CONFIDENCE_DOWNGRADE_LADDER.get(current_confidence)
+            applied_downgrade = downgrade and next_confidence is not None
+            if applied_downgrade:
+                conn.execute(
+                    """
+                    UPDATE agent_memory_entries
+                       SET confidence = ?,
+                           updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (next_confidence, now, entry_id),
+                )
+            self._append_event(
+                conn,
+                entry_id,
+                "negative_feedback",
+                task_id=task_id,
+                message_id=message_id,
+                details={
+                    "reason": reason,
+                    "previous_confidence": current_confidence,
+                    "confidence": next_confidence if applied_downgrade else current_confidence,
+                    "downgraded": applied_downgrade,
+                },
+            )
+            row = self._select_entry(conn, entry_id, include_deleted=True)
+        return _row_to_entry(row)
+
+    def negative_feedback_counts(self, entry_ids: list[str]) -> dict[str, int]:
+        """Batch count of 'negative_feedback' audit events per entry id, used
+        to net negative signal against positive support when distilling
+        (MEM-7c: distillation support becomes a net positive-minus-negative
+        value instead of a raw member count)."""
+        ordered_ids = list(dict.fromkeys(str(entry_id) for entry_id in entry_ids if entry_id))
+        if not ordered_ids:
+            return {}
+        placeholders = ",".join("?" for _ in ordered_ids)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT memory_id, COUNT(*) AS negative_count
+                  FROM agent_memory_events
+                 WHERE event_type = 'negative_feedback'
+                   AND memory_id IN ({placeholders})
+                 GROUP BY memory_id
+                """,
+                ordered_ids,
+            ).fetchall()
+        counts = {str(entry_id): 0 for entry_id in ordered_ids}
+        for row in rows:
+            counts[str(row["memory_id"])] = int(row["negative_count"])
+        return counts
 
     def set_status(
         self,

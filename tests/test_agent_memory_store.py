@@ -502,3 +502,112 @@ def test_store_create_does_not_dedup_across_different_tasks_or_payloads(tmp_path
     assert other_task_entry.id != same_content_other_task.id
     assert different_content_entry.id != same_content_other_task.id
     assert len(store.list_entries(memory_type="model_experience")) == 3
+
+
+def test_record_negative_feedback_downgrades_confidence_and_audits_event(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    entry = store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="分润通用A卡模型V2026在202601自营渠道KS为30。",
+            payload=_model_experience_payload(),
+            source_task_id="task-202601",
+            confidence="high",
+        )
+    )
+
+    once = store.record_negative_feedback(entry.id, task_id="task-followup", reason="task_failed:metrics")
+    assert once.confidence == "medium"
+
+    twice = store.record_negative_feedback(entry.id, reason="user_reported")
+    assert twice.confidence == "low"
+
+    # A memory downgraded to 'low' or 'very_low' confidence is excluded from raw
+    # retrieval by _is_usable_memory -- confirm the ladder keeps stepping down
+    # rather than getting stuck, so repeated negative signal eventually removes
+    # the entry from recall entirely (MEM-7).
+    thrice = store.record_negative_feedback(entry.id)
+    assert thrice.confidence == "very_low"
+    stuck = store.record_negative_feedback(entry.id)
+    assert stuck.confidence == "very_low"
+
+    events = store.list_events(entry.id)
+    negative_events = [event for event in events if event["event_type"] == "negative_feedback"]
+    assert len(negative_events) == 4
+    assert negative_events[0]["task_id"] == "task-followup"
+    assert negative_events[0]["details"]["reason"] == "task_failed:metrics"
+    assert negative_events[0]["details"]["previous_confidence"] == "high"
+    assert negative_events[0]["details"]["confidence"] == "medium"
+    assert negative_events[0]["details"]["downgraded"] is True
+    assert negative_events[-1]["details"]["downgraded"] is False
+
+
+def test_record_negative_feedback_can_audit_without_downgrading(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    entry = store.create(
+        MemoryCandidate(
+            memory_type="task_experience",
+            summary="Notebook 环境缺少 xgboost 时需要先检查依赖清单。",
+            payload={"failure_type": "dependency", "package": "xgboost"},
+            source_task_id="task-old",
+            confidence="medium",
+        )
+    )
+
+    updated = store.record_negative_feedback(entry.id, reason="audit_only", downgrade=False)
+
+    assert updated.confidence == "medium"
+    events = store.list_events(entry.id)
+    assert events[-1]["event_type"] == "negative_feedback"
+    assert events[-1]["details"]["downgraded"] is False
+
+
+def test_record_negative_feedback_rejects_terminal_entries(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    candidate = MemoryCandidate(
+        memory_type="task_experience",
+        summary="OPENAI_API_KEY=sk-test-secret-value",
+        payload={"raw": "OPENAI_API_KEY=sk-test-secret-value"},
+        source_task_id="task-secret",
+    )
+    decision = classify_memory_candidate(candidate)
+    rejected = store.reject(candidate, decision, task_id="task-secret")
+
+    with pytest.raises(ValueError, match="rejected memory entries are terminal"):
+        store.record_negative_feedback(rejected.id)
+
+
+def test_negative_feedback_counts_batches_across_entries(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    flagged = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="字段口径：目标字段=bad_flag",
+            payload={"target_col": "bad_flag"},
+            source_task_id="task-a",
+        )
+    )
+    clean = store.create(
+        MemoryCandidate(
+            memory_type="field_convention",
+            summary="字段口径：目标字段=y",
+            payload={"target_col": "y"},
+            source_task_id="task-b",
+        )
+    )
+
+    store.record_negative_feedback(flagged.id)
+    store.record_negative_feedback(flagged.id)
+
+    counts = store.negative_feedback_counts([flagged.id, clean.id, "missing-id"])
+
+    assert counts == {flagged.id: 2, clean.id: 0, "missing-id": 0}
+    assert store.negative_feedback_counts([]) == {}
