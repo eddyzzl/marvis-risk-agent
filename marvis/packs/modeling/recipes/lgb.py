@@ -10,6 +10,7 @@ import lightgbm as lgb
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
@@ -33,8 +34,16 @@ def train_lgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         **get_recipe("lgb").default_params,
         **model_params(config.params),
         "random_state": config.seed,
-        "n_jobs": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with tune.py's
+        # DEFAULT_TUNE_NUM_THREADS) instead of a bare literal -- both training
+        # paths' thread counts now come from one place, even though their
+        # defaults intentionally differ (single-thread here for cross-machine
+        # determinism; tune.py defaults to full-core parallelism for search speed).
+        "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
         "deterministic": True,
+        # TUNE-6: pins the row/col-wise split so deterministic=True's guarantee
+        # actually holds (LightGBM's documented determinism contract requires it).
+        "force_row_wise": True,
     }
     params = resolve_auto_scale_pos_weight(params, train, config)
     constraints = normalized_monotone_constraints(config)

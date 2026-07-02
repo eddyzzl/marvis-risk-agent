@@ -10,6 +10,7 @@ import xgboost as xgb
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     artifact_params,
@@ -33,7 +34,9 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
         **get_recipe("xgb").default_params,
         **model_params(config.params),
         "random_state": config.seed,
-        "n_jobs": 1,
+        # TUNE-6: sourced from defaults.py -- see lgb.py's train_lgb for the
+        # single-source rationale shared across every tree recipe's direct-train path.
+        "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
     }
     params = resolve_auto_scale_pos_weight(params, train, config)
     constraints = normalized_monotone_constraints(config)

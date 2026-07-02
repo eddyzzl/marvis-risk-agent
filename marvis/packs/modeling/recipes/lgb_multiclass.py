@@ -10,6 +10,7 @@ import numpy as np
 from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     compute_multiclass_model_metrics,
@@ -41,7 +42,9 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
         "num_class": len(classes),
         "metric": "multi_logloss",
         "seed": config.seed,
-        "num_threads": 1,
+        # TUNE-6: sourced from defaults.py -- see lgb.py's train_lgb for the
+        # single-source rationale shared across every tree recipe's direct-train path.
+        "num_threads": DEFAULT_TRAIN_NUM_THREADS,
         "deterministic": True,
         "force_col_wise": True,
         "verbosity": -1,

@@ -44,6 +44,7 @@ import pandas as pd
 
 from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift, weighted_feature_auc, weighted_feature_ks
+from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS, DEFAULT_TUNE_NUM_THREADS
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.recipes.common import carve_early_stop_fold, cat_feature_indices
 
@@ -142,6 +143,18 @@ DEFAULT_TRIAL_BUDGET: dict[str, int] = {
 #: Tree recipes that early-stop against a carved validation fold instead of the
 #: full test split (SEL-4/TUNE-3) -- mirrors train_models' _EARLY_STOPPED_TREE_RECIPES.
 _EARLY_STOPPED_TREE_RECIPES = frozenset({"lgb", "xgb", "catboost"})
+
+#: Recipes whose trials are single-threaded (xgb/catboost n_jobs=thread_count=1,
+#: lr/scorecard/mlp are inherently single-threaded sklearn estimators at this
+#: dataset scale) -- their trials are bit-identical for a fixed seed regardless
+#: of machine core count. lgb is the one recipe whose tune trials run with
+#: DEFAULT_TUNE_NUM_THREADS (0 = every core) for search wall-clock speed, so its
+#: trials are only reproducible on machines with the same core count (TUNE-6:
+#: this is an explicit, documented trade-off, not an oversight -- see
+#: _run_lgb_trial). Recorded per trial/best_metrics as "deterministic" so a
+#: caller auditing cross-machine reproducibility doesn't have to know this
+#: per-recipe contract by heart.
+_CROSS_MACHINE_DETERMINISTIC_RECIPES = frozenset({"xgb", "catboost", "lr", "scorecard", "mlp"})
 
 
 def _group_cols_from_params(params: dict | None) -> list[str] | None:
@@ -464,7 +477,20 @@ def _run_lgb_trial(
     import lightgbm as lgb
 
     params = {**params, **fixed_params}
-    params.update({"seed": seed, "num_threads": 0, "deterministic": True})
+    # TUNE-6: sourced from defaults.py (single source shared with the direct-train
+    # path's DEFAULT_TRAIN_NUM_THREADS) instead of a bare literal. Deliberately
+    # NOT forced to match train_lgb's single-threaded default -- a multi-hour,
+    # multi-recipe two-stage search benefits far more from full-core parallelism
+    # than a single train_model call does. force_row_wise pins the row/col-wise
+    # split so deterministic=True's guarantee actually holds (LightGBM's
+    # determinism contract requires it); without it, deterministic=True alone
+    # does not guarantee bit-identical trees even at a fixed thread count.
+    params.update({
+        "seed": seed,
+        "num_threads": DEFAULT_TUNE_NUM_THREADS,
+        "deterministic": True,
+        "force_row_wise": True,
+    })
     round_ceiling = _boost_round_ceiling(params["learning_rate"], trial_max_boost_round)
     booster = lgb.train(
         params,
@@ -672,7 +698,10 @@ def _run_xgb_trial(
         "objective": "binary:logistic",
         "eval_metric": "auc",
         "random_state": seed,
-        "n_jobs": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with the
+        # direct-train path) -- xgb's tune trials already matched train_xgb's
+        # single-threaded default, unlike lgb's (see _run_lgb_trial).
+        "n_jobs": DEFAULT_TRAIN_NUM_THREADS,
         **params,
         **fixed_params,
     }
@@ -763,7 +792,10 @@ def _run_catboost_trial(
         "loss_function": "Logloss",
         "eval_metric": "AUC",
         "random_seed": seed,
-        "thread_count": 1,
+        # TUNE-6: sourced from defaults.py (single source shared with the
+        # direct-train path) -- catboost's tune trials already matched
+        # train_catboost's single-threaded default, unlike lgb's (see _run_lgb_trial).
+        "thread_count": DEFAULT_TRAIN_NUM_THREADS,
         "allow_writing_files": False,
         "od_type": "Iter",
         **params,
@@ -1204,8 +1236,14 @@ def tune_hyperparameters(
             best = record
 
     assert best is not None
+    # TUNE-6: explicit deterministic marker per trial (and mirrored onto
+    # best_metrics below) -- True means this recipe's trials are bit-identical
+    # for a fixed seed on any machine; False (lgb only, by design) means
+    # reproduction additionally requires the same core count.
+    trial_deterministic = recipe in _CROSS_MACHINE_DETERMINISTIC_RECIPES
     for record in trials:
         record.pop("_sampled", None)
+        record["deterministic"] = trial_deterministic
 
     return TuneResult(
         best_params=best["params"],
@@ -1232,6 +1270,9 @@ def tune_hyperparameters(
             **({"weighted_train_auc": best["weighted_train_auc"]} if "weighted_train_auc" in best else {}),
             **({"weighted_test_auc": best["weighted_test_auc"]} if "weighted_test_auc" in best else {}),
             **({"weighted_oot_auc": best["weighted_oot_auc"]} if "weighted_oot_auc" in best else {}),
+            # TUNE-6: explicit cross-machine reproducibility contract for this
+            # recipe's trials -- see _CROSS_MACHINE_DETERMINISTIC_RECIPES.
+            "deterministic": trial_deterministic,
         },
         trials=tuple(trials),
         n_trials=len(trials),

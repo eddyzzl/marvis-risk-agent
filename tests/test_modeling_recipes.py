@@ -588,6 +588,33 @@ def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
     assert first.best_metrics == second.best_metrics
 
 
+def test_tune_hyperparameters_records_deterministic_flag_per_recipe(tmp_path):
+    """TUNE-6: every trial (and best_metrics) explicitly records whether this
+    recipe's tune trials are reproducible across machines with different core
+    counts. lgb intentionally trades this away (num_threads=0, full-core
+    parallelism, for search wall-clock speed) while xgb/catboost/lr/scorecard/mlp
+    stay single-threaded and thus cross-machine deterministic -- also proves the
+    lgb tune path's thread config comes from DEFAULT_TUNE_NUM_THREADS (0), not the
+    train path's DEFAULT_TRAIN_NUM_THREADS (1), so the two paths' sourced-but-
+    intentionally-different defaults are both exercised."""
+    from marvis.packs.modeling.defaults import DEFAULT_TUNE_NUM_THREADS
+
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_deterministic_flag.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    lgb_result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=3))
+    assert lgb_result.best_metrics["deterministic"] is False
+    assert all(trial["deterministic"] is False for trial in lgb_result.trials)
+    assert lgb_result.trials[0]["params"]["num_threads"] == DEFAULT_TUNE_NUM_THREADS
+    assert lgb_result.trials[0]["params"]["force_row_wise"] is True
+
+    lr_result = tune_hyperparameters(backend, path, **_tune_kwargs(recipe="lr", n_trials=3))
+    assert lr_result.best_metrics["deterministic"] is True
+    assert all(trial["deterministic"] is True for trial in lr_result.trials)
+
+
 def test_tune_hyperparameters_lgb_default_recipe_matches_historical_contract(tmp_path):
     """TUNE-1 regression (d): generalising tune.py to every recipe family must not
     change the lgb single-recipe contract — recipe defaults to "lgb", the returned
