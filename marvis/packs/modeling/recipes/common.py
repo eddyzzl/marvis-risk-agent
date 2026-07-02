@@ -71,6 +71,50 @@ def model_params(params: dict | None) -> dict:
     }
 
 
+def cat_feature_indices(
+    train: pd.DataFrame, features: list[str], explicit: object = None
+) -> list[int]:
+    """Resolve CatBoost's ``cat_features`` as indices into ``features`` (PREP-3/FS-3).
+
+    ``explicit`` (from ``config.params["cat_features"]``) is a caller-supplied list of
+    column names or 0-based indices; when given, it is normalized to indices and used
+    as-is (agent/user has already decided which columns are categorical). Without it,
+    every column in ``features`` whose ``train`` dtype is object/string/category is
+    auto-detected as categorical — CatBoost is the one recipe that can consume these
+    columns natively (no float coercion), so a candidate list that still contains
+    string columns (e.g. from an explicit ``features`` override) degrades gracefully
+    into native categorical handling instead of crashing on ``fit``."""
+    if explicit:
+        resolved: list[int] = []
+        for item in explicit:
+            if isinstance(item, bool):
+                raise ModelingError(f"invalid cat_features entry: {item!r}")
+            if isinstance(item, int):
+                index = int(item)
+            else:
+                name = str(item)
+                if name not in features:
+                    raise ModelingError(f"cat_features column not in features: {name}")
+                index = features.index(name)
+            if not (0 <= index < len(features)):
+                raise ModelingError(f"cat_features index out of range: {index}")
+            resolved.append(index)
+        return sorted(set(resolved))
+    return [
+        index
+        for index, feature in enumerate(features)
+        if feature in train.columns and _is_categorical_dtype(train[feature])
+    ]
+
+
+def _is_categorical_dtype(series: pd.Series) -> bool:
+    """True for anything CatBoost cannot treat as a float column: legacy ``object``
+    dtype, pandas' newer ``StringDtype``, and ``category`` — covered generically via
+    "not numeric" so this stays correct across pandas dtype-backend changes (e.g.
+    pandas 3's default string columns are no longer ``object`` dtype)."""
+    return not pd.api.types.is_numeric_dtype(series)
+
+
 def resolve_auto_scale_pos_weight(params: dict, train: pd.DataFrame, config: TrainConfig) -> dict:
     """Resolve ``scale_pos_weight='auto'`` using the effective training split.
 
@@ -558,6 +602,7 @@ def _regression_values(target: np.ndarray, pred: np.ndarray) -> tuple[float, flo
 
 __all__ = [
     "artifact_params",
+    "cat_feature_indices",
     "compute_model_metrics",
     "compute_multiclass_metrics",
     "compute_multiclass_model_metrics",

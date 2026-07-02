@@ -18,7 +18,7 @@ from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
-from marvis.feature.candidates import candidate_numeric_features
+from marvis.feature.candidates import candidate_numeric_features, excluded_categorical_columns
 from marvis.feature.metrics import feature_metrics
 from marvis.feature.encode import woe_encode
 from marvis.feature.preprocessing import (
@@ -450,10 +450,18 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         return _screen_features_non_binary(inputs, ctx)
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    requested_features = inputs.get("features") or []
     features = _resolve_feature_cols(
         runtime,
         dataset.id,
-        inputs.get("features") or [],
+        requested_features,
+        target_col=str(inputs["target_col"]),
+        split_col=_optional_str(inputs.get("split_col")),
+    )
+    excluded_categorical = _excluded_categorical_for_screen(
+        runtime,
+        dataset.id,
+        requested_features,
         target_col=str(inputs["target_col"]),
         split_col=_optional_str(inputs.get("split_col")),
     )
@@ -478,7 +486,33 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+        "excluded_categorical": excluded_categorical,
     }
+
+
+def _excluded_categorical_for_screen(
+    runtime: "_Runtime",
+    dataset_id: str,
+    requested_features: list,
+    *,
+    target_col: str,
+    split_col: str | None,
+) -> list[dict]:
+    """String/object columns silently dropped by candidate inference (PREP-3/FS-3).
+
+    Only meaningful when ``features`` was NOT explicitly provided — an explicit
+    feature list is the caller's own choice, not an inference the platform made
+    on their behalf, so there is nothing to surface."""
+    if [str(item) for item in requested_features if str(item).strip()]:
+        return []
+    dataset = runtime.registry.get(str(dataset_id))
+    excluded = excluded_categorical_columns(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=target_col,
+        split_col=split_col,
+    )
+    return [{"column": item.column, "cardinality": item.cardinality} for item in excluded]
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:

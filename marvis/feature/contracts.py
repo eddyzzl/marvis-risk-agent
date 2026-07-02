@@ -48,6 +48,37 @@ class WOEResult:
 
 
 @dataclass(frozen=True)
+class CategoricalWOECategory:
+    category: str
+    count: int
+    bad_count: int
+    good_count: int
+    bad_rate: float
+    woe: float
+    iv_contribution: float
+
+
+@dataclass(frozen=True)
+class CategoricalWOEResult:
+    """Category -> WOE mapping (PREP-3/FS-3), the categorical analogue of
+    :class:`WOEResult`. Low-frequency categories are merged into a synthetic
+    ``__rare__`` bucket before the WOE is computed for it (so rare categories
+    share one smoothed estimate rather than each getting a noisy one). Any
+    category not present in ``categories`` at encode time (unseen category, or
+    NaN when ``na_woe`` is not set) falls back to ``default_woe`` — the
+    global-prior WOE computed from the fit frame's overall bad rate."""
+
+    feature: str
+    categories: tuple[CategoricalWOECategory, ...]
+    rare_categories: tuple[str, ...]
+    min_count: int
+    smoothing: float
+    default_woe: float
+    na_woe: float | None
+    total_iv: float
+
+
+@dataclass(frozen=True)
 class CorrelationReport:
     features: tuple[str, ...]
     matrix: tuple[tuple[float, ...], ...]
@@ -58,6 +89,8 @@ class CorrelationReport:
 __all__ = [
     "Bin",
     "BinningResult",
+    "CategoricalWOECategory",
+    "CategoricalWOEResult",
     "CorrelationReport",
     "FeatureMetrics",
     "WOEResult",

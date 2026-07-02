@@ -60,6 +60,7 @@ def _render_screen(o: dict):
     leak = o.get("leakage") or []
     susp = o.get("suspected") or []
     unusable = o.get("unusable") or []
+    excluded_categorical = o.get("excluded_categorical") or []
     scores = o.get("scores") if isinstance(o.get("scores"), dict) else {}
     leak_names = _names(leak)
     susp_names = _names(susp)
@@ -70,6 +71,17 @@ def _render_screen(o: dict):
         f"- 疑似**模型输出/评分**列 {len(susp_names)} 个" + (f"(如 {susp_names[:5]})" if susp_names else "") + "\n"
         f"- 剔除**不可用**(常量/稀疏) {len(unusable)} 个"
     )
+    if excluded_categorical:
+        preview = "、".join(
+            f"{item.get('column')}(基数{item.get('cardinality')})"
+            for item in excluded_categorical[:8]
+            if isinstance(item, dict)
+        )
+        more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
+        text += (
+            f"\n- **{len(excluded_categorical)} 个类别列未入模**:{preview}{more};"
+            "如需使用,请先用 woe_encode_categorical 编码,或改用 catboost(原生支持类别列)。"
+        )
     tables = []
     if selected:
         rows = []

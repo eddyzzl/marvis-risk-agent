@@ -664,6 +664,137 @@ def test_feature_pack_screen_features_via_runner(tmp_path):
     assert result.output["n_screened"] >= 0
 
 
+def test_screen_features_reports_excluded_categorical_when_features_inferred(tmp_path):
+    """PREP-3/FS-3: when `features` is omitted, candidate inference silently used to drop
+    string columns; screen_features must now surface them as excluded_categorical instead."""
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    inferred = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": [], "target_col": "y"},
+        task_id="task-feature",
+    )
+    assert inferred.ok is True, inferred.error
+    excluded = {item["column"]: item["cardinality"] for item in inferred.output["excluded_categorical"]}
+    assert "cat" in excluded
+    assert excluded["cat"] == 2  # "a"/"b" (NaN not counted)
+    assert "cat" not in inferred.output["selected"]
+
+    explicit = runner.invoke(
+        ToolRef("feature", "screen_features"),
+        {"dataset_id": dataset.id, "features": ["x1", "x2"], "target_col": "y"},
+        task_id="task-feature",
+    )
+    assert explicit.ok is True, explicit.error
+    # An explicit feature list is the caller's own choice — nothing to surface.
+    assert explicit.output["excluded_categorical"] == []
+
+
+def test_woe_encode_categorical_matches_hand_computed_woe_and_is_train_only(tmp_path):
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "chan": ["A"] * 10 + ["B"] * 10 + ["A", "B"],
+        "y": [1] * 5 + [0] * 5 + [1] * 2 + [0] * 8 + [1, 0],
+        "split": ["train"] * 20 + ["oot"] * 2,
+    })
+    path = tmp_path / "cat_woe.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    blocked = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {"dataset_id": dataset.id, "features": ["chan"], "target_col": "y", "min_count": 5},
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "fit_requires_split"
+    assert blocked.error_detail["tool"] == "woe_encode_categorical"
+
+    result = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["chan"],
+            "target_col": "y",
+            "min_count": 5,
+            "split_col": "split",
+            "holdout_values": ["oot"],
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["fit_split"] == "train"
+    assert result.output["fit_rows"] == 20  # excludes the 2 oot rows
+    woe_map = result.output["woe_maps"]["chan"]
+    by_category = {item["category"]: item for item in woe_map["categories"]}
+    total_bad, total_good, n_groups = 7, 13, 2
+    expected_a = np.log(((5 + 0.5) / (total_good + 0.5 * n_groups)) / ((5 + 0.5) / (total_bad + 0.5 * n_groups)))
+    assert by_category["A"]["woe"] == pytest.approx(expected_a)
+
+    encoded = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    assert encoded.shape[0] == frame.shape[0]  # oot rows still get encoded, just not fit on
+    assert encoded.loc[0, "chan_woe"] == pytest.approx(by_category["A"]["woe"])
+    assert encoded.loc[20, "chan_woe"] == pytest.approx(by_category["A"]["woe"])  # oot row, category A
+
+
+def test_woe_encode_categorical_merges_rare_and_falls_back_for_unseen(tmp_path):
+    runner, registry, _repo, backend = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "chan": ["A"] * 10 + ["B"] * 10 + ["C", "D", "E", "F", "G"],
+        "y": [1] * 5 + [0] * 5 + [1] * 2 + [0] * 8 + [1, 0, 1, 0, 1],
+    })
+    path = tmp_path / "cat_woe_rare.csv"
+    frame.to_csv(path, index=False)
+    dataset = registry.register_from_upload("task-feature", path, role="sample")
+
+    result = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["chan"],
+            "target_col": "y",
+            "min_count": 5,
+            "allow_full_fit": True,
+        },
+        task_id="task-feature",
+    )
+
+    assert result.ok is True, result.error
+    woe_map = result.output["woe_maps"]["chan"]
+    assert set(woe_map["rare_categories"]) == {"C", "D", "E", "F", "G"}
+    by_category = {item["category"]: item for item in woe_map["categories"]}
+    assert "C" not in by_category
+
+    encoded = backend.read_frame(registry.resolve_path(result.output["result_dataset_id"]))
+    rare_woe = by_category["__rare__"]["woe"]
+    assert encoded.loc[frame["chan"] == "C", "chan_woe"].iloc[0] == pytest.approx(rare_woe)
+
+
+def test_woe_encode_categorical_without_split_raises_typed_error_unless_allow_full_fit(tmp_path):
+    runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    blocked = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {"dataset_id": dataset.id, "features": ["cat"], "target_col": "y"},
+        task_id="task-feature",
+    )
+    assert blocked.ok is False
+    assert blocked.error_kind == "fit_requires_split"
+    assert blocked.error_detail["tool"] == "woe_encode_categorical"
+
+    confirmed = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {"dataset_id": dataset.id, "features": ["cat"], "target_col": "y", "allow_full_fit": True},
+        task_id="task-feature",
+    )
+    assert confirmed.ok is True, confirmed.error
+    assert confirmed.output["fit_split"] == "full"
+    assert confirmed.output["fit_rows"] == 8
+
+
 def test_screen_features_continuous_skips_leakage_and_keeps_all(tmp_path):
     """A non-binary (continuous) target skips the binary-only leakage KS screen: every
     candidate is selected (ks None), no leakage/suspected flags, and a skip note is set."""
