@@ -202,9 +202,9 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | DOM-4 | 概率校准在拟合集自评（该集已用于早停+调参）：Brier/ECE 全 in-sample（与 SEL-4 独立验证集一并设计） | Med/S | — |
+| ✅ | DOM-4 | 校准默认在 train 内切折拟合、test/OOT 出样评估（`128cf6fc`）；显式 fit_split 向后兼容并标注 in-sample | Med/S | — |
 | ✅ | DOM-5 | 分段表重建（`20a64468`）：train 定界三 split 共享分箱、累计坏账率/通过率、方向感知、cutoff 算例注解进 sheet 说明 | Med/M | — |
-| ⬜ | DOM-6 | 场景声明的 eval_metric 是死元数据：营销/反欺诈仍按 KS 选冠军 | Med/M | — |
+| ✅ | DOM-6 | eval_metric 接入冠军选择全链路（`a86c25ae`）：lift head/tail 5/10 进 ModelMetrics、response_lift 场景按 lift 选优；顺修 DB 回读静默丢字段 bug | Med/M | — |
 | ✅ | DOM-7 | psi_split/psi_watch 进 screen（可选 max_feature_psi 观察阈值）+ 报告单变量 sheet 加 psi_vs_train 列（`fac87c9e`） | Med/S | — |
 
 ## 10. 阶段九：审查 Batch 5 —— 看得见的体验（约 2 周）
