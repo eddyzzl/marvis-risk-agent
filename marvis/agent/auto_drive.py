@@ -64,6 +64,11 @@ AUTO_HIGH_RISK_RESET_SCOPES = frozenset({
     "wide",
 })
 AUTO_MAX_AUTO_RESET_STEPS = 2
+# AGT-7: decide_gate already parses a confidence score out of the LLM's JSON
+# reply, but nothing consumed it — a confirm at confidence=0.3 and one at 0.95
+# were treated identically. Below this threshold a confirm/adjust/replan is
+# downgraded to halt so a low-confidence AUTO decision always reaches a human.
+AUTO_MIN_CONFIDENCE = 0.6
 
 _SYSTEM_TEMPLATE = (
     "你是信贷风控建模 Agent,正在自动执行一个分步计划。每到一个需要确认的节点,"
@@ -381,6 +386,11 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
         gate_risk = _gate_risk_reason(envelope)
         if gate_risk:
             return _policy_halt(gate_risk)
+        confidence = decision.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < AUTO_MIN_CONFIDENCE:
+            return _policy_halt(
+                f"AUTO 决策置信度 {confidence:.2f} 低于阈值 {AUTO_MIN_CONFIDENCE},不足以自动{action}。"
+            )
     if action == "adjust":
         allowed_controls = {str(control.id) for control in getattr(envelope, "controls", ())}
         params = _object_or_empty(decision.get("params"))

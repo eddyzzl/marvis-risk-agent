@@ -27,6 +27,8 @@ from marvis.agent.auto_drive import decide_gate, parse_decision
 from marvis.agent.turn_handlers import DRIVER_TURN_FUNCS, agent_autodrive_turn
 from marvis.app import create_app
 from marvis.domain import TASK_TYPE_MODELING
+from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+from marvis.plugins.manifest import ToolRef
 
 
 def _join_dir(root: Path, n: int = 50) -> Path:
@@ -213,6 +215,90 @@ def test_agent_autodrive_binds_gate_step_token_to_confirming_actions(monkeypatch
 
     assert calls
     assert calls[0]["expected_step_id"] == "gate-1"
+
+
+def test_agent_autodrive_warns_when_gate_budget_exhausted(monkeypatch):
+    """AGT-7: when the AUTO loop's gate budget runs out with a gate STILL open
+    (every iteration matched a real gate and looped back via confirm), the user
+    gets an explicit message instead of the agent silently going quiet."""
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        # Simulate a driver turn that re-pauses at a (still open) gate, same as a
+        # real confirm that immediately hits the next needs_confirmation step.
+        repo.add_agent_message(
+            task.id, role="assistant", stage="chat", content="请确认下一个 gate",
+            metadata={"kind": "gate", "step_id": f"gate-{len(calls) + 1}"},
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    # No plan_repo on this runtime → _auto_gate_budget falls back to AGENT_MAX_GATES.
+    fake = _FakeLLM(action="confirm", reason="继续")
+
+    agent_autodrive_turn(SimpleNamespace(), repo, task, client=fake)
+
+    from marvis.agent.turn_handlers import AGENT_MAX_GATES
+
+    assert len(calls) == AGENT_MAX_GATES
+    budget_messages = [
+        m for m in repo.messages
+        if m["role"] == "assistant" and m["metadata"].get("intent") == "agent_budget_exhausted"
+    ]
+    assert len(budget_messages) == 1
+    assert f"{AGENT_MAX_GATES} 个节点" in budget_messages[0]["content"]
+    assert "转人工确认" in budget_messages[0]["content"]
+
+
+def test_agent_autodrive_sizes_budget_from_active_plan_gate_count(monkeypatch):
+    """AGT-7: the budget is dynamic (plan gate count + margin, capped by tier) —
+    a plan with more needs_confirmation gates than AGENT_MAX_GATES=8 should still
+    get to auto-drive past the old fixed ceiling instead of exhausting early."""
+    calls = []
+
+    def fake_turn(runtime, repo, task, **kwargs):
+        calls.append(kwargs)
+        repo.add_agent_message(
+            task.id, role="assistant", stage="chat", content="请确认下一个 gate",
+            metadata={"kind": "gate", "step_id": f"gate-{len(calls) + 1}"},
+        )
+        return {"status": "ok"}
+
+    monkeypatch.setitem(DRIVER_TURN_FUNCS, TASK_TYPE_MODELING, fake_turn)
+    repo = _TokenRepo()
+    task = SimpleNamespace(id="task-1", task_type=TASK_TYPE_MODELING)
+    fake = _FakeLLM(action="confirm", reason="继续")
+
+    steps = [
+        PlanStep(
+            id=f"step-{i}",
+            plan_id="plan-1",
+            index=i,
+            title=f"步骤{i}",
+            tool_ref=ToolRef("_sample", "echo"),
+            inputs={},
+            depends_on=[],
+            post_checks=[],
+            needs_confirmation=True,
+        )
+        for i in range(11)
+    ]
+    plan = Plan(
+        id="plan-1", task_id="task-1", goal="modeling", source="template",
+        template_id="modeling", autonomy_level=1, steps=steps,
+        status=PlanStatus.AWAITING_CONFIRM,
+    )
+    plan_repo = SimpleNamespace(list_plans_for_task=lambda task_id: [plan])
+    runtime = SimpleNamespace(plan_repo=plan_repo, tier="autonomous")
+
+    agent_autodrive_turn(runtime, repo, task, client=fake)
+
+    # 11 needs_confirmation steps + 1 (plan overview) + margin(2) = 14, under the
+    # autonomous tier's ceiling (16) — so it must run MORE than the old fixed 8.
+    assert len(calls) == 14
 
 
 def test_agent_mode_halt_decision_stops_at_gate(client: TestClient, tmp_path: Path, monkeypatch):
@@ -507,6 +593,50 @@ def test_decide_gate_blocks_confirm_when_gate_has_high_risk_flag():
 
     assert decision["action"] == "halt"
     assert "风险标记:production_deploy_champion_model" in decision["reason"]
+
+
+def test_decide_gate_downgrades_low_confidence_confirm_to_halt():
+    """AGT-7: decide_gate parses confidence but previously never consumed it — a
+    confirm at confidence=0.3 and one at 0.95 were treated identically. Below the
+    AUTO_MIN_CONFIDENCE threshold, confirm/adjust/replan are downgraded to halt so
+    a low-confidence AUTO decision always reaches a human."""
+    fake = _FakeLLM()
+    fake._payload = json.dumps({
+        "action": "confirm",
+        "reason": "看起来正常,但不太确定",
+        "confidence": 0.3,
+    })
+    gate = {"content": "特征筛选完成", "metadata": {}}
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "置信度 0.30" in decision["reason"]
+
+
+def test_decide_gate_keeps_high_confidence_confirm():
+    fake = _FakeLLM()
+    fake._payload = json.dumps({
+        "action": "confirm",
+        "reason": "结果正常",
+        "confidence": 0.95,
+    })
+    gate = {"content": "特征筛选完成", "metadata": {}}
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "confirm"
+
+
+def test_decide_gate_treats_missing_confidence_as_unconstrained():
+    """Older/weaker models that never emit a confidence field must not be
+    penalized — only an explicit low value downgrades the decision."""
+    fake = _FakeLLM(action="confirm", reason="结果正常")
+    gate = {"content": "特征筛选完成", "metadata": {}}
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "confirm"
 
 
 def test_decide_gate_blocks_strategy_manual_review_risk_flag():

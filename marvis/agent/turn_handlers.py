@@ -30,6 +30,7 @@ from marvis.domain import (
     TaskRecord,
 )
 from marvis.llm_client import LLMClientError
+from marvis.orchestrator.capability import auto_gate_budget, resolve_tier
 
 
 DRIVER_AGENT_TASK_TYPES = frozenset(
@@ -42,6 +43,10 @@ DRIVER_AGENT_TASK_TYPES = frozenset(
     }
 )
 
+# AGT-7: retained as the floor/fallback when a plan's gate count can't be
+# determined yet (e.g. before the first C1 file-role gate builds the real
+# plan). The effective per-turn budget is dynamic — see
+# marvis.orchestrator.capability.auto_gate_budget.
 AGENT_MAX_GATES = 8
 _TERMINAL_PLAN_STATUS_VALUES = frozenset({"done", "failed", "cancelled"})
 
@@ -465,7 +470,8 @@ def agent_autodrive_turn(
     runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, *, client
 ) -> None:
     turn_fn = DRIVER_TURN_FUNCS[task.task_type]
-    for _ in range(AGENT_MAX_GATES):
+    max_gates = _auto_gate_budget(runtime, task.id)
+    for _ in range(max_gates):
         gate = latest_open_gate(repo.list_agent_messages(task.id))
         if gate is None:
             return
@@ -561,6 +567,21 @@ def agent_autodrive_turn(
             )
             continue
         return
+    # AGT-7: the budget ran out with a gate STILL open (every iteration matched a
+    # real gate and looped back via confirm/adjust/replan) — tell the user
+    # explicitly instead of silently going quiet, which previously looked like
+    # the agent had inexplicably stopped responding.
+    if latest_open_gate(repo.list_agent_messages(task.id)) is not None:
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=(
+                f"🤖 AUTO 已连续自动处理 {max_gates} 个节点,为安全起见转人工确认;"
+                "请查看当前节点并回复「确认」或给出调整指令以继续。"
+            ),
+            metadata={"intent": "agent_budget_exhausted", "max_gates": max_gates},
+        )
 
 
 def append_driver_messages(
@@ -638,6 +659,25 @@ def _active_plan(plan_repo, task_id: str):
         if status not in _TERMINAL_PLAN_STATUS_VALUES:
             return plan
     return None
+
+
+def _auto_gate_budget(runtime: DriverTurnRuntime, task_id: str) -> int:
+    """AGT-7: size the AUTO auto-drive loop's per-turn gate budget off the active
+    plan's own gate count (needs_confirmation steps + the plan-overview gate),
+    capped by the task's capability tier — instead of the fixed AGENT_MAX_GATES=8
+    that silently exhausted on any plan with >=9 gates (the modeling_with_join
+    template alone has 7 needs_confirmation steps plus the overview + C1 gates).
+    Falls back to AGENT_MAX_GATES when no plan has been built yet (e.g. before the
+    first C1 file-role gate) or the plan repo is unavailable, so pre-plan turns
+    (join_c1) still get a sane budget."""
+    tier = resolve_tier(getattr(runtime, "tier", None))
+    plan_repo = getattr(runtime, "plan_repo", None)
+    plan = _active_plan(plan_repo, task_id) if plan_repo is not None else None
+    if plan is None:
+        return AGENT_MAX_GATES
+    gate_count = sum(1 for step in plan.steps if step.needs_confirmation)
+    # +1 for the plan-overview gate every driver plan pauses at before running.
+    return auto_gate_budget(tier, gate_count + 1)
 
 
 def _latest_c1_state(conversation: list[dict]) -> dict | None:
