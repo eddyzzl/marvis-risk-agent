@@ -476,6 +476,149 @@ def test_build_settings_reads_upload_guardrails_from_env(tmp_path, monkeypatch):
     assert overridden.max_excel_rows == 42
 
 
+def test_register_path_dataset_end_to_end_then_appears_in_list_and_preview(tmp_path):
+    """TST-2 (roadmap-1e): register a dataset directly from a local absolute
+    path -- no HTTP upload -- then confirm it shows up via list/preview and
+    that the source file was copied into the workspace (not registered
+    in-place), and that an INV-8 audit row was written."""
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    local_dir = tmp_path / "outside_workspace"
+    local_dir.mkdir()
+    source_path = local_dir / "local_sample.csv"
+    source_path.write_bytes(b"mobile,bad_flag\n13800138000,0\n13900139000,1\n")
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 201
+    dataset = response.json()["datasets"][0]
+    assert dataset["role"] == "sample"
+    assert dataset["task_id"] == task.id
+
+    # copied into the workspace, not referencing the original path
+    registered_path = settings.datasets_dir / dataset["source_path"]
+    assert registered_path.exists()
+    assert registered_path.resolve() != source_path.resolve()
+
+    listing = client.get(f"/api/tasks/{task.id}/datasets").json()
+    assert [item["id"] for item in listing["datasets"]] == [dataset["id"]]
+
+    preview = client.get(f"/api/datasets/{dataset['id']}/preview?rows=2")
+    assert preview.status_code == 200
+    assert preview.json()["columns"] == ["mobile", "bad_flag"]
+
+    from marvis.repositories.audit import _list_audit_rows
+
+    audit_rows = _list_audit_rows(settings.db_path, kind="dataset.registered_from_path")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["target_ref"] == dataset["id"]
+    assert audit_rows[0]["detail"]["source_path"] == str(source_path.resolve())
+    assert audit_rows[0]["detail"]["task_id"] == task.id
+
+
+def test_register_path_dataset_reuses_existing_dataset_by_content_hash(tmp_path):
+    """TST-2: local-path registration reuses register_from_upload's GAP-7
+    content-hash dedup -- registering the same bytes twice does not write a
+    second parquet file."""
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    source_path = tmp_path / "dup.csv"
+    source_path.write_bytes(b"mobile,bad_flag\n13800138000,0\n")
+
+    first = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+    second = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "feature"},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    dataset_a = first.json()["datasets"][0]
+    dataset_b = second.json()["datasets"][0]
+    assert dataset_a["content_hash"] == dataset_b["content_hash"]
+    assert dataset_a["source_path"] == dataset_b["source_path"]
+    assert len(list((settings.datasets_dir / task.id).glob("*.parquet"))) == 1
+
+
+def test_register_path_rejects_nonexistent_path(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(tmp_path / "does_not_exist.csv"), "role": "sample"},
+    )
+
+    assert response.status_code == 422
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
+def test_register_path_rejects_directory_path(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    a_directory = tmp_path / "a_directory.csv"
+    a_directory.mkdir()
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(a_directory), "role": "sample"},
+    )
+
+    assert response.status_code == 422
+    assert "not a regular file" in response.json()["detail"]
+
+
+def test_register_path_rejects_disallowed_extension(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    bad_path = tmp_path / "notes.txt"
+    bad_path.write_text("not a dataset")
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(bad_path), "role": "sample"},
+    )
+
+    assert response.status_code == 422
+    assert "unsupported file extension" in response.json()["detail"]
+
+
+def test_register_path_rejects_relative_path(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": "relative/sample.csv", "role": "sample"},
+    )
+
+    assert response.status_code == 422
+    assert "must be absolute" in response.json()["detail"]
+
+
+def test_register_path_rejects_oversized_file(tmp_path):
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_csv_upload_bytes", 32)
+    task = _create_task(settings)
+    source_path = tmp_path / "too_big.csv"
+    source_path.write_bytes(b"mobile,bad_flag\n" + b"13800138000,0\n" * 50)
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/register-path",
+        json={"path": str(source_path), "role": "sample"},
+    )
+
+    assert response.status_code == 413
+    assert "本地路径注册文件大小超过上限" in response.json()["detail"]
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
 def test_dataset_upload_raw_file_rolls_back_when_registration_fails(
     tmp_path,
     monkeypatch,

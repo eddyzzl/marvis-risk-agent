@@ -32,6 +32,7 @@ from marvis.data.errors import (
     DatasetTooLargeError,
     DedupRequiredError,
     FanOutError,
+    InvalidDatasetPathError,
     JoinNotConfirmedError,
 )
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
@@ -47,6 +48,9 @@ DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
 # TST-2: chunk size for streaming an upload to disk instead of reading the
 # whole file into memory with UploadFile.read()/file.file.read().
 UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+# TST-2 (roadmap-1e): local-path registration only accepts these extensions --
+# an explicit whitelist, not "whatever register_from_upload happens to parse".
+DATASET_PATH_SUFFIXES = {".csv", ".xlsx", ".parquet"}
 _EXCEL_UPLOAD_SUFFIXES = {".xlsx", ".xlsm"}
 
 
@@ -107,6 +111,63 @@ def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: in
             if total_bytes > max_bytes:
                 raise DatasetTooLargeError(
                     reason="上传文件大小超过上限",
+                    limit=max_bytes,
+                    actual=total_bytes,
+                )
+            output.write(chunk)
+    return total_bytes
+
+
+def _resolve_local_dataset_path(raw_path: str) -> Path:
+    """TST-2 (roadmap-1e): validate a client-supplied local absolute path for
+    server-side dataset registration.
+
+    Guards, in order: non-empty; absolute (a relative path is ambiguous about
+    the server's cwd and is rejected outright); resolves cleanly (catches
+    embedded NUL bytes / OS-level malformed paths); exists and is a regular
+    file, not a symlink to elsewhere or a directory (checked on the *resolved*
+    path so a symlink pointing e.g. at /etc/passwd cannot slip through);
+    extension is in the whitelist. The resolved path is deliberately allowed
+    to live anywhere on the local filesystem (this endpoint is loopback-only,
+    see the module docstring on the router below) -- it is copied into
+    ``datasets_root`` rather than registered in place, so no traversal check
+    against ``datasets_root`` is needed here; the copy destination itself is
+    always a freshly generated name under the task's own upload directory.
+    """
+    value = str(raw_path or "").strip()
+    if not value:
+        raise InvalidDatasetPathError("path is required")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        raise InvalidDatasetPathError(f"path must be absolute: {value}")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise InvalidDatasetPathError(f"path does not exist: {value}") from exc
+    if not resolved.is_file():
+        raise InvalidDatasetPathError(f"path is not a regular file: {value}")
+    if resolved.suffix.lower() not in DATASET_PATH_SUFFIXES:
+        raise InvalidDatasetPathError(
+            "unsupported file extension: "
+            f"{resolved.suffix or '(none)'} (allowed: {sorted(DATASET_PATH_SUFFIXES)})"
+        )
+    return resolved
+
+
+def _copy_local_dataset_path(source: Path, destination: Path, *, max_bytes: int) -> int:
+    """Chunked copy (mirrors ``_stream_upload_to_path``) so a large local file
+    is never fully buffered in memory, and so it is subject to the same size
+    guardrail as an HTTP upload of the same file type."""
+    total_bytes = 0
+    with source.open("rb") as input_file, destination.open("wb") as output:
+        while True:
+            chunk = input_file.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise DatasetTooLargeError(
+                    reason="本地路径注册文件大小超过上限",
                     limit=max_bytes,
                     actual=total_bytes,
                 )
@@ -325,6 +386,104 @@ def upload_task_dataset(
         "datasets": [dataset_payload(dataset) for dataset in datasets],
         "reports": reports,
     }
+
+
+@router.post("/tasks/{task_id}/datasets/register-path", status_code=201)
+def register_task_dataset_from_path(
+    task_id: str,
+    request: Request,
+    payload: dict = Body(default_factory=dict),
+) -> dict:
+    """TST-2 (roadmap-1e): register a dataset directly from a local absolute
+    path on the machine running MARVIS, skipping an HTTP upload entirely --
+    for single-machine deployments where the file already lives on disk.
+
+    Loopback-only: this is a POST, and the app-wide ``_local_access_guard``
+    middleware (marvis/app.py) already rejects every non-GET/HEAD/OPTIONS
+    request from a non-local client with 403 before it reaches any router --
+    the same guard every other write endpoint in this module relies on, so no
+    additional per-endpoint check is added here (importing app.py's
+    ``_is_local_client`` back into this module would be a circular import,
+    since app.py imports this router).
+    """
+    _require_task(request, task_id)
+    role = str(payload.get("role") or "unknown")
+    if role not in DATASET_ROLES:
+        raise HTTPException(status_code=422, detail="invalid dataset role")
+    settings = request.app.state.settings
+    repo_data, _backend, registry, _join_engine = _data_runtime(request)
+    try:
+        source_path = _resolve_local_dataset_path(str(payload.get("path") or ""))
+    except InvalidDatasetPathError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    upload_dir = settings.datasets_dir / task_id / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_uow = ArtifactUnitOfWork()
+    upload_artifact = upload_uow.stage_file(
+        upload_dir, _upload_artifact_name(source_path.name)
+    )
+    max_bytes = _max_upload_bytes_for_suffix(settings, source_path.suffix.lower())
+    try:
+        _copy_local_dataset_path(source_path, upload_artifact.path, max_bytes=max_bytes)
+    except DatasetTooLargeError as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except OSError as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=422, detail=f"cannot read path: {exc}") from exc
+    upload_path = upload_artifact.final_path
+    try:
+        upload_uow.promote_all()
+        # register_from_upload already gives GAP-7 content-hash dedup / idempotency
+        # for free -- registering the same local path twice reuses the existing
+        # dataset's parquet instead of duplicating it, exactly like a repeat HTTP
+        # upload of the same file would.
+        dataset = registry.register_from_upload(
+            task_id,
+            upload_path,
+            role=role,
+            max_excel_rows=settings.max_excel_rows,
+        )
+    except HTTPException:
+        upload_uow.rollback()
+        raise
+    except DatasetTooLargeError as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except (DataBackendError, DataIngestError, ValueError) as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        upload_uow.rollback()
+        raise
+    upload_uow.commit()
+    # INV-8: audit every local-path registration, regardless of dedup outcome --
+    # a hard write (not a soft getattr probe): a failure here must be a visible
+    # 500, not a silently-skipped audit trail for a security-sensitive path.
+    repo_data.write_audit(
+        kind="dataset.registered_from_path",
+        target_ref=dataset.id,
+        outcome="succeeded",
+        detail={
+            "task_id": task_id,
+            "dataset_id": dataset.id,
+            "role": dataset.role,
+            "source_path": str(source_path),
+            "content_hash": dataset.content_hash,
+        },
+    )
+    dispatch_platform_hook(
+        getattr(request.app.state, "hook_dispatcher", None),
+        "dataset.registered",
+        {
+            "task_id": task_id,
+            "dataset_id": dataset.id,
+            "role": dataset.role,
+        },
+        task_id=task_id,
+    )
+    return {"datasets": [dataset_payload(dataset)]}
 
 
 @router.get("/datasets/{dataset_id}/preview")

@@ -238,6 +238,24 @@ def test_trusted_proxy_forwards_remote_client_and_guard_still_applies(tmp_path, 
     assert blocked_write.json()["detail"] == "unsafe API methods are limited to local clients"
 
 
+def test_remote_client_cannot_register_dataset_from_local_path(tmp_path):
+    # TST-2 (roadmap-1e): POST /api/tasks/{id}/datasets/register-path lets the
+    # server read an arbitrary local file by path -- it must be rejected for a
+    # remote client by the same app-wide local-access guard every other unsafe
+    # (non-GET/HEAD/OPTIONS) endpoint relies on, well before path validation
+    # or the (nonexistent) task lookup ever runs.
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("192.168.1.20", 43210))
+
+    response = client.post(
+        "/api/tasks/some-task/datasets/register-path",
+        json={"path": "/etc/passwd", "role": "sample"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "unsafe API methods are limited to local clients"
+
+
 def test_trusted_proxy_forwards_local_client_as_local(tmp_path, monkeypatch):
     monkeypatch.setenv("MARVIS_TRUSTED_PROXY_HOSTS", "127.0.0.1")
     app = create_app(tmp_path)
