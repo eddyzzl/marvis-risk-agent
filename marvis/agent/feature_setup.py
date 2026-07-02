@@ -69,7 +69,7 @@ def build_feature_proposal(
     setup = detect_setup(backend, path)
     if not setup.target_col:
         raise FeatureSetupError(
-            "未能在数据中识别 0/1 目标列;请确认数据含标签列后重试。"
+            "未能在数据中识别 0/1 目标列；请确认数据含标签列后重试。"
         )
     # metrics = optional metrics the user selected at creation (spec §2: 选了才算);
     # empty → base per-feature metrics only.

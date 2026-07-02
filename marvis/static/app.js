@@ -62,9 +62,11 @@ import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js
 import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
   handleDedupConfirmClick as handleDedupConfirmClickController,
+  handleDedupExcludeClick as handleDedupExcludeClickController,
   renderDedupPicker,
   renderJoinC1Form,
   submitC1Assignment as submitC1AssignmentController,
+  submitDedupExclude as submitDedupExcludeController,
   submitDedupStrategies as submitDedupStrategiesController,
 } from "./js/v2/join_gate_controller.js";
 import {
@@ -243,6 +245,7 @@ const planRailController = createPlanRailController({
   refreshTasks,
   loadAgentMessages,
   renderAll,
+  fillComposer: focusAgentComposerForIntervene,
 });
 const taskSearchController = createTaskSearchController({
   getElementById: $,
@@ -5351,7 +5354,7 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
     const label = String(raw).replace(/\s★$/, "");
     return {
       cls: "cell-text cell-champion",
-      html: `<span class="champion-badge" data-tip="表现最优,当前推荐候选">${escapeHtml(label)}</span>`,
+      html: `<span class="champion-badge" data-tip="表现最优，当前推荐候选">${escapeHtml(label)}</span>`,
     };
   }
   if (kind === "psi") {
@@ -5608,12 +5611,24 @@ async function submitDedupStrategies(button) {
 function handleDedupConfirmClick(event) {
   return handleDedupConfirmClickController(event, joinGateControllerContext());
 }
+
+async function submitDedupExclude(button) {
+  return submitDedupExcludeController(button, joinGateControllerContext());
+}
+
+function handleDedupExcludeClick(event) {
+  return handleDedupExcludeClickController(event, joinGateControllerContext());
+}
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDedupConfirmClick);
+  document.addEventListener("click", handleDedupExcludeClick);
 }
 
 function agentMessageGateButtonHtml(message) {
-  return renderDriverGateButton(message);
+  // UX-10: resolve the gate step's own tool (the step it is confirming) so the
+  // button copy can state the consequence (确认并执行拼接/确认所选特征/...).
+  const step = planRailController.planStep(message?.metadata || {});
+  return renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || "" });
 }
 
 async function submitDriverConfirm(button) {
@@ -6045,6 +6060,14 @@ function prefillAgentTaskInstruction(task) {
   input.value = definition.initialGoal;
   autoGrowComposerInput();
   updateAgentSendDisabled();
+}
+
+// UX-5: "发消息介入" on a plan-rail no_progress event — focuses the composer
+// without overwriting anything the user may already be drafting there.
+function focusAgentComposerForIntervene() {
+  const input = $("agentComposerInput");
+  if (!input) return;
+  input.focus();
 }
 
 async function createTask() {
@@ -6670,10 +6693,17 @@ $("agentEffortSelect").onchange = (event) => {
   event.target.blur();
 };
 $("agentAcceptanceModeSelect").onchange = (event) => {
+  const previousMode = agentAcceptanceMode;
   agentAcceptanceMode = normalizeAgentAcceptanceMode(event.target.value);
   event.target.value = agentAcceptanceMode;
   renderAgentAcceptanceModePreference();
   persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
+  // UX-10: switching INTO auto mode is the moment the risk (Agent confirms every
+  // gate on the user's behalf, including destructive ones like execute_join) becomes
+  // real — surface it once here rather than relying only on the chip's hover title.
+  if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
+    setAgentComposerNotice("自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。", "info");
+  }
   event.target.blur();
 };
 

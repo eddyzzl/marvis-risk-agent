@@ -120,7 +120,15 @@ def test_data_join_dedup_picker_resolves_conflicts(client: TestClient, tmp_path:
     assert dedup["strategies"] == ["first", "last"]
     feature_id = dedup["needs_dedup"][0]
     # the picker shows the conflict count from the propose-step diagnostics
-    assert dedup["features"][0]["conflict_keys"] >= 1
+    feature_payload = dedup["features"][0]
+    assert feature_payload["conflict_keys"] >= 1
+    # UX-6: conflict_columns and a real conflict-value example are surfaced too, not
+    # just the bare count -- the conflicting rows disagree on "balance".
+    assert "balance" in feature_payload["conflict_columns"]
+    assert feature_payload["examples"], feature_payload
+    example = feature_payload["examples"][0]
+    assert "key" in example and example["key"]
+    assert example["values"].get("balance"), example
 
     # pick a strategy -> re-confirm; conflict resolved, re-pause at the now-clear gate
     resp = client.post(

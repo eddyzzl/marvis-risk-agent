@@ -41,12 +41,12 @@ def tuning_setup_red_flags(*, split_output: dict | None, modeling_spec_output: d
     if total_rows is None and split_counts:
         total_rows = sum(split_counts.values())
     if total_rows is not None and total_rows < MIN_SAMPLE_SIZE:
-        flags.append(f"样本量偏小(共 {total_rows} 行 < {MIN_SAMPLE_SIZE}),指标抽样噪声可能较大。")
+        flags.append(f"样本量偏小（共 {total_rows} 行 < {MIN_SAMPLE_SIZE}），指标抽样噪声可能较大。")
     if split_counts and split_counts.get("oot", 0) <= 0:
-        flags.append("样本切分缺少 OOT(时间外)子集,稳定性结论需谨慎。")
+        flags.append("样本切分缺少 OOT（时间外）子集，稳定性结论需谨慎。")
     feature_count = _safe_int(_dict(modeling_spec_output).get("feature_count"))
     if feature_count is not None and feature_count > MAX_FEATURE_COUNT:
-        flags.append(f"入模候选特征数偏多({feature_count} > {MAX_FEATURE_COUNT}),过拟合与训练成本风险上升。")
+        flags.append(f"入模候选特征数偏多（{feature_count} > {MAX_FEATURE_COUNT}），过拟合与训练成本风险上升。")
     return flags
 
 
@@ -64,7 +64,7 @@ def select_experiment_red_flags(*, tune_output: dict | None, train_models_output
     failed = [item for item in _dict(train_models_output).get("failed") or [] if isinstance(item, dict)]
     if failed:
         recipes = ", ".join(str(item.get("recipe") or "?") for item in failed[:8])
-        flags.append(f"训练阶段有 {len(failed)} 个候选算法失败({recipes}),对比范围不完整。")
+        flags.append(f"训练阶段有 {len(failed)} 个候选算法失败（{recipes}），对比范围不完整。")
     return flags
 
 
@@ -81,7 +81,7 @@ def _overfit_gap_flags(tune_output: dict | None) -> list[str]:
             worst_gap = gap
     if worst_gap is not None and worst_gap > MAX_TRAIN_TEST_KS_GAP:
         return [
-            f"调参 trial 中最大 train-test KS 差为 {worst_gap:.3f}(> {MAX_TRAIN_TEST_KS_GAP}),存在过拟合迹象。"
+            f"调参 trial 中最大 train-test KS 差为 {worst_gap:.3f}（> {MAX_TRAIN_TEST_KS_GAP}），存在过拟合迹象。"
         ]
     return []
 
@@ -96,8 +96,8 @@ def _champion_runner_up_flags(experiments: list[dict]) -> list[str]:
     gap = scores[0] - scores[1]
     if gap < MIN_CHAMPION_RUNNER_UP_KS_GAP:
         return [
-            f"冠军与亚军的 test_ks 差距仅 {gap:.4f}(< {MIN_CHAMPION_RUNNER_UP_KS_GAP}),"
-            "冠军选择可能落在噪声范围内,建议复核而非直接采信。"
+            f"冠军与亚军的 test_ks 差距仅 {gap:.4f}（< {MIN_CHAMPION_RUNNER_UP_KS_GAP}），"
+            "冠军选择可能落在噪声范围内，建议复核而非直接采信。"
         ]
     return []
 
@@ -108,7 +108,7 @@ def _weighted_unweighted_mismatch_flags(experiments: list[dict]) -> list[str]:
     if weighted_best and unweighted_best and weighted_best != unweighted_best:
         return [
             f"按加权 test_ks 与未加权 test_ks 选出的冠军算法不一致"
-            f"(加权={weighted_best},未加权={unweighted_best}),请确认样本权重是否应纳入选型口径。"
+            f"（加权={weighted_best}，未加权={unweighted_best}），请确认样本权重是否应纳入选型口径。"
         ]
     return []
 

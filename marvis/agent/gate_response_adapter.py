@@ -36,7 +36,7 @@ def validate_gate_control(
 ) -> None:
     if expected_step_id:
         if gate is None or gate.id != str(expected_step_id):
-            raise GateControlValidationError("当前待确认步骤已变化,请刷新后使用最新步骤的控件。")
+            raise GateControlValidationError("当前待确认步骤已变化，请刷新后使用最新步骤的控件。")
     screen_adjust = has_screen_adjust(adjust_params)
     select_adjust = has_select_adjust(adjust_params)
     modeling_setup_adjust = has_modeling_setup_adjust(adjust_params)
@@ -54,9 +54,9 @@ def validate_gate_control(
     ):
         return
     if gate is None:
-        raise GateControlValidationError("当前没有待确认步骤,无法应用该控件。")
+        raise GateControlValidationError("当前没有待确认步骤，无法应用该控件。")
     if not expected_step_id:
-        raise GateControlValidationError("该控件缺少待确认步骤校验信息,请刷新后重试。")
+        raise GateControlValidationError("该控件缺少待确认步骤校验信息，请刷新后重试。")
     if (selection is not None or screen_adjust) and not gate_depends_on_tool(plan, gate, "screen_features"):
         raise GateControlValidationError("该控件只适用于特征筛选确认步骤。")
     if select_adjust and not gate_depends_on_tool(plan, gate, "select_features"):
@@ -71,7 +71,7 @@ def validate_gate_control(
         })
         if invalid:
             raise GateControlValidationError(
-                f"不支持的去重策略: {', '.join(invalid)};请使用 first 或 last。"
+                f"不支持的去重策略: {', '.join(invalid)}；请使用 first 或 last。"
             )
     if modeling_setup_adjust and not gate_depends_on_tool(plan, gate, "choose_modeling_spec"):
         raise GateControlValidationError("该控件只适用于建模规格确认步骤。")

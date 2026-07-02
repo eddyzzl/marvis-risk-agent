@@ -108,7 +108,7 @@ def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
     assert "计划读取失败" in plan_js
     assert "当前显示的是上次缓存的计划" in plan_js
     assert "const fetchErrorBanner = fetchError" in plan_js
-    assert "return fetchErrorBanner + phasesHtml + startControl;" in plan_js
+    assert "return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;" in plan_js
     assert "data-plan-rail-retry" in plan_js
     assert "function retryFetch" in plan_js
 
@@ -1451,13 +1451,24 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "body instanceof FormData" in api_body
     assert '"Content-Type": "application/json"' not in api_body
 
-    upload_start = create_dialog_js.index("async function uploadMaterialFiles")
+    # UX-12: uploadMaterialFiles is XMLHttpRequest-based (not fetch/api()) so it
+    # can report upload progress — fetch has no upload-progress event at all.
+    upload_start = create_dialog_js.index("function uploadMaterialFiles")
     upload_end = create_dialog_js.index("async function createTask", upload_start)
     upload_body = create_dialog_js[upload_start:upload_end]
     assert "new FormData()" in upload_body
     assert 'formData.append("files"' in upload_body
     assert 'formData.append("relative_paths"' in upload_body
-    assert 'api("api/material-uploads"' in upload_body
+    assert "new XMLHttpRequest()" in upload_body
+    assert 'xhr.open("POST", "/api/material-uploads")' in upload_body
+    assert "xhr.upload.onprogress" in upload_body
+    assert "onProgress(event.loaded, event.total)" in upload_body
+    # a 2xx response resolves with the parsed JSON payload; a non-2xx (or a
+    # network-level xhr.onerror) rejects with a real Error, matching the
+    # error.message contract runAction()'s catch block expects.
+    assert "resolve(payload)" in upload_body
+    assert "reject(new Error(message))" in upload_body
+    assert 'reject(new Error("材料上传失败：网络错误。"))' in upload_body
 
     create_start = create_dialog_js.index("async function createTask")
     create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
@@ -1465,6 +1476,11 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "await uploadMaterialFiles" in create_body
     assert "payload.source_dir = upload.source_dir" in create_body
     assert "文件上传暂未开放" not in create_body
+    # UX-12: percentage readout only kicks in above the size threshold, and the
+    # status text is driven by the same setCreateStatus channel as every other
+    # busy state (no separate progress-bar component).
+    assert "MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES" in create_dialog_js
+    assert "onProgress: showPercent" in create_body
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
@@ -5595,7 +5611,10 @@ def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     # widget through free-text routing only); it still steps aside whenever the
     # gate carries a structured widget, since that widget owns the primary
     # confirm action.
-    assert "renderDriverGateButton(message)" in app_js
+    # UX-10: the button also resolves the gate step's own tool_ref (via
+    # planRailController.planStep) so its copy can state the consequence
+    # (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every gate.
+    assert "renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || \"\" })" in app_js
     assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
     assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js
@@ -9515,3 +9534,220 @@ def test_artifact_panel_loading_state_uses_table_skeleton():
     assert "正在加载输出..." not in plan_js
     assert "skeletonTableHtml" in plan_js
     assert 'data-skeleton="artifact"' in plan_js
+
+
+
+def test_plan_rail_renders_replan_badge_loop_events_and_subagent_rows():
+    """UX-5: replan/no_progress/sub_agents were fully persisted in the plan
+    payload but the plan rail rendered none of it — verify the rail now shows
+    a "已重规划 N 次" badge, the last-3 loop_events (with an intervene button
+    on no_progress rows), and a "子任务运行中" badge for active sub-agents.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "const plan = {",
+            "  id: 'plan-1',",
+            "  status: 'running',",
+            "  replan_count: 2,",
+            "  loop_events: [",
+            "    { type: 'replan', reason: 'failure', at: 't1', trigger_step_id: 'step-1', tool_ref: 'data_ops.propose_join' },",
+            "    { type: 'no_progress', reason: 'failure', at: 't2', trigger_step_id: 'step-2' },",
+            "  ],",
+            "  sub_agents: [",
+            "    { id: 'sub-1', scope: 'feature <scan>', status: 'running', granted_tools: [] },",
+            "    { id: 'sub-2', scope: 'done scope', status: 'returned', granted_tools: [] },",
+            "  ],",
+            "  steps: [",
+            "    { id: 'step-1', index: 0, title: 'Propose join', status: 'done', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  ],",
+            "};",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "已重规划 2 次" in html
+    assert "已重规划：步骤执行失败" in html
+    assert "暂无进展：步骤执行失败" in html
+    assert 'data-plan-rail-intervene="1"' in html
+    assert "发消息介入" in html
+    assert "子任务运行中" in html
+    assert "feature &lt;scan&gt;" in html
+    # returned sub-agent is not "active" — only running/spawned rows render.
+    assert "done scope" not in html
+
+
+def test_plan_rail_omits_event_chrome_when_plan_has_no_events():
+    """UX-5: the common uneventful plan (no replans, no active sub-agents)
+    must not grow any of the new chrome — quiet by default per the review's
+    "克制不喧宾" instruction.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "function loopEventStripHtml(plan)" in plan_js
+    assert "function replanBadgeHtml(plan)" in plan_js
+    assert "function subAgentRowsHtml(plan)" in plan_js
+
+
+def test_plan_rail_shows_waiting_for_confirmation_not_generating():
+    """UX-10: at the C1 role-assignment gate (no plan built yet by design), the
+    rail must say "等待确认：<步骤名>" — the system is waiting on the USER, not
+    generating a plan. The old unconditional "计划生成中…" text misattributed
+    the wait for this exact scenario.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const gateMessage = { role: 'assistant', metadata: { join_c1: { target_col: 'bad' } } };",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [gateMessage],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "等待确认：文件角色与目标列" in html
+    assert "计划生成中" not in html
+
+
+def test_plan_rail_falls_back_to_generating_when_no_open_gate():
+    """UX-10: a genuine still-generating wait (no plan yet, no open gate message)
+    must keep showing "计划生成中…" — only the gate-waiting case changes.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "计划生成中" in html
+    assert "等待确认" not in html
+
+
+def test_gate_confirm_button_states_consequence_by_tool():
+    """UX-10: gate confirm-button copy maps to the gate step's own tool
+    (execute_join/screen_features/train_model/...) instead of a bare "确认"
+    for every gate — the button looks identical today whether it just accepts
+    a read-only screening result or writes artifacts to disk.
+    """
+    driver_gate_js = _read_static("js/v2/driver_gate_confirm.js")
+
+    assert "export function gateConfirmLabel(toolName)" in driver_gate_js
+    assert 'execute_join: "确认并执行拼接"' in driver_gate_js
+    assert 'screen_features: "确认所选特征"' in driver_gate_js
+    assert 'train_model: "确认并开始训练"' in driver_gate_js
+
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderDriverGateButton }} from {json.dumps(module_url)};",
+            "const message = { metadata: { kind: 'gate', step_id: 'gate-1' } };",
+            "const joinHtml = renderDriverGateButton(message, { gateStepTool: 'execute_join' });",
+            "const genericHtml = renderDriverGateButton(message, {});",
+            "process.stdout.write(JSON.stringify({ joinHtml, genericHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert "确认并执行拼接" in payload["joinHtml"]
+    assert ">确认<" in payload["genericHtml"]
+
+
+def test_acceptance_mode_chip_explains_auto_mode_scope():
+    """UX-10: the acceptance-mode chip/select must explain, on hover, that auto
+    mode confirms every gate (including destructive ones) on the user's
+    behalf — previously there was no title/tooltip at all.
+    """
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="agentAcceptanceModeSelect"' in index_html
+    assert "自动模式下 Agent 将替你确认全部关键节点" in index_html
+    # fires the composer notice once on switching INTO auto mode.
+    assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
+    assert "setAgentComposerNotice(\"自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。\", \"info\")" in app_js

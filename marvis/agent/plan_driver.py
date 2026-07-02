@@ -244,7 +244,7 @@ class PlanDriver:
         plan = self._repo.load_plan(plan_id)
         gate = None if plan.status == PlanStatus.VALIDATED else self._awaiting_step(plan)
         if expected_step_id and (gate is None or gate.id != str(expected_step_id)):
-            raise DriverError("当前待确认步骤已变化,请刷新后重试。")
+            raise DriverError("当前待确认步骤已变化，请刷新后重试。")
         return self._gate_execution.apply_replan(plan, gate, goal, run_seq)
 
     def _handle_instruction(self, plan, gate, user_text, run_seq) -> DriverTurn:
@@ -281,7 +281,7 @@ class PlanDriver:
                     plan,
                     gate,
                     run_seq=run_seq,
-                    text=route.get("reason") or "请明确指令:回复「确认」继续,或说明要调整的参数。",
+                    text=route.get("reason") or "请明确指令:回复「确认」继续，或说明要调整的参数。",
                 )
             ],
         )

@@ -69,10 +69,10 @@ def build_vintage_proposal(
     columns = backend.column_names(path)
     cohort_col = _resolve_named_col(columns, time_col, _COHORT_HINTS)
     if not cohort_col:
-        raise VintageSetupError("未能识别 cohort/放款月份列;请在创建任务时用 time_col 指定。")
+        raise VintageSetupError("未能识别 cohort/放款月份列；请在创建任务时用 time_col 指定。")
     mob_col = _resolve_named_col(columns, None, _MOB_HINTS)
     if not mob_col:
-        raise VintageSetupError("未能识别 MOB(月龄)列;请确认数据包含 mob/month_on_book 等字段。")
+        raise VintageSetupError("未能识别 MOB（月龄）列；请确认数据包含 mob/month_on_book 等字段。")
     bad_col = _resolve_bad_col(backend, path, columns, target_col)
     return VintageProposal(
         dataset_id=dataset.id,
@@ -105,7 +105,7 @@ def _resolve_bad_col(backend, path: Path, columns: list[str], requested: str | N
     setup = detect_setup(backend, path)
     if setup.target_col:
         return setup.target_col
-    raise VintageSetupError("未能识别 0/1 坏账标签列;请在创建任务时指定 target_col。")
+    raise VintageSetupError("未能识别 0/1 坏账标签列；请在创建任务时指定 target_col。")
 
 
 def _resolve_named_col(columns: list[str], requested: str | None, hints: tuple[str, ...]) -> str:

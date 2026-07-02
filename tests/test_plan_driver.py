@@ -551,7 +551,7 @@ def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tm
     assert setup["eligible_algorithms"] == ["lgb", "xgb"]
     assert setup["disabled_algorithms"] == [{"recipe": "lgb_regressor", "reason": "target mismatch"}]
     assert setup["split_summary"]["split_counts"] == {"train": 90, "test": 10, "oot": 2}
-    assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%,稳定性结论需谨慎。"]
+    assert setup["split_summary"]["warnings"] == ["OOT 占比低于 5%，稳定性结论需谨慎。"]
     guidance_by_id = {item["id"]: item for item in setup["override_guidance"]}
     assert guidance_by_id["split_quality"]["level"] == "warning"
     assert "OOT 占比低于 5%" in guidance_by_id["split_quality"]["message"]
@@ -691,7 +691,7 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
         "stability_value": 0.06,
         "generalization_gap": pytest.approx(0.02),
         "overfit_flag": False,
-        "calibration": "已校准(PMML不含)",
+        "calibration": "已校准（PMML不含）",
         "delivery": "可移交",
     }
     assert delivery["policy_signals"] == {
@@ -727,7 +727,7 @@ def test_modeling_selection_gate_carries_delivery_payload(tmp_path):
         "reason": "策略门控已通过",
     }
     assert [row["selected"] for row in delivery["candidates"]] == [True, False, False]
-    assert delivery["candidates"][0]["business_signals"]["calibration"] == "已校准(PMML不含)"
+    assert delivery["candidates"][0]["business_signals"]["calibration"] == "已校准（PMML不含）"
     assert delivery["candidates"][0]["policy_signals"]["monotonicity"] == "已约束"
     assert delivery["candidates"][1]["policy_signals"]["scorecard"] == "评分卡"
     assert delivery["candidates"][1]["policy_signals"]["monotonicity"] == "已约束"
@@ -2096,7 +2096,7 @@ def test_render_registry_has_modeling_renderers_and_generic_fallback():
         },
     )
     assert "策略候选已生成" in strategy_text
-    assert strategy_tables[0]["title"] == "策略规则(按顺序命中)"
+    assert strategy_tables[0]["title"] == "策略规则（按顺序命中）"
     vintage_text, vintage_tables = render_tool_output(
         "vintage_curve",
         {
@@ -2131,8 +2131,8 @@ def test_render_propose_join_surfaces_fingerprint_consistency_column():
         ],
     })
     table = next(t for t in tables if t["title"].startswith("拼接诊断"))
-    assert "指纹(raw=md5?)" in table["columns"]
-    fp_idx = table["columns"].index("指纹(raw=md5?)")
+    assert "指纹（raw=md5?）" in table["columns"]
+    fp_idx = table["columns"].index("指纹（raw=md5?）")
     cells = {row[0]: row[fp_idx] for row in table["rows"]}
     assert cells["feat_ok"] == "✓"
     assert "✗" in cells["feat_md5"] and "raw≠md5" in cells["feat_md5"]
@@ -2204,7 +2204,7 @@ def test_render_tune_leaderboard_includes_full_per_trial_matrix():
     })
     board = next(table for table in tables if table["title"].startswith("trials 排行"))
     for col in ("test_auc", "oot_auc", "头部lift5%", "头部lift10%", "尾部lift5%", "尾部lift10%",
-                "过拟合gap(tt)", "过拟合gap(to)"):
+                "过拟合gap（tt）", "过拟合gap（to）"):
         assert col in board["columns"], col
     assert any("0.72" in str(cell) for cell in board["rows"][0])  # AUC reached the top row
     assert any("0.07" in str(cell) for cell in board["rows"][0])  # train-oot gap surfaced

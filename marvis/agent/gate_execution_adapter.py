@@ -90,13 +90,13 @@ class GateExecutionAdapter:
                 plan,
                 gate,
                 run_seq,
-                "重规划未成功(重规划预算用尽或指令无法执行);可改为在节点处「调参重算」,"
+                "重规划未成功（重规划预算用尽或指令无法执行）；可改为在节点处「调参重算」，"
                 "或重新创建任务调整配置。",
             )
         revised = self._repo.load_plan(plan.id)
         if revised.status == PlanStatus.VALIDATED:
             return DriverTurn(revised.id, revised.status.value, [
-                DriverMessage("chat", "已按指令重规划,请查看新计划。", {"plan_id": revised.id, "run_seq": run_seq}),
+                DriverMessage("chat", "已按指令重规划，请查看新计划。", {"plan_id": revised.id, "run_seq": run_seq}),
                 self._plan_overview_message(revised),
             ])
         turn = self._run_and_handle(plan.id, run_seq=run_seq)
@@ -110,7 +110,7 @@ class GateExecutionAdapter:
         """Apply declared parameter overrides, reset affected steps, and rerun."""
         deps = [step for step in (find_step(plan, dep_id) for dep_id in (gate.depends_on or [])) if step is not None]
         if not deps:
-            return self._instruction_message(plan, gate, run_seq, "没找到可调整的上一步,请重新确认。")
+            return self._instruction_message(plan, gate, run_seq, "没找到可调整的上一步，请重新确认。")
         params = params or {}
         validation_error = adjust_param_error(params)
         if validation_error:
@@ -140,7 +140,7 @@ class GateExecutionAdapter:
                 plan,
                 gate,
                 run_seq,
-                f"没有识别到可调整的参数,未重算。{hint}",
+                f"没有识别到可调整的参数，未重算。{hint}",
             )
         reset_ids = self._reset_downstream_steps(plan, adjusted_ids)
         if gate.id not in reset_ids:
@@ -173,7 +173,7 @@ class GateExecutionAdapter:
             return None
         output = self._safe_output(step_id)
         if not isinstance(output, dict):
-            return "缺少建模规格输出,无法调整样本权重列。"
+            return "缺少建模规格输出，无法调整样本权重列。"
         candidates = [str(col) for col in (output.get("sample_weight_candidates") or []) if str(col).strip()]
         current = str(output.get("sample_weight_col") or "").strip()
         allowed = set(candidates)
@@ -181,7 +181,7 @@ class GateExecutionAdapter:
             allowed.add(current)
         if selected not in allowed:
             display = "、".join(candidates) if candidates else "无"
-            return f"样本权重列 `{selected}` 不在已检测候选列中,未重算。候选列:{display}。"
+            return f"样本权重列 `{selected}` 不在已检测候选列中，未重算。候选列:{display}。"
         return None
 
     def _instruction_message(self, plan: Plan, gate: PlanStep | None, run_seq, text) -> DriverTurn:

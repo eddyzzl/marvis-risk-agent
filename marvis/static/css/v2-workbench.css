@@ -1069,6 +1069,86 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   border-radius: 999px;
   white-space: nowrap;
 }
+/* UX-5: replan/no_progress event strip + replan badge + active sub-agent rows,
+   rendered above the phase list in plan_rail_controller.js. Kept quiet (no
+   pulse/glow) so it informs without competing with the gate cards (VD-2). */
+.plan-rail-header {
+  display: flex;
+  align-items: center;
+  margin: 0 0 8px;
+}
+.plan-rail-replan-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.plan-rail-events {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.plan-rail-event {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+}
+.plan-rail-event.attention {
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  border: 1px solid var(--warning-border);
+}
+.plan-rail-intervene {
+  flex: 0 0 auto;
+}
+.plan-rail-subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.plan-rail-subagent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  background: var(--surface-soft);
+}
+.plan-rail-subagent-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--info-strong, var(--text-muted));
+  background: var(--info-soft, var(--surface-subtle));
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.plan-rail-subagent-scope {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.plan-rail-subagent-status {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
 .plan-rail-empty {
   padding: 16px 6px;
   color: var(--text-muted);
@@ -2210,6 +2290,26 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 }
 .dedup-table .dedup-feat {
   font-weight: 600;
+  white-space: normal;
+}
+/* UX-6: evidence rows (conflicting columns + a real value example) rendered under the
+   feature id — normal wrapping so a wide column list or example doesn't force the
+   table wider than the gate panel. */
+.dedup-conflict-columns,
+.dedup-example {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: normal;
+}
+.dedup-picker .dedup-strategy-note {
+  margin: 0;
+  padding: 7px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border-color);
 }
 .dedup-table select.dedup-strategy {
   font-size: 12px;
@@ -2217,6 +2317,9 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   border-radius: var(--radius);
   border: 1px solid var(--border-color);
   background: var(--surface);
+}
+.dedup-table .dedup-exclude {
+  margin-left: 6px;
 }
 .dedup-foot {
   display: flex;

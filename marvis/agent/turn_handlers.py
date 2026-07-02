@@ -105,18 +105,18 @@ def run_join_driver_turn(
                 task.id,
                 role="assistant",
                 stage="chat",
-                content="请确认文件角色与目标列:无误就回复「确认」,或用下方控件调整后点「确认角色」。",
+                content="请确认文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
                 metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
             )
             return join_turn_response(repo, task.id)
         if not assignment["anchor_id"]:
-            return append_join_error(repo, task.id, "请先指定样本锚表(通常是含目标列的那张),再确认。")
+            return append_join_error(repo, task.id, "请先指定样本锚表（通常是含目标列的那张），再确认。")
         if not assignment["feature_ids"]:
             repo.add_agent_message(
                 task.id,
                 role="assistant",
                 stage="chat",
-                content="已确认样本表与目标列。只有一张表,无需拼接(数据拼接阶段已跳过)。",
+                content="已确认样本表与目标列。只有一张表，无需拼接（数据拼接阶段已跳过）。",
                 metadata={"join_skip": True},
             )
             return join_turn_response(repo, task.id)
@@ -174,8 +174,8 @@ def run_feature_driver_turn(
             role="assistant",
             stage="chat",
             content=(
-                f"分析数据集 `{proposal.dataset_name}`(目标列 `{proposal.target_col}`,"
-                f"{len(proposal.features)} 个候选特征):"
+                f"分析数据集 `{proposal.dataset_name}`（目标列 `{proposal.target_col}`，"
+                f"{len(proposal.features)} 个候选特征）:"
             ),
             metadata={"intent": "feature_analysis"},
         )
@@ -234,14 +234,14 @@ def run_strategy_driver_turn(
             score_col=getattr(task, "score_col", "") or None,
         )
         note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
-        bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""
+        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
         repo.add_agent_message(
             task.id,
             role="assistant",
             stage="chat",
             content=(
-                f"开始策略分析:样本 `{proposal.dataset_name}`,目标列 `{proposal.target_col}`{bad},"
-                f"评分列 `{proposal.score_col}`。已生成默认审批策略候选,回测前会停下确认。"
+                f"开始策略分析:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
+                f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
                 f"{note_text}"
             ),
             metadata={"intent": "strategy"},
@@ -305,8 +305,8 @@ def run_vintage_driver_turn(
             role="assistant",
             stage="chat",
             content=(
-                f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`,"
-                f"cohort `{proposal.cohort_col}`,MOB `{proposal.mob_col}`,坏账列 `{proposal.bad_col}`。"
+                f"开始 Vintage 风险分析:样本 `{proposal.dataset_name}`，"
+                f"cohort `{proposal.cohort_col}`，MOB `{proposal.mob_col}`，坏账列 `{proposal.bad_col}`。"
             ),
             metadata={"intent": "vintage"},
         )
@@ -371,12 +371,12 @@ def run_modeling_driver_turn(
                     task.id,
                     role="assistant",
                     stage="chat",
-                    content="请先确认建模文件角色与目标列:无误就回复「确认」,或用下方控件调整后点「确认角色」。",
+                    content="请先确认建模文件角色与目标列:无误就回复「确认」，或用下方控件调整后点「确认角色」。",
                     metadata={"join_c1": c1_state, "tables": _c1_table(c1_state)},
                 )
                 return join_turn_response(repo, task.id)
             if not c1_assignment["anchor_id"]:
-                return append_join_error(repo, task.id, "请先指定建模样本主表(通常是含目标列的那张),再确认。")
+                return append_join_error(repo, task.id, "请先指定建模样本主表（通常是含目标列的那张），再确认。")
         proposal = build_modeling_proposal(
             registry,
             backend,
@@ -394,17 +394,17 @@ def run_modeling_driver_turn(
             ),
         )
         counts = proposal.counts
-        bad = f"(坏率 {proposal.bad_rate:.2%})" if proposal.bad_rate is not None else ""
+        bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
         note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
         repo.add_agent_message(
             task.id,
             role="assistant",
             stage="chat",
             content=(
-                f"开始建模:样本 `{proposal.dataset_name}`,目标列 `{proposal.target_col}`{bad},"
+                f"开始建模:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
                 f"切分 `{proposal.split_col}` train/test/oot="
-                f"{counts.get('train', 0)}/{counts.get('test', 0)}/{counts.get('oot', 0)},"
-                f"候选特征 {len(proposal.feature_cols)} 个。先做泄漏感知特征筛选,随后请确认特征集。"
+                f"{counts.get('train', 0)}/{counts.get('test', 0)}/{counts.get('oot', 0)}，"
+                f"候选特征 {len(proposal.feature_cols)} 个。先做泄漏感知特征筛选，随后请确认特征集。"
                 f"{note_text}"
             ),
             metadata={"intent": "modeling"},
@@ -589,7 +589,7 @@ def agent_autodrive_turn(
             role="assistant",
             stage="chat",
             content=(
-                f"🤖 AUTO 已连续自动处理 {max_gates} 个节点,为安全起见转人工确认;"
+                f"🤖 AUTO 已连续自动处理 {max_gates} 个节点，为安全起见转人工确认；"
                 "请查看当前节点并回复「确认」或给出调整指令以继续。"
             ),
             metadata={"intent": "agent_budget_exhausted", "max_gates": max_gates},
@@ -715,7 +715,7 @@ def _c1_table(c1_state: dict) -> list[dict]:
     ]
     return [
         {
-            "title": "输入文件(请确认角色与目标列)",
+            "title": "输入文件（请确认角色与目标列）",
             "columns": ["文件", "行数", "列数", "含目标列", "候选目标列", "提议角色"],
             "rows": rows,
         }
@@ -729,17 +729,17 @@ def _append_c1_message(repo: TaskRepository, task_id: str, proposal) -> None:
     if proposal.skip:
         text = (
             f"我发现 {len(files)} 个数据文件。提议**样本主表 = `{anchor.name if anchor else '?'}`**"
-            + (f",目标列 = `{proposal.target_col}`" if proposal.target_col else "(未识别目标列,请指定)")
-            + "。只有一张表,确认后将跳过拼接。请确认,或用下方控件调整。"
+            + (f"，目标列 = `{proposal.target_col}`" if proposal.target_col else "（未识别目标列，请指定）")
+            + "。只有一张表，确认后将跳过拼接。请确认，或用下方控件调整。"
         )
     else:
         text = (
-            f"我发现 {len(files)} 个数据文件,先确认每张的**角色与目标列**(样本是锚,只贴列不改行,**1:1**):\n"
+            f"我发现 {len(files)} 个数据文件，先确认每张的**角色与目标列**（样本是锚，只贴列不改行，**1:1**）:\n"
             f"- 提议**样本主表** = `{anchor.name if anchor else '?'}`"
-            + (f"(目标列 `{proposal.target_col}`)" if proposal.target_col else "(未识别目标列,请指定)")
+            + (f"（目标列 `{proposal.target_col}`）" if proposal.target_col else "（未识别目标列，请指定）")
             + "\n- 提议**特征表** = "
-            + (", ".join(f"`{name}`" for name in feature_names) or "(无)")
-            + "\n确认无误回复「确认」;要改就用下方控件选好角色/目标列后点「确认角色」。"
+            + (", ".join(f"`{name}`" for name in feature_names) or "（无）")
+            + "\n确认无误回复「确认」；要改就用下方控件选好角色/目标列后点「确认角色」。"
         )
     c1_state = {
         "files": [

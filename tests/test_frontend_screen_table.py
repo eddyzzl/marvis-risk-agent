@@ -686,7 +686,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           currentRecipes: "lgb",
           reason: "目标改为连续",
         }}) }}, context);
-        assert.deepEqual(statuses.at(-1), ["目标类型 continuous 与算法 lgb 不匹配,请选择同一目标类型的算法。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["目标类型 continuous 与算法 lgb 不匹配，请选择同一目标类型的算法。", "error"]);
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           targetType: "continuous",
           selectedRecipes: ["lgb_regressor"],
@@ -1371,6 +1371,13 @@ def test_dedup_picker_posts_strategies():
     assert "pollAgentMessagesUntilSettled" in module_js
     assert "resetFetchThrottle" in module_js
     assert "renderWorkflowStepper" in module_js
+    # UX-6: "排除该特征表" is wired the same way (controller export + app.js
+    # wrapper + document click listener) as the strategy-confirm button.
+    assert "function submitDedupExclude(button)" in app_js
+    assert "submitDedupExcludeController(button, joinGateControllerContext())" in app_js
+    assert "export async function submitDedupExclude(button, rawContext = {})" in module_js
+    assert "data-dedup-exclude" in module_js
+    assert "handleDedupExcludeClick" in app_js
 
 
 def test_join_c1_form_renderer_and_submit_are_wired():
@@ -1415,6 +1422,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
           renderDedupPicker,
           renderJoinC1Form,
           submitC1Assignment,
+          submitDedupExclude,
           submitDedupStrategies,
         }} from "./marvis/static/js/v2/join_gate_controller.js";
         let agentMessages = [];
@@ -1495,7 +1503,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         // screen/modeling-setup/dedup readonly-guard convention.
         const readonlyC1Form = {{ dataset: {{ c1Readonly: "true" }} }};
         await submitC1Assignment({{ disabled: false, closest: () => readonlyC1Form }}, context);
-        assert.deepEqual(statuses.at(-1), ["这是历史拼接角色结果,请使用最新待确认步骤确认。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["这是历史拼接角色结果，请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeDuplicateAttempt);
 
         const dedupHtml = renderDedupPicker({{
@@ -1504,12 +1512,26 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
             step_id: "gate-dedup",
             dedup: {{
               strategies: ["first", "last"],
-              features: [{{ feature_id: "feat", conflict_keys: 3 }}],
+              features: [{{
+                feature_id: "feat",
+                conflict_keys: 3,
+                conflict_columns: ["amount", "city"],
+                examples: [{{ key: "138xxxx", values: {{ amount: [500, 800] }} }}],
+              }}],
             }},
           }},
         }});
         assert.equal(dedupHtml.includes('data-dedup-gate-step-id="gate-dedup"'), true);
         assert.equal(dedupHtml.includes('data-dedup-feature="feat"'), true);
+        // UX-6: conflict_columns + a real conflict-value example are rendered, not
+        // dropped, and the first/last row-order semantics are stated plainly.
+        assert.equal(dedupHtml.includes("冲突列：amount、city"), true);
+        assert.equal(dedupHtml.includes("k=138xxxx"), true);
+        assert.equal(dedupHtml.includes("amount 两行分别为 500、800"), true);
+        assert.equal(dedupHtml.includes("按当前文件行序保留"), true);
+        // UX-6: an "排除该特征表" exit alongside the strategy select.
+        assert.equal(dedupHtml.includes('data-dedup-exclude="feat"'), true);
+        assert.equal(dedupHtml.includes("排除该特征表"), true);
         const readonlyDedupHtml = renderDedupPicker({{
           id: "dedup-msg-old",
           metadata: {{
@@ -1540,8 +1562,28 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         const callsBeforeReadonlyDedup = calls.length;
         const readonlyDedupForm = {{ dataset: {{ dedupReadonly: "true" }} }};
         await submitDedupStrategies({{ disabled: false, closest: () => readonlyDedupForm }}, context);
-        assert.deepEqual(statuses.at(-1), ["这是历史去重结果,请使用最新待确认步骤确认。", "error"]);
+        assert.deepEqual(statuses.at(-1), ["这是历史去重结果，请使用最新待确认步骤确认。", "error"]);
         assert.equal(calls.length, callsBeforeReadonlyDedup);
+
+        // UX-6: "排除该特征表" posts the same free-text instruction channel a typed
+        // composer message would use (no dedup_strategies field).
+        const callsBeforeExclude = calls.length;
+        const excludeForm = {{ dataset: {{ dedupGateStepId: "gate-dedup" }} }};
+        const excludeButton = {{ disabled: false, closest: () => excludeForm, getAttribute: () => "feat" }};
+        await submitDedupExclude(excludeButton, context);
+        assert.equal(excludeButton.disabled, true);
+        assert.equal(calls.length, callsBeforeExclude + 1);
+        const excludeCall = calls.at(-1);
+        assert.equal(excludeCall[0], "/api/tasks/task-1/agent/messages");
+        assert.equal(excludeCall[1].content.includes("feat"), true);
+        assert.equal(excludeCall[1].dedup_strategies, undefined);
+        assert.equal(excludeCall[1].expected_step_id, "gate-dedup");
+
+        // UX-2: a read-only (stale) dedup picker must refuse the exclude submit too.
+        const callsBeforeReadonlyExclude = calls.length;
+        await submitDedupExclude({{ disabled: false, closest: () => readonlyDedupForm }}, context);
+        assert.deepEqual(statuses.at(-1), ["这是历史去重结果，请使用最新待确认步骤确认。", "error"]);
+        assert.equal(calls.length, callsBeforeReadonlyExclude);
         process.stdout.write("ok");
         """
     )

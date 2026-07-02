@@ -22,6 +22,24 @@ function gateHasStructuredWidget(message) {
   return Boolean(meta.join_c1 || meta.screen || meta.modeling_setup || meta.dedup);
 }
 
+// UX-10: a bare "确认" button looks identical whether it writes artifacts to disk
+// (execute_join) or just accepts a read-only screening result — map the gate step's
+// own tool (it IS the step the gate is confirming, e.g. execute_join/screen_features/
+// train_model) to copy that states the consequence. Falls back to the generic "确认"
+// when the tool isn't in this table or isn't known (never blocks the button).
+const GATE_CONFIRM_LABELS = {
+  execute_join: "确认并执行拼接",
+  confirm_join: "确认并执行拼接",
+  screen_features: "确认所选特征",
+  select_features: "确认所选特征",
+  train_model: "确认并开始训练",
+  tune_hyperparameters: "确认并开始调参",
+};
+
+export function gateConfirmLabel(toolName) {
+  return GATE_CONFIRM_LABELS[toolName] || "确认";
+}
+
 export function renderDriverGateButton(message, options = {}) {
   if (message?.metadata?.kind !== "gate") return "";
   if (gateHasStructuredWidget(message)) return "";
@@ -29,8 +47,9 @@ export function renderDriverGateButton(message, options = {}) {
   const expectedAttr = expectedStepId
     ? ` data-expected-step-id="${escapeHtml(expectedStepId)}"`
     : "";
+  const label = gateConfirmLabel(options.gateStepTool || "");
   return '<div class="driver-gate-actions">'
-    + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedAttr}>确认</button>`
+    + `<button type="button" class="button compact primary driver-confirm" data-driver-confirm="1"${expectedAttr}>${escapeHtml(label)}</button>`
     + "</div>";
 }
 

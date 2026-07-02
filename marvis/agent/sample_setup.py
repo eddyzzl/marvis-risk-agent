@@ -167,7 +167,7 @@ def detect_setup(
         labels = "、".join(
             {"target_col": "目标列", "split_col": "切分列"}[field] for field in memory_matched_fields
         )
-        notes.append(f"{labels}：与历史任务口径一致(来自记忆)。")
+        notes.append(f"{labels}：与历史任务口径一致（来自记忆）。")
 
     # -- candidate features (numeric, minus target/split/meta) ----------------
     candidates = candidate_numeric_features(
@@ -188,12 +188,12 @@ def detect_setup(
     )
     if excluded_categorical:
         preview = "、".join(
-            f"{item.column}(基数{item.cardinality})" for item in excluded_categorical[:8]
+            f"{item.column}（基数{item.cardinality}）" for item in excluded_categorical[:8]
         )
         more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
         notes.append(
-            f"{len(excluded_categorical)} 个类别列未入模:{preview}{more};"
-            "如需使用,请先用 woe_encode_categorical 编码,或改用 catboost(原生支持类别列)。"
+            f"{len(excluded_categorical)} 个类别列未入模:{preview}{more}；"
+            "如需使用，请先用 woe_encode_categorical 编码，或改用 catboost（原生支持类别列）。"
         )
 
     # -- counts / bad-rate (read only key columns in full) --------------------
