@@ -59,6 +59,13 @@ def build_screen_payload(output: dict, dep) -> dict:
     leakage/suspected/unusable buckets with reasons) plus (a) the screen step id —
     so an edited selection can be confirmed back against that exact step — and (b)
     the gating thresholds the screen used, so the table's sliders default to them.
+
+    UX-4/VD-7: also passes through the watch-band lists (ks_decay_watch/psi_watch/
+    leakage_watch/split_shift) and the categorical-column notes (sentinel_columns/
+    excluded_categorical/suspected_categorical) the screen already computes
+    (marvis/feature/screen.py, marvis/packs/modeling/tools.py:tool_screen_features)
+    but the table previously dropped, so the frontend's watch/category-column chip
+    filters have real data instead of only the four hard-cut buckets.
     """
     o = output if isinstance(output, dict) else {}
     inputs = getattr(dep, "inputs", None) or {}
@@ -83,6 +90,13 @@ def build_screen_payload(output: dict, dep) -> dict:
             "leakage_ks": _flt("leakage_ks", 0.40),
             "max_missing_rate": _flt("max_missing_rate", 0.95),
         },
+        "leakage_watch": o.get("leakage_watch") or [],
+        "ks_decay_watch": o.get("ks_decay_watch") or [],
+        "psi_watch": o.get("psi_watch") or [],
+        "split_shift": o.get("split_shift") or [],
+        "sentinel_columns": o.get("sentinel_columns") if isinstance(o.get("sentinel_columns"), dict) else {},
+        "excluded_categorical": o.get("excluded_categorical") or [],
+        "suspected_categorical": o.get("suspected_categorical") or [],
     }
 
 
