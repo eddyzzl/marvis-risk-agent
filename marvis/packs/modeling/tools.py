@@ -582,6 +582,9 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
     n_trials_override = _optional_int(inputs.get("n_trials"))
     if n_trials_override is not None and n_trials_override < 1:
         raise ModelingError("n_trials must be at least 1")
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     # Per-recipe tuning budget (TUNE-1/SEL-2): every recipe gets its own trial
     # count from DEFAULT_TRIAL_BUDGET (tree recipes 40, lr/scorecard/mlp 12) so a
     # multi-algorithm comparison tunes every candidate, not just lgb. An explicit
@@ -606,6 +609,7 @@ def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:
         "sample_weight_candidates": sample_weight_candidates,
         "sample_weight_diagnostics": _jsonable(sample_weight_diagnostics),
         "seed": _effective_seed(inputs, ctx),
+        "cv_folds": cv_folds,
         "n_trials": n_trials,
         "n_trials_by_recipe": n_trials_by_recipe,
         "params": _jsonable(params),
@@ -632,6 +636,11 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     single-recipe entry point for back-compat: it degrades to a one-element
     ``recipes`` list. An explicit ``n_trials`` overrides every listed recipe's
     budget uniformly; per-recipe overrides can be passed via ``n_trials_by_recipe``.
+
+    ``cv_folds`` (TUNE-3, optional, default None -- single split): when set (>=2),
+    every recipe's search additionally scores trials via grouped cross-validation
+    instead of a single train/test split; recommended for small samples where a
+    single split's KS is noisy. Costs roughly ``cv_folds``x the runtime.
     """
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
@@ -647,6 +656,9 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     for item, value in explicit_budgets.items():
         if value < 1:
             raise ModelingError("n_trials must be at least 1")
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     sample_weight_col = str(inputs.get("sample_weight_col") or "").strip()
     seed = _effective_seed(inputs, ctx)
     tunable = [item for item in recipes if item in DEFAULT_TRIAL_BUDGET]
@@ -669,6 +681,8 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
     )
     if non_tunable:
         reason += f" {'/'.join(non_tunable)} 不参与调参,使用算法默认参数。"
+    if cv_folds:
+        reason += f" 已启用 {cv_folds} 折分组交叉验证,每轮 trial 耗时约为单一切分的 {cv_folds} 倍。"
     return {
         "recipe": recipe,
         "recipes": recipes,
@@ -679,6 +693,7 @@ def tool_configure_tuning(inputs: dict, ctx) -> dict:
         "total_n_trials": total_budget,
         "sample_weight_col": sample_weight_col,
         "seed": seed,
+        "cv_folds": cv_folds,
         "params": _jsonable(params),
         "reason": reason,
     }
@@ -698,6 +713,12 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     DEFAULT_TRIAL_BUDGET), and the output additionally carries ``per_recipe``
     (full per-algorithm detail) plus a ``best_params``/``trials`` dict keyed by
     recipe id for ``train_models`` to consume.
+
+    ``cv_folds`` (TUNE-3, optional, default None -- single split): when set (>=2),
+    every requested recipe's search scores trials via grouped cross-validation
+    over train instead of the single train/test split; recommended for small
+    samples where a single split's KS is noisy. Applies uniformly to every
+    recipe in ``recipes``. Costs roughly ``cv_folds``x the runtime.
     """
     recipe = str(inputs.get("recipe") or "lgb")
     recipes = _unique_strings(inputs.get("recipes") or [recipe]) or [recipe]
@@ -705,6 +726,9 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
     control_params = _training_control_params(inputs, configured_params)
     base_params = {**configured_params, **control_params}
     n_trials_override = _optional_int(inputs.get("n_trials"))
+    cv_folds = _optional_int(inputs.get("cv_folds"))
+    if cv_folds is not None and cv_folds < 2:
+        raise ModelingError("cv_folds must be at least 2")
     explicit_budgets = {
         str(k): int(v)
         for k, v in dict(inputs.get("n_trials_by_recipe") or {}).items()
@@ -749,6 +773,7 @@ def tool_tune_hyperparameters(inputs: dict, ctx) -> dict:
                 sample_weight_col=control_params.get("sample_weight_col", ""),
                 base_params=base_params,
                 drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+                cv_folds=cv_folds,
             )
             best_params = {**control_params, **result.best_params}
             per_recipe[item] = {
@@ -3495,7 +3520,6 @@ def _preprocessing_chain_traceable(runtime: "_Runtime", dataset_id: str) -> bool
     except KeyError:
         return False
     return sidecar_path(dataset_path).exists()
-
 
 def _train_recipe(
     recipe: str,

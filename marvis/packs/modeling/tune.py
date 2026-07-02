@@ -154,6 +154,135 @@ def _group_cols_from_params(params: dict | None) -> list[str] | None:
     return raw if isinstance(raw, list) else [raw]
 
 
+# ==========================================================================
+# Optional grouped cross-validation scoring (TUNE-3)
+# ==========================================================================
+
+
+def _cv_folds(
+    frame: pd.DataFrame,
+    *,
+    cv_folds: int,
+    seed: int,
+    group_cols: list[str] | None,
+) -> list[np.ndarray]:
+    """``cv_folds`` disjoint group-aware row-index arrays covering ``frame`` (each
+    row/group assigned to exactly one fold). Deterministic given ``seed``."""
+    rng = np.random.RandomState(_valid_fold_seed_for_cv(seed))
+    resolved_group_cols = [str(col) for col in (group_cols or []) if str(col) in frame.columns]
+    groups = (
+        frame.groupby(resolved_group_cols, sort=False).ngroup().to_numpy()
+        if resolved_group_cols
+        else np.arange(len(frame))
+    )
+    unique_groups = np.unique(groups)
+    rng.shuffle(unique_groups)
+    fold_of_group = {int(group): index % cv_folds for index, group in enumerate(unique_groups)}
+    fold_ids = np.array([fold_of_group[int(g)] for g in groups])
+    return [np.where(fold_ids == fold)[0] for fold in range(cv_folds)]
+
+
+def _valid_fold_seed_for_cv(seed: int) -> int:
+    import hashlib
+
+    digest = hashlib.sha256(f"{int(seed)}:cv_folds".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
+
+
+def _make_cv_trial_runner(
+    recipe: str,
+    *,
+    train: pd.DataFrame,
+    oot: pd.DataFrame | None,
+    feats: list[str],
+    target_col: str,
+    weight_col: str,
+    cv_folds: int,
+    seed: int,
+    early_stopping_rounds: int,
+    max_boost_round: int,
+    overfit_penalty: float,
+    oot_has_labels: bool,
+    base_params: dict | None,
+    pos_weight_hint: float,
+    group_cols: list[str] | None,
+) -> Callable[[dict, str], dict]:
+    """A trial_runner that scores each sampled param set with grouped k-fold CV
+    over ``train`` instead of a single held-out split (TUNE-3): each fold takes a
+    turn as the held-out "test" (tree recipes additionally carve their own
+    early-stopping valid fold from that fold's training portion, exactly like the
+    single-split path), and the trial's score is
+    ``mean(fold_test_ks) - 0.5 * std(fold_test_ks)`` -- a robustness penalty so a
+    param set that wins by getting lucky on one fold doesn't out-rank a param set
+    that wins consistently across folds.
+    """
+    fold_indices = _cv_folds(train, cv_folds=cv_folds, seed=seed, group_cols=group_cols)
+    fold_runners: list[Callable[[dict, str], dict]] = []
+    for fold in range(cv_folds):
+        fold_test_idx = fold_indices[fold]
+        fold_train_idx = np.concatenate([fold_indices[i] for i in range(cv_folds) if i != fold])
+        fold_train = train.iloc[fold_train_idx]
+        fold_test = train.iloc[fold_test_idx]
+        fold_ytr = fold_train[target_col].to_numpy(dtype=float)
+        fold_yte = fold_test[target_col].to_numpy(dtype=float)
+        fold_wtr = _sample_weight(fold_train, weight_col)
+        fold_wte = _sample_weight(fold_test, weight_col)
+        if recipe in _EARLY_STOPPED_TREE_RECIPES:
+            fold_fit_train, fold_valid = carve_early_stop_fold(
+                fold_train, seed=seed + fold + 1, group_cols=group_cols,
+            )
+            fold_yfit = fold_fit_train[target_col].to_numpy(dtype=float)
+            fold_yva = fold_valid[target_col].to_numpy(dtype=float)
+            fold_wfit = _sample_weight(fold_fit_train, weight_col)
+            fold_wva = _sample_weight(fold_valid, weight_col)
+        else:
+            fold_fit_train, fold_valid = fold_train, fold_test
+            fold_yfit, fold_yva, fold_wfit, fold_wva = fold_ytr, fold_yte, fold_wtr, fold_wte
+        _, _, fold_runner = _recipe_search_hooks(
+            recipe,
+            train=fold_train, test=fold_test, oot=oot,
+            fit_train=fold_fit_train, valid=fold_valid,
+            feats=feats, target_col=target_col,
+            ytr=fold_ytr, yte=fold_yte, wtr=fold_wtr, wte=fold_wte,
+            yfit=fold_yfit, yva=fold_yva, wfit=fold_wfit, wva=fold_wva,
+            seed=seed, early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels,
+            base_params=base_params, pos_weight_hint=pos_weight_hint,
+        )
+        fold_runners.append(fold_runner)
+
+    # Numeric per-fold metrics averaged into the merged record -- each fold trains
+    # its own model, so its oot_ks/oot_auc/etc. are genuinely different values, not
+    # an arbitrary fold's report (only test_ks/train_ks additionally get their
+    # spread reported via test_ks_std/cv_fold_test_ks, since those drive the score).
+    _AVERAGED_KEYS = (
+        "train_auc", "test_auc", "oot_ks", "oot_auc",
+        "lift_head_5", "lift_tail_5", "lift_head_10", "lift_tail_10",
+        "overfit_gap_to", "oot_stability_gap",
+    )
+
+    def cv_runner(params: dict, stage: str) -> dict:
+        fold_records = [runner(params, stage) for runner in fold_runners]
+        fold_test_ks = [record["test_ks"] for record in fold_records]
+        mean_ks = float(np.mean(fold_test_ks))
+        std_ks = float(np.std(fold_test_ks))
+        score = mean_ks - overfit_penalty * std_ks
+        merged = dict(fold_records[0])
+        merged["train_ks"] = float(np.mean([record["train_ks"] for record in fold_records]))
+        merged["test_ks"] = mean_ks
+        merged["test_ks_std"] = std_ks
+        merged["cv_fold_test_ks"] = fold_test_ks
+        merged["score"] = score
+        merged["overfit_gap_tt"] = merged["train_ks"] - mean_ks
+        for key in _AVERAGED_KEYS:
+            values = [record.get(key) for record in fold_records]
+            merged[key] = float(np.mean(values)) if all(v is not None for v in values) else None
+        return merged
+
+    return cv_runner
+
+
 @dataclass(frozen=True)
 class TuneResult:
     best_params: dict
@@ -859,10 +988,23 @@ def tune_hyperparameters(
     base_params: dict | None = None,
     drop_nan_labels: bool = False,
     coarse_fraction: float = 0.6,
+    cv_folds: int | None = None,
 ) -> TuneResult:
     """Deterministic two-stage random search for ``recipe``; selects by test KS
     minus in-time overfit penalty. ``recipe`` defaults to ``"lgb"`` and its search
     space/semantics are unchanged from the original lgb-only implementation.
+
+    ``cv_folds`` (TUNE-3, default ``None`` -- single train/test split, unchanged
+    historical behaviour): when set to an integer >= 2, each trial is instead
+    scored with grouped ``cv_folds``-fold cross-validation over ``train`` (group-
+    aware via the same ``valid_group_cols`` param used for the early-stopping
+    carve) -- ``score = mean(fold_test_ks) - overfit_penalty * std(fold_test_ks)``,
+    a robustness penalty against a param set that only got lucky on one fold.
+    ``test`` is not touched by CV scoring; ``best_metrics["test_ks"]`` becomes the
+    fold mean and ``best_metrics["test_ks_std"]`` / trial ``cv_fold_test_ks``
+    additionally report the spread. Costs roughly ``cv_folds``x the runtime of a
+    single split; recommended for small datasets where a single split's KS is
+    noisy.
 
     Supported recipes: ``lgb``, ``xgb``, ``catboost`` (tree recipes, early-stopped
     against the test split, so ``num_boost_round``/``iterations`` in the returned
@@ -937,6 +1079,23 @@ def tune_hyperparameters(
         oot_has_labels=oot_has_labels,
         base_params=base_params, pos_weight_hint=pos_weight_hint,
     )
+    resolved_cv_folds = int(cv_folds) if cv_folds else None
+    if resolved_cv_folds is not None:
+        if resolved_cv_folds < 2:
+            raise ModelingError(f"cv_folds must be >= 2: {resolved_cv_folds}")
+        # TUNE-3: replace the single-split trial_runner with grouped k-fold CV
+        # scoring over train; the coarse/fine samplers are recipe-space-only and
+        # stay the single-split ones (no data dependency).
+        trial_runner = _make_cv_trial_runner(
+            recipe,
+            train=train, oot=oot, feats=feats, target_col=target_col,
+            weight_col=weight_col, cv_folds=resolved_cv_folds, seed=seed,
+            early_stopping_rounds=early_stopping_rounds,
+            max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
+            oot_has_labels=oot_has_labels, base_params=base_params,
+            pos_weight_hint=pos_weight_hint,
+            group_cols=_group_cols_from_params(base_params),
+        )
 
     total_trials = max(1, resolved_n_trials)
     n_coarse = min(total_trials, max(1, round(total_trials * coarse_fraction)))
@@ -983,6 +1142,11 @@ def tune_hyperparameters(
             "train_auc": best.get("train_auc"), "test_auc": best.get("test_auc"),
             "oot_auc": best.get("oot_auc"),
             **({"best_iteration": best["best_iteration"]} if "best_iteration" in best else {}),
+            # TUNE-3: only present when cv_folds was used -- the fold spread behind
+            # the mean test_ks above, so a caller can tell "robustly good" apart
+            # from "got lucky on one fold".
+            **({"test_ks_std": best["test_ks_std"]} if "test_ks_std" in best else {}),
+            **({"cv_fold_test_ks": best["cv_fold_test_ks"]} if "cv_fold_test_ks" in best else {}),
         },
         trials=tuple(trials),
         n_trials=len(trials),

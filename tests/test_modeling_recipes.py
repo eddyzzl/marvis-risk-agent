@@ -706,6 +706,69 @@ def test_tune_hyperparameters_default_n_trials_resolves_per_recipe():
     }
 
 
+def test_tune_hyperparameters_cv_folds_none_matches_single_split_default(tmp_path):
+    """TUNE-3: cv_folds defaults to None, i.e. today's single train/test split --
+    no behaviour change for existing callers that never pass it."""
+    import inspect
+
+    sig = inspect.signature(tune_hyperparameters)
+    assert sig.parameters["cv_folds"].default is None
+
+
+def test_tune_hyperparameters_cv_folds_rejects_values_below_two(tmp_path):
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_invalid.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    with pytest.raises(ModelingError, match="cv_folds"):
+        tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=2, cv_folds=1))
+
+
+def test_tune_hyperparameters_cv_folds_is_deterministic_and_reports_fold_spread(tmp_path):
+    """TUNE-3: with cv_folds set, each trial's score comes from k-fold CV over
+    train (mean - overfit_penalty*std of the per-fold held-out KS), reported via
+    best_metrics/trial test_ks_std + cv_fold_test_ks, and the whole search stays
+    reproducible for a fixed seed."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_folds.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    kwargs = _tune_kwargs(n_trials=4, cv_folds=3, early_stopping_rounds=5, max_boost_round=20)
+
+    first = tune_hyperparameters(backend, path, **kwargs)
+    second = tune_hyperparameters(backend, path, **kwargs)
+
+    assert first.n_trials == 4
+    assert first.best_params == second.best_params
+    assert first.best_metrics == second.best_metrics
+    assert "test_ks_std" in first.best_metrics
+    assert "cv_fold_test_ks" in first.best_metrics
+    for trial in first.trials:
+        assert "cv_fold_test_ks" in trial
+        assert len(trial["cv_fold_test_ks"]) == 3
+        assert trial["test_ks_std"] == pytest.approx(float(np.std(trial["cv_fold_test_ks"])))
+        expected_score = float(np.mean(trial["cv_fold_test_ks"])) - 0.5 * trial["test_ks_std"]
+        assert trial["score"] == pytest.approx(expected_score)
+
+
+def test_tune_hyperparameters_cv_folds_works_for_non_tree_recipe(tmp_path):
+    """TUNE-3: CV scoring isn't tree-recipe-specific -- lr (no early-stopping
+    concept) also scores trials via k-fold CV when cv_folds is set."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_cv_lr.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(recipe="lr", n_trials=3, cv_folds=3),
+    )
+
+    assert result.n_trials == 3
+    assert "test_ks_std" in result.best_metrics
+    assert len(result.best_metrics["cv_fold_test_ks"]) == 3
+
+
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
     rows = 160
     labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]

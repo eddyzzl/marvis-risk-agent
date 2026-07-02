@@ -747,6 +747,10 @@
           },
           "seed": {
             "type": "integer"
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
           }
         },
         "required": [
@@ -842,6 +846,13 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          "cv_folds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 2
           }
         },
         "required": [
@@ -915,6 +926,10 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
           }
         },
         "required": [
@@ -967,6 +982,13 @@
           "total_n_trials": {
             "type": "integer",
             "minimum": 0
+          },
+          "cv_folds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 2
           }
         },
         "required": [
@@ -1069,6 +1091,10 @@
               "type": "integer",
               "minimum": 1
             }
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
           }
         },
         "required": [
