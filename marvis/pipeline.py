@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -55,6 +56,8 @@ from marvis.validation.results import (
     validation_results_from_dict,
 )
 from marvis.state_machine import IllegalTransition
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -1439,6 +1442,7 @@ def _json_literal(payload: dict) -> str:
 
 
 def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
+    logger.info("staged pipeline starting task_id=%s", task_id)
     repo = TaskRepository(settings.db_path)
     task = repo.get_task(task_id)
     if task.status in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
@@ -1459,14 +1463,23 @@ def run_staged_pipeline(*, task_id: str, settings: PipelineSettings) -> None:
     )
     task = repo.get_task(task_id)
     if task.status is not TaskStatus.EXECUTED:
+        logger.info(
+            "staged pipeline stopping after notebook stage task_id=%s status=%s",
+            task_id, task.status.value,
+        )
         return
 
     run_metrics_stage(task_id=task_id, settings=settings)
     task = repo.get_task(task_id)
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
+        logger.info(
+            "staged pipeline stopping after metrics stage task_id=%s status=%s",
+            task_id, task.status.value,
+        )
         return
 
     run_report_stage(task_id=task_id, settings=settings)
+    logger.info("staged pipeline finished task_id=%s", task_id)
 
 
 def run_pipeline(*, task_id: str, settings: PipelineSettings) -> None:

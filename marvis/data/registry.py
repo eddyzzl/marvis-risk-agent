@@ -12,10 +12,15 @@ import pandas as pd
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.backend import DataBackend
 from marvis.data.contracts import Dataset
+from marvis.data.csv_ingest import CsvIngestReport, read_csv_with_fallback_encoding
 from marvis.data.errors import DataBackendError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class DatasetRegistry:
@@ -24,6 +29,12 @@ class DatasetRegistry:
         self._backend = backend
         self._root = Path(datasets_root)
         self._root.mkdir(parents=True, exist_ok=True)
+        # GAP-1: side-channel for the most recent CSV encoding/dtype-defense
+        # decision, populated during register_from_upload/_write_upload_as_parquet.
+        # A router handling a single upload request calls register_from_upload
+        # once and reads this immediately after -- mirrors the existing
+        # single-request-scoped usage pattern of this registry instance.
+        self.last_csv_ingest_report: CsvIngestReport | None = None
 
     def register_from_upload(
         self,
@@ -40,6 +51,7 @@ class DatasetRegistry:
         final_name = f"{source_path.stem}_{uuid.uuid4().hex[:8]}.parquet"
         artifact = uow.stage_file(dataset_dir, final_name)
         try:
+            self.last_csv_ingest_report = None
             sheet = self._write_upload_as_parquet(source_path, artifact.path)
             profiles = profile_dataset(self._backend, artifact.path, seed=seed)
             sample = self._backend.sample_rows(artifact.path, 1000, seed=seed)
@@ -268,7 +280,22 @@ class DatasetRegistry:
             shutil.copy2(source_path, out_path)
             return None
         if suffix == ".csv":
-            frame = pd.read_csv(source_path, encoding="utf-8-sig")
+            frame, report = read_csv_with_fallback_encoding(source_path)
+            self.last_csv_ingest_report = report
+            if report.encoding_used != "utf-8-sig":
+                logger.info(
+                    "CSV %s decoded with fallback encoding %s",
+                    source_path.name,
+                    report.encoding_used,
+                )
+            if report.long_id_columns:
+                logger.info(
+                    "CSV %s: %d long numeric id column(s) read as string to avoid "
+                    "float64 precision truncation: %s",
+                    source_path.name,
+                    len(report.long_id_columns),
+                    ", ".join(report.long_id_columns),
+                )
             frame.to_parquet(out_path, index=False)
             return None
         if suffix == ".feather":

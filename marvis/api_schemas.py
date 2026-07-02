@@ -52,6 +52,18 @@ class LLMSettingsRequest(BaseModel):
     models: list[dict] = Field(default_factory=list)
 
 
+class LLMConnectionTestRequest(BaseModel):
+    # GAP-8: test a candidate profile before it is saved (e.g. from the "add
+    # model" dialog) by supplying the connection fields directly; alternatively
+    # pass model_id to test an already-saved model (has_api_key must be true
+    # for that model, since its api_key is never round-tripped to the client).
+    model_id: str = ""
+    api_base_url: str = ""
+    model_name: str = ""
+    api_key: str = ""
+    timeout_seconds: int = 10
+
+
 class MemoryPolicyRequest(BaseModel):
     reference_cross_task: bool = True
     auto_distill: bool = True

@@ -6,6 +6,7 @@ def test_settings_routes_live_in_dedicated_module():
     assert "/settings/execution-environment" in route_paths
     assert "/settings/execution-environment/options" in route_paths
     assert "/settings/llm" in route_paths
+    assert "/settings/llm/test" in route_paths
     assert all(
         route.endpoint.__module__ == "marvis.api_settings"
         for route in api_settings.router.routes

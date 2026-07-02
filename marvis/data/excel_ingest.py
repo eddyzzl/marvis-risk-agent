@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +13,14 @@ from marvis.data.errors import DataIngestError
 MAX_HEADER_ROWS = 5
 PREVIEW_ROWS = 25
 
+# GAP-1: Excel stores "Number"-typed cells as IEEE754 doubles at the file-format
+# level -- if a long id (e.g. an 18-digit national id) was entered into a Number
+# cell rather than a Text cell, its trailing digits are already lost before this
+# code ever reads the file; there is no way to recover the original digits. The
+# best we can do is *detect* an integer-shaped float at or above this magnitude
+# and flag the column so the user knows to re-export/re-enter it as text.
+LONG_ID_FLOAT_THRESHOLD = 1e15
+
 
 @dataclass(frozen=True)
 class IngestReport:
@@ -21,6 +29,7 @@ class IngestReport:
     data_start_row: int
     flattened_columns: list[str]
     original_shape: tuple[int, int]
+    suspected_truncated_id_columns: tuple[str, ...] = field(default_factory=tuple)
 
 
 def list_sheets(path: Path) -> list[str]:
@@ -100,8 +109,36 @@ def ingest_sheet(
         data_start_row=resolved_header_rows,
         flattened_columns=flattened_columns,
         original_shape=tuple(int(value) for value in full.shape),
+        suspected_truncated_id_columns=_suspected_truncated_id_columns(data),
     )
     return out_path, report
+
+
+def _suspected_truncated_id_columns(data: pd.DataFrame) -> tuple[str, ...]:
+    """Flag columns whose values look like a long id that Excel already stored
+    as a Number cell (precision unrecoverable -- see LONG_ID_FLOAT_THRESHOLD).
+
+    openpyxl/pandas read a Number cell as a Python float, but an integer-valued
+    float (e.g. 1.1e17) is round-tripped back to a plain ``int`` by the time it
+    reaches this DataFrame -- so both float and int cells are inspected here;
+    what matters is the *magnitude*, which already reflects any precision lost
+    at the Excel-file-format level before this code ever ran.
+    """
+    flagged: list[str] = []
+    for column in data.columns:
+        values = data[column].dropna()
+        if values.empty:
+            continue
+        numeric_like = [value for value in values if isinstance(value, (int, float))]
+        if not numeric_like:
+            continue
+        long_integer_shaped = [
+            value for value in numeric_like
+            if float(value).is_integer() and abs(value) >= LONG_ID_FLOAT_THRESHOLD
+        ]
+        if long_integer_shaped and len(long_integer_shaped) / len(numeric_like) >= 0.9:
+            flagged.append(str(column))
+    return tuple(flagged)
 
 
 def _looks_like_data_row(row: pd.Series) -> bool:
@@ -155,6 +192,7 @@ def _safe_sheet_name(sheet: str) -> str:
 
 
 __all__ = [
+    "LONG_ID_FLOAT_THRESHOLD",
     "MAX_HEADER_ROWS",
     "PREVIEW_ROWS",
     "IngestReport",

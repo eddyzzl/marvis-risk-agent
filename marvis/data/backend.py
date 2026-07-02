@@ -19,6 +19,7 @@ from marvis.data.contracts import (
     ConflictReport,
     KeyPair,
 )
+from marvis.data.csv_ingest import read_csv_with_fallback_encoding
 from marvis.data.errors import DataBackendError, DataSecurityError
 
 
@@ -337,12 +338,14 @@ class DataBackend:
         selected = self._validate_columns(columns, allowed_columns)
         suffix = path.suffix.lower()
         if suffix == ".csv":
-            return pd.read_csv(
+            # GAP-1: fall back through the common Chinese-bank-export encodings
+            # instead of hardcoding utf-8-sig -- see marvis.data.csv_ingest.
+            frame, _report = read_csv_with_fallback_encoding(
                 path,
                 usecols=selected,
                 nrows=nrows,
-                encoding="utf-8-sig",
             )
+            return frame
         if suffix == ".parquet":
             if nrows is not None:
                 cols_sql = self._select_columns_sql(selected, allowed_columns)

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from marvis.api_schemas import (
     ExecutionEnvironmentRequest,
+    LLMConnectionTestRequest,
     LLMSettingsRequest,
     MemoryPolicyRequest,
     model_payload,
@@ -15,9 +16,11 @@ from marvis.execution_environment import (
     save_execution_environment,
     validate_execution_environment,
 )
+from marvis.llm_client import test_llm_connection
 from marvis.llm_settings import (
     LLMSettingsError,
     load_llm_settings,
+    resolve_llm_model,
     save_llm_settings,
 )
 from marvis.memory_policy import (
@@ -88,6 +91,34 @@ def update_llm_settings(payload: LLMSettingsRequest, request: Request) -> dict:
         )
     except LLMSettingsError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# GAP-8: preflight connection check, called either from the "add/edit model"
+# dialog (inline candidate profile, not yet saved) or against an already-saved
+# model_id -- so a mistyped base_url/port/model name is caught at
+# configuration time instead of surfacing later as a silent agent degradation.
+@router.post("/settings/llm/test")
+def test_llm_settings_connection(payload: LLMConnectionTestRequest, request: Request) -> dict:
+    workspace = request.app.state.settings.workspace
+    profile: dict = {
+        "api_base_url": payload.api_base_url,
+        "model_name": payload.model_name,
+        "api_key": payload.api_key,
+    }
+    if payload.model_id:
+        try:
+            saved = resolve_llm_model(workspace, payload.model_id)
+        except LLMSettingsError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        profile = {**saved, **{k: v for k, v in profile.items() if v}}
+    result = test_llm_connection(profile, timeout_seconds=min(max(payload.timeout_seconds, 1), 60))
+    return {
+        "ok": result.ok,
+        "latency_ms": result.latency_ms,
+        "model_echo": result.model_echo,
+        "error_kind": result.error_kind,
+        "error_detail": result.error_detail,
+    }
 
 
 @router.get("/settings/memory-policy")

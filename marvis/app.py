@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 from pathlib import Path
 import os
 import sys
@@ -37,7 +38,7 @@ from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
-from marvis.llm_settings import resolve_llm_model
+from marvis.llm_settings import load_llm_settings, resolve_llm_model
 from marvis.memory_policy import load_memory_policy
 from marvis.orchestrator.executor import PlanExecutor
 from marvis.orchestrator.harness_state import HarnessState
@@ -80,6 +81,8 @@ from marvis.settings import Settings, build_settings
 from marvis.state_machine import IllegalTransition
 
 
+logger = logging.getLogger(__name__)
+
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _NAMED_LOCAL_HOSTS = {"localhost", "testclient"}
 _REMOTE_READ_ENV = "MARVIS_ALLOW_REMOTE_READ"
@@ -91,6 +94,19 @@ _STATIC_VERSION_FILES = (
     "css/welcome.css",
     "css/v2-workbench.css",
 )
+
+
+def _has_configured_llm(workspace: Path) -> bool:
+    """GAP-8: True if at least one enabled model with a resolvable api_key is
+    saved -- a pure settings-file read, no network call."""
+    try:
+        settings_payload = load_llm_settings(workspace)
+    except Exception:
+        return False
+    return any(
+        model.get("enabled") and model.get("has_api_key")
+        for model in settings_payload.get("enabled_models", [])
+    )
 
 
 def _is_local_client(host: str | None) -> bool:
@@ -175,9 +191,22 @@ def _is_local_only_path(path: str) -> bool:
 
 def create_app(workspace: str | Path | Settings) -> FastAPI:
     settings = workspace if isinstance(workspace, Settings) else build_settings(workspace)
+    logger.info("MARVIS starting up workspace=%s version=%s", settings.workspace, __version__)
     init_db(settings.db_path)
     reclaim_stale_running_tasks(settings.db_path, tasks_dir=settings.tasks_dir)
     artifact_recovery_report = reconcile_workspace_artifacts(settings)
+    _recovery_actions = (
+        artifact_recovery_report.removed_staging_dirs
+        + artifact_recovery_report.removed_backups
+        + artifact_recovery_report.restored_backups
+        + artifact_recovery_report.removed_orphan_dirs
+        + artifact_recovery_report.removed_orphan_tmp_files
+    )
+    if _recovery_actions or artifact_recovery_report.errors:
+        logger.info(
+            "startup artifact recovery: %d action(s), %d error(s)",
+            _recovery_actions, len(artifact_recovery_report.errors),
+        )
 
     app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
@@ -196,6 +225,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     job_watchdog = JobHeartbeatWatchdog(task_repo)
     job_watchdog.start()
     app.state.job_watchdog = job_watchdog
+    logger.info("MARVIS startup complete workspace=%s", settings.workspace)
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
@@ -262,9 +292,15 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         stuck_jobs = task_repo.count_heartbeat_stale_running_jobs(
             older_than_seconds=heartbeat_timeout_seconds()
         )
+        # GAP-8: llm_configured is a cheap "at least one enabled model with an
+        # api_key is saved" check -- it deliberately does NOT make a live LLM
+        # call (that belongs to POST /api/settings/llm/test); it only answers
+        # "has the user configured anything at all" so the frontend can
+        # distinguish "never configured" from "configured but the model is dumb".
         return {
             "status": "ok",
             "stuck_jobs": stuck_jobs,
+            "llm_configured": _has_configured_llm(settings.workspace),
             **sqlite_health(settings.db_path),
             **duckdb_health(),
         }

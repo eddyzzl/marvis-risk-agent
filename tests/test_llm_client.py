@@ -682,3 +682,104 @@ def test_estimate_tokens_counts_cjk_and_ascii_differently():
     cjk_tokens = estimate_tokens("测" * 40)
 
     assert cjk_tokens > ascii_tokens
+
+
+# --- GAP-8: LLM connection preflight ----------------------------------------
+
+
+def test_llm_connection_test_succeeds_with_short_ping(monkeypatch):
+    from marvis.llm_client import test_llm_connection
+
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponseWithModel()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    result = test_llm_connection(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "gpt-test",
+            "api_key": "secret",
+        }
+    )
+
+    assert result.ok is True
+    assert result.model_echo == "gpt-test"
+    assert result.error_kind is None
+    assert result.latency_ms >= 0
+    assert captured["url"] == "https://api.example.com/v1/chat/completions"
+    assert captured["payload"]["max_tokens"] == 8
+    assert captured["payload"]["stream"] is False
+
+
+def test_llm_connection_test_reports_incomplete_profile_without_network_call(monkeypatch):
+    from marvis.llm_client import test_llm_connection
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("should not attempt a network call")
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fail_urlopen)
+
+    result = test_llm_connection({"api_base_url": "", "model_name": "", "api_key": ""})
+
+    assert result.ok is False
+    assert result.error_kind == "incomplete_profile"
+
+
+def test_llm_connection_test_classifies_connection_refused(monkeypatch):
+    from marvis.llm_client import test_llm_connection
+
+    def fake_urlopen(request, timeout):
+        raise URLError(ConnectionRefusedError("connection refused"))
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    result = test_llm_connection(
+        {
+            "api_base_url": "http://127.0.0.1:1",
+            "model_name": "gpt-test",
+            "api_key": "secret",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "connection"
+
+
+def test_llm_connection_test_classifies_http_404_as_actionable_hint(monkeypatch):
+    from marvis.llm_client import test_llm_connection
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    result = test_llm_connection(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "gpt-test",
+            "api_key": "secret",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "http_404"
+    assert "API 地址" in result.error_detail
+
+
+class _JsonResponseWithModel:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return json.dumps(
+            {"model": "gpt-test", "choices": [{"message": {"content": "pong"}}]}
+        ).encode("utf-8")
