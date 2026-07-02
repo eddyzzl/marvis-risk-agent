@@ -176,6 +176,10 @@ class ModelingRepository:
         with connect(self.db_path) as conn:
             _set_model_artifact_params_row(conn, artifact_id, params)
 
+    def set_model_artifact_baseline_distributions(self, artifact_id: str, baseline_distributions: dict) -> None:
+        with connect(self.db_path) as conn:
+            _set_model_artifact_baseline_distributions_row(conn, artifact_id, baseline_distributions)
+
     def set_model_artifact_params_with_audit(
         self,
         artifact_id: str,
@@ -208,7 +212,8 @@ class ModelingRepository:
                 """
                 SELECT id, experiment_id, algorithm, model_path, pmml_path,
                        feature_list_json, feature_importance_json, params_json, woe_maps_json,
-                       scorecard_table_json, created_at, score_direction, points_direction
+                       scorecard_table_json, created_at, score_direction, points_direction,
+                       baseline_distributions_json
                   FROM model_artifacts
                  WHERE id = ?
                 """,
@@ -229,7 +234,8 @@ class ModelingRepository:
         query = """
             SELECT id, experiment_id, algorithm, model_path, pmml_path,
                    feature_list_json, feature_importance_json, params_json, woe_maps_json,
-                   scorecard_table_json, created_at, score_direction, points_direction
+                   scorecard_table_json, created_at, score_direction, points_direction,
+                   baseline_distributions_json
               FROM model_artifacts
         """
         if experiment_id is not None:
@@ -343,6 +349,7 @@ def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
         artifact.created_at,
         artifact.score_direction,
         artifact.points_direction,
+        None if artifact.baseline_distributions is None else _dump_json_any(artifact.baseline_distributions),
     )
 
 
@@ -352,9 +359,10 @@ def _insert_model_artifact_row(conn: sqlite3.Connection, artifact: ModelArtifact
         INSERT INTO model_artifacts(
             id, experiment_id, algorithm, model_path, pmml_path,
             feature_list_json, feature_importance_json, params_json, woe_maps_json,
-            scorecard_table_json, created_at, score_direction, points_direction
+            scorecard_table_json, created_at, score_direction, points_direction,
+            baseline_distributions_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _model_artifact_insert_values(artifact),
     )
@@ -394,6 +402,23 @@ def _set_model_artifact_params_row(
         raise KeyError(artifact_id)
 
 
+def _set_model_artifact_baseline_distributions_row(
+    conn: sqlite3.Connection,
+    artifact_id: str,
+    baseline_distributions: dict,
+) -> None:
+    cursor = conn.execute(
+        """
+        UPDATE model_artifacts
+           SET baseline_distributions_json = ?
+         WHERE id = ?
+        """,
+        (_dump_json_any(baseline_distributions), artifact_id),
+    )
+    if cursor.rowcount == 0:
+        raise KeyError(artifact_id)
+
+
 def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
     woe_maps_json = row["woe_maps_json"]
     return ModelArtifact(
@@ -416,6 +441,13 @@ def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
         # treat None as "unknown" (see marvis/packs/modeling/contracts.py::ModelArtifact).
         score_direction=_optional_str(row["score_direction"]) if "score_direction" in row.keys() else None,
         points_direction=_optional_str(row["points_direction"]) if "points_direction" in row.keys() else None,
+        # S1b: nullable, absent on rows written before the migration -- monitor_run
+        # must treat None as "no baseline, cannot monitor" (see contracts.py).
+        baseline_distributions=(
+            _load_json_object(row["baseline_distributions_json"])
+            if "baseline_distributions_json" in row.keys() and row["baseline_distributions_json"] is not None
+            else None
+        ),
     )
 
 

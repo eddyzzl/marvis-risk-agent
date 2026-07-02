@@ -445,6 +445,38 @@ def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     assert [step.title for step in plan.steps if step.decision_point] == ["计算 Vintage 曲线"]
 
 
+def test_monitoring_run_template_chains_score_then_monitor_with_alert_gate(tmp_path):
+    """(f) S1b MONITORING_RUN: score_dataset -> monitor_run, with monitor_run as
+    the sole confirmation/decision_point gate (the alert-confirmation gate whose
+    copy is rendered from tool_monitor_run's own red/amber/green output)."""
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("monitoring_run"),
+        {
+            "experiment_id": "experiment-1",
+            "dataset_id": "dataset-1",
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("modeling", "score_dataset"),
+        ToolRef("modeling", "monitor_run"),
+    ]
+    assert [step.title for step in plan.steps if step.decision_point] == ["监控运行"]
+    assert [step.title for step in plan.steps if step.needs_confirmation] == ["监控运行"]
+    score_step = next(step for step in plan.steps if step.title == "打分")
+    monitor_step = next(step for step in plan.steps if step.title == "监控运行")
+    assert monitor_step.inputs["scored_dataset_id"] == f"$ref:{score_step.id}.output.result_dataset_id"
+    assert monitor_step.inputs["score_col"] == f"$ref:{score_step.id}.output.score_col"
+    assert score_step.id in monitor_step.depends_on
+    assert "monitoring_run" in builtin_template_ids()
+
+
 def test_user_template_registration_cannot_shadow_builtin_and_can_reload():
     load_builtin_templates()
     clear_user_templates()

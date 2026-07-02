@@ -117,6 +117,8 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "post_training_action",
         "generate_model_report",
         "generate_model_reports",
+        "score_dataset",
+        "monitor_run",
     }
     assert train_tool.determinism == "stochastic"
     assert reject_tool.determinism == "deterministic"

@@ -143,6 +143,11 @@ def persist_model_meta(
         "created_at": artifact.created_at,
         "score_direction": artifact.score_direction,
         "points_direction": artifact.points_direction,
+        # S1b: training-time baseline distribution snapshot (see
+        # marvis/packs/modeling/tools.py::_compute_baseline_distributions). None
+        # for pre-S1b artifacts or non-binary targets -- monitor_run must treat a
+        # missing/None value as "no baseline, cannot monitor".
+        "baseline_distributions": _jsonable(artifact.baseline_distributions),
     }
     meta_path = out_dir / f"{artifact.id}.model_meta.json"
     payload = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False, default=str)

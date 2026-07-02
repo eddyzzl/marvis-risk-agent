@@ -2398,6 +2398,272 @@
         "llm"
       ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "score_dataset",
+      "summary": "Apply a trained model artifact to a new dataset, producing a PD (+ points, for scorecards) column and registering the result as a derived, direction-tagged dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "points_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "experiment_id",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": "string"
+          },
+          "points_col": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "score_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "points_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "score_missing_rate": {
+            "type": "number"
+          },
+          "points_missing_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "experiment_id",
+          "artifact_id",
+          "score_col",
+          "score_direction",
+          "row_count",
+          "score_missing_rate"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_score_dataset",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "monitor_run",
+      "summary": "Execute one monitoring run against an artifact's training-time baseline snapshot: score PSI, per-feature CSI, and (when labels are available) KS/AUC vs the development period, judged into a green/amber/red verdict.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scored_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_policy": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "experiment_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "dataset_id": {
+            "type": "string"
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "score_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overall_level": {
+            "type": "string",
+            "enum": [
+              "green",
+              "amber",
+              "red"
+            ]
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "metric": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "green",
+                    "amber",
+                    "red",
+                    "n/a"
+                  ]
+                },
+                "status": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "metric",
+                "value",
+                "level",
+                "status"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "top_drifted_features": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "feature": {
+                  "type": "string"
+                },
+                "csi": {
+                  "type": "number"
+                },
+                "sample_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "feature",
+                "csi",
+                "sample_count"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "experiment_id",
+          "artifact_id",
+          "dataset_id",
+          "row_count",
+          "overall_level",
+          "recommendation",
+          "checks",
+          "top_drifted_features"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_monitor_run",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],

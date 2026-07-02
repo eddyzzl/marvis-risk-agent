@@ -680,6 +680,9 @@ def init_db(db_path: Path) -> None:
         # S1a: direction metadata (nullable -- old rows stay NULL, no backfill).
         _ensure_column(conn, "model_artifacts", "score_direction", "TEXT")
         _ensure_column(conn, "model_artifacts", "points_direction", "TEXT")
+        # S1b: training-time baseline distribution snapshot (nullable JSON text --
+        # old rows stay NULL, no backfill; monitor_run treats NULL as "no baseline").
+        _ensure_column(conn, "model_artifacts", "baseline_distributions_json", "TEXT")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)
