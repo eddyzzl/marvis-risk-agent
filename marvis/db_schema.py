@@ -54,7 +54,14 @@ _MIGRATION_TABLES = frozenset({
 # = 0 (SQLite default, since nothing ever set it), so it naturally re-runs
 # migration 1 exactly once on the first init_db call after upgrading, then
 # is stamped to version 1 and never runs it again.
-SCHEMA_VERSION = 1
+#
+# _migration_002_strategy_versioning (S2) adds strategy version/status
+# lifecycle columns and the strategy_artifacts table. It only ever runs on a
+# database already stamped at version 1 (which therefore already has the
+# strategies table from migration 1), but is written idempotently anyway (a
+# table_info probe before each ADD COLUMN, CREATE TABLE/INDEX IF NOT EXISTS)
+# so it is safe against any partially-migrated database.
+SCHEMA_VERSION = 2
 
 
 def _migration_001_baseline(conn: sqlite3.Connection) -> None:
@@ -729,6 +736,43 @@ def _migration_001_baseline(conn: sqlite3.Connection) -> None:
     ensure_agent_memory_schema(conn)
 
 
+def _migration_002_strategy_versioning(conn: sqlite3.Connection) -> None:
+    """S2: strategy version/status lifecycle + strategy_artifacts table.
+
+    Runs only against a database already stamped at version 1 (so the
+    strategies table from migration 1 already exists), but every statement is
+    idempotent -- a table_info probe guards each ADD COLUMN, and the new table
+    and its index use CREATE ... IF NOT EXISTS -- so it is safe against any
+    partially-migrated database and re-runnable without error."""
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+    }
+    for column, definition in (
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("status", "TEXT NOT NULL DEFAULT 'draft'"),
+        ("adopted_at", "TEXT"),
+        ("adoption_reason", "TEXT"),
+        ("parent_strategy_id", "TEXT"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE strategies ADD COLUMN {column} {definition}")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_artifacts (
+            id TEXT PRIMARY KEY,
+            strategy_id TEXT NOT NULL REFERENCES strategies(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_artifacts_strategy"
+        " ON strategy_artifacts(strategy_id, created_at, id)"
+    )
+
+
 # Ordered, append-only migration registry. Each entry is
 # (version, migration_function). To add a new migration: write a new
 # _migration_NNN_description(conn) function, append (NNN, that function) to
@@ -738,6 +782,7 @@ def _migration_001_baseline(conn: sqlite3.Connection) -> None:
 # would silently diverge from what already-upgraded databases have.
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_001_baseline),
+    (2, _migration_002_strategy_versioning),
 ]
 
 

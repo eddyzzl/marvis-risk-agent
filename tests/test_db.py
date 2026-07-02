@@ -763,6 +763,64 @@ def test_init_db_upgrades_pre_arch10_database_losslessly(tmp_path):
     assert {"tasks", "audit", "plugins", "tools", "agent_memory_entries"} <= tables
 
 
+def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp_path):
+    # ARCH-10 + S2: a database stamped at version 1 (strategies table without the
+    # version/status lifecycle columns) must gain them and the strategy_artifacts
+    # table on the next init_db, defaulting an existing strategy row to
+    # version=1/status='draft' without touching its data.
+    db_path = tmp_path / "legacy_v1.sqlite"
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                rules_json TEXT NOT NULL,
+                score_col TEXT,
+                default_decision_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at
+            )
+            VALUES ('s-1', 'task-1', 'approval', '[]', 'score', '\"approve\"',
+                    'legacy strategy', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute("PRAGMA user_version = 1")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()}
+        row = conn.execute(
+            "SELECT status, version, adopted_at, parent_strategy_id, description"
+            " FROM strategies WHERE id = 's-1'"
+        ).fetchone()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert {"version", "status", "adopted_at", "adoption_reason", "parent_strategy_id"} <= columns
+    assert row["status"] == "draft"
+    assert row["version"] == 1
+    assert row["adopted_at"] is None
+    assert row["parent_strategy_id"] is None
+    assert row["description"] == "legacy strategy"
+    assert "strategy_artifacts" in tables
+
+
 def test_init_db_is_idempotent_across_repeated_calls(tmp_path):
     # ARCH-10: calling init_db repeatedly (as app startup / eval runner / CLI
     # scripts all do) must not re-run already-applied migrations or error.

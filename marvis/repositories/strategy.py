@@ -11,6 +11,7 @@ from marvis.packs.strategy.contracts import (
     Strategy,
     StrategyRule,
 )
+from marvis.state_machine import ConflictError
 
 
 def _now() -> str:
@@ -56,6 +57,24 @@ class StrategyRepository:
             ).fetchone()
         return None if row is None else _strategy_from_row(row)
 
+    def get_strategy_meta(self, strategy_id: str) -> dict | None:
+        """Lifecycle metadata (version/status/adopted_at/parent) for a strategy.
+
+        Kept separate from get_strategy so the frozen Strategy dataclass (and its
+        equality tests) stay untouched; callers that need the S2 versioning fields
+        read them here."""
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, version, status, adopted_at,
+                       adoption_reason, parent_strategy_id, created_at
+                  FROM strategies
+                 WHERE id = ?
+                """,
+                (strategy_id,),
+            ).fetchone()
+        return None if row is None else _strategy_meta_from_row(row)
+
     def list_for_task(self, task_id: str) -> list[Strategy]:
         with connect(self.db_path) as conn:
             rows = conn.execute(
@@ -69,6 +88,214 @@ class StrategyRepository:
                 (task_id,),
             ).fetchall()
         return [_strategy_from_row(row) for row in rows]
+
+    def list_meta_for_task(self, task_id: str) -> list[dict]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, version, status, adopted_at,
+                       adoption_reason, parent_strategy_id, created_at
+                  FROM strategies
+                 WHERE task_id = ?
+                 ORDER BY created_at, id
+                """,
+                (task_id,),
+            ).fetchall()
+        return [_strategy_meta_from_row(row) for row in rows]
+
+    def adopt_strategy_with_audit(
+        self,
+        strategy_id: str,
+        *,
+        reason: str,
+        audit: dict,
+        adopted_at: str | None = None,
+    ) -> dict:
+        """Atomically move a draft strategy to adopted, retiring any sibling
+        adopted strategy (same task_id + strategy_type) in the same transaction.
+
+        The status transition is a single guarded UPDATE (... WHERE id=? AND
+        status='draft'); rowcount==0 -> ConflictError, so a concurrent or repeated
+        adopt of the same strategy raises instead of silently double-adopting
+        (the confirm_step compare-and-swap lesson, tests/test_concurrency.py).
+        Returns {"version", "retired_strategy_ids"}."""
+        stamp = adopted_at or _now()
+        with connect(self.db_path) as conn:
+            head = conn.execute(
+                "SELECT task_id, strategy_type, version FROM strategies WHERE id = ?",
+                (strategy_id,),
+            ).fetchone()
+            if head is None:
+                raise KeyError(strategy_id)
+            task_id = str(head["task_id"])
+            strategy_type = str(head["strategy_type"])
+            version = int(head["version"])
+            # Retire in-role siblings first, in the same transaction, so the
+            # "at most one adopted per (task, type)" invariant holds atomically.
+            retired_rows = conn.execute(
+                """
+                SELECT id FROM strategies
+                 WHERE task_id = ? AND strategy_type = ? AND status = 'adopted'
+                   AND id <> ?
+                 ORDER BY created_at, id
+                """,
+                (task_id, strategy_type, strategy_id),
+            ).fetchall()
+            retired_ids = [str(r["id"]) for r in retired_rows]
+            for retired_id in retired_ids:
+                conn.execute(
+                    "UPDATE strategies SET status = 'retired' WHERE id = ? AND status = 'adopted'",
+                    (retired_id,),
+                )
+                _write_audit_row(
+                    conn,
+                    kind="strategy.retire",
+                    target_ref=retired_id,
+                    outcome="succeeded",
+                    detail={
+                        "task_id": task_id,
+                        "strategy_type": strategy_type,
+                        "superseded_by": strategy_id,
+                    },
+                )
+            cursor = conn.execute(
+                """
+                UPDATE strategies
+                   SET status = 'adopted', adopted_at = ?, adoption_reason = ?
+                 WHERE id = ? AND status = 'draft'
+                """,
+                (stamp, reason, strategy_id),
+            )
+            if cursor.rowcount == 0:
+                current = conn.execute(
+                    "SELECT status FROM strategies WHERE id = ?",
+                    (strategy_id,),
+                ).fetchone()
+                raise ConflictError(
+                    f"strategy {strategy_id} is not draft: {current['status']}"
+                )
+            _write_audit_row(conn, **audit)
+        return {"version": version, "retired_strategy_ids": retired_ids}
+
+    def new_version_from(
+        self,
+        strategy_id: str,
+        *,
+        rules: list | None = None,
+        description: str | None = None,
+        new_strategy_id: str | None = None,
+        created_at: str | None = None,
+    ) -> Strategy:
+        """Clone a strategy into a new draft at version=max(version)+1, with
+        parent_strategy_id pointing back at the source. rules/description override
+        the clone when supplied."""
+        stamp = created_at or _now()
+        with connect(self.db_path) as conn:
+            src = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, rules_json, score_col,
+                       default_decision_json, description
+                  FROM strategies
+                 WHERE id = ?
+                """,
+                (strategy_id,),
+            ).fetchone()
+            if src is None:
+                raise KeyError(strategy_id)
+            task_id = str(src["task_id"])
+            max_version_row = conn.execute(
+                """
+                SELECT MAX(version) AS mx FROM strategies
+                 WHERE task_id = ? AND strategy_type = ?
+                """,
+                (task_id, str(src["strategy_type"])),
+            ).fetchone()
+            next_version = int(max_version_row["mx"] or 0) + 1
+            child_id = new_strategy_id or uuid.uuid4().hex
+            child_rules = (
+                _dump_json_any(
+                    [_strategy_rule_to_dict(_coerce_rule(rule)) for rule in rules]
+                )
+                if rules is not None
+                else str(src["rules_json"])
+            )
+            child_description = (
+                str(description) if description is not None else str(src["description"])
+            )
+            conn.execute(
+                """
+                INSERT INTO strategies(
+                    id, task_id, strategy_type, rules_json, score_col,
+                    default_decision_json, description, created_at,
+                    version, status, parent_strategy_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+                """,
+                (
+                    child_id,
+                    task_id,
+                    str(src["strategy_type"]),
+                    child_rules,
+                    _optional_str(src["score_col"]),
+                    str(src["default_decision_json"]),
+                    child_description,
+                    stamp,
+                    next_version,
+                    strategy_id,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT id, task_id, strategy_type, rules_json, score_col,
+                       default_decision_json, description, created_at
+                  FROM strategies
+                 WHERE id = ?
+                """,
+                (child_id,),
+            ).fetchone()
+        return _strategy_from_row(row)
+
+    def save_strategy_artifact(
+        self,
+        strategy_id: str,
+        *,
+        kind: str,
+        path: str,
+        created_at: str | None = None,
+        artifact_id: str | None = None,
+    ) -> str:
+        new_id = artifact_id or uuid.uuid4().hex
+        with connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO strategy_artifacts(id, strategy_id, kind, path, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (new_id, strategy_id, str(kind), str(path), created_at or _now()),
+            )
+        return new_id
+
+    def list_strategy_artifacts(self, strategy_id: str) -> list[dict]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, strategy_id, kind, path, created_at
+                  FROM strategy_artifacts
+                 WHERE strategy_id = ?
+                 ORDER BY created_at, id
+                """,
+                (strategy_id,),
+            ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "strategy_id": str(row["strategy_id"]),
+                "kind": str(row["kind"]),
+                "path": str(row["path"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     def save_backtest(
         self,
@@ -210,6 +437,26 @@ def _strategy_from_row(row: sqlite3.Row) -> Strategy:
         default_decision=json.loads(row["default_decision_json"]),
         description=str(row["description"]),
     )
+
+
+def _strategy_meta_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "task_id": str(row["task_id"]),
+        "strategy_type": str(row["strategy_type"]),
+        "version": int(row["version"]),
+        "status": str(row["status"]),
+        "adopted_at": _optional_str(row["adopted_at"]),
+        "adoption_reason": _optional_str(row["adoption_reason"]),
+        "parent_strategy_id": _optional_str(row["parent_strategy_id"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _coerce_rule(rule) -> StrategyRule:
+    if isinstance(rule, StrategyRule):
+        return rule
+    return _strategy_rule_from_dict(dict(rule))
 
 
 def _strategy_rule_to_dict(rule: StrategyRule) -> dict:
