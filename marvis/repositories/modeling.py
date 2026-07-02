@@ -453,6 +453,13 @@ def _model_metrics_from_dict(payload: dict) -> ModelMetrics:
         train_accuracy=_optional_float(payload.get("train_accuracy")),
         test_accuracy=_optional_float(payload.get("test_accuracy")),
         oot_accuracy=_optional_float(payload.get("oot_accuracy")),
+        test_ks_ci_low=_optional_float(payload.get("test_ks_ci_low")),
+        test_ks_ci_high=_optional_float(payload.get("test_ks_ci_high")),
+        test_ks_ci_std=_optional_float(payload.get("test_ks_ci_std")),
+        oot_ks_ci_low=_optional_float(payload.get("oot_ks_ci_low")),
+        oot_ks_ci_high=_optional_float(payload.get("oot_ks_ci_high")),
+        oot_ks_ci_std=_optional_float(payload.get("oot_ks_ci_std")),
+        ks_ci_n_boot=_optional_int(payload.get("ks_ci_n_boot")),
     )
 
 

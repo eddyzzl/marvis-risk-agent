@@ -774,7 +774,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -971,7 +972,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -1136,7 +1138,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -1228,7 +1231,8 @@
               "scorecard",
               "mlp",
               "lgb_regressor",
-              "lgb_multiclass"
+              "lgb_multiclass",
+              "ensemble"
             ]
           },
           "features": {
@@ -1348,7 +1352,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -1469,6 +1474,9 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "target_type": {
+            "type": "string"
           }
         },
         "required": [
@@ -1484,6 +1492,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "ks_ci_note": {
+            "type": "string"
           }
         },
         "required": [
@@ -1656,6 +1667,9 @@
           },
           "refit": {
             "type": "object"
+          },
+          "ks_ci_note": {
+            "type": "string"
           }
         },
         "required": [
@@ -1793,6 +1807,104 @@
         "read:model",
         "read:dataset",
         "write:model"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "segment_value_evaluation",
+      "summary": "Diagnose whether a candidate segment column looks worth building per-segment models for, by reporting an already-trained model's pooled vs per-segment KS/AUC breakdown (no new model is trained).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "artifact_id",
+          "dataset_id",
+          "segment_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "segment_col": {
+            "type": "string"
+          },
+          "split": {
+            "type": "string"
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer"
+          },
+          "pooled": {
+            "type": "object"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "segment_ks_spread": {
+            "type": "number"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "segment_col",
+          "split",
+          "split_value",
+          "min_group_rows",
+          "pooled",
+          "segments",
+          "segment_ks_spread",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_segment_value_evaluation",
+      "side_effects": [
+        "read:model",
+        "read:dataset"
       ],
       "memory_limit_mb": 4096
     },

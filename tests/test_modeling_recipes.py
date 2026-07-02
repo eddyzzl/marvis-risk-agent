@@ -52,7 +52,7 @@ def test_recipe_registry_exposes_builtin_classification_and_regression_recipes()
     recipes = list_recipes()
 
     assert [recipe.id for recipe in recipes] == [
-        "lgb", "xgb", "catboost", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass",
+        "lgb", "xgb", "catboost", "lr", "scorecard", "lgb_regressor", "mlp", "lgb_multiclass", "ensemble",
     ]
     assert get_recipe("catboost").algorithm == "catboost"
     assert get_recipe("scorecard").requires_woe is True
@@ -60,6 +60,8 @@ def test_recipe_registry_exposes_builtin_classification_and_regression_recipes()
     assert get_recipe("lgb_multiclass").algorithm == "lgb_multiclass"
     assert get_recipe("lgb_multiclass").requires_woe is False
     assert get_recipe("lr").algorithm == "lr"
+    assert get_recipe("ensemble").algorithm == "ensemble"
+    assert get_recipe("ensemble").requires_woe is False
     with pytest.raises(KeyError):
         get_recipe("unknown")
 
@@ -381,6 +383,155 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
     assert [item[0] for item in first_xgb.feature_importance] == ["x1", "x2"]
+
+
+def _ensemble_sample(tmp_path):
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "ensemble_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return path
+
+
+def test_train_ensemble_seed_bagging_writes_member_artifacts_and_is_deterministic(tmp_path):
+    """SEL-6: the seed-bagging ensemble trains N (small, test-sized) members of
+    base_recipe at deterministically-derived per-member seeds, reusing that
+    recipe's own unchanged training function, and averages their probabilities.
+    Same top-level seed -> bit-identical metrics (deterministic-metrics
+    invariant extended to the new recipe)."""
+    from marvis.packs.modeling.recipes.ensemble import train_ensemble
+
+    path = _ensemble_sample(tmp_path)
+    backend = DataBackend(tmp_path)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={
+            "base_recipe": "lgb",
+            "n_members": 3,
+            "num_boost_round": 5,
+            "learning_rate": 0.1,
+            "num_leaves": 4,
+        },
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    first = train_ensemble(backend, path, config, out_dir=tmp_path / "ensemble_a")
+    second = train_ensemble(backend, path, config, out_dir=tmp_path / "ensemble_b")
+
+    assert first.artifact.algorithm == "ensemble"
+    assert (tmp_path / "ensemble_a" / first.artifact.model_path).exists()
+    assert first.artifact.params["ensemble_member_count"] == 3
+    assert first.artifact.params["ensemble_base_recipe"] == "lgb"
+    assert len(first.artifact.params["ensemble_member_artifact_ids"]) == 3
+    # every member artifact id is distinct (different seeds -> different models).
+    assert len(set(first.artifact.params["ensemble_member_artifact_ids"])) == 3
+    assert first.metrics.test_ks == pytest.approx(second.metrics.test_ks)
+    assert first.metrics.oot_ks == pytest.approx(second.metrics.oot_ks)
+    # SEL-5 bootstrap CI is computed transparently for the ensemble too, since
+    # it goes through the same compute_model_metrics as every other recipe.
+    assert first.metrics.test_ks_ci_low is not None
+    assert first.metrics.test_ks_ci_low <= first.metrics.test_ks <= first.metrics.test_ks_ci_high
+
+
+def test_train_ensemble_scorer_replay_matches_member_average(tmp_path):
+    """SEL-6: _ModelArtifactScorer, given an ensemble artifact, must reproduce
+    the exact same averaged probability the training-time score_fn produced --
+    scoring-time replay loads each member fresh from disk rather than reusing
+    any in-memory model, so this also guards that the persisted members/weights
+    payload round-trips correctly."""
+    from marvis.packs.modeling.artifact import load_model
+    from marvis.packs.modeling.recipes.ensemble import train_ensemble
+    from marvis.packs.modeling.tools import _ModelArtifactScorer
+
+    path = _ensemble_sample(tmp_path)
+    backend = DataBackend(tmp_path)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"base_recipe": "lgb", "n_members": 3, "num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+    out_dir = tmp_path / "ensemble_replay"
+    result = train_ensemble(backend, path, config, out_dir=out_dir)
+
+    scorer = _ModelArtifactScorer(result.artifact, base_dir=out_dir, load_calibration=False)
+    frame = pd.read_parquet(path)
+    test_frame = frame[frame["split"] == "test"]
+    replayed = scorer.raw_score(test_frame)
+
+    payload = load_model(result.artifact, base_dir=out_dir)
+    assert payload["kind"] == "seed_bagging"
+    assert len(payload["members"]) == 3
+    assert payload["weights"] == pytest.approx([1 / 3, 1 / 3, 1 / 3])
+
+    member_scores = []
+    for member in payload["members"]:
+        from marvis.packs.modeling.contracts import ModelArtifact
+
+        member_artifact = ModelArtifact(
+            id=member["artifact_id"], experiment_id="", algorithm=member["algorithm"],
+            model_path=member["model_path"], pmml_path=None, feature_list=("x1", "x2"),
+            params={}, woe_maps=None, created_at="",
+        )
+        member_model = load_model(member_artifact, base_dir=out_dir)
+        member_scores.append(member_model.predict_proba(test_frame[["x1", "x2"]])[:, 1])
+
+    expected = np.mean(np.array(member_scores), axis=0)
+    assert list(replayed) == pytest.approx(list(expected))
+
+
+def test_train_ensemble_rejects_unsupported_base_recipe(tmp_path):
+    """SEL-6: scorecard is deliberately excluded from _MEMBER_RECIPES (WOE-space
+    scoring doesn't mix with probability-space averaging) -- requesting it as
+    base_recipe is a clear config error, not a silent fallback."""
+    from marvis.packs.modeling.recipes.ensemble import train_ensemble
+
+    path = _ensemble_sample(tmp_path)
+    backend = DataBackend(tmp_path)
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("x1", "x2"),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={"base_recipe": "scorecard", "n_members": 3},
+        seed=23,
+        early_stopping_rounds=None,
+    )
+
+    with pytest.raises(ModelingError, match="unsupported ensemble base_recipe"):
+        train_ensemble(backend, path, config, out_dir=tmp_path / "ensemble_bad")
+
+
+def test_train_ensemble_rejects_pmml_export():
+    """SEL-6: PMML export for an ensemble artifact is explicitly rejected (a
+    multi-member probability blend has no single PMML pipeline representation),
+    not silently attempted and left to crash downstream."""
+    from marvis.packs.modeling.artifact import export_pmml
+    from marvis.packs.modeling.contracts import ModelArtifact
+
+    artifact = ModelArtifact(
+        id="artifact-ensemble", experiment_id="exp-1", algorithm="ensemble",
+        model_path="artifact-ensemble.joblib", pmml_path=None, feature_list=("x1", "x2"),
+        params={}, woe_maps=None, created_at="2026-01-01T00:00:00Z",
+    )
+
+    with pytest.raises(ModelingError, match="PMML export is not supported for algorithm: ensemble"):
+        export_pmml(artifact, "unused.parquet", "unused.pmml", base_dir="unused")
 
 
 def test_train_catboost_uses_native_categorical_features_without_float_coercion(tmp_path):
@@ -1311,6 +1462,35 @@ def test_build_modeling_proposal_stays_binary_for_classification_recipes(tmp_pat
     slots = proposal.template_slots()
     assert slots["target_type"] == "binary"
     assert slots["selection_policy"] == {"require_pmml": True, "require_handoff": True}
+
+
+def test_build_modeling_proposal_accepts_ensemble_as_explicit_opt_in_only(tmp_path):
+    """SEL-6: `ensemble` is a legal recipe id when the caller names it explicitly
+    (setup-gate opt-in), and correctly derives target_type='binary' -- but the
+    single-recipe default path (no recipes/recipe kwarg) never picks it on its
+    own, since _default_recipe_for_target_type always returns lgb/lgb_regressor/
+    lgb_multiclass."""
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "ensemble_opt_in_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-ensemble", path, role="sample")
+
+    proposal = build_modeling_proposal(
+        registry, backend, "task-ensemble", tmp_path, recipes=["lgb", "ensemble"],
+    )
+
+    assert proposal.target_type == "binary"
+    assert proposal.recipes == ["lgb", "ensemble"]
+
+    default_proposal = build_modeling_proposal(registry, backend, "task-ensemble", tmp_path)
+    assert "ensemble" not in default_proposal.recipes
 
 
 def test_build_modeling_proposal_surfaces_excluded_categorical_notice(tmp_path):

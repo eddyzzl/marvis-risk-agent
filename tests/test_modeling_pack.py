@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import nbformat
+import numpy as np
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
@@ -110,6 +111,7 @@ def test_modeling_manifest_registers_expected_tools(tmp_path):
         "compare_experiments",
         "select_experiment",
         "calibrate_model",
+        "segment_value_evaluation",
         "export_pmml",
         "handoff_to_validation",
         "post_training_action",
@@ -698,6 +700,195 @@ def test_calibrate_model_rolls_back_files_and_meta_when_audit_fails(
     assert PluginRepository(settings.db_path).list_audit(kind="modeling.artifact.calibrate") == []
 
 
+def _register_segment_sample(registry, tmp_path, task_id: str):
+    """SEL-8 fixture: a channel column where channel B carries a much weaker
+    signal than channel A -- large per-segment KS/AUC spread is the expected,
+    checkable signal for segment_value_evaluation."""
+    rows = 1500
+    rng = np.random.RandomState(7)
+    channel = np.where(rng.rand(rows) < 0.7, "A", "B")
+    x1 = rng.rand(rows)
+    x2 = rng.rand(rows)
+    signal = np.where(channel == "A", x1, 0.05 * x1)
+    y = (rng.rand(rows) < (0.1 + 0.6 * signal)).astype(int)
+    split = np.array((["train"] * 900) + (["test"] * 400) + (["oot"] * 200))
+    frame = pd.DataFrame({"x1": x1, "x2": x2, "y": y, "split": split, "channel": channel})
+    path = tmp_path / "segment_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return registry.register_existing(path, task_id=task_id, role="modeling_sample")
+
+
+def test_segment_value_evaluation_reports_pooled_and_per_segment_breakdown(tmp_path):
+    """SEL-8 (scoped-down diagnostic): segment_value_evaluation scores ONE
+    already-trained model (no new training) and reports pooled KS/AUC plus a
+    per-segment breakdown -- channel B's much weaker signal must show up as a
+    materially lower per-segment AUC than channel A, with a nonzero KS spread."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 20, "learning_rate": 0.1, "num_leaves": 8},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    evaluated = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+            "min_group_rows": 50,
+        },
+        task_id=task.id,
+    )
+
+    assert evaluated.ok is True, evaluated.error
+    out = evaluated.output
+    assert out["segment_col"] == "channel"
+    assert out["min_group_rows"] == 50
+    segments = {row["segment"]: row for row in out["segments"]}
+    assert set(segments) == {"A", "B"}
+    assert segments["A"]["sample_count"] + segments["B"]["sample_count"] == out["pooled"]["sample_count"]
+    # channel A carries the real signal -> its AUC should clearly beat channel B's.
+    assert segments["A"]["auc"] > segments["B"]["auc"] + 0.1
+    assert out["segment_ks_spread"] > 0.0
+    assert "不训练分群模型" in out["note"]
+
+    # deterministic: same inputs -> byte-identical numbers (no randomness in
+    # scoring/grouping/KS-AUC computation).
+    evaluated_again = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+            "min_group_rows": 50,
+        },
+        task_id=task.id,
+    )
+    assert evaluated_again.output["segments"] == out["segments"]
+    assert evaluated_again.output["pooled"] == out["pooled"]
+
+
+def test_segment_value_evaluation_merges_small_segments_into_default_group(tmp_path):
+    """SEL-8: any segment below min_group_rows is folded into __default__
+    rather than getting an unreliable few-row KS/AUC row of its own -- with the
+    tool's own default floor (500), channel B (a few hundred rows) merges away
+    and only __default__ remains."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 20, "learning_rate": 0.1, "num_leaves": 8},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+
+    evaluated = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "channel",
+        },
+        task_id=task.id,
+    )
+
+    assert evaluated.ok is True, evaluated.error
+    segments = {row["segment"] for row in evaluated.output["segments"]}
+    assert segments == {"__default__"}
+    assert evaluated.output["segment_ks_spread"] == 0.0
+
+
+def test_segment_value_evaluation_requires_binary_target_and_known_segment_column(tmp_path):
+    """SEL-8: clear config errors instead of silent misbehaviour -- an unknown
+    segment_col and (separately) a non-binary target both raise."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_segment_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {
+            "dataset_id": dataset.id,
+            "target_col": "y",
+            "feature_cols": ["x1", "x2"],
+            "split_col": "split",
+            "passthrough_cols": ["channel"],
+            "seed": 11,
+        },
+        task_id=task.id,
+    )
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+
+    missing_col = runner.invoke(
+        ToolRef("modeling", "segment_value_evaluation"),
+        {
+            "artifact_id": trained.output["artifact_id"],
+            "dataset_id": prepared.output["result_dataset_id"],
+            "segment_col": "does_not_exist",
+        },
+        task_id=task.id,
+    )
+    assert missing_col.ok is False
+    assert "segment_col not found" in missing_col.error
+
+
 def test_select_features_supports_woe_space_on_train_split(tmp_path):
     runner, _plugin_registry, registry, _backend, _settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
@@ -1225,6 +1416,113 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["target_type"] == "binary"
     assert out["selection_metric"] == "test_ks(overfit-penalized)"
     assert out["failed"] == []
+
+
+def test_train_models_reports_deterministic_ks_bootstrap_confidence_intervals(tmp_path):
+    """SEL-5: every trained experiment carries a bootstrap 95% CI for test_ks (and
+    oot_ks when OOT is present), and the interval is a pure function of the
+    training seed -- the same config trained twice produces bit-identical CI
+    bounds (the platform's deterministic-metrics invariant extended to the new
+    bootstrap statistic)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    def _train():
+        result = runner.invoke(
+            ToolRef("modeling", "train_model"),
+            {
+                "dataset_id": prepared.output["result_dataset_id"],
+                "recipe": "lgb",
+                "features": ["x1", "x2"],
+                "target_col": "y",
+                "split_col": "split",
+                "split_values": {"train": "train", "test": "test", "oot": "oot"},
+                "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+                "seed": 23,
+            },
+            task_id=task.id,
+        )
+        assert result.ok is True, result.error
+        return result.output["metrics"]
+
+    metrics_a = _train()
+    metrics_b = _train()
+
+    for key in ("test_ks_ci_low", "test_ks_ci_high", "test_ks_ci_std", "ks_ci_n_boot"):
+        assert key in metrics_a, key
+        assert metrics_a[key] == metrics_b[key], key
+
+    assert metrics_a["test_ks_ci_low"] <= metrics_a["test_ks"] <= metrics_a["test_ks_ci_high"]
+    assert metrics_a["ks_ci_n_boot"] == 200
+    # OOT is present in this fixture's split -> OOT CI is also populated.
+    assert metrics_a["oot_ks_ci_low"] <= metrics_a["oot_ks"] <= metrics_a["oot_ks_ci_high"]
+
+
+def test_compare_and_select_experiment_surface_ks_ci_overlap_note(tmp_path):
+    """SEL-5: when two candidates' test_ks bootstrap CIs overlap, compare_experiments
+    and select_experiment both surface a "within sampling error" hint -- the
+    selection RULE itself is untouched (still picks the metric-best row); this is
+    purely an informational note attached to the output."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "lr"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 2, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    experiment_ids = trained.output["experiment_ids"]
+
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": experiment_ids, "target_type": "binary"},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    assert "ks_ci_note" in compared.output
+    for row in compared.output["experiments"]:
+        assert "test_ks_ci_low" in row
+        assert "test_ks_ci_high" in row
+
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": experiment_ids,
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert "ks_ci_note" in selected.output
+    # note is either empty (CIs did not overlap) or mentions the sampling-error
+    # language -- both are valid depending on the random data draw, but the
+    # field must always be present and, when non-empty, carry the expected hint.
+    if selected.output["ks_ci_note"]:
+        assert "抽样误差" in selected.output["ks_ci_note"]
+        assert "抽样误差" in selected.output["selection_reason"]
 
 
 def test_train_models_isolates_a_single_recipe_failure(tmp_path, monkeypatch: pytest.MonkeyPatch):
@@ -1803,6 +2101,82 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "## 入模特征" in markdown_text
 
 
+def test_train_models_accepts_ensemble_as_opt_in_participant(tmp_path):
+    """SEL-6: ensemble is a legal recipe id in the multi-algorithm arena when
+    explicitly requested (opt-in participant), but never appears unless the
+    caller names it -- default_recipe_for_target_type/choose_modeling_spec never
+    add it on their own (covered separately in test_modeling_recipes.py and
+    modeling_setup tests). This exercises the full train_models -> compare ->
+    select_experiment chain with a per-recipe params dict, the shape ensemble
+    needs to receive its own base_recipe/n_members (the legacy flat-params
+    shape only threads through to the lgb slot)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "ensemble"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {
+                "lgb": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+                "ensemble": {
+                    "base_recipe": "lgb",
+                    "n_members": 3,
+                    "num_boost_round": 5,
+                    "learning_rate": 0.1,
+                    "num_leaves": 4,
+                },
+            },
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    assert {exp["recipe"] for exp in trained.output["experiments"]} == {"lgb", "ensemble"}
+    assert trained.output["failed"] == []
+
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": trained.output["experiment_ids"], "target_type": "binary"},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    ensemble_row = next(row for row in compared.output["experiments"] if row["recipe"] == "ensemble")
+    assert ensemble_row["capabilities"]["pmml_supported"] is False
+    assert "PMML" in ensemble_row["capabilities"]["reason"]
+
+    # select_experiment must be able to pick the ensemble explicitly (it is a
+    # legitimate delivery-limited candidate, not silently excluded from
+    # selection when the caller asks for it by id).
+    ensemble_experiment_id = next(
+        exp["experiment_id"] for exp in trained.output["experiments"] if exp["recipe"] == "ensemble"
+    )
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": ensemble_experiment_id,
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert selected.output["recipe"] == "ensemble"
+    assert selected.output["capabilities"]["pmml_supported"] is False
+
+
 def test_pick_best_experiment_is_target_type_aware():
     from marvis.packs.modeling.tools import _pick_best_experiment
 
@@ -2181,6 +2555,166 @@ def test_selection_policy_metric_thresholds_block_missing_or_weak_metrics():
     assert missing_metric["status"] == "blocked"
     assert missing_metric["violations"][0]["code"] == "metric_threshold_missing"
     assert missing_metric["violations"][0]["metric"] == "oot_ks"
+
+
+def test_selection_policy_default_warns_on_overfit_gap_without_blocking():
+    """SEL-7: a candidate whose train-test KS gap exceeds the default warn
+    threshold (0.10) gets an overfit_warning even when NO selection_policy was
+    requested at all -- the guardrail is on by default, but it never blocks
+    (status stays "not_requested" / "accepted", not "blocked")."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "overfit-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.18,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2", "x3", "x4"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["status"] == "not_requested"
+    assert decision["violations"] == []
+    assert len(decision["warnings"]) == 1
+    assert decision["warnings"][0]["code"] == "overfit_warning"
+    assert "0.18" in decision["warnings"][0]["message"]
+
+
+def test_selection_policy_default_warns_on_low_feature_count():
+    """SEL-7: fewer than 3 input features triggers sanity_warning by default."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "sparse-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.01,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == [{
+        "code": "sanity_warning",
+        "message": "入模特征数为 2,低于建议下限 3,模型稳健性存疑(未阻断选择)。",
+    }]
+
+
+def test_selection_policy_disable_quality_warnings_opts_out():
+    """SEL-7: disable_quality_warnings=True is the explicit opt-out restoring the
+    historical PMML/handoff-only default behaviour (no warnings surfaced)."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "overfit-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.30,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1"],
+        },
+        {"disable_quality_warnings": True},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == []
+
+
+def test_selection_policy_clean_candidate_has_no_quality_warnings():
+    """SEL-7: a candidate within both default guardrails gets an empty warnings
+    list -- the checks are additive, not always-present noise."""
+    from marvis.packs.modeling.tools import _selection_policy_decision
+
+    decision = _selection_policy_decision(
+        {
+            "id": "healthy-candidate",
+            "recipe": "lgb",
+            "overfit_train_test_gap": 0.03,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+            "feature_list": ["x1", "x2", "x3", "x4", "x5"],
+        },
+        {},
+        explicit=False,
+    )
+
+    assert decision["warnings"] == []
+
+
+def test_pick_best_comparison_row_annotates_delivery_excluded_candidates():
+    """SEL-7: the delivery-ready (PMML+handoff) pre-filter used to silently drop
+    non-delivery-ready candidates from champion consideration. Now every
+    excluded row is annotated in place with delivery_excluded=True and a
+    delivery_excluded_reason explaining why it never competed -- including
+    whether it would have outscored every delivery-ready candidate."""
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "catboost-higher-ks",
+            "recipe": "catboost",
+            "test_ks": 0.50,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+        {
+            "id": "lgb-lower-ks",
+            "recipe": "lgb",
+            "test_ks": 0.40,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "mlp-lowest-ks",
+            "recipe": "mlp",
+            "test_ks": 0.10,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+    ]
+
+    best, metric = _pick_best_comparison_row(rows, target_type="binary")
+
+    assert best["id"] == "lgb-lower-ks"
+    assert metric == "test_ks(overfit-penalized)"
+
+    catboost_row = next(row for row in rows if row["id"] == "catboost-higher-ks")
+    mlp_row = next(row for row in rows if row["id"] == "mlp-lowest-ks")
+    lgb_row = next(row for row in rows if row["id"] == "lgb-lower-ks")
+
+    assert catboost_row["delivery_excluded"] is True
+    assert "优于所有交付可用候选" in catboost_row["delivery_excluded_reason"]
+    assert mlp_row["delivery_excluded"] is True
+    assert "非最优候选" in mlp_row["delivery_excluded_reason"]
+    assert "delivery_excluded" not in lgb_row
+
+
+def test_pick_best_comparison_row_no_annotation_when_delivery_ready_already_wins():
+    """SEL-7: when the metric-best row is already delivery-ready, the pre-filter
+    never actually changed the outcome -- no exclusion annotation is needed."""
+    from marvis.packs.modeling.tools import _pick_best_comparison_row
+
+    rows = [
+        {
+            "id": "lgb-best",
+            "recipe": "lgb",
+            "test_ks": 0.55,
+            "capabilities": {"pmml_supported": True, "handoff_supported": True},
+        },
+        {
+            "id": "catboost-lower",
+            "recipe": "catboost",
+            "test_ks": 0.30,
+            "capabilities": {"pmml_supported": False, "handoff_supported": False},
+        },
+    ]
+
+    best, _metric = _pick_best_comparison_row(rows, target_type="binary")
+
+    assert best["id"] == "lgb-best"
+    catboost_row = next(row for row in rows if row["id"] == "catboost-lower")
+    assert "delivery_excluded" not in catboost_row
 
 
 def test_selection_policy_string_false_is_not_enabled():

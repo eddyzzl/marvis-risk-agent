@@ -24,7 +24,13 @@ from marvis.feature.candidates import (
     excluded_categorical_columns,
     suspected_categorical_columns,
 )
-from marvis.feature.metrics import DEFAULT_IV_BINS, feature_metrics, feature_psi
+from marvis.feature.metrics import (
+    DEFAULT_IV_BINS,
+    feature_auc,
+    feature_ks,
+    feature_metrics,
+    feature_psi,
+)
 from marvis.feature.encode import woe_encode
 from marvis.feature.screen import sentinel_screen_notice
 from marvis.feature.preprocessing import (
@@ -61,6 +67,7 @@ from marvis.packs.modeling.prepare import SPLIT_COLUMN, prepare_modeling_frame
 from marvis.packs.modeling.reject_inference import reject_inference
 from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.packs.modeling.recipes.catboost import train_catboost
+from marvis.packs.modeling.recipes.ensemble import train_ensemble
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
@@ -95,6 +102,10 @@ SUPPORTED_MODELING_RECIPES = frozenset({
     "mlp",
     "lgb_regressor",
     "lgb_multiclass",
+    # SEL-6: seed-bagging ensemble -- deliberately NOT in BINARY_MODELING_RECIPES
+    # (never joins the default multi-algorithm arena / tuning budget), an
+    # explicit opt-in participant only.
+    "ensemble",
 })
 BINARY_MODELING_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
 CONTINUOUS_MODELING_RECIPES = frozenset({"lgb_regressor"})
@@ -113,6 +124,15 @@ _POLICY_METRIC_THRESHOLD_SHORTCUTS = {
     "max_oot_logloss": ("oot_logloss", "max"),
     "max_test_logloss": ("test_logloss", "max"),
 }
+#: SEL-7 default quality guardrails (warn-only, never block): a candidate whose
+#: train-test KS gap exceeds this is flagged overfit_warning; the fail-level
+#: threshold in DEFAULT_MONITORING_THRESHOLDS (overfit_train_test_gap) is 0.12,
+#: this warn-level guardrail is intentionally a notch below it (0.10) so the
+#: selection-time hint fires before the post-selection monitoring gate would.
+DEFAULT_OVERFIT_GAP_WARN_THRESHOLD = 0.10
+#: SEL-7: a candidate with fewer than this many input features is flagged
+#: sanity_warning (too few features to plausibly be a robust credit model).
+DEFAULT_MIN_FEATURE_COUNT_WARNING = 3
 DEFAULT_MONITORING_THRESHOLDS = {
     "psi_test_vs_train": {
         "label": "Test PSI vs Train",
@@ -1156,6 +1176,20 @@ def tool_compare_experiments(inputs: dict, ctx) -> dict:
     rows = [row for row in compared.get("experiments", []) if isinstance(row, dict)]
     _attach_capabilities_to_comparison_rows(runtime, rows)
     _attach_policy_profile_to_comparison_rows(runtime, rows)
+    target_type = str(inputs.get("target_type") or "").strip()
+    if not target_type and rows:
+        first_id = str(rows[0].get("id") or "")
+        if first_id:
+            target_type = getattr(runtime.experiments.get(first_id).config, "target_type", "binary")
+    # SEL-5: surface the same "within sampling error" hint the gate text uses in
+    # select_experiment, here against the metric-best row -- so a caller
+    # comparing candidates (before ever calling select_experiment) sees the same
+    # signal ahead of time.
+    ks_ci_note = ""
+    if rows and str(target_type or "binary") == "binary":
+        best_row, _metric = _pick_best_comparison_row(rows, target_type=target_type or "binary")
+        ks_ci_note = _ks_ci_overlap_note(best_row, rows, target_type=target_type or "binary")
+    compared["ks_ci_note"] = ks_ci_note
     return _jsonable(compared)
 
 
@@ -1221,6 +1255,9 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
     final_artifact_id = refit_info.get("artifact_id") or artifact_id
     final_experiment_id = refit_info.get("experiment_id") or selected_id
     final_metrics = refit_info.get("metrics") or pre_refit_metrics
+    ks_ci_note = _ks_ci_overlap_note(selected, rows, target_type=target_type)
+    if ks_ci_note:
+        selection_reason = f"{selection_reason} {ks_ci_note}"
     return {
         "selected_experiment_id": final_experiment_id,
         "artifact_id": final_artifact_id,
@@ -1236,7 +1273,51 @@ def tool_select_experiment(inputs: dict, ctx) -> dict:
         "model_params": selected.get("model_params") or {},
         "experiments": rows,
         "refit": refit_info,
+        "ks_ci_note": ks_ci_note,
     }
+
+
+#: SEL-5: champion selection message appended when the runner-up's KS bootstrap
+#: CI overlaps the champion's -- the observed gap may be within sampling noise.
+_KS_CI_OVERLAP_NOTE_TEMPLATE = (
+    "冠军与亚军({runner_recipe})的{metric_label} bootstrap 95% 置信区间存在重叠"
+    "(冠军 [{champ_low:.4f}, {champ_high:.4f}] vs 亚军 [{runner_low:.4f}, {runner_high:.4f}]),"
+    "差异在抽样误差内,不构成统计显著优势(选择规则本身未改变,仍按 {metric_label} 排序)。"
+)
+
+
+def _ks_ci_overlap_note(selected: dict, rows: list[dict], *, target_type: str) -> str:
+    """SEL-5: when the champion and runner-up's KS bootstrap CIs overlap, surface
+    a "statistically indistinguishable" hint in the selection output -- purely
+    informational, the selection rule (max overfit-penalized test KS) is
+    unchanged. Only evaluated for binary targets (KS is a binary-only
+    statistic); compares test_ks CI first (the actual selection basis), falling
+    back to oot_ks CI when test CI evidence is missing on either side."""
+    if str(target_type or "binary") != "binary":
+        return ""
+    others = [row for row in rows if row.get("id") != selected.get("id")]
+    if not others:
+        return ""
+    runner_up = max(others, key=_overfit_penalized_test_ks)
+    for metric, label in (("test_ks", "test KS"), ("oot_ks", "OOT KS")):
+        champ_low = selected.get(f"{metric}_ci_low")
+        champ_high = selected.get(f"{metric}_ci_high")
+        runner_low = runner_up.get(f"{metric}_ci_low")
+        runner_high = runner_up.get(f"{metric}_ci_high")
+        if not all(isinstance(v, (int, float)) for v in (champ_low, champ_high, runner_low, runner_high)):
+            continue
+        overlaps = float(champ_low) <= float(runner_high) and float(runner_low) <= float(champ_high)
+        if not overlaps:
+            return ""
+        return _KS_CI_OVERLAP_NOTE_TEMPLATE.format(
+            runner_recipe=runner_up.get("recipe") or runner_up.get("id") or "?",
+            metric_label=label,
+            champ_low=float(champ_low),
+            champ_high=float(champ_high),
+            runner_low=float(runner_low),
+            runner_high=float(runner_high),
+        )
+    return ""
 
 
 def _apply_champion_refit(
@@ -1333,13 +1414,46 @@ def _pick_best_comparison_row_with_policy(
 
 def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
     """Pick the best comparison row. Binary maximizes the overfit-penalized test KS —
-    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9)."""
+    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9).
+
+    SEL-7: candidates excluded by the delivery-ready (PMML+handoff) pre-filter no
+    longer vanish silently -- when the metric-best row overall is NOT
+    delivery-ready-eligible (i.e. it would have won on the raw metric but is
+    filtered out), every row this pre-filter drops is annotated in place with
+    ``delivery_excluded=True`` / ``delivery_excluded_reason`` so the comparison
+    table can display "excluded, would have scored higher" instead of the row
+    just disappearing from consideration.
+    """
     if not rows:
         raise ModelingError("experiment_ids must resolve to experiments")
+    target_type = str(target_type or "binary")
+    metric_key, minimize = _selection_metric_basis(target_type)
     delivery_ready = [row for row in rows if _delivery_ready(row)]
+    if delivery_ready and len(delivery_ready) < len(rows):
+        raw_best = max(rows, key=lambda row: _score_first(row, (metric_key,), minimize=minimize))
+        if not _delivery_ready(raw_best):
+            best_ready_score = (
+                _score_first(delivery_ready[0], (metric_key,), minimize=minimize)
+                if delivery_ready
+                else float("-inf")
+            )
+            for row in delivery_ready[1:]:
+                score = _score_first(row, (metric_key,), minimize=minimize)
+                if score > best_ready_score:
+                    best_ready_score = score
+            for row in rows:
+                if _delivery_ready(row):
+                    continue
+                row["delivery_excluded"] = True
+                row_score = _score_first(row, (metric_key,), minimize=minimize)
+                would_have_won = row_score > best_ready_score
+                suffix = "该候选按此指标优于所有交付可用候选" if would_have_won else "即便不排除也非最优候选"
+                row["delivery_excluded_reason"] = (
+                    "不支持 PMML 导出和/或验证移交,已在默认交付可用性预过滤中排除,"
+                    f"未参与冠军竞争({suffix})。"
+                )
     if delivery_ready:
         rows = delivery_ready
-    target_type = str(target_type or "binary")
     if target_type == "continuous":
         return max(rows, key=lambda row: _score_first(row, ("oot_rmse", "test_rmse"), minimize=True)), "oot_rmse"
     if target_type == "multiclass":
@@ -1348,6 +1462,22 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
             return auc_best, "oot_macro_auc"
         return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
     return max(rows, key=_overfit_penalized_test_ks), BINARY_SELECTION_METRIC
+
+
+def _selection_metric_basis(target_type: str) -> tuple[str, bool]:
+    """The single metric key (and min/max direction) used to detect whether the
+    delivery-ready pre-filter actually excluded a better-scoring candidate
+    (SEL-7). Mirrors each target type's primary ranking metric in
+    ``_pick_best_comparison_row`` -- binary's real selection key is the
+    overfit-penalized test KS (not a plain column), so it is approximated here
+    by the raw test_ks column, which is what the pre-filter comparison cares
+    about (relative ranking, not the exact champion score)."""
+    target_type = str(target_type or "binary")
+    if target_type == "continuous":
+        return "oot_rmse", True
+    if target_type == "multiclass":
+        return "oot_macro_auc", False
+    return "test_ks", False
 
 
 def _attach_capabilities_to_comparison_rows(runtime: _Runtime, rows: list[dict]) -> None:
@@ -1397,6 +1527,12 @@ def _normalize_selection_policy(raw) -> dict:
         "prefer_scorecard": _policy_bool(source.get("prefer_scorecard")),
         "allow_policy_override": _policy_bool(source.get("allow_policy_override")),
         "override_reason": str(source.get("override_reason") or "").strip(),
+        # SEL-7: default (non-opt-in) quality warnings -- overfit-gap and
+        # feature-sanity checks that fire even when the caller requested no
+        # other policy at all. Never block selection; disable_quality_warnings
+        # is the explicit opt-out for a caller that wants the historical
+        # PMML/handoff-only default behaviour back.
+        "disable_quality_warnings": _policy_bool(source.get("disable_quality_warnings")),
     }
     max_feature_count = _positive_int_or_none(source.get("max_feature_count"))
     if max_feature_count is not None:
@@ -1404,6 +1540,14 @@ def _normalize_selection_policy(raw) -> dict:
     max_oot_psi = _nonnegative_float_or_none(source.get("max_oot_psi"))
     if max_oot_psi is not None:
         policy["max_oot_psi"] = max_oot_psi
+    overfit_gap_warn = _nonnegative_float_or_none(source.get("overfit_gap_warn_threshold"))
+    policy["overfit_gap_warn_threshold"] = (
+        overfit_gap_warn if overfit_gap_warn is not None else DEFAULT_OVERFIT_GAP_WARN_THRESHOLD
+    )
+    min_feature_count_warn = _positive_int_or_none(source.get("min_feature_count_warning"))
+    policy["min_feature_count_warning"] = (
+        min_feature_count_warn if min_feature_count_warn is not None else DEFAULT_MIN_FEATURE_COUNT_WARNING
+    )
     metric_thresholds = _normalize_selection_policy_metric_thresholds(source)
     if metric_thresholds:
         policy["metric_thresholds"] = metric_thresholds
@@ -1476,8 +1620,48 @@ def _selection_policy_decision(row: dict, policy: dict, *, explicit: bool) -> di
         },
         "profile": profile,
         "violations": violations,
+        # SEL-7: non-blocking default quality guardrails -- never affect `status`.
+        "warnings": _selection_policy_quality_warnings(row, policy),
         "override_reason": policy.get("override_reason") if status == "overridden" else "",
     }
+
+
+def _selection_policy_quality_warnings(row: dict, policy: dict) -> list[dict]:
+    """SEL-7 default quality guardrails: warn (never block) when a candidate's
+    train-test KS gap looks like overfitting, or when it trained on
+    suspiciously few features. Unlike ``_selection_policy_violations`` these
+    fire by default (``disable_quality_warnings=True`` is the explicit opt-out)
+    regardless of whether any other selection_policy field was requested --
+    a caller who asked for nothing still gets these two sanity checks."""
+    if policy.get("disable_quality_warnings"):
+        return []
+    warnings: list[dict] = []
+    gap_threshold = policy.get("overfit_gap_warn_threshold", DEFAULT_OVERFIT_GAP_WARN_THRESHOLD)
+    gap = _finite_float_or_none(row.get("overfit_train_test_gap"))
+    if isinstance(gap_threshold, (int, float)) and gap is not None and gap > float(gap_threshold):
+        warnings.append({
+            "code": "overfit_warning",
+            "message": (
+                f"train-test KS 差距为 {_format_number_token(float(gap))},超过警戒阈值 "
+                f"{_format_number_token(float(gap_threshold))},存在过拟合风险(未阻断选择)。"
+            ),
+        })
+    min_feature_count = policy.get("min_feature_count_warning", DEFAULT_MIN_FEATURE_COUNT_WARNING)
+    profile = _row_policy_profile(row)
+    feature_count = profile.get("feature_count")
+    if (
+        isinstance(min_feature_count, int)
+        and isinstance(feature_count, int)
+        and feature_count < min_feature_count
+    ):
+        warnings.append({
+            "code": "sanity_warning",
+            "message": (
+                f"入模特征数为 {feature_count},低于建议下限 {min_feature_count},"
+                "模型稳健性存疑(未阻断选择)。"
+            ),
+        })
+    return warnings
 
 
 def _selection_policy_violations(row: dict, policy: dict) -> list[dict]:
@@ -1875,6 +2059,144 @@ def tool_calibrate_model(inputs: dict, ctx) -> dict:
         "pmml_includes_calibration": False,
         "reliability_curve": reliability_curve,
     }
+
+
+#: SEL-8: a segment (after merging groups below the floor) must retain at
+#: least this many rows to get its own KS/AUC row -- otherwise the statistic is
+#: too noisy to act on and the group is folded into __default__.
+SEGMENT_MIN_GROUP_ROWS = 500
+
+#: SEL-8: label used for every row whose original segment fell below
+#: SEGMENT_MIN_GROUP_ROWS and was merged together.
+SEGMENT_DEFAULT_GROUP_LABEL = "__default__"
+
+
+def tool_segment_value_evaluation(inputs: dict, ctx) -> dict:
+    """SEL-8 (scoped-down): diagnose whether a candidate segment column looks
+    worth building separate per-segment models for, WITHOUT training any new
+    model. Scores an already-trained artifact once (its normal single champion
+    scorer) against the dataset, then reports the pooled KS/AUC alongside a
+    per-segment breakdown of the SAME model's KS/AUC -- large spread between
+    segments (a segment where the shared model performs far better/worse than
+    pooled) is the signal that a dedicated per-segment model could plausibly
+    help; a flat spread means segmentation is unlikely to pay for the added
+    complexity of maintaining N models.
+
+    Full per-segment model training/routing (the un-scoped SEL-8 spec) was
+    judged to exceed the ~600-line budget once artifact routing, scoring
+    replay, and report/monitoring plumbing for a genuinely new multi-model
+    artifact shape were accounted for (see recipes/ensemble.py's SEL-6 blast
+    radius as a lower-complexity precedent that alone ran ~600 lines) --
+    this diagnostic-only tool is the explicitly-sanctioned degraded scope.
+    Segments below SEGMENT_MIN_GROUP_ROWS rows are merged into
+    SEGMENT_DEFAULT_GROUP_LABEL before scoring (mirrors the floor the full
+    spec's per-segment training would have needed for the same reason: a
+    KS/AUC computed on a handful of rows is not a usable statistic).
+    """
+    runtime = _runtime(ctx)
+    artifact = _artifact(runtime, str(inputs["artifact_id"]))
+    experiment = runtime.experiments.get(artifact.experiment_id)
+    config = experiment.config
+    if getattr(config, "target_type", "binary") != "binary":
+        raise ModelingError("segment value evaluation is only supported for binary models")
+
+    segment_col = str(inputs.get("segment_col") or "").strip()
+    if not segment_col:
+        raise ModelingError("segment_col is required")
+    dataset_id = str(inputs.get("dataset_id") or config.dataset_id)
+    dataset = runtime.registry.get(dataset_id)
+    target_col = str(inputs.get("target_col") or config.target_col)
+    split_col = str(inputs.get("split_col") or config.split_col)
+    split_name = str(inputs.get("split") or "test")
+    split_value = inputs.get("split_value", config.split_values.get(split_name, split_name))
+    min_group_rows = int(inputs.get("min_group_rows") or SEGMENT_MIN_GROUP_ROWS)
+    if min_group_rows < 1:
+        raise ModelingError("min_group_rows must be at least 1")
+
+    dataset_path = runtime.registry.resolve_path(dataset.id)
+    columns = _unique_columns([*artifact.feature_list, target_col, split_col, segment_col])
+    if segment_col not in runtime.backend.column_names(dataset_path):
+        raise ModelingError(f"segment_col not found in dataset: {segment_col}")
+    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    sample = frame[frame[split_col] == split_value].copy()
+    if sample.empty:
+        raise ModelingError(f"segment evaluation split has no rows: {split_col}={split_value}")
+
+    scorer = _ModelArtifactScorer(
+        artifact,
+        base_dir=_artifact_model_base_dir(runtime, artifact),
+        load_calibration=False,
+    )
+    scores = np.asarray(scorer.score(sample, use_calibration=False), dtype=float)
+    labels = pd.to_numeric(sample[target_col], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(scores) & np.isfinite(labels) & np.isin(labels, [0.0, 1.0])
+    segment_values = sample[segment_col].astype("object").where(sample[segment_col].notna(), None)
+    scores = scores[valid]
+    labels = labels[valid].astype(int)
+    segment_labels = [
+        "(missing)" if value is None else str(value)
+        for value in segment_values.to_numpy()[valid]
+    ]
+    if labels.size < 2 or len(set(labels.tolist())) < 2:
+        raise ModelingError("segment evaluation sample must contain both positive and negative labels")
+
+    grouped_labels = _merge_small_segments(segment_labels, min_group_rows=min_group_rows)
+    pooled = {
+        "sample_count": int(labels.size),
+        "bad_rate": float(np.mean(labels)),
+        "ks": feature_ks(scores, labels.astype(float)),
+        "auc": feature_auc(scores, labels.astype(float)),
+    }
+    segment_rows = _segment_breakdown_rows(scores, labels, grouped_labels)
+    segment_kss = [row["ks"] for row in segment_rows if row["segment"] != SEGMENT_DEFAULT_GROUP_LABEL]
+    ks_spread = (max(segment_kss) - min(segment_kss)) if len(segment_kss) >= 2 else 0.0
+    return {
+        "artifact_id": artifact.id,
+        "segment_col": segment_col,
+        "split": split_name,
+        "split_value": split_value,
+        "min_group_rows": min_group_rows,
+        "pooled": _jsonable(pooled),
+        "segments": _jsonable(segment_rows),
+        "segment_ks_spread": _jsonable(ks_spread),
+        "note": (
+            "诊断口径:同一模型在各分群上的 KS/AUC 分布,不训练分群模型;"
+            "spread 越大越可能通过分群建模获益,仅供投入前评估参考。"
+        ),
+    }
+
+
+def _merge_small_segments(segment_labels: list[str], *, min_group_rows: int) -> list[str]:
+    """SEL-8: any segment label with fewer than min_group_rows rows is folded
+    into SEGMENT_DEFAULT_GROUP_LABEL -- deterministic (pure function of the
+    input labels + threshold, no randomness)."""
+    counts: dict[str, int] = {}
+    for label in segment_labels:
+        counts[label] = counts.get(label, 0) + 1
+    return [
+        label if counts[label] >= min_group_rows else SEGMENT_DEFAULT_GROUP_LABEL
+        for label in segment_labels
+    ]
+
+
+def _segment_breakdown_rows(
+    scores: np.ndarray, labels: np.ndarray, grouped_labels: list[str],
+) -> list[dict]:
+    grouped = np.asarray(grouped_labels)
+    rows = []
+    for segment in sorted(set(grouped_labels)):
+        mask = grouped == segment
+        segment_scores = scores[mask]
+        segment_labels_arr = labels[mask].astype(float)
+        has_both_classes = len(set(labels[mask].tolist())) >= 2
+        rows.append({
+            "segment": segment,
+            "sample_count": int(mask.sum()),
+            "bad_rate": float(np.mean(labels[mask])) if mask.sum() else None,
+            "ks": feature_ks(segment_scores, segment_labels_arr) if has_both_classes else None,
+            "auc": feature_auc(segment_scores, segment_labels_arr) if has_both_classes else None,
+        })
+    return rows
 
 
 def tool_export_pmml(inputs: dict, ctx) -> dict:
@@ -3824,6 +4146,8 @@ def _train_recipe(
         return train_scorecard(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "mlp":
         return train_mlp(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "ensemble":
+        return train_ensemble(backend, dataset_path, config, out_dir=out_dir)
     raise ModelingError(f"unsupported modeling recipe: {recipe}")
 
 
@@ -3867,6 +4191,12 @@ def _unsupported_pmml_reason(artifact: ModelArtifact, payload_reason: str | None
         return (
             "CatBoost 可保留原生 .pkl 模型和报告;当前 sklearn2pmml/JPMML "
             "不支持 CatBoostClassifier 直接导出 PMML,因此验证移交需使用 lr/lgb/xgb/scorecard。"
+        )
+    if artifact.algorithm == "ensemble":
+        return (
+            "模型融合(seed-bagging/blend)由多个异构成员模型概率加权平均得到,"
+            "不存在单一 PMML 管线可表达该融合逻辑;PMML 导出/验证移交明确不支持,"
+            "可保留原生成员模型列表(members/weights)与报告用于内部复现。"
         )
     return (
         f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
@@ -4899,6 +5229,8 @@ class _ModelArtifactScorer:
     def raw_score(self, dataframe: pd.DataFrame) -> list[float]:
         dataframe = self._replay_preprocessing(dataframe)
         features = list(self.artifact.feature_list)
+        if self.artifact.algorithm == "ensemble" and isinstance(self.model, dict):
+            return self._ensemble_raw_score(dataframe, features)
         if self.artifact.algorithm == "xgb" and not hasattr(self.model, "predict_proba"):
             import xgboost as xgb
 
@@ -4913,6 +5245,42 @@ class _ModelArtifactScorer:
         if hasattr(self.model, "predict_proba"):
             return [float(value) for value in self.model.predict_proba(dataframe[features])[:, 1]]
         return [float(value) for value in self.model.predict(dataframe[features])]
+
+    def _ensemble_raw_score(self, dataframe: pd.DataFrame, features: list[str]) -> list[float]:
+        """SEL-6: score every member (each loaded fresh via its own algorithm's
+        load_model dispatch, relative to this artifact's base_dir) and return
+        the weight-averaged probability. Mirrors
+        recipes/ensemble.py._member_score_fn's per-algorithm dispatch, kept
+        separate since that module cannot import tools.py (circular import)."""
+        members = self.model.get("members") or []
+        weights = self.model.get("weights") or [1.0 / len(members)] * len(members)
+        if not members:
+            raise ModelingError(f"ensemble artifact has no members: {self.artifact.id}")
+        predictions = []
+        for member in members:
+            member_artifact = ModelArtifact(
+                id=str(member.get("artifact_id") or ""),
+                experiment_id="",
+                algorithm=str(member.get("algorithm") or ""),
+                model_path=str(member.get("model_path") or ""),
+                pmml_path=None,
+                feature_list=tuple(features),
+                params={},
+                woe_maps=None,
+                created_at="",
+            )
+            member_model = load_model(member_artifact, base_dir=self.base_dir)
+            if member_artifact.algorithm == "xgb" and not hasattr(member_model, "predict_proba"):
+                import xgboost as xgb
+
+                matrix = xgb.DMatrix(dataframe[features], feature_names=features)
+                predictions.append(np.asarray(member_model.predict(matrix), dtype=float))
+            else:
+                predictions.append(
+                    np.asarray(member_model.predict_proba(dataframe[features])[:, 1], dtype=float)
+                )
+        averaged = np.average(np.array(predictions, dtype=float), axis=0, weights=weights)
+        return [float(value) for value in averaged]
 
     def scorecard_points(self, dataframe: pd.DataFrame) -> list[float] | None:
         if self.artifact.algorithm != "scorecard" or not isinstance(self.model, dict):
@@ -5160,6 +5528,7 @@ __all__ = [
     "tool_modeling_readiness",
     "tool_prepare_modeling_frame",
     "tool_reject_inference",
+    "tool_segment_value_evaluation",
     "tool_select_features",
     "tool_train_model",
 ]

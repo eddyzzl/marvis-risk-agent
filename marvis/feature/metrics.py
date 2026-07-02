@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 from scipy.stats import rankdata
 
@@ -29,6 +31,88 @@ def feature_ks(scores: np.ndarray, target: np.ndarray) -> float:
     cum_good = np.cumsum(sorted_target == 0) / total_good
     change_points = np.r_[np.where(np.diff(sorted_scores) != 0)[0], len(sorted_scores) - 1]
     return float(np.max(np.abs(cum_bad[change_points] - cum_good[change_points])))
+
+
+#: Rows above this count switch bootstrap_ks_ci to the reduced replicate count
+#: (SEL-5) -- KS bootstrap is O(n log n) per replicate, and at a few hundred
+#: thousand rows even 100 replicates already takes real wall-clock time inside
+#: a multi-recipe comparison; the CI half-width barely tightens beyond 100
+#: replicates once the sample itself is this large.
+BOOTSTRAP_KS_LARGE_SAMPLE_ROWS = 200_000
+#: Default replicate count for typical sample sizes (SEL-5 spec: n_boot=200).
+BOOTSTRAP_KS_DEFAULT_N_BOOT = 200
+#: Reduced replicate count for samples above BOOTSTRAP_KS_LARGE_SAMPLE_ROWS.
+BOOTSTRAP_KS_LARGE_SAMPLE_N_BOOT = 100
+
+
+def bootstrap_ks_ci(
+    scores: np.ndarray,
+    target: np.ndarray,
+    *,
+    seed: int,
+    n_boot: int | None = None,
+    confidence: float = 0.95,
+) -> dict[str, float | int]:
+    """Bootstrap confidence interval for the KS statistic (SEL-5).
+
+    Stratified resampling: each bootstrap replicate resamples the bad (target==1)
+    and good (target==0) rows independently, with replacement, at their original
+    counts -- this holds the bad rate fixed across replicates so the CI reflects
+    ranking-score sampling noise, not resampled class-balance noise. ``seed``
+    fully determines the replicate draws (same seed + same scores/target always
+    reproduces the same interval -- the platform's deterministic-metrics
+    invariant); a fresh ``np.random.RandomState`` is derived from ``seed`` so the
+    draw does not collide with any other seeded step in the training pipeline.
+
+    ``n_boot`` defaults to ``BOOTSTRAP_KS_DEFAULT_N_BOOT`` (200); when the finite
+    sample exceeds ``BOOTSTRAP_KS_LARGE_SAMPLE_ROWS`` (200k rows) and no explicit
+    ``n_boot`` was passed, it is automatically lowered to
+    ``BOOTSTRAP_KS_LARGE_SAMPLE_N_BOOT`` (100) to bound wall-clock cost.
+
+    Returns ``{"ks": point estimate, "ci_low": ..., "ci_high": ..., "std": ...,
+    "n_boot": replicates actually used}``. Degenerate inputs (fewer than 2 rows
+    in either class, or the ``feature_ks`` point estimate itself falling back to
+    0.0 because a class is empty) return a zero-width interval around the point
+    estimate rather than raising -- CI computation is a reporting enhancement,
+    never a hard blocker for a metric that otherwise computed fine.
+    """
+    scores_arr, target_arr = _finite_binary_pairs(scores, target)
+    point = feature_ks(scores_arr, target_arr)
+    n_rows = scores_arr.size
+    if n_boot is None:
+        n_boot = (
+            BOOTSTRAP_KS_LARGE_SAMPLE_N_BOOT
+            if n_rows > BOOTSTRAP_KS_LARGE_SAMPLE_ROWS
+            else BOOTSTRAP_KS_DEFAULT_N_BOOT
+        )
+    bad_idx = np.flatnonzero(target_arr == 1)
+    good_idx = np.flatnonzero(target_arr == 0)
+    if bad_idx.size < 2 or good_idx.size < 2 or n_boot < 1:
+        return {"ks": point, "ci_low": point, "ci_high": point, "std": 0.0, "n_boot": 0}
+    rng = np.random.RandomState(_bootstrap_ks_seed(seed))
+    replicates = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        bad_sample = bad_idx[rng.randint(0, bad_idx.size, size=bad_idx.size)]
+        good_sample = good_idx[rng.randint(0, good_idx.size, size=good_idx.size)]
+        sample_idx = np.concatenate([bad_sample, good_sample])
+        replicates[i] = feature_ks(scores_arr[sample_idx], target_arr[sample_idx])
+    alpha = (1.0 - confidence) / 2.0
+    ci_low = float(np.quantile(replicates, alpha))
+    ci_high = float(np.quantile(replicates, 1.0 - alpha))
+    return {
+        "ks": point,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "std": float(np.std(replicates, ddof=1)),
+        "n_boot": int(n_boot),
+    }
+
+
+def _bootstrap_ks_seed(seed: int) -> int:
+    """Deterministic seed derivation distinct from other seeded draws in the
+    pipeline (mirrors recipes/common.py's ``_valid_fold_seed`` pattern)."""
+    digest = hashlib.sha256(f"{int(seed)}:bootstrap_ks".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 2_147_483_647
 
 
 def weighted_feature_ks(scores: np.ndarray, target: np.ndarray, weights: np.ndarray) -> float:
@@ -293,6 +377,7 @@ def _finite_binary_weighted_triples(
 
 __all__ = [
     "DEFAULT_IV_BINS",
+    "bootstrap_ks_ci",
     "compute_psi",
     "feature_auc",
     "feature_ks",

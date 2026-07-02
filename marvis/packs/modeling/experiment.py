@@ -152,6 +152,14 @@ def _comparison_row(experiment: Experiment) -> dict:
         "psi_test_vs_train": None if metrics is None else metrics.psi_test_vs_train,
         "psi_oot_vs_train": None if metrics is None else metrics.psi_oot_vs_train,
         "overfit_flag": None if metrics is None else metrics.overfit_flag,
+        # SEL-5: bootstrap KS sampling-error interval, deterministic per config.seed.
+        "test_ks_ci_low": None if metrics is None else metrics.test_ks_ci_low,
+        "test_ks_ci_high": None if metrics is None else metrics.test_ks_ci_high,
+        "test_ks_ci_std": None if metrics is None else metrics.test_ks_ci_std,
+        "oot_ks_ci_low": None if metrics is None else metrics.oot_ks_ci_low,
+        "oot_ks_ci_high": None if metrics is None else metrics.oot_ks_ci_high,
+        "oot_ks_ci_std": None if metrics is None else metrics.oot_ks_ci_std,
+        "ks_ci_n_boot": None if metrics is None else metrics.ks_ci_n_boot,
     }
 
 
