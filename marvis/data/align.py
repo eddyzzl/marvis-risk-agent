@@ -108,17 +108,23 @@ class ColumnAligner:
         best: KeyPair | None = None
         for feature_col in feature_cols:
             methods = candidate_match_methods(anchor_col.fingerprint, feature_col.fingerprint)
-            for method in methods:
-                matched, sampled = self._backend.match_rate_for_method(
-                    anchor_path,
-                    [anchor_col.name],
-                    feature_path,
-                    [feature_col.name],
-                    method=method,
-                    key_fingerprints=[_pair_fp(anchor_col, feature_col)],
-                    sample_n=SMALL_SAMPLE_N,
-                    seed=seed,
-                )
+            if not methods:
+                continue
+            # PERF-4: try every candidate method for this column pair in ONE batched
+            # DuckDB call (one feature-table scan shared across methods) instead of one
+            # match_rate_for_method call -- and therefore one feature scan -- per method.
+            fingerprint = _pair_fp(anchor_col, feature_col)
+            rates = self._backend.match_rates_for_methods(
+                anchor_path,
+                anchor_col.name,
+                feature_path,
+                feature_col.name,
+                methods=methods,
+                key_fingerprints=[fingerprint] * len(methods),
+                sample_n=SMALL_SAMPLE_N,
+                seed=seed,
+            )
+            for method, (matched, sampled) in zip(methods, rates):
                 rate = matched / sampled if sampled else 0.0
                 if rate < MIN_KEY_MATCH_RATE:
                     continue

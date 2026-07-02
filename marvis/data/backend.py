@@ -137,9 +137,40 @@ class DataBackend:
     def __init__(self, datasets_root: Path):
         self._root = Path(datasets_root)
         configure_duckdb_defaults(self._root.parent / DUCKDB_TEMP_DIR_NAME)
+        # PERF-4: a plain in-process dict, scoped to THIS DataBackend instance's lifetime
+        # (one per request/job -- see routers/data.py, turn_handlers.py, packs/*/tools.py).
+        # It is never persisted or shared across instances, so there is no cross-request
+        # invalidation to get wrong: the cache is created and thrown away with the backend
+        # that populated it. Keys are namespaced by call kind + a (path, mtime_ns, size)
+        # file-identity tuple (plus call-specific extras), so a file changing on disk between
+        # two DataBackend instances can never serve a stale value.
+        self._cache: dict[tuple, Any] = {}
+
+    def _memo(self, kind: str, path: Path, *extra: Any, compute):
+        key = (kind, *self._file_identity(path), *extra)
+        if key in self._cache:
+            return self._cache[key]
+        value = compute()
+        self._cache[key] = value
+        return value
+
+    def _file_identity(self, path: Path) -> tuple[str, int, int]:
+        """(path, mtime_ns, size) -- used as the cache-key prefix for every memoized call so
+        a file that changes on disk (different mtime/size) never serves a stale cached value,
+        upholding determinism (INV-1) the same way a fresh DataBackend would recompute it."""
+        try:
+            stat = path.stat()
+            return (path.as_posix(), stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            # Path doesn't exist yet or is unreadable -- let the real call raise the real
+            # error; do not cache under a fake identity.
+            return (path.as_posix(), -1, -1)
 
     def row_count(self, path: Path) -> int:
         path = self._resolve_path(path)
+        return self._memo("row_count", path, compute=lambda: self._row_count_uncached(path))
+
+    def _row_count_uncached(self, path: Path) -> int:
         suffix = path.suffix.lower()
         if suffix in SUPPORTED_DUCKDB_SUFFIXES:
             row = duckdb.sql(
@@ -158,6 +189,9 @@ class DataBackend:
         path = self._resolve_path(path)
         if path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES:
             return set()
+        return self._memo("numeric_columns", path, compute=lambda: self._numeric_columns_uncached(path))
+
+    def _numeric_columns_uncached(self, path: Path) -> set[str]:
         rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
         return {str(row[0]) for row in rows if _is_duckdb_numeric_type(str(row[1]))}
 
@@ -278,6 +312,9 @@ class DataBackend:
 
     def column_names(self, path: Path) -> list[str]:
         path = self._resolve_path(path)
+        return list(self._memo("column_names", path, compute=lambda: self._column_names_uncached(path)))
+
+    def _column_names_uncached(self, path: Path) -> list[str]:
         suffix = path.suffix.lower()
         if suffix in SUPPORTED_DUCKDB_SUFFIXES:
             rows = duckdb.sql(f"DESCRIBE SELECT * FROM {self._duckdb_rel(path)}").fetchall()
@@ -319,6 +356,16 @@ class DataBackend:
 
     def sample_rows(self, path: Path, n: int, *, seed: int) -> pd.DataFrame:
         path = self._resolve_path(path)
+        cached = self._memo(
+            "sample_rows", path, int(n), int(seed),
+            compute=lambda: self._sample_rows_uncached(path, n, seed=seed),
+        )
+        # Defensive copy: callers must never be able to mutate the cached frame in place
+        # and corrupt a later cache hit (upholding determinism -- INV-1 -- across repeated
+        # calls with the same path/n/seed within one diagnose session).
+        return cached.copy()
+
+    def _sample_rows_uncached(self, path: Path, n: int, *, seed: int) -> pd.DataFrame:
         total = self.row_count(path)
         if total <= n:
             return self.read_frame(path)
@@ -340,6 +387,19 @@ class DataBackend:
         path = self._resolve_path(path)
         if not columns:
             raise DataBackendError("distinct_count requires at least one column")
+        cache_key_pairs = tuple(key_pairs) if key_pairs is not None else None
+        return self._memo(
+            "distinct_count", path, tuple(columns), cache_key_pairs,
+            compute=lambda: self._distinct_count_uncached(path, columns, key_pairs=key_pairs),
+        )
+
+    def _distinct_count_uncached(
+        self,
+        path: Path,
+        columns: list[str],
+        *,
+        key_pairs: Sequence[KeyPair] | None,
+    ) -> int:
         allowed_columns = set(self.column_names(path))
         self._validate_columns(columns, allowed_columns)
         if path.suffix.lower() in SUPPORTED_DUCKDB_SUFFIXES:
@@ -457,7 +517,39 @@ class DataBackend:
         if len(anchor_keys) != len(key_fingerprints):
             raise DataBackendError("key_fingerprints must align with key columns")
         methods = _methods_for_keys(method, len(anchor_keys))
+        cache_key = (
+            "match_rate_for_method",
+            *self._file_identity(anchor_path),
+            tuple(anchor_keys),
+            *self._file_identity(feature_path),
+            tuple(feature_keys),
+            tuple(methods),
+            tuple(key_fingerprints),
+            int(sample_n),
+            int(seed),
+        )
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        result = self._match_rate_for_method_uncached(
+            anchor_path, anchor_keys, feature_path, feature_keys,
+            methods=methods, key_fingerprints=key_fingerprints,
+            sample_n=sample_n, seed=seed,
+        )
+        self._cache[cache_key] = result
+        return result
 
+    def _match_rate_for_method_uncached(
+        self,
+        anchor_path: Path,
+        anchor_keys: Sequence[str],
+        feature_path: Path,
+        feature_keys: Sequence[str],
+        *,
+        methods: Sequence[str],
+        key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
+    ) -> tuple[int, int]:
         self._validate_columns(anchor_keys, set(self.column_names(anchor_path)))
         self._validate_columns(feature_keys, set(self.column_names(feature_path)))
         anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
@@ -510,6 +602,124 @@ class DataBackend:
             if all(value is not None for value in key) and key in feature_key_set:
                 matched += 1
         return matched, int(anchor_frame.shape[0])
+
+    def match_rates_for_methods(
+        self,
+        anchor_path: Path,
+        anchor_col: str,
+        feature_path: Path,
+        feature_col: str,
+        *,
+        methods: Sequence[str],
+        key_fingerprints: Sequence[Any],
+        sample_n: int,
+        seed: int,
+    ) -> list[tuple[int, int]]:
+        """Batched counterpart to :meth:`match_rate_for_method` for a SINGLE anchor/feature
+        column pair tried under several candidate match methods (PERF-4: this is exactly the
+        ``align._resolve_by_data`` loop -- one column pair x several methods). Instead of one
+        DuckDB round-trip (anchor sample scan + feature DISTINCT scan) per method, this issues
+        ONE query: one shared registered anchor sample, one feature-table scan producing all
+        methods' normalized keys together, and one ``count(*) FILTER`` per method. Falls back
+        to :meth:`match_rate_for_method` per-method for any method DuckDB can't express
+        (unsupported hash algorithm) so semantics/results are identical either way.
+
+        Returns a list of ``(matched, sampled)`` aligned with ``methods``.
+        """
+        anchor_path = self._resolve_path(anchor_path)
+        feature_path = self._resolve_path(feature_path)
+        if len(methods) != len(key_fingerprints):
+            raise DataBackendError("key_fingerprints must align with methods")
+        if not methods:
+            return []
+        cache_key = (
+            "match_rates_for_methods",
+            *self._file_identity(anchor_path),
+            anchor_col,
+            *self._file_identity(feature_path),
+            feature_col,
+            tuple(methods),
+            tuple(key_fingerprints),
+            int(sample_n),
+            int(seed),
+        )
+        if cache_key in self._cache:
+            return list(self._cache[cache_key])
+        if (
+            feature_path.suffix.lower() not in SUPPORTED_DUCKDB_SUFFIXES
+            or not _duckdb_supports_match_methods(methods)
+        ):
+            # Fall back to the per-method path (still benefits from the sample_rows /
+            # column_names memoization above) when DuckDB can't express every method in
+            # one batch -- e.g. an unsupported hash algorithm forces the Python fallback.
+            results = [
+                self.match_rate_for_method(
+                    anchor_path, [anchor_col], feature_path, [feature_col],
+                    method=method, key_fingerprints=[fingerprint],
+                    sample_n=sample_n, seed=seed,
+                )
+                for method, fingerprint in zip(methods, key_fingerprints)
+            ]
+            self._cache[cache_key] = results
+            return list(results)
+
+        self._validate_columns([anchor_col], set(self.column_names(anchor_path)))
+        self._validate_columns([feature_col], set(self.column_names(feature_path)))
+        anchor_frame = self.sample_rows(anchor_path, sample_n, seed=seed)
+        results = self._duckdb_match_rates_for_methods(
+            anchor_frame, feature_path, anchor_col, feature_col,
+            methods=methods, key_fingerprints=key_fingerprints,
+        )
+        self._cache[cache_key] = results
+        return list(results)
+
+    def _duckdb_match_rates_for_methods(
+        self,
+        anchor_frame: pd.DataFrame,
+        feature_path: Path,
+        anchor_col: str,
+        feature_col: str,
+        *,
+        methods: Sequence[str],
+        key_fingerprints: Sequence[Any],
+    ) -> list[tuple[int, int]]:
+        anchor_columns = set(str(column) for column in anchor_frame.columns)
+        feature_columns = set(self.column_names(feature_path))
+        anchor_ident = "a." + sql_identifier(anchor_col, anchor_columns)
+        feature_ident = "b." + sql_identifier(feature_col, feature_columns)
+        feature_rel = self._duckdb_text_rel(feature_path)
+        # feature_keys computes DISTINCT normalized keys for EVERY method from a SINGLE
+        # scan of the feature table (one file read shared across all methods, instead of
+        # one read per method as the single-method path would do if called N times), then
+        # each method gets its own LEFT JOIN against the shared (small) anchor sample --
+        # same hash-join shape as the proven single-method query below, just batched.
+        feature_exprs = ", ".join(
+            f"{_sql_normalized_key(method, feature_ident, fingerprint=_fingerprint_pair(fp)[1])} "
+            f"AS __key_{index}"
+            for index, (method, fp) in enumerate(zip(methods, key_fingerprints))
+        )
+        ctes = [f"feature_keys AS (SELECT {feature_exprs} FROM {feature_rel} b)"]
+        selects = []
+        for index, (method, fp) in enumerate(zip(methods, key_fingerprints)):
+            anchor_fp, _feature_fp = _fingerprint_pair(fp)
+            anchor_expr = _sql_normalized_key(method, anchor_ident, fingerprint=anchor_fp)
+            ctes.append(
+                f"anchor_keys_{index} AS (SELECT {anchor_expr} AS __key FROM anchor_sample a)"
+            )
+            ctes.append(
+                f"feature_distinct_{index} AS (SELECT DISTINCT __key_{index} AS __key FROM feature_keys)"
+            )
+            selects.append(
+                f"(SELECT count(*) FILTER (WHERE a.__key IS NOT NULL AND f.__key IS NOT NULL) "
+                f"FROM anchor_keys_{index} a LEFT JOIN feature_distinct_{index} f "
+                f"ON a.__key = f.__key) AS __matched_{index}"
+            )
+        query = "WITH " + ", ".join(ctes) + " SELECT " + ", ".join(selects)
+        with duckdb.connect(database=":memory:") as conn:
+            conn.register("anchor_sample", anchor_frame)
+            row = conn.execute(query).fetchone()
+        sampled = int(anchor_frame.shape[0])
+        return [(int(row[index] or 0), sampled) for index in range(len(methods))]
 
     def _duckdb_match_rate_for_method(
         self,
