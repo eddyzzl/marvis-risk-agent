@@ -1126,7 +1126,7 @@
     },
     {
       "name": "train_models",
-      "summary": "Train one or more recipes and return all experiments plus the best experiment using the target-aware selector: binary OOT KS (test KS fallback), regression lower OOT RMSE (test RMSE fallback), and multiclass OOT macro-AUC (test macro-AUC fallback, then lower logloss). lgb uses tuned params when provided; other recipes train with their own defaults. The single-recipe case mirrors train_model.",
+      "summary": "Train one or more recipes and return all experiments plus the best experiment using the target-aware selector: binary overfit-penalized test KS (OOT reported only, not used for selection), regression lower OOT RMSE (test RMSE fallback), and multiclass OOT macro-AUC (test macro-AUC fallback, then lower logloss). lgb uses tuned params when provided; other recipes train with their own defaults. The single-recipe case mirrors train_model.",
       "input_schema": {
         "type": "object",
         "properties": {

@@ -680,9 +680,11 @@ def tool_train_model(inputs: dict, ctx) -> dict:
 
 
 def tool_train_models(inputs: dict, ctx) -> dict:
-    """Train each requested recipe and return all experiments plus the best by OOT KS
-    (test KS fallback). lgb uses the tuned params; other recipes train with their own
-    defaults. The single-recipe case (recipes=[lgb]) behaves like train_model."""
+    """Train each requested recipe and return all experiments plus the champion picked by
+    overfit-penalized test KS (OOT is reported only, never used to select — mirrors
+    tune_hyperparameters' "OOT reports only" policy, DOM-9). lgb uses the tuned params;
+    other recipes train with their own defaults. The single-recipe case (recipes=[lgb])
+    behaves like train_model."""
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     recipes = [str(item) for item in inputs["recipes"]]
@@ -751,11 +753,36 @@ def tool_train_models(inputs: dict, ctx) -> dict:
     }
 
 
+#: Overfit penalty applied to the binary champion-selection score, matching
+#: tune.py's ``_trial_score`` objective (``test_ks - penalty * max(0, train_ks - test_ks)``).
+_CHAMPION_OVERFIT_PENALTY = 0.5
+
+#: Binary champion selection metric name/basis: OOT is reported but never used to pick
+#: a winner (mirrors tune_hyperparameters' "OOT reports only" policy — DOM-9).
+BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
+
+
+def _overfit_penalized_test_ks(metrics: dict) -> float:
+    """``test_ks - penalty * max(0, train_ks - test_ks)``; ``-inf`` when test_ks is missing.
+
+    OOT is intentionally excluded from the score — using it for champion selection would
+    contradict tune_hyperparameters' explicit "OOT metrics are reported for transparency
+    but are not used for hyperparameter selection" policy (DOM-9).
+    """
+    test_ks = metrics.get("test_ks")
+    if not isinstance(test_ks, (int, float)):
+        return float("-inf")
+    train_ks = metrics.get("train_ks")
+    gap = float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
+    return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
+
+
 def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary") -> tuple[dict, str]:
     """Pick the best experiment with the metric family that matches the target.
 
-    Binary maximizes OOT/test KS; regression minimizes OOT/test RMSE; multiclass
-    maximizes OOT/test macro-AUC, falling back to minimizing logloss.
+    Binary maximizes the overfit-penalized test KS (OOT is reported, not selected on —
+    DOM-9); regression minimizes OOT/test RMSE; multiclass maximizes OOT/test macro-AUC,
+    falling back to minimizing logloss.
     """
     target_type = str(target_type or "binary")
     if target_type == "continuous":
@@ -789,14 +816,9 @@ def _pick_best_experiment(experiments: list[dict], *, target_type: str = "binary
         return max(experiments, key=score), "oot_macro_auc"
 
     def score(experiment: dict) -> float:
-        metrics = experiment.get("metrics") or {}
-        for key in ("oot_ks", "test_ks"):
-            value = metrics.get(key)
-            if isinstance(value, (int, float)):
-                return float(value)
-        return float("-inf")
+        return _overfit_penalized_test_ks(experiment.get("metrics") or {})
 
-    return max(experiments, key=score), "oot_ks"
+    return max(experiments, key=score), BINARY_SELECTION_METRIC
 
 
 def tool_compare_experiments(inputs: dict, ctx) -> dict:
@@ -915,6 +937,8 @@ def _pick_best_comparison_row_with_policy(
 
 
 def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[dict, str]:
+    """Pick the best comparison row. Binary maximizes the overfit-penalized test KS —
+    OOT is reported but not used for selection, matching tune_hyperparameters (DOM-9)."""
     if not rows:
         raise ModelingError("experiment_ids must resolve to experiments")
     delivery_ready = [row for row in rows if _delivery_ready(row)]
@@ -928,7 +952,7 @@ def _pick_best_comparison_row(rows: list[dict], *, target_type: str) -> tuple[di
         if _score_first(auc_best, ("oot_macro_auc", "test_macro_auc")) != float("-inf"):
             return auc_best, "oot_macro_auc"
         return max(rows, key=lambda row: _score_first(row, ("oot_logloss", "test_logloss"), minimize=True)), "oot_logloss"
-    return max(rows, key=lambda row: _score_first(row, ("oot_ks", "test_ks"))), "oot_ks"
+    return max(rows, key=_overfit_penalized_test_ks), BINARY_SELECTION_METRIC
 
 
 def _attach_capabilities_to_comparison_rows(runtime: _Runtime, rows: list[dict]) -> None:
@@ -3731,7 +3755,9 @@ def _metric_policy_for_target_type(target_type: str) -> str:
         return "lower OOT RMSE, fallback lower test RMSE"
     if target_type == "multiclass":
         return "higher OOT macro-AUC, fallback higher test macro-AUC then lower logloss"
-    return "higher OOT KS, fallback higher test KS"
+    # Binary champion selection uses test KS (overfit-penalized); OOT is reported only,
+    # never used to pick a winner — mirrors tune_hyperparameters' policy (DOM-9).
+    return "higher overfit-penalized test KS; OOT reported only, not used for selection"
 
 
 def _eligible_algorithms(target_type: str) -> list[str]:
