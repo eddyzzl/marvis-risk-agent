@@ -242,7 +242,7 @@
 | ✅ | TST-3 | 真 e2e 落地（`1978319c`）：真 `marvis serve` 子进程全旅程（JOIN→standard_modeling 全门→PMML），三连跑确定性验证（~30s/次，e2e marker） | High/M | ✅ |
 | ⬜ | TST-4 | 隔离/资源护栏测试全是 mock 断言：真杀/真 OOM 零验证（INV-6） | High/M | ✅ |
 | ✅ | ARCH-1 | legacy shim 拆除（`e3a7d6f5`/`4f6b845e`）：36 处私有 seam 迁入新 agent/validation_app_service.py 公有面，routers 直连、_agent_api()/legacy_api 服务定位器删除、api.py 955→184 行、DriverTurnRuntime 全类型化；routers/ 内 legacy_api 引用归零 | High/M | ✅ |
-| ⬜ | ARCH-2 | packs/modeling/tools.py 4386 行新 god file | High/M | ⚠️ |
+| ✅ | ARCH-2 | modeling tools 拆 13 子模块（`5103dede`：prepare/feature/train/select/calibrate/delivery/monitor/report_tools+_common/_runtime/scoring 等），tools.py 保留聚合门面、对外 import 面不变；B6h 字典代码已随合并迁至 feature_tools | High/M | ✅ |
 | ⬜ | GAP-5 | 共享主机 loopback 全信任（装插件=任意代码执行） | Med/S | — |
 | ✅ | GAP-6 | 只读注册表 API（跨任务列表/详情/分页，`fc4e737f`）；前端面板按预授权降级（进 UX 后续） | Med/M | — |
 | ✅ | GAP-7 | content_hash 指纹复用（同内容跨任务共享 parquet+profile，dedup 审计，`da47ae0e`），删除引用计数联动 | Med/M | — |
@@ -264,7 +264,7 @@
 | ⬜ | ARCH-11 | app.js 6416 行前端 god file：状态所有权未定界（追踪器"TaskWorkspace 抽取"同一件事） | Med/L | — |
 | ✅ | PERF-6 | 轮询热路径收敛（`fe5180c4`）：GET /api/tasks 11 连接→2（与任务数无关）、evidence mtime/size 缓存、journal_mode PRAGMA 每库一次；查询计数断言守护 | Med/M | — |
 | ✅ | PERF-9 | 全量静态版本化（`a752660d`）：_static_asset_version rglob 全部 js/css、importmap 把裸相对导入重写为 ?v= URL、/static Cache-Control 分层（?v= immutable / 否则 no-cache）；真 Chromium smoke 验证 | Med/S | — |
-| ⬜ | PERF-10 | 多配方训练逐配方全帧 copy：宽表内存峰值成倍放大 | Med/S | — |
+| ✅ | PERF-10 | read_frame 深拷贝改 CoW 视图（`d3336acf`）：内存峰值随配方数从线性变常量；六配方训练字节等价验证 | Med/S | ✅ |
 | ✅ | UX-8 | 8 个死代码模块删除（`caee3d9f`）：join_review/plan_view/plan_confirm/workflow_create/subagent_view/loop_progress/memory_manager/draft_manager，全部先复核零挂载；7 个专属测试文件同步清理 | Med/M | — |
 | ✅ | VD-10 | （随 UX-8 落地）零挂载模块已清除；join_review 的"中止去重"选项无在线等价物，按纯死代码删除不移植 | Med/S | — |
 | ⬜ | VD-11 | 设计 token 剩余缺口：radius 塌缩、spacing/type scale 为零（radius 调整须先出对比稿由用户拍板；含追踪器"legacy hex 清理"） | Med/L | — |
@@ -296,16 +296,16 @@
 | ⬜ | LT-6 | TrainingDataset adapter 扩到剩余辅助读路径（按 profiling 证据） | 追踪器 |
 | ⬜ | LT-7 | 特征筛选/大摘要加 DuckDB query-backed helpers 替代全帧 pandas | 追踪器 |
 | ⬜ | LT-8 | 性能回归三件套：大 parquet 筛选 / 多配方 read-count / join match-rate smoke | 追踪器 |
-| ⬜ | LT-9 | OS 级 Notebook/插件沙箱本体（namespace/chroot 类）或正式裁决 subprocess+护栏为终态 | 6-28+roadmap |
-| ⬜ | LT-10 | legacy live-session 路径终局：worker RPC 化或正式定为 triple-opt-in legacy-only | 追踪器 |
+| ✅ | LT-9 | 已裁决：subprocess+护栏为 V2 终态（威胁模型=单机单用户；TST-4 真进程证据链）；OS 沙箱升级条件=V3 多用户，见 v2-longtail-adjudications.md | 6-28+roadmap |
+| ✅ | LT-10 | 已裁决：triple-opt-in legacy-only 为终态（settings 双开关+env var 三重门槛既有）；不做 RPC 化，只收安全修复，见 v2-longtail-adjudications.md | 追踪器 |
 | ⬜ | LT-11 | agent 推荐产品化：引用 evidence refs、给 tradeoff、AUTO 解释 bounded action 为何安全 | 追踪器 |
-| ⬜ | LT-12 | row-level 聚合去重策略（仅当业务要求"必须保留真实行"时触发） | 6-28 |
+| ✅ | LT-12 | 已裁决：触发条件不存在，关闭；未来出现行级保真要求时按 join 引擎设计重开新 spec，见 v2-longtail-adjudications.md | 6-28 |
 | ⬜ | LT-13 | 分页扩展：随数据量增长审计剩余高容量列表端点 | 追踪器 |
 | ⬜ | LT-14 | 样本权重 leakage-risk/business-rationale 指南随 fixtures 持续丰富 | 追踪器 |
 | ✅ | LT-15 | 全部批次 spec 已出：S1a（已实现）、S2-S6（docs/plans/specs/v2-s2..s6-*.md，函数级）；S5 范围校准注明趋势/EL/报告项由 S3 吸收 | 策略计划 |
 | ⬜ | LT-16 | modeling-agent-roadmap Phase 3 开放式打磨（健壮性/报告/衔接）——以 §3 EXC 清零 + 真实数据对照实验为具体化载体 | roadmap |
 | ⬜ | LT-17 | 定期复审机制：每完成 2-3 个阶段跑一轮聚焦审查（新代码带来新债；本轮三个"已修未修净"即为证） | 本轮教训 |
-| ⬜ | LT-18 | 下一版本方向蓄水池：V3+（多用户/权限、部署打包、外部决策引擎对接等，超出单机单用户边界的显式不做项） | 产品选择 |
+| ✅ | LT-18 | 蓄水池已建：五类 V3+ 显式不做项与准入门槛记录于 v2-longtail-adjudications.md | 产品选择 |
 | ⬜ | LT-19 | 每阶段完成后同步更新本清单与记忆索引 | 流程 |
 
 ## 13. 映射、去重与已收尾文档记录
