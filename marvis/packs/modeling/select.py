@@ -10,9 +10,10 @@ from marvis.data.labels import require_labels_confirmed
 from marvis.feature.binning import chimerge_edges, monotonic_direction, monotonic_edges
 from marvis.feature.correlation import correlation_matrix, find_collinear_pairs, vif
 from marvis.feature.encode import woe_encode
-from marvis.feature.errors import FeatureError
+from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_ks, feature_metrics
+from marvis.packs.modeling.prepare import SPLIT_COLUMN
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class SelectionResult:
     scores: dict[str, dict[str, Any]]
     nan_labels_dropped: int = 0
     warnings: tuple[str, ...] = ()
+    fit_rows: int = 0
+    fit_split: str = "train"
 
 
 def select_features(
@@ -39,18 +42,36 @@ def select_features(
     space: str = "raw",
     split_col: str | None = None,
     split_value: Any = None,
+    holdout_values: tuple[str, ...] = ("test", "oot"),
+    allow_full_fit: bool = False,
     scorecard_max_bins: int = 6,
     enforce_monotonic: bool = True,
     monotonic_direction_request: str = "auto",
     sign_check: bool = True,
 ) -> SelectionResult:
     del seed  # Selection is deterministic; seed is reserved for API symmetry.
-    columns = _unique([*features, target_col, split_col])
+    dataset_columns = set(backend.column_names(dataset_path))
+    resolved_split_col = split_col or (SPLIT_COLUMN if SPLIT_COLUMN in dataset_columns else None)
+    columns = _unique([*features, target_col, resolved_split_col])
     frame = backend.read_frame(dataset_path, columns=columns)
     if split_col and split_value is not None:
+        # Legacy exact-match filter: caller picked a single split value explicitly
+        # (e.g. split_value="train"). This already excludes every holdout row.
         frame = frame[frame[str(split_col)] == split_value].copy()
         if frame.empty:
             raise FeatureError(f"feature selection split has no rows: {split_col}={split_value}")
+        fit_rows = int(len(frame))
+        fit_split = "train"
+    else:
+        fit_mask, fit_split = _selection_fit_mask(
+            frame,
+            split_col=resolved_split_col,
+            holdout_values=holdout_values,
+            allow_full_fit=allow_full_fit,
+            dataset_path=dataset_path,
+        )
+        frame = frame.loc[fit_mask].copy()
+        fit_rows = int(len(frame))
     nan_labels_dropped = require_labels_confirmed(
         frame, target_col, drop_nan_labels=drop_nan_labels,
     )
@@ -71,6 +92,8 @@ def select_features(
             enforce_monotonic=enforce_monotonic,
             monotonic_direction_request=monotonic_direction_request,
             sign_check=sign_check,
+            fit_rows=fit_rows,
+            fit_split=fit_split,
         )
     if normalized_space != "raw":
         raise FeatureError("select_features space must be 'raw' or 'woe'")
@@ -83,7 +106,36 @@ def select_features(
         vif_max=vif_max,
         top_k=top_k,
         nan_labels_dropped=nan_labels_dropped,
+        fit_rows=fit_rows,
+        fit_split=fit_split,
     )
+
+
+def _selection_fit_mask(
+    frame: pd.DataFrame,
+    *,
+    split_col: str | None,
+    holdout_values: tuple[str, ...],
+    allow_full_fit: bool,
+    dataset_path: Path,
+) -> tuple[Any, str]:
+    """Rows used to fit selection statistics (IV/corr/VIF/WOE) — excludes holdout
+    (default test+OOT) so selection never peeks at evaluation labels (FS-2).
+
+    ``split_col`` is already resolved by the caller (explicit input, else the
+    platform-standard ``marvis.packs.modeling.prepare.SPLIT_COLUMN`` when present in
+    the dataset). No split column at all is a typed-error stop unless the caller
+    explicitly confirms a full-pool fit via ``allow_full_fit``.
+    """
+    if not split_col:
+        if allow_full_fit:
+            return frame.index.notna(), "full"
+        raise FitRequiresSplitError(tool="select_features", dataset_id=str(dataset_path))
+    holdout = tuple(str(value) for value in (holdout_values or ("test", "oot")))
+    mask = ~frame[str(split_col)].astype(str).isin(holdout)
+    if not mask.any():
+        raise FeatureError("select_features fit frame is empty after excluding holdout rows")
+    return mask, "train"
 
 
 def _select_features_raw(
@@ -96,6 +148,8 @@ def _select_features_raw(
     vif_max: float,
     top_k: int | None,
     nan_labels_dropped: int,
+    fit_rows: int = 0,
+    fit_split: str = "train",
 ) -> SelectionResult:
     kept: list[str] = []
     dropped: list[tuple[str, str]] = []
@@ -115,7 +169,10 @@ def _select_features_raw(
     kept, dropped = _drop_collinear(frame, features, kept, dropped, scores, corr_max, label="")
     kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="")
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
-    return SelectionResult(tuple(kept), tuple(dropped), scores, nan_labels_dropped)
+    return SelectionResult(
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped,
+        fit_rows=fit_rows, fit_split=fit_split,
+    )
 
 
 def _select_features_woe(
@@ -133,6 +190,8 @@ def _select_features_woe(
     enforce_monotonic: bool,
     monotonic_direction_request: str,
     sign_check: bool,
+    fit_rows: int = 0,
+    fit_split: str = "train",
 ) -> SelectionResult:
     target_arr = frame[target_col].to_numpy(dtype=float)
     encoded = pd.DataFrame(index=frame.index)
@@ -172,7 +231,10 @@ def _select_features_woe(
     kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ")
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
     warnings = tuple(_woe_sign_warnings(encoded, kept, target_arr, scores, directions) if sign_check else ())
-    return SelectionResult(tuple(kept), tuple(dropped), scores, nan_labels_dropped, warnings)
+    return SelectionResult(
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped, warnings,
+        fit_rows=fit_rows, fit_split=fit_split,
+    )
 
 
 def _drop_collinear(

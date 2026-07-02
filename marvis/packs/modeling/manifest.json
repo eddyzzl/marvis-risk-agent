@@ -548,6 +548,15 @@
             "minLength": 1
           },
           "split_value": {},
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allow_full_fit": {
+            "type": "boolean"
+          },
           "iv_min": {
             "type": "number"
           },
@@ -617,6 +626,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "fit_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fit_split": {
+            "type": "string",
+            "enum": [
+              "train",
+              "full"
+            ]
           }
         },
         "required": [

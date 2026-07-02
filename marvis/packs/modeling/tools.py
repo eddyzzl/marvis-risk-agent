@@ -403,6 +403,7 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         split_col=_optional_str(inputs.get("split_col")),
     )
     split_col = _optional_str(inputs.get("split_col"))
+    holdout = inputs.get("holdout_values")
     result = select_features(
         runtime.backend,
         runtime.registry.resolve_path(dataset.id),
@@ -417,6 +418,8 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         space=str(inputs.get("space") or "raw"),
         split_col=split_col,
         split_value=inputs.get("split_value"),
+        holdout_values=tuple(str(v) for v in holdout) if holdout else ("test", "oot"),
+        allow_full_fit=bool(inputs.get("allow_full_fit")),
         scorecard_max_bins=int(inputs.get("scorecard_max_bins") or 6),
         enforce_monotonic=bool(inputs.get("enforce_monotonic", True)),
         monotonic_direction_request=str(inputs.get("monotonic_direction") or "auto"),
@@ -428,6 +431,8 @@ def tool_select_features(inputs: dict, ctx) -> dict:
         "scores": _jsonable(result.scores),
         "nan_labels_dropped": result.nan_labels_dropped,
         "warnings": list(result.warnings),
+        "fit_rows": result.fit_rows,
+        "fit_split": result.fit_split,
     }
 
 

@@ -243,6 +243,7 @@
           "breakpoints": {"type": "array", "items": {"type": "number"}},
           "split_col": {"type": "string", "minLength": 1},
           "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"},
           "seed": {"type": "integer"},
           "drop_nan_labels": {"type": "boolean"}
         },
@@ -255,7 +256,9 @@
           "result_dataset_id": {"type": "string"},
           "new_columns": {"type": "array", "items": {"type": "string"}},
           "woe_maps": {"type": "object"},
-          "nan_labels_dropped": {"type": "integer", "minimum": 0}
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
         },
         "required": ["result_dataset_id", "new_columns", "woe_maps"],
         "additionalProperties": false
@@ -305,7 +308,10 @@
           "dataset_id": {"type": "string", "minLength": 1},
           "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "method": {"type": "string", "enum": ["minmax", "zscore"]},
-          "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
+          "feature_range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns", "method"],
         "additionalProperties": false
@@ -314,7 +320,9 @@
         "type": "object",
         "properties": {
           "result_dataset_id": {"type": "string"},
-          "scaler_params": {"type": "object"}
+          "scaler_params": {"type": "object"},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
         },
         "required": ["result_dataset_id", "scaler_params"],
         "additionalProperties": false
@@ -335,7 +343,10 @@
           "dataset_id": {"type": "string", "minLength": 1},
           "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "strategy": {"type": "string", "enum": ["mean", "median", "mode", "constant"]},
-          "fill_value": {}
+          "fill_value": {},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns", "strategy"],
         "additionalProperties": false
@@ -344,7 +355,9 @@
         "type": "object",
         "properties": {
           "result_dataset_id": {"type": "string"},
-          "fill_values": {"type": "object"}
+          "fill_values": {"type": "object"},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
         },
         "required": ["result_dataset_id", "fill_values"],
         "additionalProperties": false
@@ -366,7 +379,10 @@
           "columns": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
           "method": {"type": "string", "enum": ["iqr", "quantile"]},
           "lower_q": {"type": "number", "minimum": 0, "maximum": 1},
-          "upper_q": {"type": "number", "minimum": 0, "maximum": 1}
+          "upper_q": {"type": "number", "minimum": 0, "maximum": 1},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"}
         },
         "required": ["dataset_id", "columns"],
         "additionalProperties": false
@@ -375,7 +391,9 @@
         "type": "object",
         "properties": {
           "result_dataset_id": {"type": "string"},
-          "bounds": {"type": "object"}
+          "bounds": {"type": "object"},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
         },
         "required": ["result_dataset_id", "bounds"],
         "additionalProperties": false

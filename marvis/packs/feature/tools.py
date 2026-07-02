@@ -25,10 +25,11 @@ from marvis.feature.binning import (
 from marvis.feature.correlation import correlation_report
 from marvis.feature.derive import derive_batch
 from marvis.feature.encode import onehot_encode, woe_encode
-from marvis.feature.errors import FeatureError
+from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
 from marvis.feature.transform import (
+    apply_scaler,
     cap_outliers,
     impute_missing,
     minmax_normalize,
@@ -304,7 +305,7 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         required_columns.append(str(inputs["split_col"]))
     _assert_columns(frame, required_columns)
     out = frame.copy()
-    fit_frame = _woe_fit_frame(out, inputs)
+    fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id)
     nan_labels_dropped = require_labels_confirmed(
         fit_frame,
         target_col,
@@ -332,19 +333,27 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         "new_columns": new_columns,
         "woe_maps": woe_maps,
         "nan_labels_dropped": nan_labels_dropped,
+        "fit_rows": int(len(fit_frame)),
+        "fit_split": fit_split,
     }
 
 
-def _woe_fit_frame(frame: pd.DataFrame, inputs: dict) -> pd.DataFrame:
+def _woe_fit_frame(frame: pd.DataFrame, inputs: dict, dataset_id: str) -> tuple[pd.DataFrame, str]:
+    """Rows used to fit the WOE mapping — excludes holdout (default test+OOT) so the
+    mapping never peeks at evaluation labels (PREP-1). No ``split_col`` means the caller
+    cannot express train-only fitting; that's a typed-error stop unless the caller
+    explicitly confirms a full-pool fit via ``allow_full_fit``."""
     split_col = inputs.get("split_col")
     if not split_col:
-        return frame
-    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("oot",)))
+        if bool(inputs.get("allow_full_fit")):
+            return frame, "full"
+        raise FitRequiresSplitError(tool="woe_encode", dataset_id=dataset_id)
+    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("test", "oot")))
     mask = ~frame[str(split_col)].astype(str).isin(holdout_values)
     fit_frame = frame.loc[mask]
     if fit_frame.empty:
         raise FeatureError("WOE fit frame is empty after excluding holdout rows")
-    return fit_frame
+    return fit_frame, "train"
 
 
 def tool_onehot_encode(inputs: dict, ctx) -> dict:
@@ -369,20 +378,29 @@ def tool_normalize(inputs: dict, ctx) -> dict:
     params = {}
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
+    fit_mask, fit_split = _stat_fit_mask(out, inputs, "normalize", dataset.id)
     for col in columns:
+        fit_values = out.loc[fit_mask, col].to_numpy(dtype=float)
         if method == "minmax":
-            values, column_params = minmax_normalize(
-                out[col].to_numpy(dtype=float),
+            _fit_values, column_params = minmax_normalize(
+                fit_values,
                 feature_range=tuple(inputs.get("feature_range") or (0, 1)),
             )
+            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="minmax")
         elif method == "zscore":
-            values, column_params = zscore_standardize(out[col].to_numpy(dtype=float))
+            _fit_values, column_params = zscore_standardize(fit_values)
+            values = apply_scaler(out[col].to_numpy(dtype=float), column_params, kind="zscore")
         else:
             raise FeatureError("method must be minmax or zscore")
         out[col] = values
         params[col] = column_params
     result = _register_frame(runtime, out, dataset, ctx, "normalize")
-    return {"result_dataset_id": result.id, "scaler_params": _jsonable(params)}
+    return {
+        "result_dataset_id": result.id,
+        "scaler_params": _jsonable(params),
+        "fit_rows": int(fit_mask.sum()),
+        "fit_split": fit_split,
+    }
 
 
 def tool_impute_missing(inputs: dict, ctx) -> dict:
@@ -392,16 +410,22 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
     fill_values = {}
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
+    fit_mask, fit_split = _stat_fit_mask(out, inputs, "impute_missing", dataset.id)
     for column in columns:
-        filled, value = impute_missing(
-            out[column],
+        _filled_fit, value = impute_missing(
+            out.loc[fit_mask, column],
             strategy=str(inputs["strategy"]),
             fill_value=inputs.get("fill_value"),
         )
-        out[column] = filled
+        out[column] = out[column].fillna(value)
         fill_values[column] = value
     result = _register_frame(runtime, out, dataset, ctx, "impute")
-    return {"result_dataset_id": result.id, "fill_values": _jsonable(fill_values)}
+    return {
+        "result_dataset_id": result.id,
+        "fill_values": _jsonable(fill_values),
+        "fit_rows": int(fit_mask.sum()),
+        "fit_split": fit_split,
+    }
 
 
 def tool_cap_outliers(inputs: dict, ctx) -> dict:
@@ -411,17 +435,50 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
     bounds = {}
     columns = [str(column) for column in inputs["columns"]]
     _assert_columns(out, columns)
+    fit_mask, fit_split = _stat_fit_mask(out, inputs, "cap_outliers", dataset.id)
     for column in columns:
-        values, params = cap_outliers(
-            out[column].to_numpy(dtype=float),
+        fit_values = out.loc[fit_mask, column].to_numpy(dtype=float)
+        _capped_fit, params = cap_outliers(
+            fit_values,
             method=str(inputs.get("method") or "iqr"),
             lower_q=float(inputs.get("lower_q", 0.01)),
             upper_q=float(inputs.get("upper_q", 0.99)),
         )
-        out[column] = values
+        all_values = out[column].to_numpy(dtype=float)
+        mask = np.isfinite(all_values)
+        clipped = all_values.copy()
+        lower = params["lower"]
+        upper = params["upper"]
+        if np.isfinite(lower) and np.isfinite(upper):
+            clipped[mask] = np.clip(clipped[mask], lower, upper)
+        out[column] = clipped
         bounds[column] = params
     result = _register_frame(runtime, out, dataset, ctx, "cap")
-    return {"result_dataset_id": result.id, "bounds": _jsonable(bounds)}
+    return {
+        "result_dataset_id": result.id,
+        "bounds": _jsonable(bounds),
+        "fit_rows": int(fit_mask.sum()),
+        "fit_split": fit_split,
+    }
+
+
+def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str) -> tuple[np.ndarray, str]:
+    """Rows used to fit statistical transforms (impute/normalize/cap) — excludes holdout
+    (default test+OOT) so fill values / scaler params / capping bounds never absorb
+    evaluation-set distribution (PREP-1). No ``split_col`` means the caller cannot
+    express train-only fitting; that's a typed-error stop unless the caller explicitly
+    confirms a full-pool fit via ``allow_full_fit``."""
+    split_col = inputs.get("split_col")
+    if not split_col:
+        if bool(inputs.get("allow_full_fit")):
+            return np.ones(len(frame), dtype=bool), "full"
+        raise FitRequiresSplitError(tool=tool, dataset_id=dataset_id)
+    _assert_columns(frame, [str(split_col)])
+    holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("test", "oot")))
+    mask = (~frame[str(split_col)].astype(str).isin(holdout_values)).to_numpy()
+    if not mask.any():
+        raise FeatureError(f"{tool} fit frame is empty after excluding holdout rows")
+    return mask, "train"
 
 
 def tool_cross_features(inputs: dict, ctx) -> dict:
