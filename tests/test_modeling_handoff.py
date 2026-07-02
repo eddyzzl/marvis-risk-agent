@@ -29,6 +29,7 @@ from marvis.packs.modeling.handoff import (
     mark_validated_from_validation_task,
 )
 import marvis.packs.modeling.tools as modeling_tools
+import marvis.packs.modeling.delivery_tools as modeling_delivery_tools
 from marvis.settings import build_settings
 
 
@@ -461,7 +462,7 @@ def test_export_pmml_meta_failure_does_not_persist_success_state(tmp_path, monke
     def fail_meta(*args, **kwargs):
         raise RuntimeError("meta down")
 
-    monkeypatch.setattr(modeling_tools, "persist_model_meta", fail_meta)
+    monkeypatch.setattr(modeling_delivery_tools, "persist_model_meta", fail_meta)
     ctx = SimpleNamespace(
         task_id=source_task.id,
         workspace=settings.workspace,
