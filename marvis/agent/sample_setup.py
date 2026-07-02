@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from marvis.feature.candidates import META_TOKENS, candidate_numeric_features
+from marvis.feature.candidates import (
+    META_TOKENS,
+    candidate_numeric_features,
+    excluded_categorical_columns,
+)
+
 # Preferred binary-target name tokens, most-specific first.
 _TARGET_PRIORITY = (
     "long_y", "fission_y", "y", "label", "target",
@@ -46,6 +51,11 @@ class SetupProposal:
     counts: dict[str, int]
     bad_rate: Optional[float]
     notes: list[str]
+    excluded_categorical: list[dict] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.excluded_categorical is None:
+            self.excluded_categorical = []
 
 
 def _is_binary(series) -> bool:
@@ -125,6 +135,24 @@ def detect_setup(
         sample_rows=sample_rows,
     )
 
+    # -- excluded categorical columns (PREP-3/FS-3: never silently drop) ------
+    excluded_categorical = excluded_categorical_columns(
+        backend,
+        path,
+        target_col=target,
+        split_col=split_col,
+        sample_rows=sample_rows,
+    )
+    if excluded_categorical:
+        preview = "、".join(
+            f"{item.column}(基数{item.cardinality})" for item in excluded_categorical[:8]
+        )
+        more = f" 等共 {len(excluded_categorical)} 个" if len(excluded_categorical) > 8 else ""
+        notes.append(
+            f"{len(excluded_categorical)} 个类别列未入模:{preview}{more};"
+            "如需使用,请先用 woe_encode_categorical 编码,或改用 catboost(原生支持类别列)。"
+        )
+
     # -- counts / bad-rate (read only key columns in full) --------------------
     counts: dict[str, int] = {}
     bad_rate: Optional[float] = None
@@ -140,7 +168,18 @@ def detect_setup(
                 role: int((keys[split_col] == val).sum())
                 for role, val in split_values.items()
             }
-    return SetupProposal(target, split_col or None, split_values, candidates, counts, bad_rate, notes)
+    return SetupProposal(
+        target,
+        split_col or None,
+        split_values,
+        candidates,
+        counts,
+        bad_rate,
+        notes,
+        excluded_categorical=[
+            {"column": item.column, "cardinality": item.cardinality} for item in excluded_categorical
+        ],
+    )
 
 
 def _detect_continuous_target(probe, configured_target: str) -> str:
