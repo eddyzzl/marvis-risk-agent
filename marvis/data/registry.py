@@ -44,6 +44,7 @@ class DatasetRegistry:
         *,
         role: str = "unknown",
         seed: int = 0,
+        max_excel_rows: int | None = None,
     ) -> Dataset:
         source_path = Path(source_path)
         dataset_dir = self._dataset_dir(task_id)
@@ -53,7 +54,9 @@ class DatasetRegistry:
         artifact = uow.stage_file(dataset_dir, final_name)
         try:
             self.last_csv_ingest_report = None
-            sheet = self._write_upload_as_parquet(source_path, artifact.path)
+            sheet = self._write_upload_as_parquet(
+                source_path, artifact.path, max_excel_rows=max_excel_rows
+            )
             content_hash = sha256_file(artifact.path)
             find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
             existing = find_by_hash(content_hash) if callable(find_by_hash) else None
@@ -318,7 +321,13 @@ class DatasetRegistry:
         sheet = self._write_upload_as_parquet(source_path, out_path)
         return out_path, sheet
 
-    def _write_upload_as_parquet(self, source_path: Path, out_path: Path) -> str | None:
+    def _write_upload_as_parquet(
+        self,
+        source_path: Path,
+        out_path: Path,
+        *,
+        max_excel_rows: int | None = None,
+    ) -> str | None:
         suffix = source_path.suffix.lower()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         if suffix == ".parquet":
@@ -354,7 +363,9 @@ class DatasetRegistry:
             if not sheets:
                 raise DataBackendError(f"workbook has no sheets: {source_path}")
             with tempfile.TemporaryDirectory(prefix=".xlsx_ingest_", dir=out_path.parent) as temp_name:
-                parquet_path, report = ingest_sheet(source_path, sheets[0], Path(temp_name))
+                parquet_path, report = ingest_sheet(
+                    source_path, sheets[0], Path(temp_name), max_rows=max_excel_rows
+                )
                 shutil.move(parquet_path, out_path)
             return report.sheet
         raise DataBackendError(f"unsupported dataset upload format: {suffix}")

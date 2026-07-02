@@ -29,6 +29,7 @@ from marvis.data.contracts import KeyPair
 from marvis.data.errors import (
     DataBackendError,
     DataIngestError,
+    DatasetTooLargeError,
     DedupRequiredError,
     FanOutError,
     JoinNotConfirmedError,
@@ -43,6 +44,10 @@ router = APIRouter(prefix="/api", tags=["data"])
 DATASET_ROLES = {"sample", "feature", "derived", "unknown"}
 DATASET_PREVIEW_MAX_ROWS = 500
 DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
+# TST-2: chunk size for streaming an upload to disk instead of reading the
+# whole file into memory with UploadFile.read()/file.file.read().
+UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+_EXCEL_UPLOAD_SUFFIXES = {".xlsx", ".xlsm"}
 
 
 def _upload_artifact_name(filename: str | None) -> str:
@@ -50,6 +55,63 @@ def _upload_artifact_name(filename: str | None) -> str:
     source_path = Path(source_name)
     stem = source_path.stem or "upload"
     return f"{stem}_{uuid4().hex[:8]}{source_path.suffix.lower()}"
+
+
+def _max_upload_bytes_for_suffix(settings, suffix: str) -> int:
+    if suffix in _EXCEL_UPLOAD_SUFFIXES:
+        return settings.max_excel_upload_bytes
+    return settings.max_csv_upload_bytes
+
+
+def _reject_by_content_length(request: Request, max_bytes: int) -> None:
+    """Fast pre-check: if the client sent a Content-Length header, reject
+    obviously oversized requests before any bytes are read. Content-Length
+    covers the whole multipart body (form fields + boundaries), which is
+    always >= the uploaded file's own size, so this can only reject requests
+    that are already too large -- it can never wrongly *accept* an oversized
+    file, and is not itself sufficient (a client can omit or lie about
+    Content-Length), which is why the streaming write below re-checks the
+    actual bytes written as the authoritative guard.
+    """
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return
+    try:
+        declared_bytes = int(content_length)
+    except ValueError:
+        return
+    if declared_bytes > max_bytes:
+        raise DatasetTooLargeError(
+            reason="上传内容大小超过上限",
+            limit=max_bytes,
+            actual=declared_bytes,
+        )
+
+
+def _stream_upload_to_path(file: UploadFile, destination: Path, *, max_bytes: int) -> int:
+    """Stream ``file`` to ``destination`` in fixed-size chunks instead of
+    ``file.file.read()`` (whole-file-into-memory). Sync read of the underlying
+    SpooledTemporaryFile: this endpoint is a plain `def` so FastAPI already
+    runs it in a worker thread (PERF-1); `file.file` is the raw BinaryIO, no
+    event loop needed. Enforces `max_bytes` against the cumulative bytes
+    actually written -- the authoritative guard (Content-Length can be absent
+    or spoofed, see `_reject_by_content_length`).
+    """
+    total_bytes = 0
+    with destination.open("wb") as output:
+        while True:
+            chunk = file.file.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise DatasetTooLargeError(
+                    reason="上传文件大小超过上限",
+                    limit=max_bytes,
+                    actual=total_bytes,
+                )
+            output.write(chunk)
+    return total_bytes
 
 
 def _data_runtime(request: Request):
@@ -132,15 +194,27 @@ def upload_task_dataset(
     _require_task(request, task_id)
     if role not in DATASET_ROLES:
         raise HTTPException(status_code=422, detail="invalid dataset role")
+    settings = request.app.state.settings
     _repo_data, _backend, registry, _join_engine = _data_runtime(request)
-    upload_dir = request.app.state.settings.datasets_dir / task_id / "uploads"
+    upload_suffix = Path(file.filename or "").suffix.lower()
+    max_upload_bytes = _max_upload_bytes_for_suffix(settings, upload_suffix)
+    try:
+        _reject_by_content_length(request, max_upload_bytes)
+    except DatasetTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    upload_dir = settings.datasets_dir / task_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     upload_uow = ArtifactUnitOfWork()
     upload_artifact = upload_uow.stage_file(upload_dir, _upload_artifact_name(file.filename))
-    # Sync read of the underlying SpooledTemporaryFile: this endpoint is a plain `def`
-    # so FastAPI already runs it in a worker thread (PERF-1); `file.file` is the raw
-    # BinaryIO, no event loop needed.
-    upload_artifact.path.write_bytes(file.file.read())
+    # TST-2: stream to disk in fixed-size chunks instead of file.file.read()
+    # (whole-file-into-memory) -- see _stream_upload_to_path. The cumulative
+    # byte count is the authoritative size guard; Content-Length above is only
+    # a fast pre-check and can be absent or spoofed.
+    try:
+        _stream_upload_to_path(file, upload_artifact.path, max_bytes=max_upload_bytes)
+    except DatasetTooLargeError as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
@@ -153,7 +227,7 @@ def upload_task_dataset(
                 sheets = [sheet]
             datasets = []
             reports = []
-            out_dir = request.app.state.settings.datasets_dir / task_id / "excel"
+            out_dir = settings.datasets_dir / task_id / "excel"
             out_dir.mkdir(parents=True, exist_ok=True)
             uow = ArtifactUnitOfWork()
             staged_sheets = []
@@ -161,7 +235,12 @@ def upload_task_dataset(
                 with tempfile.TemporaryDirectory(prefix=".excel_ingest_", dir=out_dir) as scratch:
                     scratch_dir = Path(scratch)
                     for sheet_name in sheets:
-                        parquet_path, report = ingest_sheet(upload_path, sheet_name, scratch_dir)
+                        parquet_path, report = ingest_sheet(
+                            upload_path,
+                            sheet_name,
+                            scratch_dir,
+                            max_rows=settings.max_excel_rows,
+                        )
                         artifact = uow.stage_file(out_dir, parquet_path.name)
                         shutil.move(parquet_path, artifact.path)
                         staged_sheets.append((artifact.final_path, report))
@@ -194,7 +273,14 @@ def upload_task_dataset(
                 uow.rollback()
                 raise
         else:
-            datasets = [registry.register_from_upload(task_id, upload_path, role=role)]
+            datasets = [
+                registry.register_from_upload(
+                    task_id,
+                    upload_path,
+                    role=role,
+                    max_excel_rows=settings.max_excel_rows,
+                )
+            ]
             reports = []
             csv_report = registry.last_csv_ingest_report
             if csv_report is not None:
@@ -214,6 +300,9 @@ def upload_task_dataset(
     except HTTPException:
         upload_uow.rollback()
         raise
+    except DatasetTooLargeError as exc:
+        upload_uow.rollback()
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (DataBackendError, DataIngestError, ValueError) as exc:
         upload_uow.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

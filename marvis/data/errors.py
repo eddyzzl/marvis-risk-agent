@@ -130,13 +130,56 @@ class DataSecurityError(DataLayerError):
     """Raised when untrusted input would enter a backend query."""
 
 
+class DatasetTooLargeError(DataIngestError):
+    """TST-2: raised when an uploaded/registered file exceeds the configured
+    size or row-count guardrail. Carries structured diagnostics (mirrors
+    NanLabelNotConfirmedError's pattern) so the router can surface a 413 with
+    both the configured limit and the actual size/row count, instead of a
+    generic message the caller has to parse.
+    """
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        limit: int,
+        actual: int | None = None,
+        unit: str = "bytes",
+    ) -> None:
+        self.reason = str(reason)
+        self.limit = int(limit)
+        self.actual = None if actual is None else int(actual)
+        self.unit = str(unit)
+        actual_text = "unknown" if self.actual is None else str(self.actual)
+        super().__init__(
+            f"{self.reason}: limit={self.limit} {self.unit}, actual={actual_text} {self.unit}"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": "dataset_too_large",
+            "reason": self.reason,
+            "limit": self.limit,
+            "actual": self.actual,
+            "unit": self.unit,
+        }
+
+
+class InvalidDatasetPathError(DataSecurityError):
+    """TST-2: raised when a local-path dataset registration request names a
+    path that fails validation (does not exist, is not a regular file,
+    unsupported extension, or escapes the expected location)."""
+
+
 __all__ = [
     "DataBackendError",
     "DataIngestError",
     "DataLayerError",
     "DataSecurityError",
+    "DatasetTooLargeError",
     "DedupRequiredError",
     "FanOutError",
+    "InvalidDatasetPathError",
     "JoinNotConfirmedError",
     "NanLabelNotConfirmedError",
     "ScoreDirectionConflictError",

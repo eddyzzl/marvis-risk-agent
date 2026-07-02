@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
-from marvis.data.errors import DataIngestError
+from marvis.data.errors import DataIngestError, DatasetTooLargeError
 
 
 MAX_HEADER_ROWS = 5
@@ -36,6 +36,26 @@ def list_sheets(path: Path) -> list[str]:
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         return list(workbook.sheetnames)
+    finally:
+        workbook.close()
+
+
+def probe_sheet_row_count(path: Path, sheet: str) -> int | None:
+    """TST-2: cheap row-count probe using a read_only workbook, so an oversized
+    sheet can be rejected *before* paying for a full ``pd.read_excel`` load.
+
+    ``read_only=True`` streams the worksheet's XML instead of materializing
+    every cell, so ``max_row`` is available without loading sheet data into
+    memory. openpyxl's ``max_row`` reflects the sheet's used-range dimension
+    (from the file's ``<dimension>`` element when present) and can be ``None``
+    for a pathological/empty sheet -- callers should treat ``None`` as
+    "unknown, do not gate on it" rather than as zero rows.
+    """
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook[sheet]
+        max_row = worksheet.max_row
+        return int(max_row) if max_row is not None else None
     finally:
         workbook.close()
 
@@ -79,7 +99,17 @@ def ingest_sheet(
     out_dir: Path,
     *,
     header_rows: int | None = None,
+    max_rows: int | None = None,
 ) -> tuple[Path, IngestReport]:
+    if max_rows is not None:
+        probed_rows = probe_sheet_row_count(path, sheet)
+        if probed_rows is not None and probed_rows > max_rows:
+            raise DatasetTooLargeError(
+                reason=f"Excel 工作表 {sheet!r} 行数超过上限",
+                limit=max_rows,
+                actual=probed_rows,
+                unit="rows",
+            )
     try:
         preview = pd.read_excel(
             path,
@@ -200,4 +230,5 @@ __all__ = [
     "flatten_headers",
     "ingest_sheet",
     "list_sheets",
+    "probe_sheet_row_count",
 ]

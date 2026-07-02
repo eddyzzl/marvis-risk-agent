@@ -324,6 +324,158 @@ def test_dataset_upload_rejects_invalid_excel_sheet(tmp_path):
     assert not any(upload_dir.rglob("*"))
 
 
+def test_dataset_upload_streams_to_disk_without_full_buffer_read(tmp_path, monkeypatch):
+    """TST-2: the upload endpoint must never pull the whole file into memory
+    via a single unbounded read -- assert every read the router issues against
+    the underlying SpooledTemporaryFile is bounded by a small chunk size, and
+    that more than one chunked read happens for a file bigger than one chunk.
+    A real 8MB UPLOAD_CHUNK_SIZE would need a multi-hundred-MB fixture file to
+    force a second read, so the module constant is monkeypatched down to a
+    trivially small size for this test only.
+    """
+    from tempfile import SpooledTemporaryFile
+
+    monkeypatch.setattr("marvis.routers.data.UPLOAD_CHUNK_SIZE", 256)
+
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    read_sizes = []
+    original_read = SpooledTemporaryFile.read
+
+    def tracking_read(self, size=-1, *args, **kwargs):
+        read_sizes.append(size)
+        assert size is not None and size != -1 and size <= 256, (
+            f"upload read requested unbounded/oversized chunk: {size!r}"
+        )
+        return original_read(self, size, *args, **kwargs)
+
+    monkeypatch.setattr(SpooledTemporaryFile, "read", tracking_read)
+
+    # ~4KB, comfortably bigger than the 256-byte patched chunk size, so a
+    # true streaming implementation must issue several bounded reads.
+    multi_chunk_csv = b"mobile,bad_flag\n" + b"13800138000,0\n" * 300
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", multi_chunk_csv, "text/csv")},
+    )
+
+    assert response.status_code == 201
+    assert len(read_sizes) > 1, "expected multiple chunked reads, not one full-buffer read"
+    assert all(size <= 256 for size in read_sizes)
+
+
+def test_dataset_upload_rejects_oversized_csv_via_streaming_check(tmp_path, monkeypatch):
+    """TST-2: 413 with a Chinese guardrail message when the actual streamed
+    bytes exceed the configured CSV limit. Content-Length is deliberately
+    withheld (chunked-transfer request body) so this can only be caught by
+    the streaming cumulative-byte-count check, not the Content-Length
+    pre-check -- proving the streaming check is a real, independent guard and
+    not just a formality behind the pre-check."""
+    monkeypatch.setattr("marvis.routers.data.UPLOAD_CHUNK_SIZE", 1024)
+    client, settings = _client(tmp_path)
+    # Shrink the limit so the test doesn't need to generate gigabytes.
+    object.__setattr__(settings, "max_csv_upload_bytes", 2048)
+    task = _create_task(settings)
+    oversized_csv = b"mobile,bad_flag\n" + b"13800138000,0\n" * 500  # well over 2048 bytes
+
+    multipart_request = httpx.Request(
+        "POST",
+        "http://testserver/irrelevant",
+        files={"file": ("big.csv", oversized_csv, "text/csv")},
+        data={"role": "sample"},
+    )
+    body_bytes = multipart_request.read()
+    content_type = multipart_request.headers["content-type"]
+
+    def body_without_content_length():
+        chunk_size = 200
+        for offset in range(0, len(body_bytes), chunk_size):
+            yield body_bytes[offset:offset + chunk_size]
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        content=body_without_content_length(),
+        headers={"content-type": content_type},
+    )
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert "上传文件大小超过上限" in detail
+    assert "2048" in detail
+    upload_dir = settings.datasets_dir / task.id / "uploads"
+    assert not any(upload_dir.rglob("*"))
+
+
+def test_dataset_upload_rejects_oversized_content_length_before_reading(tmp_path):
+    """TST-2: a declared Content-Length that already exceeds the limit is
+    rejected before any staging/writing happens (fast pre-check)."""
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_csv_upload_bytes", 100)
+    task = _create_task(settings)
+    csv_bytes = b"mobile,bad_flag\n13800138000,0\n"
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", csv_bytes, "text/csv")},
+        headers={"Content-Length": str(10_000)},
+    )
+
+    assert response.status_code == 413
+    assert "上传内容大小超过上限" in response.json()["detail"]
+
+
+def test_dataset_upload_rejects_excel_sheet_over_row_guardrail(tmp_path, monkeypatch):
+    """TST-2: Excel sheets are row-probed before the full pd.read_excel load;
+    an oversized sheet gets a clear typed error instead of an unbounded read."""
+    client, settings = _client(tmp_path)
+    object.__setattr__(settings, "max_excel_rows", 3)
+    task = _create_task(settings)
+    workbook_path = tmp_path / "book.xlsx"
+    pd.DataFrame({"id": [1, 2, 3, 4, 5], "bad_flag": [0, 1, 0, 1, 0]}).to_excel(
+        workbook_path, sheet_name="Sample", index=False
+    )
+
+    response = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={
+            "file": (
+                "book.xlsx",
+                workbook_path.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    detail = response.json()["detail"]
+    assert "行数超过上限" in detail
+    assert DatasetRepository(settings.db_path).list_datasets(task.id) == []
+
+
+def test_build_settings_reads_upload_guardrails_from_env(tmp_path, monkeypatch):
+    """TST-2: upload size/row guardrails are configurable via env var, with
+    sane defaults (2GB CSV / 500MB Excel / 2M Excel rows) when unset."""
+    from marvis.settings import build_settings
+
+    defaults = build_settings(tmp_path / "defaults_workspace")
+    assert defaults.max_csv_upload_bytes == 2 * 1024 * 1024 * 1024
+    assert defaults.max_excel_upload_bytes == 500 * 1024 * 1024
+    assert defaults.max_excel_rows == 2_000_000
+
+    monkeypatch.setenv("MARVIS_MAX_CSV_UPLOAD_BYTES", "1234")
+    monkeypatch.setenv("MARVIS_MAX_EXCEL_UPLOAD_BYTES", "5678")
+    monkeypatch.setenv("MARVIS_MAX_EXCEL_ROWS", "42")
+    overridden = build_settings(tmp_path / "overridden_workspace")
+    assert overridden.max_csv_upload_bytes == 1234
+    assert overridden.max_excel_upload_bytes == 5678
+    assert overridden.max_excel_rows == 42
+
+
 def test_dataset_upload_raw_file_rolls_back_when_registration_fails(
     tmp_path,
     monkeypatch,
