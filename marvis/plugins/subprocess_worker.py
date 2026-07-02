@@ -18,7 +18,7 @@ import subprocess
 import sys
 import traceback
 
-from marvis.plugins.contracts import ToolContext
+from marvis.plugins.contracts import PROTOCOL_VERSION, ToolContext
 
 
 def worker_main() -> None:
@@ -28,6 +28,8 @@ def worker_main() -> None:
     except Exception as exc:
         _emit({"ok": False, "error_kind": "protocol", "error": f"bad job json: {exc}"})
         _hard_exit(1)
+
+    _check_protocol_version(job)
 
     resource_limits = _apply_resource_limits(
         job.get("memory_limit_mb"),
@@ -73,8 +75,38 @@ def worker_main() -> None:
         "stdout": stdout_buffer.getvalue(),
         "stderr": stderr_buffer.getvalue(),
         "resource_limits": resource_limits,
+        "worker_protocol_version": PROTOCOL_VERSION,
     })
     _hard_exit(0)
+
+
+def _check_protocol_version(job: dict) -> None:
+    """ARCH-5: verify the host's protocol_version matches this worker's before
+    doing any real work. A version mismatch means the job dict schema, result
+    protocol shape, or guard semantics may have drifted between host and
+    worker (e.g. execution_environment.python_executable points at a separate
+    interpreter running a different marvis checkout) -- continuing would fail
+    in confusing, hard-to-diagnose ways deeper in the run. Fail fast with a
+    typed, Chinese-readable error instead."""
+    host_version = job.get("protocol_version")
+    if host_version == PROTOCOL_VERSION:
+        return
+    _emit({
+        "ok": False,
+        "error_kind": "protocol_version_mismatch",
+        "error": (
+            f"插件 worker 协议版本不匹配：宿主={host_version!r}，"
+            f"worker={PROTOCOL_VERSION!r}；请确认 execution_environment 配置的 "
+            f"python_executable 与宿主使用同一份 marvis 代码"
+        ),
+        "error_detail": {
+            "kind": "protocol_version_mismatch",
+            "host_protocol_version": host_version,
+            "worker_protocol_version": PROTOCOL_VERSION,
+        },
+        "worker_protocol_version": PROTOCOL_VERSION,
+    })
+    _hard_exit(1)
 
 
 def _run_tool(job: dict) -> dict:
