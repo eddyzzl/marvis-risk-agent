@@ -2,14 +2,28 @@
 
 The modeling pack previously had no tuning at all — train_model ran a single
 fixed (and very weak: 20-round) configuration, so an out-of-the-box model badly
-underperformed a hand-tuned reference. This module runs a seeded random search
-over a sensible LightGBM space, selecting on the **test** split while penalising
-train/test overfit. OOT metrics are reported for transparency but are not used for
-hyperparameter selection, so the search does not tune against the holdout window.
-step produces strong, robust ``params`` to hand straight to ``train_model``.
+underperformed a hand-tuned reference. This module runs a seeded **two-stage**
+random search over a sensible LightGBM space, selecting on the **test** split
+while penalising train/test overfit. OOT metrics are reported for transparency
+but are not used for hyperparameter selection, so the search does not tune
+against the holdout window. The step produces strong, robust ``params`` to feed
+straight to ``train_model``.
 
-Deterministic given ``seed`` (the trial space is sampled from a seeded RNG and
-LightGBM is trained with fixed seed + single thread). KS comes from
+Two-stage search (no new dependency — deterministic, seed-derived, no TPE/
+Bayesian library required):
+  * Stage 1 ("coarse", ``coarse_fraction`` of the budget, default 60%) samples
+    the full space uniformly / log-uniformly at random — the original strategy.
+  * Stage 2 ("fine", the remaining budget) resamples each numeric hyperparameter
+    in a shrunk neighbourhood around the stage-1 best trial (log-neighbourhood
+    for log-scaled params, linear-neighbourhood for linear-scaled ones) while
+    keeping the more categorical params (``max_depth``, ``bagging_freq``,
+    ``scale_pos_weight``) fixed at the stage-1 best value. Each trial records
+    its ``search_stage`` ("coarse"/"fine") for report traceability.
+
+Deterministic given ``seed``: stage 1 and stage 2 each draw from their own
+seed-derived ``RandomState`` (``seed`` and ``seed + 1``), so re-running with the
+same seed reproduces the exact same trial sequence and results. LightGBM is
+trained with fixed seed + single thread. KS comes from
 marvis.feature.metrics.feature_ks.
 """
 
@@ -26,6 +40,34 @@ from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
 from marvis.packs.modeling.errors import ModelingError
 
+# Reference learning rate used to scale the per-trial boost-round ceiling: lower
+# sampled learning rates get proportionally more rounds (early stopping still
+# backstops actual training length), higher learning rates get fewer.
+_LR_REFERENCE = 0.1
+_MIN_BOOST_ROUND_CEILING = 100
+
+# log-scaled numeric params: (low, high) bounds used for coarse-stage sampling.
+_LOG_SPACE_BOUNDS: dict[str, tuple[float, float]] = {
+    "learning_rate": (0.01, 0.3),
+    "lambda_l1": (1e-8, 10.0),
+    "lambda_l2": (1e-8, 10.0),
+}
+# linear-scaled numeric params sampled by rng.uniform in coarse stage.
+_LINEAR_SPACE_BOUNDS: dict[str, tuple[float, float]] = {
+    "feature_fraction": (0.4, 0.9),
+    "bagging_fraction": (0.5, 0.9),
+    "min_gain_to_split": (0.0, 3.0),
+}
+# choice-scaled numeric params sampled from a fixed candidate list in coarse stage.
+_CHOICE_SPACE: dict[str, tuple] = {
+    "num_leaves": (8, 12, 16, 24, 31, 48, 63),
+    "min_child_samples": (50, 100, 150, 200, 300, 500),
+}
+# Fine-stage shrink factor applied around the stage-1 best value.
+_FINE_LOG_SHRINK = 0.35  # +/- fraction (in log space) of the full log-range
+_FINE_LINEAR_SHRINK = 0.2  # +/- fraction of the full linear-range
+_FINE_CHOICE_NEIGHBORS = 1  # +/- N positions in the sorted choice list
+
 
 @dataclass(frozen=True)
 class TuneResult:
@@ -34,7 +76,7 @@ class TuneResult:
     best_metrics: dict
     """{train_ks, test_ks, oot_ks, train_auc?, overfit_gap} for the chosen trial."""
     trials: tuple[dict, ...] = field(default_factory=tuple)
-    """Per-trial {params, train_ks, test_ks, oot_ks, score} for transparency."""
+    """Per-trial {params, train_ks, test_ks, oot_ks, score, search_stage} for transparency."""
     n_trials: int = 0
     nan_labels_dropped: int = 0
     """Rows excluded by the NaN-label gate (train/test/oot), for audit (mirrors TrainResult)."""
@@ -57,23 +99,93 @@ def _split(frame: pd.DataFrame, split_col: str, split_values: dict) -> tuple[pd.
     return train, test, oot
 
 
-def _sample_params(rng: np.random.RandomState, pos_weight_hint: float) -> dict:
-    return {
+def _sample_coarse_params(rng: np.random.RandomState, pos_weight_hint: float) -> dict:
+    """Stage-1 coarse sample: full-space uniform / log-uniform draw."""
+    params = {
         "objective": "binary",
         "metric": "auc",
         "verbosity": -1,
-        "num_leaves": int(rng.choice([8, 12, 16, 24, 31, 48, 63])),
         "max_depth": int(rng.choice([2, 3, 4, 5, 6, -1])),
-        "learning_rate": float(round(10 ** rng.uniform(-2.0, -1.1), 5)),  # ~0.01..0.08
-        "min_child_samples": int(rng.choice([50, 100, 150, 200, 300, 500])),
-        "feature_fraction": float(round(rng.uniform(0.4, 0.9), 3)),
-        "bagging_fraction": float(round(rng.uniform(0.5, 0.9), 3)),
         "bagging_freq": 1,
-        "lambda_l1": float(round(rng.uniform(0.0, 20.0), 2)),
-        "lambda_l2": float(round(rng.uniform(0.0, 20.0), 2)),
-        "min_gain_to_split": float(round(rng.uniform(0.0, 3.0), 2)),
         "scale_pos_weight": float(rng.choice([1.0, 3.0, 5.0, 10.0, pos_weight_hint])),
     }
+    for name, (low, high) in _LOG_SPACE_BOUNDS.items():
+        params[name] = _round_log_sample(rng, low, high)
+    for name, (low, high) in _LINEAR_SPACE_BOUNDS.items():
+        params[name] = float(round(rng.uniform(low, high), 3))
+    for name, choices in _CHOICE_SPACE.items():
+        params[name] = int(rng.choice(choices))
+    return params
+
+
+def _sample_fine_params(rng: np.random.RandomState, pos_weight_hint: float, anchor: dict) -> dict:
+    """Stage-2 fine sample: shrunk neighbourhood around the stage-1 best trial.
+
+    Numeric params (log- or linear-scaled) are resampled in a bounded window
+    around ``anchor``'s value, clipped back into the full space bounds.
+    Categorical-ish params (``max_depth``, ``bagging_freq``, ``scale_pos_weight``)
+    stay fixed at the anchor's value — the coarse stage already picked the best
+    region for them and there is no continuous neighbourhood to refine.
+    """
+    params = {
+        "objective": "binary",
+        "metric": "auc",
+        "verbosity": -1,
+        "max_depth": anchor["max_depth"],
+        "bagging_freq": 1,
+        "scale_pos_weight": anchor["scale_pos_weight"],
+    }
+    for name, (low, high) in _LOG_SPACE_BOUNDS.items():
+        params[name] = _round_log_sample(
+            rng, low, high, center=anchor[name], shrink=_FINE_LOG_SHRINK,
+        )
+    for name, (low, high) in _LINEAR_SPACE_BOUNDS.items():
+        span = (high - low) * _FINE_LINEAR_SHRINK
+        lo = max(low, anchor[name] - span)
+        hi = min(high, anchor[name] + span)
+        params[name] = float(round(rng.uniform(lo, hi), 3))
+    for name, choices in _CHOICE_SPACE.items():
+        ordered = sorted(choices)
+        idx = ordered.index(anchor[name])
+        lo_idx = max(0, idx - _FINE_CHOICE_NEIGHBORS)
+        hi_idx = min(len(ordered) - 1, idx + _FINE_CHOICE_NEIGHBORS)
+        params[name] = int(rng.choice(ordered[lo_idx : hi_idx + 1]))
+    return params
+
+
+def _round_log_sample(
+    rng: np.random.RandomState,
+    low: float,
+    high: float,
+    *,
+    center: float | None = None,
+    shrink: float | None = None,
+) -> float:
+    """Log-uniform sample in ``[low, high]``, optionally shrunk to a neighbourhood
+    of ``center`` (also in log space, clipped back to the full bounds)."""
+    log_low, log_high = np.log10(low), np.log10(high)
+    if center is not None and shrink is not None:
+        log_center = np.log10(max(center, low))
+        span = (log_high - log_low) * shrink
+        log_low = max(log_low, log_center - span)
+        log_high = min(log_high, log_center + span)
+    value = 10 ** rng.uniform(log_low, log_high)
+    return float(round(value, 8))
+
+
+def _sample_params(rng: np.random.RandomState, pos_weight_hint: float) -> dict:
+    """Back-compat single-stage sampler (used by callers that want one draw from
+    the full coarse space, e.g. non-lgb fallbacks or tests)."""
+    return _sample_coarse_params(rng, pos_weight_hint)
+
+
+def _boost_round_ceiling(learning_rate: float, max_boost_round: int) -> int:
+    """Scale the per-trial round ceiling inversely with the sampled learning rate
+    so low-lr trials get enough rounds to converge; early stopping still bounds
+    actual training length, this only raises/lowers the ceiling it can reach."""
+    scale = _LR_REFERENCE / max(learning_rate, 1e-6)
+    scaled = int(round(max_boost_round * scale))
+    return min(max_boost_round, max(_MIN_BOOST_ROUND_CEILING, scaled))
 
 
 def tune_hyperparameters(
@@ -92,8 +204,16 @@ def tune_hyperparameters(
     sample_weight_col: str = "",
     base_params: dict | None = None,
     drop_nan_labels: bool = False,
+    coarse_fraction: float = 0.6,
 ) -> TuneResult:
-    """Random-search LightGBM params; select by test KS minus in-time overfit penalty.
+    """Deterministic two-stage random search; select by test KS minus in-time
+    overfit penalty.
+
+    Stage 1 ("coarse") spends ``round(n_trials * coarse_fraction)`` trials
+    sampling the full space at random. Stage 2 ("fine") spends the remaining
+    trials resampling numeric params in a shrunk neighbourhood around the best
+    stage-1 trial. Both stages draw from seed-derived ``RandomState`` instances
+    so the whole search is reproducible for a fixed ``seed``.
 
     Objective per trial:
     ``test_ks - overfit_penalty * max(0, train_ks - test_ks)``.
@@ -121,23 +241,32 @@ def tune_hyperparameters(
 
     dtrain = lgb.Dataset(train[feats], label=ytr, weight=wtr, free_raw_data=False)
     dvalid = lgb.Dataset(test[feats], label=yte, weight=wte, reference=dtrain, free_raw_data=False)
-    rng = np.random.RandomState(seed)
     fixed_params = _lgb_base_params(base_params, pos_weight_hint=pos_weight_hint)
     trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
 
-    best = None
+    total_trials = max(1, n_trials)
+    n_coarse = min(total_trials, max(1, round(total_trials * coarse_fraction)))
+    n_fine = total_trials - n_coarse
+
+    coarse_rng = np.random.RandomState(seed)
+    fine_rng = np.random.RandomState(seed + 1)
+
+    best: dict | None = None
+    best_coarse: dict | None = None
     trials: list[dict] = []
-    for trial in range(max(1, n_trials)):
-        params = {**_sample_params(rng, pos_weight_hint), **fixed_params}
+
+    def _run_trial(params: dict, stage: str) -> dict:
+        params = {**params, **fixed_params}
         params.update({"seed": seed, "num_threads": 0, "deterministic": True})
+        round_ceiling = _boost_round_ceiling(params["learning_rate"], trial_max_boost_round)
         booster = lgb.train(
             params,
             dtrain,
-            num_boost_round=trial_max_boost_round,
+            num_boost_round=round_ceiling,
             valid_sets=[dvalid],
             callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)],
         )
-        rounds = int(booster.best_iteration or trial_max_boost_round)
+        rounds = int(booster.best_iteration or round_ceiling)
         train_preds = booster.predict(train[feats])
         test_preds = booster.predict(test[feats])
         train_ks = feature_ks(train_preds, ytr)
@@ -163,7 +292,7 @@ def tune_hyperparameters(
             test_ks=test_ks,
             overfit_penalty=overfit_penalty,
         )
-        record = {
+        return {
             "params": {**params, "num_boost_round": rounds},
             "train_ks": train_ks, "test_ks": test_ks, "oot_ks": oot_ks, "score": score,
             "train_auc": train_auc, "test_auc": test_auc, "oot_auc": oot_auc,
@@ -171,12 +300,32 @@ def tune_hyperparameters(
             "lift_head_10": lift.get("lift_head_10"), "lift_tail_10": lift.get("lift_tail_10"),
             "overfit_gap_tt": gap_tt, "overfit_gap_to": gap_to,
             "oot_stability_gap": oot_stability_gap,
+            "search_stage": stage,
         }
+
+    for _ in range(n_coarse):
+        sampled = _sample_coarse_params(coarse_rng, pos_weight_hint)
+        record = _run_trial(sampled, "coarse")
+        record["_sampled"] = sampled
         trials.append(record)
-        if best is None or score > best["score"]:
+        if best is None or record["score"] > best["score"]:
+            best = record
+        if best_coarse is None or record["score"] > best_coarse["score"]:
+            best_coarse = record
+
+    anchor = (best_coarse or best)["_sampled"]
+    for _ in range(n_fine):
+        sampled = _sample_fine_params(fine_rng, pos_weight_hint, anchor)
+        record = _run_trial(sampled, "fine")
+        record["_sampled"] = sampled
+        trials.append(record)
+        if record["score"] > best["score"]:
             best = record
 
     assert best is not None
+    for record in trials:
+        record.pop("_sampled", None)
+
     return TuneResult(
         best_params=best["params"],
         best_metrics={

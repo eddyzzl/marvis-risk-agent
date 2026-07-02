@@ -337,20 +337,11 @@ def _modeling_override_guidance(
         })
     n_trials = _safe_int(output.get("n_trials"))
     if n_trials is not None:
-        if n_trials < 5:
-            message = "当前调参轮数较少，适合快速烟测；用于正式候选模型时建议扩大搜索或记录人工原因。"
-            level = "warning"
-        elif n_trials > 50:
-            message = "当前调参轮数较高，会显著增加运行成本并扩大后续重算范围；AUTO 不应直接放大该预算。"
-            level = "warning"
-        else:
-            message = f"当前调参轮数 {n_trials} 适合作为常规搜索；大幅上调会增加运行成本并触发更宽的下游重算。"
-            level = "info"
+        total_rows = _safe_int(split_summary.get("total_rows")) if isinstance(split_summary, dict) else None
         guidance.append({
             "id": "n_trials",
             "label": "调参预算",
-            "level": level,
-            "message": message,
+            **_n_trials_guidance_by_scale(n_trials, total_rows),
         })
     invalid_weights = [
         str(item.get("column") or "")
@@ -393,6 +384,34 @@ def _modeling_override_guidance(
             "message": "；".join(split_warnings),
         })
     return guidance
+
+
+def _n_trials_guidance_by_scale(n_trials: int, total_rows: int | None) -> dict:
+    """Data-scale-aware n_trials guidance (TUNE-2): recommend a budget instead of
+    discouraging larger ones. Small samples (<50k rows) can afford a thorough
+    search cheaply; larger samples get a runtime heads-up, not a ceiling."""
+    small_sample = total_rows is not None and total_rows < 50_000
+    recommended = "40-80" if small_sample else "40 起，按数据规模和可用时间上调"
+    if n_trials < 5:
+        return {
+            "level": "warning",
+            "message": (
+                f"当前调参轮数较少，适合快速烟测；正式候选模型建议 {recommended} 轮起步，或记录人工原因。"
+            ),
+        }
+    if small_sample:
+        message = (
+            f"当前调参轮数 {n_trials}；当前数据规模（<5万行）适合 40-80 轮的两阶段搜索"
+            "（粗搜定区域、细搜收敛），充分搜索的运行成本通常可接受。"
+        )
+    elif total_rows is not None:
+        message = (
+            f"当前调参轮数 {n_trials}；数据规模较大，扩大搜索预算会显著增加运行耗时，"
+            "建议先用 40 轮左右两阶段搜索评估收益，再按可用时间上调。"
+        )
+    else:
+        message = f"当前调参轮数 {n_trials}；两阶段搜索（粗搜+细搜）下可按需扩大预算以换取更充分的收敛。"
+    return {"level": "info", "message": message}
 
 
 def _safe_int(value) -> int | None:
