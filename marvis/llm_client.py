@@ -79,55 +79,88 @@ class OpenAICompatibleLLMClient:
         )
         timeout = int(self.profile.get("timeout_seconds") or 60)
         prompt_chars = len(system_prompt or "") + len(user_prompt or "")
-        usage: dict = {}
+        max_retries = _transport_max_retries(self.profile)
         started = time.monotonic()
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                content = _read_completion_content(
-                    response, on_delta=on_delta, usage_out=usage
-                )
-        except HTTPError as exc:
-            # Drain the body to free the socket, but never surface it: error bodies
-            # can echo the rejected prompt and would be persisted into
-            # agent_messages.metadata. Only the status code and reason are recorded.
+        retry_count = 0
+        while True:
+            usage: dict = {}
+            delta_fired = {"value": False}
+            wrapped_on_delta = None
+            if on_delta is not None:
+                def wrapped_on_delta(chunk, _flag=delta_fired, _cb=on_delta):
+                    _flag["value"] = True
+                    _cb(chunk)
             try:
-                exc.read()
-            except Exception:
-                pass
+                with urlopen(request, timeout=timeout) as response:
+                    content = _read_completion_content(
+                        response, on_delta=wrapped_on_delta, usage_out=usage
+                    )
+            except HTTPError as exc:
+                # Drain the body to free the socket, but never surface it: error
+                # bodies can echo the rejected prompt and would be persisted into
+                # agent_messages.metadata. Only the status code/reason are recorded.
+                try:
+                    exc.read()
+                except Exception:
+                    pass
+                error_kind = _http_error_kind(exc.code)
+                if error_kind == "http_5xx" and retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False, error_kind=error_kind,
+                    retry_count=retry_count,
+                )
+                raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
+            except URLError as exc:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False, error_kind="connection",
+                    retry_count=retry_count,
+                )
+                raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
+            except TimeoutError as exc:
+                if retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False, error_kind="timeout",
+                    retry_count=retry_count,
+                )
+                raise LLMClientError("LLM request timed out") from exc
+            except (OSError, HTTPException) as exc:
+                # A mid-stream interruption is only retryable if nothing has been
+                # forwarded to the caller yet; retrying after on_delta emitted
+                # content would make the UI roll back partial output.
+                if not delta_fired["value"] and retry_count < max_retries:
+                    retry_count += 1
+                    time.sleep(_RETRY_BACKOFF_SECONDS)
+                    continue
+                self._record_call(
+                    recorder, caller=caller, model_name=model_name,
+                    prompt_chars=prompt_chars, usage={}, started=started,
+                    streamed=bool(stream), ok=False,
+                    error_kind="stream_interrupted", retry_count=retry_count,
+                )
+                raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
             self._record_call(
                 recorder, caller=caller, model_name=model_name,
-                prompt_chars=prompt_chars, usage={}, started=started,
-                streamed=bool(stream), ok=False,
-                error_kind=_http_error_kind(exc.code),
+                prompt_chars=prompt_chars, usage=usage, started=started,
+                streamed=bool(stream), ok=True, error_kind=None,
+                retry_count=retry_count,
             )
-            raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
-        except URLError as exc:
-            self._record_call(
-                recorder, caller=caller, model_name=model_name,
-                prompt_chars=prompt_chars, usage={}, started=started,
-                streamed=bool(stream), ok=False, error_kind="connection",
-            )
-            raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
-        except TimeoutError as exc:
-            self._record_call(
-                recorder, caller=caller, model_name=model_name,
-                prompt_chars=prompt_chars, usage={}, started=started,
-                streamed=bool(stream), ok=False, error_kind="timeout",
-            )
-            raise LLMClientError("LLM request timed out") from exc
-        except (OSError, HTTPException) as exc:
-            self._record_call(
-                recorder, caller=caller, model_name=model_name,
-                prompt_chars=prompt_chars, usage={}, started=started,
-                streamed=bool(stream), ok=False, error_kind="stream_interrupted",
-            )
-            raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
-        self._record_call(
-            recorder, caller=caller, model_name=model_name,
-            prompt_chars=prompt_chars, usage=usage, started=started,
-            streamed=bool(stream), ok=True, error_kind=None,
-        )
-        return content.strip()
+            return content.strip()
 
     def _record_call(
         self,
@@ -141,6 +174,7 @@ class OpenAICompatibleLLMClient:
         streamed: bool,
         ok: bool,
         error_kind: str | None,
+        retry_count: int = 0,
     ) -> None:
         if on_call_recorded is None:
             return
@@ -156,12 +190,26 @@ class OpenAICompatibleLLMClient:
             "ok": ok,
             "error_kind": error_kind,
             "streamed": streamed,
+            "retry_count": retry_count,
         }
         try:
             on_call_recorded(record)
         except Exception:
             # Observability must never break the call path.
             pass
+
+
+_RETRY_BACKOFF_SECONDS = 1.0
+
+
+def _transport_max_retries(profile: dict) -> int:
+    value = profile.get("transport_max_retries")
+    if value is None:
+        return 1
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _http_error_kind(code) -> str:

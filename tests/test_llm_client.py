@@ -1,5 +1,6 @@
 import json
 from http.client import RemoteDisconnected
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -305,3 +306,116 @@ def test_streaming_requests_include_usage_stream_option(monkeypatch):
     ).complete(system_prompt="s", user_prompt="u")
 
     assert captured["payload"]["stream_options"] == {"include_usage": True}
+
+
+class _Http4xxError(HTTPError):
+    def __init__(self):
+        super().__init__(
+            url="https://api.example.com/v1/chat/completions",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=None,
+        )
+
+    def read(self):
+        return b""
+
+
+def test_transient_failure_is_retried_once_then_succeeds(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+    records = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise URLError("connection reset")
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        stream=False,
+        on_call_recorded=records.append,
+    )
+
+    assert content == "plain json"
+    assert calls["n"] == 2
+    assert records[0]["ok"] is True
+    assert records[0]["retry_count"] == 1
+
+
+def test_http_4xx_is_not_retried(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+    records = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        raise _Http4xxError()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="LLM HTTP 400"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+            }
+        ).complete(
+            system_prompt="s",
+            user_prompt="u",
+            stream=False,
+            on_call_recorded=records.append,
+        )
+
+    assert calls["n"] == 1
+    assert records[0]["ok"] is False
+    assert records[0]["error_kind"] == "http_4xx"
+    assert records[0]["retry_count"] == 0
+
+
+class _InterruptedAfterDeltaResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n'.encode("utf-8")
+        raise RemoteDisconnected("stream dropped after first delta")
+
+
+def test_interruption_after_on_delta_is_not_retried(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+    deltas = []
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        return _InterruptedAfterDeltaResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="LLM stream interrupted"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+            }
+        ).complete(system_prompt="s", user_prompt="u", on_delta=deltas.append)
+
+    assert calls["n"] == 1
+    assert deltas == ["partial"]
