@@ -1451,13 +1451,24 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "body instanceof FormData" in api_body
     assert '"Content-Type": "application/json"' not in api_body
 
-    upload_start = create_dialog_js.index("async function uploadMaterialFiles")
+    # UX-12: uploadMaterialFiles is XMLHttpRequest-based (not fetch/api()) so it
+    # can report upload progress — fetch has no upload-progress event at all.
+    upload_start = create_dialog_js.index("function uploadMaterialFiles")
     upload_end = create_dialog_js.index("async function createTask", upload_start)
     upload_body = create_dialog_js[upload_start:upload_end]
     assert "new FormData()" in upload_body
     assert 'formData.append("files"' in upload_body
     assert 'formData.append("relative_paths"' in upload_body
-    assert 'api("api/material-uploads"' in upload_body
+    assert "new XMLHttpRequest()" in upload_body
+    assert 'xhr.open("POST", "/api/material-uploads")' in upload_body
+    assert "xhr.upload.onprogress" in upload_body
+    assert "onProgress(event.loaded, event.total)" in upload_body
+    # a 2xx response resolves with the parsed JSON payload; a non-2xx (or a
+    # network-level xhr.onerror) rejects with a real Error, matching the
+    # error.message contract runAction()'s catch block expects.
+    assert "resolve(payload)" in upload_body
+    assert "reject(new Error(message))" in upload_body
+    assert 'reject(new Error("材料上传失败：网络错误。"))' in upload_body
 
     create_start = create_dialog_js.index("async function createTask")
     create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
@@ -1465,6 +1476,11 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "await uploadMaterialFiles" in create_body
     assert "payload.source_dir = upload.source_dir" in create_body
     assert "文件上传暂未开放" not in create_body
+    # UX-12: percentage readout only kicks in above the size threshold, and the
+    # status text is driven by the same setCreateStatus channel as every other
+    # busy state (no separate progress-bar component).
+    assert "MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES" in create_dialog_js
+    assert "onProgress: showPercent" in create_body
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():

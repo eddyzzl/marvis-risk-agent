@@ -2,6 +2,12 @@ import { api } from "./api.js";
 import { defaultTaskType, taskTypeDefinitions } from "./task-types.js";
 import { formatDateInput } from "./ui-utils.js";
 
+// UX-12: below this total upload size, plain "正在上传材料..." is enough — a
+// percentage readout for a few small files would jump straight to 100% and
+// add noise, not signal. Large credit-sample/feature-table files (the actual
+// case this is for) clear this easily.
+const MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES = 10 * 1024 * 1024;
+
 export function createCreateTaskDialogController({
   $,
   materialSourceController,
@@ -252,18 +258,47 @@ export function createCreateTaskDialogController({
     status.className = `status ${kind}`;
   }
 
-  async function uploadMaterialFiles(files) {
+  // UX-12: XMLHttpRequest (not fetch/api()) because only XHR exposes upload
+  // progress events. onProgress receives (loadedBytes, totalBytes) so the
+  // caller can render "正在上传 N 个文件 (P%)" — large credit-data files can
+  // take real time even on localhost, and fetch gives no signal at all
+  // during that wait.
+  function uploadMaterialFiles(files, { onProgress } = {}) {
     if (!files.length) {
-      throw new Error("请先选择要上传的材料文件。");
+      return Promise.reject(new Error("请先选择要上传的材料文件。"));
     }
     const formData = new FormData();
     files.forEach((item) => {
       formData.append("files", item.file, item.name);
       formData.append("relative_paths", item.relativePath || item.name);
     });
-    return await api("api/material-uploads", {
-      method: "POST",
-      body: formData,
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/material-uploads");
+      if (xhr.upload && typeof onProgress === "function") {
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          onProgress(event.loaded, event.total);
+        };
+      }
+      xhr.onload = () => {
+        let payload = null;
+        try {
+          payload = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch (_) {
+          payload = null;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload);
+          return;
+        }
+        const detail = payload?.detail;
+        const message = typeof detail === "string" ? detail : (detail ? JSON.stringify(detail) : "材料上传失败");
+        reject(new Error(message));
+      };
+      xhr.onerror = () => reject(new Error("材料上传失败：网络错误。"));
+      xhr.onabort = () => reject(new Error("材料上传已取消。"));
+      xhr.send(formData);
     });
   }
 
@@ -344,8 +379,21 @@ export function createCreateTaskDialogController({
         );
         return null;
       }
-      setCreateStatus("正在上传材料...");
-      const upload = await uploadMaterialFiles(files);
+      // UX-12: percentage only kicks in once there is something worth showing a
+      // number for (>10MB total) — for a handful of small files the plain
+      // "正在上传材料..." text is enough and a jumpy 0%→100% readout would be
+      // noise, not signal.
+      const totalBytes = files.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+      const showPercent = totalBytes > MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES;
+      setCreateStatus(`正在上传材料...${showPercent ? " (0%)" : ""}`, "busy");
+      const upload = await uploadMaterialFiles(files, {
+        onProgress: showPercent
+          ? (loaded, total) => {
+              const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+              setCreateStatus(`正在上传材料...共 ${files.length} 个文件 (${percent}%)`, "busy");
+            }
+          : undefined,
+      });
       payload.source_dir = upload.source_dir;
     }
     if (!payload.model_name || !payload.validator || !payload.source_dir) {
