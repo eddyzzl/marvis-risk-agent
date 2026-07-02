@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -316,7 +317,13 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
             vintage=None,
             feature_importance=[{"feature": "x1", "importance": 0.7}],
             scorecard_table=[{"feature": "x1", "bin_label": "[0, 1)", "points": 12.3}],
-            score_bands=[{"split": "oot", "bin": 1, "bad_rate": 0.1}],
+            score_bands=[{
+                "split": "oot",
+                "bin": 1,
+                "bad_rate": 0.1,
+                "bin_edges_source": "train",
+                "cum_direction": "higher_is_riskier",
+            }],
             univariate=[{"feature": "x1", "iv": 0.2, "ks": 0.3}],
             oot_bin_table=[{"bin": 1, "bad_rate": 0.1}],
             stress_product_removal={"baseline": []},
@@ -345,8 +352,9 @@ def test_resolve_sections_and_render_model_report_degrades_missing_business_data
     assert workbook["评分卡"]["A1"].value == "feature"
     assert workbook["评分卡"]["B2"].value == "[0, 1)"
     assert workbook["评分卡"]["C2"].value == 12.3
-    assert workbook["评分分段"]["A1"].value == "split"
-    assert workbook["评分分段"]["C2"].value == 0.1
+    assert "分箱边界口径" in workbook["评分分段"]["A1"].value
+    assert workbook["评分分段"]["A4"].value == "split"
+    assert workbook["评分分段"]["C5"].value == 0.1
     assert any(status.section == "product_list" and not status.available for status in statuses)
 
 
@@ -697,9 +705,14 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     assert len(report.output["section_status"]) == 5
     workbook = load_workbook(report.output["report_path"])
     score_band_sheet = workbook["评分分段"]
-    score_band_headers = [cell.value for cell in score_band_sheet[1]]
+    assert "分箱边界口径" in score_band_sheet["A1"].value
+    score_band_headers = [cell.value for cell in score_band_sheet[4]]
     assert score_band_headers[:5] == ["split", "bin", "score_lower", "score_upper", "sample_count"]
-    assert score_band_sheet.max_row > 1
+    assert "cum_count_pct" in score_band_headers
+    assert "cum_bad_rate" in score_band_headers
+    assert "cum_bad_capture" in score_band_headers
+    assert "ks_contribution" in score_band_headers
+    assert score_band_sheet.max_row > 4
     summary_sheet = workbook["汇总"]
     train_row = next(
         row
@@ -960,3 +973,179 @@ def test_generate_model_report_fails_when_artifact_and_score_column_are_missing(
     assert result.error_detail["experiment_id"] == experiment_id
     assert result.error_detail["dataset_id"] == dataset.id
     assert "score" in str(result.error)
+def _score_band_runtime(tmp_path, frame: pd.DataFrame):
+    path = tmp_path / "score_band_sample.parquet"
+    frame.to_parquet(path, index=False)
+    return SimpleNamespace(backend=DataBackend(tmp_path)), path
+
+
+def _score_band_config(**overrides) -> TrainConfig:
+    defaults = dict(
+        dataset_id="ds",
+        features=("x1",),
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=7,
+        early_stopping_rounds=None,
+    )
+    defaults.update(overrides)
+    return TrainConfig(**defaults)
+
+
+def test_score_band_rows_share_train_derived_bin_edges_across_splits(tmp_path):
+    """DOM-5: bin edges are computed once on train and reused verbatim by test/oot —
+    same edges array per bin index across every split that has rows."""
+    rng_train = list(range(0, 100))
+    frame = pd.DataFrame({
+        "score": [float(v) for v in rng_train] + [5.0, 15.0, 95.0, 105.0] + [10.0, 50.0, 90.0],
+        "y": ([0, 1] * 50) + [0, 1, 0, 1] + [0, 1, 0],
+        "split": (["train"] * 100) + (["test"] * 4) + (["oot"] * 3),
+    })
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime, path, score_col="score", target_col="y", config=_score_band_config(), bin_count=5,
+    )
+
+    assert rows
+    edges_by_split: dict[str, dict[int, tuple[float | None, float | None]]] = {}
+    for row in rows:
+        edges_by_split.setdefault(row["split"], {})[row["bin"]] = (row["score_lower"], row["score_upper"])
+        assert row["bin_edges_source"] == "train"
+    # Every split that shares a bin index must report the identical boundary pair.
+    shared_bins = set(edges_by_split["train"]) & set(edges_by_split["test"]) & set(edges_by_split["oot"])
+    assert shared_bins
+    for bin_index in shared_bins:
+        assert edges_by_split["train"][bin_index] == edges_by_split["test"][bin_index]
+        assert edges_by_split["train"][bin_index] == edges_by_split["oot"][bin_index]
+
+
+def test_score_band_rows_cumulative_columns_are_hand_computable_and_monotonic(tmp_path):
+    """DOM-5: cum_count_pct/cum_bad_rate/cum_bad_capture computed by hand for a tiny
+    2-bin, higher-is-riskier PD score match the function's output, and cum_count_pct /
+    cum_bad_capture are monotonically non-decreasing along the cumulation order."""
+    # 8 train rows split evenly into low (score<0.5) / high (score>=0.5) bins via
+    # equal-frequency edges; label pattern chosen so bad rates differ hand-checkably.
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9],
+        "y": [0, 0, 0, 1, 1, 1, 1, 0],
+        "split": ["train"] * 8,
+    })
+    config = _score_band_config(split_values={"train": "train"})
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime, path, score_col="score", target_col="y", config=config, bin_count=2,
+    )
+
+    assert {row["split"] for row in rows} == {"train"}
+    by_bin = {row["bin"]: row for row in rows}
+    assert set(by_bin) == {1, 2}
+    # Bin 1 = low scores [0.1..0.4] -> bad=1 among 4 (row 0.4). Bin 2 = high scores
+    # [0.6..0.9] -> bad=3 among 4 (0.6/0.7/0.8).
+    assert by_bin[1]["bad_count"] == 1
+    assert by_bin[1]["labeled_count"] == 4
+    assert by_bin[2]["bad_count"] == 3
+    assert by_bin[2]["labeled_count"] == 4
+    # higher_is_riskier -> cumulation starts at the highest bin (bin 2) first.
+    assert by_bin[2]["cum_direction"] == "higher_is_riskier"
+    assert by_bin[2]["cum_count_pct"] == pytest.approx(4 / 8)
+    assert by_bin[2]["cum_bad_rate"] == pytest.approx(3 / 4)
+    assert by_bin[2]["cum_bad_capture"] == pytest.approx(3 / 4)
+    assert by_bin[1]["cum_count_pct"] == pytest.approx(8 / 8)
+    assert by_bin[1]["cum_bad_rate"] == pytest.approx(4 / 8)
+    assert by_bin[1]["cum_bad_capture"] == pytest.approx(4 / 4)
+    # Monotonic non-decreasing along the cumulation order (bin2 then bin1).
+    ordered = [by_bin[2], by_bin[1]]
+    cum_counts = [row["cum_count_pct"] for row in ordered]
+    cum_captures = [row["cum_bad_capture"] for row in ordered]
+    assert cum_counts == sorted(cum_counts)
+    assert cum_captures == sorted(cum_captures)
+
+
+def test_score_band_rows_higher_is_better_direction_cumulates_from_low_bin_up(tmp_path):
+    """DOM-5: scorecard points are higher-is-better, so cumulation must start from the
+    lowest-scoring (riskiest) bin instead of the highest."""
+    frame = pd.DataFrame({
+        modeling_tools.SCORECARD_POINTS_COL: [10.0, 20.0, 30.0, 40.0, 60.0, 70.0, 80.0, 90.0],
+        "y": [1, 1, 1, 0, 0, 0, 0, 1],
+        "split": ["train"] * 8,
+    })
+    config = _score_band_config(split_values={"train": "train"})
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime,
+        path,
+        score_col=modeling_tools.SCORECARD_POINTS_COL,
+        target_col="y",
+        config=config,
+        bin_count=2,
+    )
+
+    by_bin = {row["bin"]: row for row in rows}
+    assert by_bin[1]["cum_direction"] == "higher_is_better"
+    # Cumulation starts at bin 1 (lowest points = highest risk) for higher_is_better.
+    assert by_bin[1]["cum_count_pct"] == pytest.approx(4 / 8)
+    assert by_bin[2]["cum_count_pct"] == pytest.approx(8 / 8)
+
+
+def test_score_band_rows_handles_no_oot_split(tmp_path):
+    """DOM-5 degradation: a config with no oot split_value must not crash — the sheet
+    just carries no oot rows, train/test still produced on shared edges."""
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.3, 0.4, 0.15, 0.25, 0.35, 0.45],
+        "y": [0, 1, 0, 1, 0, 1, 0, 1],
+        "split": (["train"] * 4) + (["test"] * 4),
+    })
+    config = _score_band_config(split_values={"train": "train", "test": "test"})
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime, path, score_col="score", target_col="y", config=config, bin_count=2,
+    )
+
+    assert rows
+    assert {row["split"] for row in rows} == {"train", "test"}
+
+
+def test_score_band_rows_handles_single_value_column_without_crashing(tmp_path):
+    """DOM-5 degradation: a constant score column collapses equal-frequency edges to a
+    single [-inf, inf] bin — must produce a degenerate-but-non-crashing band table."""
+    frame = pd.DataFrame({
+        "score": [0.5] * 6,
+        "y": [0, 1, 0, 1, 0, 1],
+        "split": ["train", "train", "test", "test", "oot", "oot"],
+    })
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime, path, score_col="score", target_col="y", config=_score_band_config(), bin_count=5,
+    )
+
+    assert rows
+    assert {row["split"] for row in rows} == {"train", "test", "oot"}
+    for row in rows:
+        assert row["score_lower"] is None or row["score_upper"] is None or row["sample_count"] > 0
+
+
+def test_score_band_rows_falls_back_to_first_available_split_when_train_empty(tmp_path):
+    """DOM-5 degradation: no train rows at all (e.g. train filtered out upstream) must
+    not return an empty sheet — falls back to the first split with finite scores and
+    records that fallback via bin_edges_source."""
+    frame = pd.DataFrame({
+        "score": [0.1, 0.2, 0.3, 0.4],
+        "y": [0, 1, 0, 1],
+        "split": ["test", "test", "oot", "oot"],
+    })
+    config = _score_band_config(split_values={"train": "train", "test": "test", "oot": "oot"})
+    runtime, path = _score_band_runtime(tmp_path, frame)
+
+    rows = modeling_tools._score_band_rows(
+        runtime, path, score_col="score", target_col="y", config=config, bin_count=2,
+    )
+
+    assert rows
+    assert all(row["bin_edges_source"] == "test" for row in rows)

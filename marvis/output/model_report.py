@@ -63,7 +63,7 @@ def render_model_report(payload: ModelReportPayload, out_path: Path) -> Path:
     )
     _write_section_sheet(workbook, "特征重要性", payload.feature_importance, None)
     _write_section_sheet(workbook, "评分卡", payload.scorecard_table, None)
-    _write_section_sheet(workbook, "评分分段", payload.score_bands, None)
+    _write_score_band_sheet(workbook, payload.score_bands)
     _write_section_sheet(workbook, "概率校准", payload.calibration, None)
     _write_section_sheet(
         workbook,
@@ -116,6 +116,57 @@ def _write_section_sheet(
         sheet["A1"].fill = PatternFill("solid", fgColor="FFC7CE")
         return
     _write_dict_table(sheet, rows or [])
+
+
+def _write_score_band_sheet(workbook: Workbook, rows: list[dict]) -> None:
+    """DOM-5: score-band sheet with a caption documenting the shared bin-edge basis
+    and cumulation direction, followed by the table itself. Bin edges are computed
+    once on train (see tools.py::_score_band_rows) so the caption states that
+    explicitly instead of leaving readers to infer it from the data."""
+    sheet = workbook.create_sheet("评分分段")
+    if not rows:
+        sheet["A1"] = "无数据"
+        return
+    edges_source = rows[0].get("bin_edges_source") or "train"
+    direction = rows[0].get("cum_direction") or "higher_is_riskier"
+    direction_label = "分数越高风险越高（PD）" if direction == "higher_is_riskier" else "分数越高风险越低（评分卡分数）"
+    cum_reading = (
+        "累计列自高分向低分累计（先批核低分/低风险箱）"
+        if direction == "higher_is_riskier"
+        else "累计列自低分向高分累计（先批核低分箱，即先批核高风险，累计口径随分数上升而放宽）"
+    )
+    example = _score_band_worked_example(rows)
+    splits_present = "/".join(dict.fromkeys(row.get("split") for row in rows if row.get("split")))
+    sheet["A1"] = (
+        f"分箱边界口径：等频分箱边界在 {edges_source} 集上确定，{splits_present} 共用同一组边界；"
+        f"{direction_label}；{cum_reading}。"
+    )
+    sheet["A1"].font = Font(bold=True)
+    if example:
+        sheet["A2"] = example
+        sheet["A2"].font = Font(italic=True)
+    _write_dict_table(sheet, rows, start_row=4)
+
+
+def _score_band_worked_example(rows: list[dict]) -> str:
+    """A single worked-reading row (DOM-5 how-to-fix #4): picks the OOT split's
+    boundary of the cutoff-side band closest to 50% cumulative pass rate as a
+    concrete "cutoff -> approval rate / bad rate" example for the report reader."""
+    oot_rows = [row for row in rows if row.get("split") == "oot" and row.get("cum_count_pct") is not None]
+    candidates = oot_rows or [row for row in rows if row.get("cum_count_pct") is not None]
+    if not candidates:
+        return ""
+    closest = min(candidates, key=lambda row: abs(row["cum_count_pct"] - 0.5))
+    cutoff = closest.get("score_upper") if closest.get("cum_direction") == "higher_is_riskier" else closest.get("score_lower")
+    cum_pct = closest.get("cum_count_pct")
+    cum_bad = closest.get("cum_bad_rate")
+    if cutoff is None or cum_pct is None:
+        return ""
+    bad_text = f"{cum_bad:.2%}" if cum_bad is not None else "n/a"
+    return (
+        f"示例读法（{closest.get('split')}）：cutoff≈{cutoff:.4g} → 通过率约 {cum_pct:.2%}，"
+        f"累计坏账率约 {bad_text}"
+    )
 
 
 def _write_stress_sheet(workbook: Workbook, payload: ModelReportPayload) -> None:

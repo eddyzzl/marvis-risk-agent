@@ -4493,6 +4493,15 @@ def _scorecard_table_rows(artifact: ModelArtifact | None) -> list[dict]:
     return [dict(row) for row in artifact.scorecard_table]
 
 
+def _score_band_direction(score_col: str) -> str:
+    """DOM-5: cumulation direction for the score-band sheet. Scorecard points are
+    higher-is-better (higher points = lower risk); the native model score is a PD
+    (higher = higher risk). No `score_direction` parameter exists platform-wide yet
+    (DOM-2, separate item) so direction is inferred from which column is being
+    banded -- the only two score columns this function is ever called with."""
+    return "higher_is_better" if score_col == SCORECARD_POINTS_COL else "higher_is_riskier"
+
+
 def _score_band_rows(
     runtime: _Runtime,
     dataset_path: Path,
@@ -4502,41 +4511,154 @@ def _score_band_rows(
     config: TrainConfig,
     bin_count: int = 10,
 ) -> list[dict]:
-    columns = _unique_columns([score_col, target_col, config.split_col])
-    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    """DOM-5: score bands on a single set of bin edges shared by every split.
+
+    Edges are computed once on the ``train`` split (equal-frequency) so that bin N
+    means the same score range in train/test/oot -- required to read cutoff impact
+    (e.g. "if cutoff = edge of bin 6, OOT approval/bad rate is X") off the table and
+    to compare distribution migration across splits. test/oot reuse train's edges
+    verbatim; when train is missing or has no finite scores, edges fall back to the
+    first available split (so the sheet degrades instead of going empty) and the
+    fallback source is recorded in every row via ``bin_edges_source``.
+
+    Cumulation direction (cum_count_pct / cum_bad_rate / cum_bad_capture) follows
+    ``_score_band_direction``: for a higher-is-riskier PD score, cumulation runs from
+    the highest bin down (an "approve everyone at or below this score" cutoff reading);
+    for higher-is-better scorecard points, it runs from the lowest bin up. Either way
+    ``cum_count_pct`` reads as "share of population that would be approved if the
+    cutoff were placed at this band's boundary".
+    """
     from marvis.validation.binning import assign_bins, equal_frequency_bin_edges
 
+    columns = _unique_columns([score_col, target_col, config.split_col])
+    frame = runtime.backend.read_frame(dataset_path, columns=columns)
+    direction = _score_band_direction(score_col)
+
+    train_value = config.split_values.get("train")
+    edges: np.ndarray | None = None
+    edges_source = "train"
+    if train_value is not None:
+        train_scores = pd.to_numeric(
+            frame.loc[frame[config.split_col] == train_value, score_col], errors="coerce"
+        ).to_numpy(dtype=float)
+        finite_train = train_scores[np.isfinite(train_scores)]
+        if finite_train.size > 0:
+            edges = equal_frequency_bin_edges(finite_train, int(bin_count))
+    if edges is None:
+        # No usable train split (missing/empty/all-NaN score) -- fall back to the first
+        # split with finite scores so the sheet still renders, and say so per row.
+        for split_name, split_value in config.split_values.items():
+            candidate = pd.to_numeric(
+                frame.loc[frame[config.split_col] == split_value, score_col], errors="coerce"
+            ).to_numpy(dtype=float)
+            finite_candidate = candidate[np.isfinite(candidate)]
+            if finite_candidate.size > 0:
+                edges = equal_frequency_bin_edges(finite_candidate, int(bin_count))
+                edges_source = split_name
+                break
+    if edges is None:
+        return []
+
+    overall_bad_rate_by_split: dict[str, float | None] = {}
     rows: list[dict] = []
     for split_name, split_value in config.split_values.items():
         split_frame = frame[frame[config.split_col] == split_value]
         if split_frame.empty:
             continue
         scores = pd.to_numeric(split_frame[score_col], errors="coerce").to_numpy(dtype=float)
-        finite_scores = scores[np.isfinite(scores)]
-        if finite_scores.size == 0:
-            continue
-        edges = equal_frequency_bin_edges(finite_scores, int(bin_count))
         assigned = assign_bins(scores, edges)
         labels = pd.to_numeric(split_frame[target_col], errors="coerce").to_numpy(dtype=float)
-        for bin_index in range(1, len(edges)):
+        labeled_mask = np.isfinite(labels)
+        total_count = int(np.sum(assigned > 0))
+        total_labeled = int(np.sum(labeled_mask & (assigned > 0)))
+        total_bad = int(np.sum(labels[labeled_mask & (assigned > 0)] == 1)) if total_labeled else 0
+        overall_bad_rate = (total_bad / total_labeled) if total_labeled else None
+        overall_bad_rate_by_split[split_name] = overall_bad_rate
+
+        # Cumulation walks bin indices in "approval order": worst-score-first for a
+        # higher-is-riskier score (approving low scores first) or best-score-first for
+        # higher-is-better points -- either way starting from bin index len(edges)-1
+        # down to 1 for higher_is_riskier, or 1 up to len(edges)-1 for higher_is_better.
+        bin_indices = list(range(1, len(edges)))
+        cum_order = list(reversed(bin_indices)) if direction == "higher_is_riskier" else bin_indices
+        band_rows: dict[int, dict] = {}
+        cum_count = 0
+        cum_labeled = 0
+        cum_bad = 0
+        for bin_index in cum_order:
             mask = assigned == bin_index
-            if not np.any(mask):
-                continue
-            label_mask = mask & np.isfinite(labels)
+            count = int(np.sum(mask))
+            label_mask = mask & labeled_mask
             labeled_count = int(np.sum(label_mask))
-            bad_count = int(np.sum(labels[label_mask].astype(int))) if labeled_count else None
-            rows.append({
+            bad_count = int(np.sum(labels[label_mask] == 1)) if labeled_count else 0
+            bad_rate = (bad_count / labeled_count) if labeled_count else None
+            cum_count += count
+            cum_labeled += labeled_count
+            cum_bad += bad_count
+            cum_count_pct = (cum_count / total_count) if total_count else None
+            cum_bad_rate = (cum_bad / cum_labeled) if cum_labeled else None
+            cum_bad_capture = (cum_bad / total_bad) if total_bad else None
+            lift = (bad_rate / overall_bad_rate) if bad_rate is not None and overall_bad_rate else None
+            band_rows[bin_index] = {
                 "split": split_name,
                 "bin": int(bin_index),
                 "score_lower": float(edges[bin_index - 1]) if np.isfinite(edges[bin_index - 1]) else None,
                 "score_upper": float(edges[bin_index]) if np.isfinite(edges[bin_index]) else None,
-                "sample_count": int(np.sum(mask)),
-                "labeled_count": labeled_count,
-                "bad_count": bad_count,
-                "bad_rate": (bad_count / labeled_count) if labeled_count and bad_count is not None else None,
-                "avg_score": float(np.mean(scores[mask])),
-            })
+                "sample_count": count,
+                "labeled_count": labeled_count if count else None,
+                "bad_count": bad_count if count and labeled_count else None,
+                "bad_rate": bad_rate if count else None,
+                "avg_score": float(np.mean(scores[mask])) if count else None,
+                "cum_count_pct": cum_count_pct if count else None,
+                "cum_bad_rate": cum_bad_rate if count else None,
+                "cum_bad_capture": cum_bad_capture if count else None,
+                "cum_pass_rate": cum_count_pct if count else None,
+                "lift": lift if count else None,
+                "bin_edges_source": edges_source,
+                "cum_direction": direction,
+            }
+        for bin_index in bin_indices:
+            row = band_rows.get(bin_index)
+            if row is None or row["sample_count"] == 0:
+                continue
+            rows.append(row)
+
+    if rows:
+        # FS-KS-band-contribution: per-band KS contribution = |cum_bad_pct - cum_good_pct|
+        # at that band, computed within each split from the already-cumulated counts above.
+        _annotate_score_band_ks(rows, overall_bad_rate_by_split)
     return rows
+
+
+def _annotate_score_band_ks(rows: list[dict], overall_bad_rate_by_split: dict[str, float | None]) -> None:
+    """Adds a per-row ``ks_contribution`` = |cum_bad_pct - cum_good_pct| within each
+    split, walking rows in the same cumulation order they were produced in (already
+    grouped by split, in cum_order). Purely derived from fields already on each row --
+    no extra data pass, deterministic (INV-1)."""
+    by_split: dict[str, list[dict]] = {}
+    for row in rows:
+        by_split.setdefault(row["split"], []).append(row)
+    for split_name, split_rows in by_split.items():
+        overall_bad_rate = overall_bad_rate_by_split.get(split_name)
+        total_labeled = sum(row["labeled_count"] or 0 for row in split_rows)
+        total_bad = sum(row["bad_count"] or 0 for row in split_rows)
+        total_good = total_labeled - total_bad
+        if total_bad <= 0 or total_good <= 0 or overall_bad_rate is None:
+            for row in split_rows:
+                row["ks_contribution"] = None
+            continue
+        cum_bad = 0
+        cum_good = 0
+        for row in split_rows:
+            bad_count = row["bad_count"] or 0
+            labeled_count = row["labeled_count"] or 0
+            good_count = labeled_count - bad_count
+            cum_bad += bad_count
+            cum_good += good_count
+            cum_bad_pct = cum_bad / total_bad
+            cum_good_pct = cum_good / total_good
+            row["ks_contribution"] = float(abs(cum_bad_pct - cum_good_pct))
+
 
 
 def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> list[dict]:
