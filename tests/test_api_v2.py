@@ -36,6 +36,7 @@ class FakeTaskRepository:
     deleted: list[str] = []
     report_values: dict[str, tuple[dict[str, str], int]] = {}
     jobs: dict[str, dict[str, str]] = {}
+    audits: list[dict] = []
 
     def __init__(self, _db_path: Path):
         pass
@@ -218,6 +219,23 @@ class FakeTaskRepository:
         )
         return new_revision
 
+    def update_report_values_with_audit(
+        self, task_id: str, values, expected_revision: int, *, audit: dict
+    ) -> int:
+        new_revision = self.update_report_values(task_id, values, expected_revision)
+        self.audits.append(audit)
+        return new_revision
+
+    def update_agent_report_conclusions(self, task_id: str, values, expected_revision: int) -> int:
+        return self.update_report_values(task_id, values, expected_revision)
+
+    def update_agent_report_conclusions_with_audit(
+        self, task_id: str, values, expected_revision: int, *, audit: dict
+    ) -> int:
+        new_revision = self.update_agent_report_conclusions(task_id, values, expected_revision)
+        self.audits.append(audit)
+        return new_revision
+
 
 class FakeHookDispatcher:
     def __init__(self):
@@ -232,6 +250,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.deleted = []
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
+    FakeTaskRepository.audits = []
     monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
     monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)

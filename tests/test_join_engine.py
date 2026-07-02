@@ -12,10 +12,11 @@ from marvis.data.schema_infer import infer_dataset_schema
 
 
 class FakeRegistry:
-    def __init__(self, root):
+    def __init__(self, root, repo=None):
         self.root = root
         self.datasets = {}
         self.paths = {}
+        self._repo = repo
 
     def add(self, dataset: Dataset, path):
         self.datasets[dataset.id] = dataset
@@ -45,6 +46,28 @@ class FakeRegistry:
         self.add(dataset, path)
         return dataset
 
+    def register_join_result_with_audit(
+        self,
+        path,
+        *,
+        join_plan_id: str,
+        audit_factory,
+        task_id: str,
+        role: str,
+        anchor_target: str | None = None,
+    ) -> Dataset:
+        # Mirrors DatasetRegistry.register_join_result_with_audit: register the dataset,
+        # then write the join-executed audit through the shared repo (matching how the
+        # real registry writes the audit via self._repo.record_join_result_with_audit,
+        # not via the registry's own state).
+        dataset = self.register_existing(
+            path, task_id=task_id, role=role, anchor_target=anchor_target
+        )
+        audit = audit_factory(dataset)
+        self._repo.set_join_plan_executed(join_plan_id, dataset.id)
+        self._repo.audits.append(audit)
+        return dataset
+
 
 class FakeJoinRepo:
     def __init__(self):
@@ -64,10 +87,18 @@ class FakeJoinRepo:
             for item in plan.joins
         ]
 
+    def update_join_spec_with_audit(self, plan_id, spec, *, audit):
+        self.update_join_spec(plan_id, spec)
+        self.audits.append(audit)
+
     def set_join_plan_executed(self, plan_id, result_dataset_id):
         plan = self.plans[plan_id]
         plan.status = "executed"
         plan.result_dataset_id = result_dataset_id
+
+    def set_join_plan_executed_with_audit(self, plan_id, result_dataset_id, *, audit):
+        self.set_join_plan_executed(plan_id, result_dataset_id)
+        self.audits.append(audit)
 
     def write_audit(self, **kwargs):
         self.audits.append(kwargs)
@@ -99,8 +130,8 @@ def _write_dataset(registry: FakeRegistry, tmp_path, dataset_id: str, frame: pd.
 
 def _engine(tmp_path):
     backend = DataBackend(tmp_path)
-    registry = FakeRegistry(tmp_path)
     repo = FakeJoinRepo()
+    registry = FakeRegistry(tmp_path, repo)
     engine = JoinEngine(backend, ColumnAligner(backend), registry, repo)
     return engine, registry, repo
 
@@ -113,7 +144,7 @@ def test_join_engine_requires_audit_writer(tmp_path):
         JoinEngine(
             DataBackend(tmp_path),
             ColumnAligner(DataBackend(tmp_path)),
-            FakeRegistry(tmp_path),
+            FakeRegistry(tmp_path, FakeJoinRepo()),
             RepoWithoutAudit(),
         )
 

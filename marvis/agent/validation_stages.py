@@ -449,29 +449,21 @@ def auto_confirm_agent_report_conclusions(
         key: str(values.get(key) or "").strip()
         for key in REQUIRED_AGENT_REPORT_KEYS
     }
-    update_conclusions = getattr(repo, "update_agent_report_conclusions_with_audit", None)
-    if callable(update_conclusions):
-        revision = update_conclusions(
-            task_id,
-            conclusion_values,
-            expected_revision=expected_revision,
-            audit={
-                "kind": "report.agent_conclusions.confirm",
-                "target_ref": task_id,
-                "outcome": "succeeded",
-                "detail": {
-                    "keys": sorted(conclusion_values),
-                    "expected_revision": expected_revision,
-                    "auto_accept": True,
-                },
+    revision = repo.update_agent_report_conclusions_with_audit(
+        task_id,
+        conclusion_values,
+        expected_revision=expected_revision,
+        audit={
+            "kind": "report.agent_conclusions.confirm",
+            "target_ref": task_id,
+            "outcome": "succeeded",
+            "detail": {
+                "keys": sorted(conclusion_values),
+                "expected_revision": expected_revision,
+                "auto_accept": True,
             },
-        )
-    else:
-        revision = repo.update_agent_report_conclusions(
-            task_id,
-            conclusion_values,
-            expected_revision=expected_revision,
-        )
+        },
+    )
     repo.add_agent_message(
         task_id,
         role="assistant",

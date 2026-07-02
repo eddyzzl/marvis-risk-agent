@@ -49,28 +49,20 @@ def update_report_fields(
             detail="If-Match must be an integer",
         ) from exc
     try:
-        update_values = getattr(repo, "update_report_values_with_audit", None)
-        if callable(update_values):
-            revision = update_values(
-                task_id,
-                payload.text_values,
-                expected_revision=expected_revision,
-                audit={
-                    "kind": "report.values.update",
-                    "target_ref": task_id,
-                    "outcome": "succeeded",
-                    "detail": {
-                        "keys": sorted(payload.text_values),
-                        "expected_revision": expected_revision,
-                    },
+        revision = repo.update_report_values_with_audit(
+            task_id,
+            payload.text_values,
+            expected_revision=expected_revision,
+            audit={
+                "kind": "report.values.update",
+                "target_ref": task_id,
+                "outcome": "succeeded",
+                "detail": {
+                    "keys": sorted(payload.text_values),
+                    "expected_revision": expected_revision,
                 },
-            )
-        else:
-            revision = repo.update_report_values(
-                task_id,
-                payload.text_values,
-                expected_revision=expected_revision,
-            )
+            },
+        )
         values, _ = repo.get_report_values(task_id)
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

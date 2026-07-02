@@ -213,28 +213,20 @@ def _confirm_agent_report_conclusions(
         _, expected_revision = repo.get_report_values(task_id)
     job_id = _start_task_job(repo, task_id, "report")
     try:
-        update_conclusions = getattr(repo, "update_agent_report_conclusions_with_audit", None)
-        if callable(update_conclusions):
-            revision = update_conclusions(
-                task_id,
-                text_values,
-                expected_revision=expected_revision,
-                audit={
-                    "kind": "report.agent_conclusions.confirm",
-                    "target_ref": task_id,
-                    "outcome": "succeeded",
-                    "detail": {
-                        "keys": sorted(text_values),
-                        "expected_revision": expected_revision,
-                    },
+        revision = repo.update_agent_report_conclusions_with_audit(
+            task_id,
+            text_values,
+            expected_revision=expected_revision,
+            audit={
+                "kind": "report.agent_conclusions.confirm",
+                "target_ref": task_id,
+                "outcome": "succeeded",
+                "detail": {
+                    "keys": sorted(text_values),
+                    "expected_revision": expected_revision,
                 },
-            )
-        else:
-            revision = repo.update_agent_report_conclusions(
-                task_id,
-                text_values,
-                expected_revision=expected_revision,
-            )
+            },
+        )
     except ConflictError as exc:
         _fail_queued_job(repo, job_id, exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc

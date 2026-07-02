@@ -40,6 +40,12 @@ class JoinEngine:
     ):
         if not callable(getattr(repo, "write_audit", None)):
             raise TypeError("JoinEngine repo must provide write_audit")
+        if not callable(getattr(repo, "update_join_spec_with_audit", None)):
+            raise TypeError("JoinEngine repo must provide update_join_spec_with_audit")
+        if not callable(getattr(repo, "set_join_plan_executed_with_audit", None)):
+            raise TypeError("JoinEngine repo must provide set_join_plan_executed_with_audit")
+        if not callable(getattr(registry, "register_join_result_with_audit", None)):
+            raise TypeError("JoinEngine registry must provide register_join_result_with_audit")
         self._backend = backend
         self._aligner = aligner
         self._registry = registry
@@ -296,12 +302,7 @@ class JoinEngine:
                 ],
             },
         )
-        update_with_audit = getattr(self._repo, "update_join_spec_with_audit", None)
-        if callable(update_with_audit):
-            update_with_audit(join_plan_id, spec, audit=audit)
-        else:
-            self._repo.update_join_spec(join_plan_id, spec)
-            self._write_audit(**audit)
+        self._repo.update_join_spec_with_audit(join_plan_id, spec, audit=audit)
 
     def execute_join_plan(self, join_plan_id: str, *, out_dir: Path) -> Dataset:
         plan = self._repo.load_join_plan(join_plan_id)
@@ -386,30 +387,14 @@ class JoinEngine:
 
         def register_result() -> Dataset:
             final_path = final_artifact.final_path
-            register_join_result = getattr(self._registry, "register_join_result_with_audit", None)
-            if callable(register_join_result):
-                return register_join_result(
-                    final_path,
-                    join_plan_id=join_plan_id,
-                    audit_factory=audit_for,
-                    task_id=plan.task_id,
-                    role="derived",
-                    anchor_target=plan.anchor_dataset_id,
-                )
-            result = self._registry.register_existing(
+            return self._registry.register_join_result_with_audit(
                 final_path,
+                join_plan_id=join_plan_id,
+                audit_factory=audit_for,
                 task_id=plan.task_id,
                 role="derived",
                 anchor_target=plan.anchor_dataset_id,
             )
-            audit = audit_for(result)
-            set_executed_with_audit = getattr(self._repo, "set_join_plan_executed_with_audit", None)
-            if callable(set_executed_with_audit):
-                set_executed_with_audit(join_plan_id, result.id, audit=audit)
-            else:
-                self._repo.set_join_plan_executed(join_plan_id, result.id)
-                self._write_audit(**audit)
-            return result
 
         result = self._connection_scoped_join_result(
             uow=uow,

@@ -43,12 +43,7 @@ class PluginRegistry:
                 "enabled": bool(enabled),
             },
         }
-        upsert_with_audit = getattr(self._repo, "upsert_plugin_with_audit", None)
-        if callable(upsert_with_audit):
-            upsert_with_audit(manifest, enabled=enabled, audit=audit)
-        else:
-            self._repo.upsert_plugin(manifest, enabled=enabled)
-            self._repo.write_audit(**audit)
+        self._repo.upsert_plugin_with_audit(manifest, enabled=enabled, audit=audit)
         self._plugins[manifest.name] = (manifest, bool(enabled))
 
     def remove(self, name: str) -> None:
@@ -61,12 +56,7 @@ class PluginRegistry:
             "outcome": "succeeded",
             "detail": {"version": manifest.version},
         }
-        delete_with_audit = getattr(self._repo, "delete_plugin_with_audit", None)
-        if callable(delete_with_audit):
-            delete_with_audit(name, audit=audit)
-        else:
-            self._repo.delete_plugin(name)
-            self._repo.write_audit(**audit)
+        self._repo.delete_plugin_with_audit(name, audit=audit)
         del self._plugins[name]
 
     def set_enabled(self, name: str, enabled: bool) -> None:
@@ -77,12 +67,7 @@ class PluginRegistry:
             "outcome": "succeeded",
             "detail": {"version": manifest.version, "enabled": bool(enabled)},
         }
-        set_enabled_with_audit = getattr(self._repo, "set_enabled_with_audit", None)
-        if callable(set_enabled_with_audit):
-            set_enabled_with_audit(name, enabled, audit=audit)
-        else:
-            self._repo.set_enabled(name, enabled)
-            self._repo.write_audit(**audit)
+        self._repo.set_enabled_with_audit(name, enabled, audit=audit)
         self._plugins[name] = (manifest, bool(enabled))
 
     def get(self, name: str) -> PluginManifest:
