@@ -934,6 +934,7 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         assert.equal(calls[0][1].content.startsWith("[C1]"), true);
         assert.deepEqual(JSON.parse(calls[0][1].content.slice(4)), {{
           anchor_id: "main",
+          anchor_ids: ["main"],
           feature_ids: ["feat"],
           target_col: "bad",
         }});
@@ -944,6 +945,20 @@ def test_join_gate_controller_posts_c1_and_dedup_payloads():
         }};
         await submitC1Assignment({{ disabled: false, closest: () => noAnchorForm }}, context);
         assert.deepEqual(statuses.at(-1), ["请先把一张表选为「样本主表」。", "error"]);
+
+        // UX-7: two datasets marked "样本主表" must be rejected client-side,
+        // not silently collapsed to a single anchor with the second dropped.
+        const callsBeforeDuplicateAttempt = calls.length;
+        const duplicateAnchorForm = {{
+          querySelectorAll: (selector) => selector === ".c1-role" ? [
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "main" : null, value: "anchor" }},
+            {{ getAttribute: (name) => name === "data-c1-dataset" ? "feat" : null, value: "anchor" }},
+          ] : [],
+          querySelector: () => null,
+        }};
+        await submitC1Assignment({{ disabled: false, closest: () => duplicateAnchorForm }}, context);
+        assert.deepEqual(statuses.at(-1), ["只能有一张样本主表，请把其余表改为「特征表」或「忽略」。", "error"]);
+        assert.equal(calls.length, callsBeforeDuplicateAttempt);
 
         const dedupHtml = renderDedupPicker({{
           id: "dedup-msg",

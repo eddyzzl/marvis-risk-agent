@@ -403,7 +403,7 @@ def run_modeling_driver_turn(
         )
         append_driver_messages(repo, task.id, turn)
         return join_turn_response(repo, task.id)
-    except ModelingSetupError as exc:
+    except (JoinSetupError, ModelingSetupError) as exc:
         return append_join_error(repo, task.id, str(exc))
     except DriverError:
         raise
@@ -663,7 +663,19 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
             payload = json.loads(text[len("[C1]"):])
         except (ValueError, TypeError):
             return None
-        anchor_id = payload.get("anchor_id")
+        anchor_ids = [aid for aid in (payload.get("anchor_ids") or []) if aid]
+        if not anchor_ids:
+            single_anchor_id = payload.get("anchor_id")
+            anchor_ids = [single_anchor_id] if single_anchor_id else []
+        anchor_ids = list(dict.fromkeys(anchor_ids))  # de-dup, preserve order
+        if len(anchor_ids) > 1:
+            names = _c1_dataset_names(c1_state, anchor_ids)
+            raise JoinSetupError(
+                "样本主表只能有一个，请把 "
+                + "、".join(names[1:])
+                + " 改为「特征表」或「忽略」。"
+            )
+        anchor_id = anchor_ids[0] if anchor_ids else payload.get("anchor_id")
         feature_ids = [
             fid for fid in (payload.get("feature_ids") or []) if fid and fid != anchor_id
         ]
@@ -679,6 +691,11 @@ def _parse_c1_reply(user_text: str | None, c1_state: dict) -> dict | None:
             "target_col": c1_state.get("target_col"),
         }
     return None
+
+
+def _c1_dataset_names(c1_state: dict, dataset_ids: list[str]) -> list[str]:
+    by_id = {f.get("dataset_id"): f.get("name") for f in c1_state.get("files") or []}
+    return [by_id.get(dataset_id) or dataset_id for dataset_id in dataset_ids]
 
 
 def _feature_metrics(task: TaskRecord) -> list[str]:
