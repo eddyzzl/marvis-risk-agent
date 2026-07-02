@@ -1116,13 +1116,32 @@ def test_impute_missing_without_add_indicators_omits_indicator_columns(tmp_path)
     assert [step["kind"] for step in chain] == ["impute"]
 
 
-def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_path):
-    """WOE replay is handled separately (scorecard/woe_encode already replay their own
-    WOE maps) and cross_features derives new columns rather than transforming existing
-    ones in place — neither should be recorded in preprocessing_steps (PREP-2 scope)."""
+def test_cross_features_does_not_append_preprocessing_steps(tmp_path):
+    """cross_features derives new columns (cross/ratio) rather than transforming
+    existing ones in place — not recorded in preprocessing_steps (PREP-2 scope)."""
     from marvis.feature.preprocessing import read_preprocessing_chain
 
     runner, registry, _repo, _backend = _runtime(tmp_path)
+    dataset = _register_sample(registry, tmp_path)
+
+    crossed = runner.invoke(
+        ToolRef("feature", "cross_features"),
+        {"dataset_id": dataset.id, "recipe": [{"kind": "ratio", "num": "x1", "den": "x2"}]},
+        task_id="task-feature",
+    )
+    assert crossed.ok is True, crossed.error
+    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+
+
+def test_woe_encode_and_woe_encode_categorical_persist_preprocessing_chain_sidecar(tmp_path):
+    """W3a tail: the general-purpose woe_encode/woe_encode_categorical tools must
+    record their fitted maps in the preprocessing chain sidecar (kind=woe /
+    categorical_woe) and replay to the exact same *_woe column on new raw data via
+    apply_preprocessing_steps -- the scorecard recipe's own internal WOE fitting is
+    a separate, already-solved path and is untouched by this."""
+    from marvis.feature.preprocessing import apply_preprocessing_steps, read_preprocessing_chain
+
+    runner, registry, _repo, backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)
 
     woe = runner.invoke(
@@ -1136,15 +1155,35 @@ def test_woe_encode_and_cross_features_do_not_append_preprocessing_steps(tmp_pat
         task_id="task-feature",
     )
     assert woe.ok is True, woe.error
-    assert read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"])) == []
+    chain = read_preprocessing_chain(registry.resolve_path(woe.output["result_dataset_id"]))
+    assert [step["kind"] for step in chain] == ["woe"]
+    assert chain[0]["columns"] == ["x1"]
+    assert chain[0]["params"]["x1"] == woe.output["woe_maps"]["x1"]
 
-    crossed = runner.invoke(
-        ToolRef("feature", "cross_features"),
-        {"dataset_id": dataset.id, "recipe": [{"kind": "ratio", "num": "x1", "den": "x2"}]},
+    raw_frame = backend.read_frame(registry.resolve_path(dataset.id))
+    replayed = apply_preprocessing_steps(raw_frame, chain)
+    derived_frame = backend.read_frame(registry.resolve_path(woe.output["result_dataset_id"]))
+    assert replayed["x1_woe"].tolist() == derived_frame["x1_woe"].tolist()
+
+    catwoe = runner.invoke(
+        ToolRef("feature", "woe_encode_categorical"),
+        {
+            "dataset_id": dataset.id,
+            "features": ["cat"],
+            "target_col": "y",
+            "allow_full_fit": True,
+            "min_count": 1,
+        },
         task_id="task-feature",
     )
-    assert crossed.ok is True, crossed.error
-    assert read_preprocessing_chain(registry.resolve_path(crossed.output["result_dataset_id"])) == []
+    assert catwoe.ok is True, catwoe.error
+    cat_chain = read_preprocessing_chain(registry.resolve_path(catwoe.output["result_dataset_id"]))
+    assert [step["kind"] for step in cat_chain] == ["categorical_woe"]
+    assert cat_chain[0]["params"]["cat"] == catwoe.output["woe_maps"]["cat"]
+
+    cat_replayed = apply_preprocessing_steps(raw_frame, cat_chain)
+    cat_derived_frame = backend.read_frame(registry.resolve_path(catwoe.output["result_dataset_id"]))
+    assert cat_replayed["cat_woe"].tolist() == cat_derived_frame["cat_woe"].tolist()
 
 
 def test_screen_features_reports_suspected_categorical_numeric_codes(tmp_path):

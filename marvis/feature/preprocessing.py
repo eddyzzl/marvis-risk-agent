@@ -13,15 +13,14 @@ turn ``preprocessing_steps`` back into concrete column transforms.
 
 A ``PreprocessingStep`` is a plain, JSON-safe dict:
 
-    {"kind": "impute" | "cap" | "normalize" | "onehot" | "missing_indicator",
+    {"kind": "impute" | "cap" | "normalize" | "onehot" | "missing_indicator"
+             | "woe" | "categorical_woe",
      "columns": [...],
      "params": {...}}
 
 ``params`` mirrors what each tool already returns today (fill_values /
 bounds / scaler_params / mapping), keyed by column name so ``kind`` +
-``columns`` + ``params`` fully describes the transform. WOE is intentionally
-excluded -- scorecard/woe_encode already replay their own WOE maps and are not
-duplicated here (see module docstring in tools.py).
+``columns`` + ``params`` fully describes the transform.
 
 ``missing_indicator`` (PREP-8) is emitted alongside ``impute`` when
 ``add_indicators=true`` is passed to ``impute_missing``: ``params[column]`` is
@@ -30,6 +29,16 @@ as its own step *before* the paired ``impute`` step in the chain, so replay
 computes the 0/1 "was this value missing" flag from the pre-fill NaN mask
 first, then imputes -- reproducing the same indicator the platform derived at
 fit time instead of silently dropping the missingness signal.
+
+``woe``/``categorical_woe`` (W3a tail) record the general-purpose feature-pack
+``woe_encode``/``woe_encode_categorical`` tools' fitted maps -- ``params[column]``
+is the tool's own ``woe_maps[column]`` entry (a serialized ``WOEResult`` /
+``CategoricalWOEResult``) verbatim, so replay reconstructs the exact same
+mapping and appends the ``{column}_woe`` column. The **scorecard recipe's**
+internal WOE fitting (``recipes/scorecard.py``) is a separate, already-solved
+path -- it persists its own ``woe_maps``/``scorecard_table`` directly on the
+model artifact and replays through the scorecard scorer/PMML/handoff code,
+independent of this sidecar; it is not duplicated here.
 """
 
 from __future__ import annotations
@@ -41,6 +50,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
+from marvis.feature.encode import apply_categorical_woe, woe_encode
 from marvis.feature.errors import FeatureError
 from marvis.feature.transform import apply_scaler
 
@@ -118,6 +129,10 @@ def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) 
             out = _apply_onehot(out, columns, params)
         elif kind == "missing_indicator":
             out = _apply_missing_indicator(out, columns, params)
+        elif kind == "woe":
+            out = _apply_woe(out, columns, params)
+        elif kind == "categorical_woe":
+            out = _apply_categorical_woe_step(out, columns, params)
         else:
             raise FeatureError(f"unsupported preprocessing step kind: {kind!r}")
     return out
@@ -195,6 +210,67 @@ def _apply_onehot(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.D
     out = out.drop(columns=present)
     if dummy_frames:
         out = pd.concat([out, *dummy_frames], axis=1)
+    return out
+
+
+def _apply_woe(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay numeric WOE encoding (W3a tail): ``params[column]`` is a serialized
+    ``WOEResult`` (as returned by ``woe_encode``'s ``woe_maps``). Adds the
+    ``{column}_woe`` column alongside the original (WOE never overwrites its
+    source column -- ``tool_woe_encode`` doesn't either)."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        entry = params.get(column)
+        if not entry:
+            continue
+        woe = WOEResult(
+            feature=column,
+            edges=tuple(float(value) for value in entry["edges"]),
+            woe_by_bin=tuple(float(value) for value in entry["woe_by_bin"]),
+            na_woe=entry.get("na_woe"),
+        )
+        encoded = woe_encode(out, column, woe)
+        out[encoded.name] = encoded
+    return out
+
+
+def _apply_categorical_woe_step(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay categorical WOE encoding (W3a tail): ``params[column]`` is a serialized
+    ``CategoricalWOEResult`` (as returned by ``woe_encode_categorical``'s
+    ``woe_maps``). Adds the ``{column}_woe`` column alongside the original."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        entry = params.get(column)
+        if not entry:
+            continue
+        categories = tuple(
+            CategoricalWOECategory(
+                category=str(item["category"]),
+                count=int(item["count"]),
+                bad_count=int(item["bad_count"]),
+                good_count=int(item["good_count"]),
+                bad_rate=float(item["bad_rate"]),
+                woe=float(item["woe"]),
+                iv_contribution=float(item["iv_contribution"]),
+            )
+            for item in entry["categories"]
+        )
+        woe = CategoricalWOEResult(
+            feature=column,
+            categories=categories,
+            rare_categories=tuple(str(value) for value in entry.get("rare_categories") or ()),
+            min_count=int(entry["min_count"]),
+            smoothing=float(entry["smoothing"]),
+            default_woe=float(entry["default_woe"]),
+            na_woe=entry.get("na_woe"),
+            total_iv=float(entry.get("total_iv", 0.0)),
+        )
+        encoded = apply_categorical_woe(out, column, woe)
+        out[encoded.name] = encoded
     return out
 
 

@@ -411,7 +411,14 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
         out[encoded.name] = encoded
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
-    result = _register_frame(runtime, out, dataset, ctx, "woe")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "woe",
+        preprocessing_step={"kind": "woe", "columns": features, "params": _jsonable(woe_maps)},
+    )
     return {
         "result_dataset_id": result.id,
         "new_columns": new_columns,
@@ -479,7 +486,14 @@ def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
         out[encoded.name] = encoded
         new_columns.append(encoded.name)
         woe_maps[feature] = _jsonable(woe)
-    result = _register_frame(runtime, out, dataset, ctx, "catwoe")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "catwoe",
+        preprocessing_step={"kind": "categorical_woe", "columns": features, "params": _jsonable(woe_maps)},
+    )
     return {
         "result_dataset_id": result.id,
         "new_columns": new_columns,
