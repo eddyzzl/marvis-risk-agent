@@ -318,6 +318,113 @@ def test_training_attach_failure_rolls_back_unattached_artifact_files(
     assert [artifact.id for artifact in artifacts] == [baseline_artifact_id]
 
 
+def test_train_model_persists_preprocessing_chain_and_flags_pmml_boundary(tmp_path):
+    """PREP-2 end-to-end: feature.impute_missing (train-only fit) on a dataset with
+    NaN values -> modeling.train_model on the derived dataset must carry the fitted
+    preprocessing chain onto the artifact, and post_training_action's model card /
+    capabilities must flag that PMML does not include the preprocessing layer (d)."""
+    runner, _plugin_registry, registry, backend, settings, task = _runtime(tmp_path)
+    rows = 240
+    frame = pd.DataFrame({
+        "x1": [None if i % 37 == 0 else ((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)],
+        "split": ["train"] * 140 + ["test"] * 60 + ["oot"] * 40,
+    })
+    path = tmp_path / "raw_with_nan.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="raw_sample")
+
+    imputed = runner.invoke(
+        ToolRef("feature", "impute_missing"),
+        {
+            "dataset_id": dataset.id,
+            "columns": ["x1"],
+            "strategy": "median",
+            "split_col": "split",
+        },
+        task_id=task.id,
+    )
+    assert imputed.ok is True, imputed.error
+    assert imputed.output["fit_split"] == "train"
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": imputed.output["result_dataset_id"],
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact is not None
+    assert artifact.params["preprocessing_steps"] == [
+        {"kind": "impute", "columns": ["x1"], "params": imputed.output["fill_values"]}
+    ]
+
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": imputed.output["result_dataset_id"],
+            "actions": ["export_pmml"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    capabilities = post_training.output["capabilities"]
+    assert capabilities["pmml_supported"] is True
+    assert any("预处理" in item and "PMML" in item for item in capabilities["limitations"])
+    assert any("预处理" in item for item in post_training.output["model_card"]["limitations"])
+
+
+def test_train_model_without_preprocessing_chain_flags_untraceable_on_model_card(tmp_path):
+    """PREP-2 (d): a model trained straight off a historical dataset (no lineage
+    sidecar at all) must get an explicit '预处理链不可追溯' model-card note, distinct
+    from a model that legitimately has zero preprocessing_steps."""
+    runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lr",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact is not None
+    assert "preprocessing_steps" not in artifact.params
+
+    post_training = runner.invoke(
+        ToolRef("modeling", "post_training_action"),
+        {
+            "experiment_id": trained.output["experiment_id"],
+            "sample_dataset_id": dataset.id,
+            "actions": ["export_pmml"],
+        },
+        task_id=task.id,
+    )
+    assert post_training.ok is True, post_training.error
+    assert any(
+        "不可追溯" in item for item in post_training.output["model_card"]["limitations"]
+    )
+
+
 def test_calibrate_model_records_diagnostics_and_report_sheet(tmp_path):
     runner, _plugin_registry, registry, _backend, settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)

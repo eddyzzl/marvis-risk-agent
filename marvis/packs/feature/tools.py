@@ -28,6 +28,11 @@ from marvis.feature.encode import onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
+from marvis.feature.preprocessing import (
+    append_step,
+    sidecar_path,
+    write_preprocessing_chain,
+)
 from marvis.feature.transform import (
     apply_scaler,
     cap_outliers,
@@ -366,7 +371,14 @@ def tool_onehot_encode(inputs: dict, ctx) -> dict:
         columns,
         max_categories=int(inputs.get("max_categories") or 50),
     )
-    result = _register_frame(runtime, encoded, dataset, ctx, "onehot")
+    result = _register_frame(
+        runtime,
+        encoded,
+        dataset,
+        ctx,
+        "onehot",
+        preprocessing_step={"kind": "onehot", "columns": columns, "params": _jsonable(mapping)},
+    )
     return {"result_dataset_id": result.id, "mapping": _jsonable(mapping)}
 
 
@@ -394,7 +406,14 @@ def tool_normalize(inputs: dict, ctx) -> dict:
             raise FeatureError("method must be minmax or zscore")
         out[col] = values
         params[col] = column_params
-    result = _register_frame(runtime, out, dataset, ctx, "normalize")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "normalize",
+        preprocessing_step={"kind": "normalize", "columns": columns, "params": _jsonable(params)},
+    )
     return {
         "result_dataset_id": result.id,
         "scaler_params": _jsonable(params),
@@ -419,7 +438,14 @@ def tool_impute_missing(inputs: dict, ctx) -> dict:
         )
         out[column] = out[column].fillna(value)
         fill_values[column] = value
-    result = _register_frame(runtime, out, dataset, ctx, "impute")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "impute",
+        preprocessing_step={"kind": "impute", "columns": columns, "params": _jsonable(fill_values)},
+    )
     return {
         "result_dataset_id": result.id,
         "fill_values": _jsonable(fill_values),
@@ -453,7 +479,14 @@ def tool_cap_outliers(inputs: dict, ctx) -> dict:
             clipped[mask] = np.clip(clipped[mask], lower, upper)
         out[column] = clipped
         bounds[column] = params
-    result = _register_frame(runtime, out, dataset, ctx, "cap")
+    result = _register_frame(
+        runtime,
+        out,
+        dataset,
+        ctx,
+        "cap",
+        preprocessing_step={"kind": "cap", "columns": columns, "params": _jsonable(bounds)},
+    )
     return {
         "result_dataset_id": result.id,
         "bounds": _jsonable(bounds),
@@ -535,12 +568,40 @@ def _read_frame(
     return dataset, frame
 
 
-def _register_frame(runtime: _Runtime, frame: pd.DataFrame, source_dataset, ctx, suffix: str):
+def _register_frame(
+    runtime: _Runtime,
+    frame: pd.DataFrame,
+    source_dataset,
+    ctx,
+    suffix: str,
+    *,
+    preprocessing_step: dict[str, Any] | None = None,
+):
     out_path = runtime.datasets_root / ctx.task_id / "feature" / f"{source_dataset.id}_{suffix}.parquet"
     uow = ArtifactUnitOfWork()
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         frame.to_parquet(artifact.path, index=False)
+        if preprocessing_step is not None:
+            # PREP-2: persist the accumulated preprocessing chain (source dataset's
+            # chain + this new step) as a sidecar next to the derived parquet, so a
+            # model trained downstream can replay every fit param at scoring time
+            # instead of only seeing it in this tool's JSON response. Staged via the
+            # same unit of work as the parquet so both promote/commit atomically.
+            source_path = None
+            try:
+                source_path = runtime.registry.resolve_path(source_dataset.id)
+            except KeyError:
+                source_path = None
+            chain = append_step(
+                source_path,
+                kind=str(preprocessing_step["kind"]),
+                columns=list(preprocessing_step["columns"]),
+                params=preprocessing_step["params"],
+            )
+            sidecar_name = sidecar_path(Path(out_path.name)).name
+            sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
+            write_preprocessing_chain(sidecar_artifact.path, chain)
         register_kwargs = {
             "task_id": ctx.task_id,
             "role": "derived",

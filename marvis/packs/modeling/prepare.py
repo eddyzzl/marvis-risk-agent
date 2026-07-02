@@ -9,6 +9,7 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.feature.candidates import candidate_numeric_features
+from marvis.feature.preprocessing import read_preprocessing_chain, sidecar_path, write_preprocessing_chain
 from marvis.packs.modeling.defaults import DEFAULT_RANDOM_SEED
 from marvis.packs.modeling.errors import ModelingError
 
@@ -71,6 +72,15 @@ def prepare_modeling_frame(
     artifact = uow.stage_file(out_path.parent, out_path.name)
     try:
         prepared.to_parquet(artifact.path, index=False)
+        # PREP-2: the modeling frame is a derived (narrowed/split) view of ``dataset``;
+        # carry its accumulated preprocessing chain forward unchanged so training can
+        # collect it into the model artifact for scoring-time replay. Staged via the
+        # same unit of work as the parquet so both promote/commit atomically.
+        source_chain = read_preprocessing_chain(dataset_path)
+        if source_chain:
+            sidecar_name = sidecar_path(Path(out_path.name)).name
+            sidecar_artifact = uow.stage_file(out_path.parent, sidecar_name)
+            write_preprocessing_chain(sidecar_artifact.path, source_chain)
         register_kwargs = {
             "task_id": dataset.task_id,
             "role": "derived",

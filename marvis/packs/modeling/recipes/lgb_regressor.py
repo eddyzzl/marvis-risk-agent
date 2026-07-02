@@ -10,7 +10,11 @@ from marvis.data.labels import resolve_modeling_splits
 from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
-from marvis.packs.modeling.recipes.common import compute_regression_metrics, split_modeling_frame
+from marvis.packs.modeling.recipes.common import (
+    compute_regression_metrics,
+    model_params,
+    split_modeling_frame,
+)
 
 
 def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
@@ -21,7 +25,7 @@ def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: 
     )
     params = {
         **get_recipe("lgb_regressor").default_params,
-        **config.params,
+        **model_params(config.params),
         "seed": config.seed,
         "num_threads": 1,
         "deterministic": True,

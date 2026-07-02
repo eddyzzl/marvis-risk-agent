@@ -23,6 +23,19 @@ _SAMPLE_WEIGHT_PARAM_KEYS = frozenset({
     "sample_weight_column",
     "weight_col",
 })
+
+#: Platform-only key carrying the accumulated preprocessing chain (PREP-2) collected
+#: from the input dataset's lineage sidecar. Never a real estimator hyperparameter —
+#: stripped by model_params() before fit() and re-attached by artifact_params() so it
+#: survives into the persisted ModelArtifact.params for scoring-time replay.
+PREPROCESSING_STEPS_PARAM_KEY = "preprocessing_steps"
+
+#: Platform-only key noting that the input dataset had NO preprocessing lineage
+#: sidecar at all (as opposed to a sidecar with zero steps) — surfaced on the model
+#: card as "预处理链不可追溯" rather than silently implying no preprocessing occurred.
+PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY = "preprocessing_chain_traceable"
+
+_PLATFORM_ONLY_PARAM_KEYS = frozenset({PREPROCESSING_STEPS_PARAM_KEY, PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY})
 _MONOTONE_CONSTRAINT_KEYS = ("monotone_constraints", "monotonic_constraints")
 
 
@@ -54,7 +67,7 @@ def model_params(params: dict | None) -> dict:
     return {
         str(key): value
         for key, value in dict(params or {}).items()
-        if str(key) not in _SAMPLE_WEIGHT_PARAM_KEYS
+        if str(key) not in _SAMPLE_WEIGHT_PARAM_KEYS and str(key) not in _PLATFORM_ONLY_PARAM_KEYS
     }
 
 
@@ -128,6 +141,11 @@ def artifact_params(params: dict, config: TrainConfig) -> dict:
     column = sample_weight_col(config)
     if column:
         out["sample_weight_col"] = column
+    steps = config.params.get(PREPROCESSING_STEPS_PARAM_KEY)
+    if steps:
+        out[PREPROCESSING_STEPS_PARAM_KEY] = steps
+    elif config.params.get(PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY) is False:
+        out[PREPROCESSING_CHAIN_TRACEABLE_PARAM_KEY] = False
     return out
 
 

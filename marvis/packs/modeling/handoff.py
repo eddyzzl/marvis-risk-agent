@@ -352,6 +352,14 @@ def _calibration_metadata(artifact: ModelArtifact) -> dict[str, Any] | None:
     return calibration if isinstance(calibration, dict) else None
 
 
+def _preprocessing_steps(artifact: ModelArtifact) -> list[dict[str, Any]]:
+    """The artifact's persisted preprocessing chain (PREP-2), or ``[]`` when it has
+    none (e.g. a pre-PREP-2 model, a scorecard whose WOE replay is handled separately,
+    or one trained on a dataset with no traceable lineage)."""
+    steps = (artifact.params or {}).get("preprocessing_steps")
+    return list(steps) if isinstance(steps, list) else []
+
+
 def _source_task(settings, task_id: str):
     try:
         return TaskRepository(settings.db_path).get_task(task_id)
@@ -538,6 +546,8 @@ def _scoring_notebook_source(
     split_json = json.dumps(experiment.config.split_col, ensure_ascii=False)
     time_json = json.dumps(_time_col(experiment.config.params), ensure_ascii=False)
     algorithm_json = json.dumps(artifact.algorithm, ensure_ascii=False)
+    preprocessing_steps = _preprocessing_steps(artifact)
+    preprocessing_steps_json = json.dumps(preprocessing_steps, ensure_ascii=False, default=str)
     return "\n".join(
         [
             "import json",
@@ -547,9 +557,11 @@ def _scoring_notebook_source(
             "import numpy as np",
             "import pandas as pd",
             "from marvis.feature.encode import woe_encode",
+            "from marvis.feature.preprocessing import apply_preprocessing_steps",
             "",
             f"RMC_FEATURES = json.loads({features_json!r})",
             f"RMC_MODEL_PARAMS = json.loads({params_json!r})",
+            f"RMC_PREPROCESSING_STEPS = json.loads({preprocessing_steps_json!r})",
             f"RMC_TARGET_COL = {target_json}",
             f"RMC_ALGORITHM = {algorithm_json}",
             f"RMC_SPLIT_COL = {split_json}",
@@ -586,6 +598,11 @@ def _scoring_notebook_source(
             "    raise ValueError(f'unsupported calibration method: {method}')",
             "",
             "def RMC_SCORE_FN(dataframe):",
+            "    # PREP-2: replay the training-time preprocessing chain (impute/cap/",
+            "    # normalize/onehot) on new raw data before scoring, so predict-time",
+            "    # input matches what the model was trained on. No-op when the artifact",
+            "    # carries no chain (e.g. a pre-PREP-2 model or an untransformed feature set).",
+            "    dataframe = apply_preprocessing_steps(dataframe, RMC_PREPROCESSING_STEPS)",
             "    if isinstance(_RMC_MODEL, dict) and 'model' in _RMC_MODEL and 'woe_maps' in _RMC_MODEL:",
             "        encoded = pd.DataFrame(index=dataframe.index)",
             "        for feature in RMC_FEATURES:",
