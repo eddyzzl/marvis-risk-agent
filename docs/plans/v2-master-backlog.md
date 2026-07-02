@@ -139,14 +139,14 @@
 | ✅ | REL-1 | driver 回合已 job 化（`232d3b35`）：start_job/finish_job 包裹全回合、并发二次确认 409（中文提示）、异常路径 finally 释放；五任务类型全覆盖+竞态回归 | Critical/M | ✅ |
 | ✅ | UX-1 | 五个 submit 路径即时 busy+消息轮询+计划栏 1.5s 刷新（`8babda7f`）；taskServerBusyAction 接 driver job，刷新后忙碌可见；停止能力归 REL-5 的 cancel（docstring 注明） | Critical/M | ✅ |
 | ✅ | REL-6 | job 化+running 步骤 started_at 进 plan payload+前端耗时显示（随 REL-1/UX-1 落地） | Med/M | — |
-| ⬜ | REL-4 | startup 恢复不覆盖 V2 plan 层：RUNNING plan 无人 reclaim | High/M | ✅ |
+| ✅ | REL-4 | startup 已 reclaim RUNNING plan（`7cf1bb0e`，plan_recovery 模块）：步骤按 ledger 语义收敛、plan 暂停、driver 任务收到中文重启通知 | High/M | ✅ |
 | ✅ | REL-2 | 重启 reclaim 识别 metrics 可续场景改发 METRICS_STAGE_FAILURE 前缀消息（`bfba3983`），is_metrics_failure 命中→metrics-only 重试；last_completed_step 接通 | High/S | ✅ |
-| ⬜ | REL-5 | 长任务无心跳/看门狗：卡死 job 永久锁死任务；join/plan job 无 cancel 端点 | Med/M | — |
+| ✅ | REL-5 | jobs 心跳列+看门狗（`c9a9be7b`，超时默认可配、/api/health 暴露 stuck_jobs）+ join/plan job cancel 端点（协作式） | Med/M | — |
 | ✅ | REL-3 | ProcessTreeResourceMonitor 已泛化接入 ToolRunner（`a278a0ff`）：默认 4096MB 可配、超限杀进程树、error_kind=resource_limit+peak 审计；真杀路径实测验证 | High/M | ✅ |
 | ⬜ | REL-7 | 文件级 staging `.bak` 崩溃残留：datasets/tasks 根下既不恢复也不清理 | Med/M | — |
 | ✅ | PERF-5 | worker 入口依赖链已切断（`c1313514`，ToolContext 抽到无依赖 contracts 模块）：入口 import 实测 1.085s→0.021s，sys.modules 无 pandas/sklearn/marvis.db（回归断言守住） | High/S | ✅ |
 | ✅ | PERF-3 | 隔离模式复现+metrics cells 合并进单次 notebook 子进程（`0e832a99`）：端到端断言执行次数==1；metrics 重试与非隔离路径不受影响 | High/M | ✅ |
-| ⬜ | PERF-4 | JOIN 对齐对每个候选列×方法重复全表扫描零缓存：大表 C2 门分钟级等待 | High/M | ✅ |
+| ✅ | PERF-4 | 诊断请求级 memoization + 多方法单扫描批量化（`90667a7b`）：200k 行 propose 15.9s→10.1s、relaxation 1.02s→0.63s | High/M | ✅ |
 | ✅ | PERF-8 | DuckDB 统一配置（`3842eb21`）：memory_limit 4GB/threads cpu·½/temp_directory spill，均可 env 覆盖，状态进 /api/health | Med/S | — |
 
 追踪器补充细则（实施本阶段时参照）：统一 job policy（同步/后台/子进程三型，覆盖 join/validation/train/tune/report）→ PERF-1+REL-6+UX-1 的"怎么做"；interrupted step-runs 在 plan rail 呈现 retry/repair 状态 → REL-4 的 UI 侧；主 app workspace 完整接入 V2 join 组件 + join 的 task/job 状态 UX 标准化到其他长任务。
