@@ -142,6 +142,7 @@ def build_modeling_proposal(
     anchor_id: str | None = None,
     join_feature_ids: list[str] | None = None,
     target_col: str | None = None,
+    field_hints: dict | None = None,
 ) -> ModelingProposal:
     datasets = _resolve_datasets(registry, task_id, source_dir)
     by_id = {dataset.id: dataset for dataset in datasets}
@@ -184,7 +185,13 @@ def build_modeling_proposal(
             f"目标类型 `{requested_target_type}` 与算法 `{', '.join(recipe_list)}` 不匹配;请重新选择同一目标类型的算法。"
         )
     target_type = requested_target_type or derived_target_type
-    setup = detect_setup(backend, path, configured_target=str(target_col or ""), target_type=target_type)
+    setup = detect_setup(
+        backend,
+        path,
+        configured_target=str(target_col or ""),
+        target_type=target_type,
+        field_hints=field_hints,
+    )
     if not setup.target_col:
         if target_type == "continuous":
             raise ModelingSetupError("未能识别连续型目标列;请确认数据含数值目标列(如 income/amount)后重试。")

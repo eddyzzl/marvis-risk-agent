@@ -1,13 +1,20 @@
 """Bridge between the V2 plan-conversation driver (JOIN/FEATURE/MODELING) and
-the agent memory subsystem (MEM-1).
+the agent memory subsystem (MEM-1 / MEM-4).
 
 The memory subsystem (store/retrieval/distillation) was, until now, wired only
-into the V1.1 validation agent. This module gives the V2 driver the write-side
-half of that capability, strictly observing INV-4 (memory is read-only with
-respect to deterministic behavior) and INV-1 (all metrics still come from the
-platform tools): when a V2 modeling/join plan reaches DONE, capture the
-champion experiment / join execution result into agent_memory so future tasks
-of the same kind have a historical anchor (MEM-1 write direction).
+into the V1.1 validation agent. This module gives the V2 driver the same two
+capabilities, strictly observing INV-4 (memory is read-only with respect to
+deterministic behavior — it only ever influences prompt text / ordering, never
+a computed number) and INV-1 (all metrics still come from the platform tools):
+
+  * write side  — when a V2 modeling/join plan reaches DONE, capture the
+    champion experiment / join execution result into agent_memory so future
+    tasks of the same kind have a historical anchor (MEM-1 write direction).
+  * read side   — at AUTO-mode gate decisions, look up top-3 same-scope
+    historical experiments and render a small read-only reference section
+    that gets appended to the gate prompt (MEM-1 read direction), and at
+    modeling slot-detection time, use field_convention memories as a pure
+    ordering hint for detected target/split columns (MEM-4).
 
 Every entry point here degrades silently to a no-op on any failure (missing
 memory policy file, unreadable store, malformed metadata, ...): memory is a
@@ -20,9 +27,14 @@ import re
 from typing import Any
 
 from marvis.agent_memory.extractors import extract_join_experience, extract_model_experience
+from marvis.agent_memory.retrieval import MemoryQuery, compare_model_experience, retrieve_with_distillations
 from marvis.agent_memory.store import AgentMemoryStore
 from marvis.domain import TASK_TYPE_DATA_JOIN, TASK_TYPE_MODELING, TaskRecord
 from marvis.memory_policy import load_memory_policy
+
+MEMORY_ANCHOR_MAX_ENTRIES = 3
+MEMORY_ANCHOR_MAX_LINE_CHARS = 120
+_MODEL_DELIVERY_TOOLS = frozenset({"compare_experiments", "select_experiment", "post_training_action"})
 
 
 def capture_agent_memory_for_driver_done(
@@ -186,6 +198,167 @@ def _first_metric(metrics: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+def build_memory_anchor(
+    settings,
+    task: TaskRecord,
+    *,
+    gate_metadata: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Read-side MEM-1: top-3 historical same-scope experiments for the modeling
+    "选择实验"/调参 gates, as a read-only reference block. Returns ``None`` when
+    memory is disabled, unavailable, or has nothing comparable — callers must
+    render nothing in that case (regression: byte-identical to current gate
+    payload with no memory).
+    """
+    if task.task_type != TASK_TYPE_MODELING:
+        return None
+    meta = gate_metadata if isinstance(gate_metadata, dict) else {}
+    tool = _gate_delivery_tool(meta)
+    has_modeling_setup = isinstance(meta.get("modeling_setup"), dict) and bool(
+        meta["modeling_setup"].get("recipe")
+    )
+    if tool not in _MODEL_DELIVERY_TOOLS and not has_modeling_setup:
+        return None
+    if not load_memory_policy(settings.workspace).reference_cross_task:
+        return None
+    try:
+        store = AgentMemoryStore(settings.db_path)
+        history = store.list_entries(memory_type="model_experience", limit=200)
+    except Exception:
+        return None
+    if not history:
+        return None
+    scope = _modeling_scope(task, meta)
+    current_payload = {"scope": scope, "model_name": _gate_recipe(meta)}
+    try:
+        comparison = compare_model_experience(current_payload, history, limit=MEMORY_ANCHOR_MAX_ENTRIES)
+    except Exception:
+        return None
+    packets = [
+        packet
+        for packet in comparison.get("context_packets", [])
+        if str(packet.get("confidence") or "").lower() != "low"
+    ][:MEMORY_ANCHOR_MAX_ENTRIES]
+    if not packets:
+        return None
+    lines: list[str] = []
+    references: list[dict[str, Any]] = []
+    for packet in packets:
+        line = _anchor_line(packet)
+        if not line:
+            continue
+        lines.append(line[:MEMORY_ANCHOR_MAX_LINE_CHARS])
+        references.append({
+            "id": packet.get("id"),
+            "kind": packet.get("kind", "raw"),
+            "use_reason": "gate_memory_anchor",
+        })
+    if not lines:
+        return None
+    return {"lines": lines, "references": references}
+
+
+def _gate_delivery_tool(meta: dict[str, Any]) -> str:
+    delivery = meta.get("model_delivery")
+    if isinstance(delivery, dict) and delivery.get("source_tool"):
+        return str(delivery.get("source_tool") or "")
+    return ""
+
+
+def _gate_recipe(meta: dict[str, Any]) -> str:
+    delivery = meta.get("model_delivery")
+    if isinstance(delivery, dict) and delivery.get("recipe"):
+        return str(delivery.get("recipe") or "")
+    modeling_setup = meta.get("modeling_setup")
+    if isinstance(modeling_setup, dict) and modeling_setup.get("recipe"):
+        return str(modeling_setup.get("recipe") or "")
+    return ""
+
+
+def _anchor_line(packet: dict[str, Any]) -> str:
+    payload = packet.get("payload") if isinstance(packet.get("payload"), dict) else {}
+    recipe = str(payload.get("model_name") or "未知算法")
+    ks = payload.get("ks")
+    auc = payload.get("auc")
+    source_task_id = packet.get("source_task_id") or "未知任务"
+    confidence = packet.get("confidence") or "medium"
+    metrics_text = "、".join(
+        part
+        for part in (
+            f"KS={ks}" if ks is not None else "",
+            f"AUC={auc}" if auc is not None else "",
+        )
+        if part
+    )
+    if not metrics_text:
+        return ""
+    return f"{recipe}：{metrics_text}（来自历史任务 {source_task_id}，confidence={confidence}）"
+
+
+def fetch_field_convention_hints(settings, *, keywords: tuple[str, ...]) -> dict[str, str] | None:
+    """MEM-4 read side: resolve target_col/split_col hints from historical
+    field_convention memories for slot-detection ordering (sample_setup's
+    ``field_hints`` param). Read-only, silently degrades to ``None`` on any
+    failure or when nothing matches — detection then falls back to today's
+    heuristics-only behavior unchanged.
+    """
+    if not load_memory_policy(settings.workspace).reference_cross_task:
+        return None
+    try:
+        store = AgentMemoryStore(settings.db_path)
+        packets: list[dict[str, Any]] = []
+        if keywords:
+            packets = [
+                packet
+                for packet in retrieve_with_distillations(store, MemoryQuery(keywords=keywords), limit=6)
+                if packet.get("memory_type") == "field_convention"
+            ]
+        if not packets:
+            # field_convention summaries never carry the dataset/table name (only
+            # field labels+values — see extractors.extract_field_convention), so a
+            # keyword match against the dataset filename essentially never hits.
+            # Fall back to the most-recently-captured field_convention entries in
+            # this single-workspace store, which the review calls out as a stable,
+            # high-prior signal for a single-machine/single-user product.
+            packets = [
+                _memory_entry_packet(entry)
+                for entry in store.list_entries(memory_type="field_convention", limit=3)
+            ]
+    except Exception:
+        return None
+    hints: dict[str, str] = {}
+    for packet in packets:
+        if packet.get("memory_type") != "field_convention":
+            continue
+        payload = packet.get("payload") if isinstance(packet.get("payload"), dict) else {}
+        structured_fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else None
+        for key in ("target_col", "split_col"):
+            if key in hints:
+                continue
+            if structured_fields is not None:
+                # Distilled payload: {"fields": {"target_col": ["bad_flag", ...]}}
+                values = structured_fields.get(key)
+                if isinstance(values, list) and values:
+                    hints[key] = str(values[0])
+            else:
+                value = payload.get(key)
+                if value not in (None, ""):
+                    hints[key] = str(value)
+    return hints or None
+
+
+def _memory_entry_packet(entry: Any) -> dict[str, Any]:
+    return {
+        "id": getattr(entry, "id", None),
+        "memory_type": getattr(entry, "memory_type", ""),
+        "payload": getattr(entry, "payload", {}) or {},
+    }
+
+
 __all__ = [
+    "MEMORY_ANCHOR_MAX_ENTRIES",
+    "MEMORY_ANCHOR_MAX_LINE_CHARS",
+    "build_memory_anchor",
     "capture_agent_memory_for_driver_done",
+    "fetch_field_convention_hints",
 ]

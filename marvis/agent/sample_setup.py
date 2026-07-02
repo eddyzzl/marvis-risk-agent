@@ -52,10 +52,17 @@ class SetupProposal:
     bad_rate: Optional[float]
     notes: list[str]
     excluded_categorical: list[dict] = None  # type: ignore[assignment]
+    # MEM-4: which of target_col/split_col (if any) were picked because they
+    # matched a historical field_convention memory hint rather than the
+    # deterministic heuristics alone — used only to annotate the gate message
+    # ("历史任务曾用"); never changes downstream behavior.
+    memory_matched_fields: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.excluded_categorical is None:
             self.excluded_categorical = []
+        if self.memory_matched_fields is None:
+            self.memory_matched_fields = []
 
 
 def _is_binary(series) -> bool:
@@ -71,6 +78,7 @@ def detect_setup(
     configured_split: str = "",
     sample_rows: int = 4000,
     target_type: str = "binary",
+    field_hints: Optional[dict] = None,
 ) -> SetupProposal:
     """Propose target column, split column/values and numeric candidate features.
 
@@ -78,6 +86,16 @@ def detect_setup(
     feature_analysis flow never passes it, so its behaviour is unchanged). When
     ``"continuous"`` the target column is resolved as a numeric column (for a
     regression task) and ``bad_rate`` is left ``None``.
+
+    ``field_hints`` (MEM-4, optional): ``{"target_col": ..., "split_col": ...}``
+    sourced from a historical field_convention memory. It is a pure *ordering*
+    tie-breaker over the same deterministic candidate pool the heuristics would
+    already consider — a hinted column only wins when it independently passes
+    the exact same validity check an explicit ``configured_target``/
+    ``configured_split`` would (binary dtype for the target; a real
+    train/test-or-oot split-value mapping for the split). It can never conjure a
+    candidate the detector would not otherwise accept, so the detection
+    algorithm itself stays fully deterministic (INV-4).
     """
     columns = backend.column_names(path)
     # Random sample (NOT a head slice) — samples are often ordered by split, so a
@@ -86,6 +104,10 @@ def detect_setup(
     notes: list[str] = []
     continuous = target_type == "continuous"
     multiclass = target_type == "multiclass"
+    hints = field_hints if isinstance(field_hints, dict) else {}
+    hinted_target = str(hints.get("target_col") or "").strip()
+    hinted_split = str(hints.get("split_col") or "").strip()
+    memory_matched_fields: list[str] = []
 
     # -- target ---------------------------------------------------------------
     target = ""
@@ -100,6 +122,15 @@ def detect_setup(
     else:
         if configured_target and configured_target in probe.columns and _is_binary(probe[configured_target]):
             target = configured_target
+        if (
+            not target
+            and not configured_target
+            and hinted_target
+            and hinted_target in probe.columns
+            and _is_binary(probe[hinted_target])
+        ):
+            target = hinted_target
+            memory_matched_fields.append("target_col")
         if not target:
             binary_cols = [c for c in probe.columns if _is_binary(probe[c])]
             ranked = sorted(
@@ -115,6 +146,11 @@ def detect_setup(
     split_col = ""
     split_values: dict[str, str] = {}
     by_name = [configured_split] if configured_split in columns else []
+    if not configured_split and hinted_split and hinted_split in columns:
+        # Memory tie-breaker: try the historically-used split column first, right
+        # after any explicit configured_split — it still must pass the same
+        # train/test-or-oot mapping check below to actually be selected.
+        by_name = [*by_name, hinted_split]
     by_name += [c for c in columns if _looks_like_split_name(c)]
     obj_cols = [c for c in probe.columns if probe[c].dtype == object and probe[c].nunique(dropna=True) <= 8]
     for cand in dict.fromkeys(c for c in (by_name + obj_cols) if c):
@@ -122,9 +158,16 @@ def detect_setup(
         mapping = _classify_split_values(col)
         if "train" in mapping and ("test" in mapping or "oot" in mapping):
             split_col, split_values = cand, mapping
+            if not configured_split and cand == hinted_split:
+                memory_matched_fields.append("split_col")
             break
     if not split_col:
         notes.append("未能自动识别 train/test/oot 切分列；可指定切分列，或我按时间字段为你切分。")
+    if memory_matched_fields:
+        labels = "、".join(
+            {"target_col": "目标列", "split_col": "切分列"}[field] for field in memory_matched_fields
+        )
+        notes.append(f"{labels}：与历史任务口径一致(来自记忆)。")
 
     # -- candidate features (numeric, minus target/split/meta) ----------------
     candidates = candidate_numeric_features(
@@ -179,6 +222,7 @@ def detect_setup(
         excluded_categorical=[
             {"column": item.column, "cardinality": item.cardinality} for item in excluded_categorical
         ],
+        memory_matched_fields=memory_matched_fields,
     )
 
 
