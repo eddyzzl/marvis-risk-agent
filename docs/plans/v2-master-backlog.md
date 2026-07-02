@@ -166,12 +166,12 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | MEM-1 | 记忆与 V2 三阶段 driver 双向断链：实验不写入、gate 不读取、compare_model_experience 零调用（AGT-2 同一件事，合并） | Critical/M | ✅ |
+| ✅ | MEM-1 | 双向接线落地（`8de582ec`/`80ccb858`，memory_bridge 模块）：实验/JOIN 结果写入记忆、门注入【历史同类实验(只读参照)】锚点+use 审计；政策双门控、无历史时字节级等同现状（INV-4）；**四条 critical 至此全清** | Critical/M | ✅ |
 | ✅ | AGT-3 | metric-aware 摘要（深度2/20键/600字符）+goal 带 slots 摘要+LLM 意见降权为 goal_doubt→REVIEW（`5ada60a2`） | High/M | ✅ |
 | ✅ | AGT-4 | build_plan 支持 success_criteria+任务级 oot_ks_min 可选控件（不写死数值）→未达标走既有 replan 环（`a0f5c19c`） | High/M | ✅ |
 | ✅ | MEM-2 | 两处构造点接通 llm_factory（`70eded8d`），失败回退模板句 | High/S | ✅ |
 | ✅ | MEM-3 | (type,task,指纹) 幂等去重+support 按独立 task 计（`db996264`） | High/S | ✅ |
-| ⬜ | MEM-4 | field_convention 口径记忆没喂给 V2 槽位探测：目标列/切分列每次从零猜 | High/M | ✅ |
+| ✅ | MEM-4 | detect_setup 接 field_hints 决胜（`80ccb858`）：按本任务数据文件名限定来源、只影响候选排序与提示文案 | High/M | ✅ |
 | ✅ | LLM-1 | json_schema 约束解码+能力探测+json_object 回退（`ed09e819`），gate/router/planner/reviewer/intent 全接 schema，抽取重试兜底保留 | High/M | ✅ |
 | 🔄 | LLM-2 | （B3e 在飞：可运行 eval cases + CLI） | High/M | ✅ |
 | ✅ | LLM-3 | llm_calls 表+7 类 caller 标签+GET /api/llm/usage 报表（`399d3b8d`） | High/M | ✅ |
