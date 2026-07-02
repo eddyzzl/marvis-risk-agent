@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import ast
 from datetime import UTC, datetime
-import json
 import re
 import uuid
 
 from jsonschema import Draft202012Validator
 
+from marvis.agent.json_reply import load_json_object
 from marvis.drafts.contracts import DraftTool, LearningNote
 from marvis.drafts.errors import AuthoringError
 
@@ -31,6 +31,7 @@ REQUIRED_DRAFT_KEYS = (
     "determinism",
 )
 DETERMINISM_CHOICES = {"deterministic", "stochastic"}
+DRAFT_MAX_ATTEMPTS = 2
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _BANNED_SNIPPETS = (
     "os.system",
@@ -89,14 +90,42 @@ def draft_script(
     learning_note: LearningNote | None,
     llm_factory,
 ) -> DraftTool:
-    raw = llm_factory().complete(
-        system_prompt=AUTHOR_SYS,
-        user_prompt=_authoring_prompt(goal, learning_note),
-        response_format={"type": "json_object"},
-        caller="author",
-        stream=False,
-    )
-    spec = _safe_json_loads(str(raw))
+    """Generate one draft tool, with fence-tolerant JSON parsing + one retry.
+
+    The safety floor (assert_draft_code_safe AST scan) is a hard gate on every
+    attempt. On the first failure the model is fed its previous reply and the
+    exact validation error for a targeted correction; the second failure raises.
+    """
+    base_prompt = _authoring_prompt(goal, learning_note)
+    prompt = base_prompt
+    last_error: str | None = None
+    for attempt in range(DRAFT_MAX_ATTEMPTS):
+        raw = llm_factory().complete(
+            system_prompt=AUTHOR_SYS,
+            user_prompt=prompt,
+            response_format={"type": "json_object"},
+            caller="author",
+            stream=False,
+        )
+        try:
+            return _build_draft_tool(str(task_id), learning_note, raw)
+        except AuthoringError as exc:
+            last_error = str(exc)
+            if attempt + 1 >= DRAFT_MAX_ATTEMPTS:
+                raise
+            prompt = _retry_prompt(base_prompt, str(raw), last_error)
+    # Unreachable: the loop either returns or raises above.
+    raise AuthoringError(last_error or "draft authoring failed")
+
+
+def _build_draft_tool(
+    task_id: str,
+    learning_note: LearningNote | None,
+    raw,
+) -> DraftTool:
+    spec, error = load_json_object(raw)
+    if spec is None:
+        raise AuthoringError(f"LLM output is not valid JSON: {error}")
     _assert_required_keys(spec)
     _assert_name(str(spec["name"]))
     _assert_schema(spec["input_schema"], "input_schema")
@@ -110,7 +139,7 @@ def draft_script(
         raise AuthoringError("code must define the named tool function")
     return DraftTool(
         id=_new_id(),
-        task_id=str(task_id),
+        task_id=task_id,
         name=str(spec["name"]),
         summary=str(spec["summary"]),
         code=code,
@@ -121,6 +150,16 @@ def draft_script(
         learning_note_id=learning_note.id if learning_note else None,
         status="draft",
         created_at=_now(),
+    )
+
+
+def _retry_prompt(base_prompt: str, previous_reply: str, error: str) -> str:
+    return (
+        f"{base_prompt}\n\n"
+        f"【上一次返回未通过校验】\n{previous_reply}\n\n"
+        f"【校验错误】\n{error}\n\n"
+        "请修正上述问题后，严格只返回一个 JSON 对象："
+        "{name, summary, code, input_schema, output_schema, determinism}。"
     )
 
 
@@ -169,16 +208,6 @@ def _authoring_prompt(goal: str, learning_note: LearningNote | None) -> str:
         "请输出 JSON: {name, summary, code, input_schema, output_schema, determinism}。\n"
         f"工具模板:\n{TOOL_TEMPLATE}"
     )
-
-
-def _safe_json_loads(raw: str) -> dict:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise AuthoringError("LLM output is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise AuthoringError("LLM JSON output must be an object")
-    return payload
 
 
 def _assert_required_keys(payload: dict) -> None:

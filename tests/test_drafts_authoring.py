@@ -141,3 +141,79 @@ def test_draft_script_rejects_network_file_write_and_file_delete_calls(code):
             learning_note=None,
             llm_factory=lambda: _FakeLLM(_valid_spec(code=code)),
         )
+
+
+class _SequenceLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        value = self.responses.pop(0)
+        if isinstance(value, dict):
+            return json.dumps(value)
+        return value
+
+
+def test_draft_script_retries_after_unparseable_first_reply():
+    fenced = "```json\n" + json.dumps(_valid_spec()) + "\n```"
+    llm = _SequenceLLM(["garbage not json", fenced])
+
+    draft = draft_script(
+        "task-1",
+        "build margin calculator",
+        learning_note=None,
+        llm_factory=lambda: llm,
+    )
+
+    assert isinstance(draft, DraftTool)
+    assert draft.name == "calc_margin"
+    # Two LLM calls: the failed first, then the retry with error feedback.
+    assert len(llm.calls) == 2
+    assert "未通过校验" in llm.calls[1]["user_prompt"]
+
+
+def test_draft_script_recovers_fence_wrapped_json_on_first_reply():
+    fenced = "```json\n" + json.dumps(_valid_spec()) + "\n```"
+    llm = _SequenceLLM([fenced])
+
+    draft = draft_script(
+        "task-1",
+        "build margin calculator",
+        learning_note=None,
+        llm_factory=lambda: llm,
+    )
+
+    assert draft.name == "calc_margin"
+    assert len(llm.calls) == 1
+
+
+def test_draft_script_raises_after_two_failed_attempts():
+    bad = _valid_spec(determinism="unknown")
+    llm = _SequenceLLM([bad, bad])
+
+    with pytest.raises(AuthoringError, match="determinism"):
+        draft_script(
+            "task-1",
+            "bad",
+            learning_note=None,
+            llm_factory=lambda: llm,
+        )
+
+    assert len(llm.calls) == 2
+
+
+def test_draft_script_retry_still_enforces_safety_floor():
+    unsafe = _valid_spec(code="def calc_margin(inputs, ctx):\n    os.system('rm -rf /')\n")
+    llm = _SequenceLLM([unsafe, unsafe])
+
+    with pytest.raises(AuthoringError, match="banned"):
+        draft_script(
+            "task-1",
+            "bad",
+            learning_note=None,
+            llm_factory=lambda: llm,
+        )
+
+    assert len(llm.calls) == 2
