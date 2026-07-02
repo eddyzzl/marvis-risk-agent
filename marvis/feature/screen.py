@@ -45,6 +45,12 @@ SPLIT_SHIFT_THRESHOLD = 0.15
 # per-split KS. A dataset whose split_col carries none of these yields no per-split flags.
 _TRAIN_VALUES = ("train",)
 _TEST_VALUES = ("test",)
+# FS-7 "missing is informative" note: a column below this coverage but still notably
+# discriminative (KS >= _NOTABLE_KS) is annotated because its KS — computed on non-missing
+# rows only — understates it. _NOTABLE_KS reuses the credit-scoring "notably discriminative"
+# bar (0.15) already used for the FS-4 split-shift band. Neither constant touches ranking.
+_LOW_COVERAGE = 0.50
+_NOTABLE_KS = 0.15
 
 
 @dataclass(frozen=True)
@@ -184,7 +190,20 @@ def screen_features(
                 unusable.append((col, f"only {unique} distinct non-null value(s)"))
                 continue
             ks = feature_ks(v_dev, target_dev)
-            scores[col] = {"ks": ks, "missing_rate": missing_rate, "unique_count": unique}
+            coverage = 1.0 - missing_rate  # FS-7: explicit so callers need not derive it.
+            scores[col] = {
+                "ks": ks,
+                "missing_rate": missing_rate,
+                "coverage": coverage,
+                "unique_count": unique,
+            }
+            # FS-7: a low-coverage yet discriminative column ("missing is itself informative"
+            # — e.g. a bureau-query field where "no record" correlates with risk) is
+            # systematically underrated because KS is computed on non-missing rows only. Note
+            # it (informational; does NOT change ranking, which stays KS-based). "High" KS uses
+            # 0.15, the same notably-discriminative bar the FS-4 split-shift band uses.
+            if coverage < _LOW_COVERAGE and ks >= _NOTABLE_KS:
+                scores[col]["note"] = "缺失即信息候选：覆盖率低但区分力强（KS仅按非缺失行计算，可能被低估）"
             # FS-4/FS-6: per-split train vs test KS (only when both splits exist). Recorded
             # for every screened column so the split-shift flag and KS-decay report share it.
             ks_train = ks_test = ks_decay = None

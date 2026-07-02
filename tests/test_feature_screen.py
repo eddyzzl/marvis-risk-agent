@@ -115,3 +115,34 @@ def test_screen_records_ks_decay_and_flags_only_when_threshold_set(tmp_path):
         assert "decayer" in {feature for feature, _decay, _reason in gated.ks_decay_watch}
     # gating never drops the feature from the ranked/clean set.
     assert "decayer" in {c for c, _ in gated.ranked}
+
+
+def test_screen_surfaces_coverage_and_low_coverage_note_without_changing_rank(tmp_path):
+    """FS-7: scores carry explicit coverage (1 - missing_rate); a low-coverage yet
+    discriminative column gets a 'missing is informative' note, and ranking stays KS-based."""
+    rows = 400
+    rng = np.random.RandomState(5)
+    y = np.array(([0, 1] * 200))
+    # full: high coverage, moderate signal.
+    full = np.where(y == 1, 0.6, 0.4) + rng.normal(scale=0.3, size=rows)
+    # sparse: ~70% missing but where present, "missing is informative" -> strong signal.
+    sparse = np.where(y == 1, 5.0, -5.0)
+    mask_missing = rng.rand(rows) < 0.7
+    sparse = sparse.astype(float)
+    sparse[mask_missing] = np.nan
+    frame = pd.DataFrame({"full": full, "sparse": sparse, "y": y})
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(backend, path, features=["full", "sparse"], target_col="y")
+
+    # coverage is explicit and equals 1 - missing_rate.
+    for col in ("full", "sparse"):
+        assert result.scores[col]["coverage"] == 1.0 - result.scores[col]["missing_rate"]
+    assert result.scores["sparse"]["coverage"] < 0.5
+    # sparse is discriminative where present -> gets the low-coverage note.
+    assert "note" in result.scores["sparse"]
+    # high-coverage column gets no note.
+    assert "note" not in result.scores["full"]
+    # ranking is still KS descending (annotation must not reorder).
+    ks_seq = [ks for _c, ks in result.ranked]
+    assert ks_seq == sorted(ks_seq, reverse=True)
