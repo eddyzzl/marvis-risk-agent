@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from marvis.app import create_app
+from marvis.db import ModelingRepository
 from marvis.plugins.manifest import ToolRef
 
 
@@ -168,7 +169,7 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     assert stale.status_code == 409
 
     # confirm features WITH an edited selection: override the screen's set,
-    # then pause at the explicit G3 tuning-configuration gate.
+    # then pause at the FS-1 multivariate-refinement ("精选特征") gate.
     resp = client.post(
         f"/api/tasks/{task_id}/agent/messages",
         json={"content": "确认", "selection": chosen, "expected_step_id": gate1["metadata"]["step_id"]},
@@ -177,6 +178,18 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     # the screen step's stored output now reflects the user's edited selection
     overridden = client.app.state.plan_repo.load_step_output(screen["step_id"])["selected"]
     assert overridden == chosen
+    refine_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert refine_gate["metadata"].get("kind") == "gate"
+    assert "精选特征完成" in refine_gate["content"]
+    # the refinement funnel ran on exactly the user's edited screen selection, not the
+    # screen tool's original proposal
+    refine_tables = refine_gate["metadata"].get("tables", [])
+    refined_list_table = next(t for t in refine_tables if t["title"].startswith("最终清单"))
+    assert {row[0] for row in refined_list_table["rows"]} <= set(chosen)
+
+    # confirm the refined feature set: pause at the explicit G3 tuning-configuration gate.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
     tuning_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert tuning_gate["metadata"].get("kind") == "gate"
     assert "调参配置已生成" in tuning_gate["content"]
@@ -208,6 +221,166 @@ def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "计划已全部完成" in done["content"]
+
+
+def _refinement_funnel_dir(root: Path, n: int = 6000) -> Path:
+    """2 strong signal features (+1 near-duplicate of the first, corr ~0.9996) and 3
+    pure-noise features — exercises the FS-1 multivariate refinement funnel: the IV
+    floor must drop the noise columns and correlation dedup must drop the duplicate,
+    leaving exactly the 2 independent strong signals for training."""
+    src = root / "refinement_funnel_material"
+    src.mkdir(parents=True, exist_ok=True)
+    rng = np.random.RandomState(15)
+    s1 = rng.normal(size=n)
+    s2 = rng.normal(size=n)
+    noise1 = rng.normal(size=n)
+    noise2 = rng.normal(size=n)
+    noise3 = rng.normal(size=n)
+    p = 1 / (1 + np.exp(-(1.1 * s1 + 1.0 * s2 - 1.1)))
+    y = (rng.uniform(size=n) < p).astype(float)
+    s1_dup = s1 + rng.normal(scale=0.03, size=n)  # corr(s1, s1_dup) ~ 0.9996
+    split = np.array(["train"] * n, dtype=object)
+    split[int(n * 0.5):int(n * 0.7)] = "test"
+    split[int(n * 0.7):] = "oot"
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "s1": s1, "s2": s2, "s1_dup": s1_dup,
+        "noise1": noise1, "noise2": noise2, "noise3": noise3,
+        "long_y": y, "model_flag": split,
+    }).to_parquet(src / "sample.parquet")
+    return src
+
+
+def test_modeling_refinement_funnel_drops_noise_and_redundant_features(client: TestClient, tmp_path: Path):
+    """FS-1 end-to-end: the multivariate refinement step (精选特征) between screen and
+    tuning must (a) drop the 3 pure-noise columns via the IV floor, (b) drop the
+    near-duplicate column via correlation dedup, and (c) leave exactly the 2
+    independent strong signals to actually train on."""
+    src = _refinement_funnel_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "精选特征漏斗验证",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+    }).json()["id"]
+
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    # "开始" runs 切分样本+选择建模规格, pauses at the 特征筛选(screen) gate — screen has
+    # NOT run yet (needs_confirmation gates pause BEFORE executing).
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    # confirming 特征筛选 executes it, then pauses at the 精选特征(select) gate — select
+    # has NOT run yet either; the gate shows screen's just-computed output.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    screen_done_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert screen_done_gate["metadata"].get("kind") == "gate"
+    assert "特征筛选完成" in screen_done_gate["content"]
+    # sanity screen (missing/constant/pooled-leakage KS<0.4) passes all 6 clean columns through
+    screen_selected = set(screen_done_gate["metadata"]["screen"]["selected"])
+    assert screen_selected == {"s1", "s2", "s1_dup", "noise1", "noise2", "noise3"}
+
+    # confirming 精选特征 executes it, then pauses at the 配置调参 gate — NOW select has
+    # run and its funnel output is readable.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    tuning_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert tuning_gate["metadata"].get("kind") == "gate"
+    assert "精选特征完成" in tuning_gate["content"]
+
+    plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
+    refine_step = next(step for step in plan.steps if step.title == "精选特征")
+    refine_output = client.app.state.plan_repo.load_step_output(refine_step.id)
+    selected = set(refine_output["selected"])
+    dropped = {feature: reason for feature, reason in refine_output["dropped"]}
+
+    # IV floor drops the 3 pure-noise columns
+    for noise_col in ("noise1", "noise2", "noise3"):
+        assert noise_col in dropped, refine_output["dropped"]
+        assert "low IV" in dropped[noise_col]
+    # correlation dedup drops the near-duplicate (lower-IV of the collinear pair)
+    assert "s1_dup" in dropped
+    assert "collinear" in dropped["s1_dup"]
+    # exactly the 2 independent strong signals survive
+    assert selected == {"s1", "s2"}
+
+    tune_step = next(step for step in plan.steps if step.title == "调参")
+    train_step = next(step for step in plan.steps if step.title == "训练模型")
+    assert tune_step.inputs["features"] == f"$ref:{refine_step.id}.output.selected"
+    assert train_step.inputs["features"] == f"$ref:{refine_step.id}.output.selected"
+
+    # drive to completion: confirm 配置调参 -> tune/train/compare -> model-selection gate
+    # -> report gate -> delivery gate -> done.
+    for content in ["确认", "确认", "确认", "确认", "确认"]:
+        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
+        assert resp.status_code == 202, resp.text
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "计划已全部完成" in done["content"]
+    assert not done["metadata"].get("error")
+
+    plan = client.app.state.plan_repo.load_plan(plan.id)
+    select_step = next(step for step in plan.steps if step.title == "选择实验")
+    select_output = client.app.state.plan_repo.load_step_output(select_step.id)
+    artifact = ModelingRepository(client.app.state.settings.db_path).get_model_artifact(
+        select_output["artifact_id"]
+    )
+    assert set(artifact.feature_list) == {"s1", "s2"}  # trained on exactly the refined set
+
+
+def test_modeling_refinement_funnel_gate_adjust_loosens_iv_floor(client: TestClient, tmp_path: Path):
+    """FS-1 decision #5 (escape hatch): iv_min is adjustable at the gate that depends
+    on select_features (配置调参) — loosening it to 0 lets the previously-dropped noise
+    columns back in, proving the funnel is not a hard, un-bypassable wall."""
+    src = _refinement_funnel_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "精选特征放宽验证",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+    }).json()["id"]
+
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # -> screen gate
+    assert resp.status_code == 202, resp.text
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # screen -> 精选特征 gate
+    assert resp.status_code == 202, resp.text
+    refine_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    refine_step_id = refine_gate["metadata"]["step_id"]
+
+    # confirm 精选特征 (runs with the default iv_min=0.02) -> pause at 配置调参 gate
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    tuning_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert tuning_gate["metadata"].get("kind") == "gate"
+    baseline = client.app.state.plan_repo.load_step_output(refine_step_id)
+    assert set(baseline["selected"]) == {"s1", "s2"}
+
+    # adjust iv_min down to 0 at the 配置调参 gate: resets 精选特征 (needs_confirmation),
+    # which re-pauses awaiting a fresh confirm rather than recomputing inline.
+    resp = client.post(
+        f"/api/tasks/{task_id}/agent/messages",
+        json={
+            "content": "把 IV 底线放宽到 0",
+            "adjust_params": {"iv_min": 0.0},
+            "expected_step_id": tuning_gate["metadata"]["step_id"],
+        },
+    )
+    assert resp.status_code == 202, resp.text
+    reset_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert reset_gate["metadata"].get("step_id") == refine_step_id
+
+    # confirm again: 精选特征 actually re-runs with iv_min=0 this time
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    loosened = client.app.state.plan_repo.load_step_output(refine_step_id)
+    # iv_min=0 lets the noise columns back in; corr_max still dedups the duplicate
+    assert loosened["selected"] != baseline["selected"]
+    assert {"noise1", "noise2", "noise3"} <= set(loosened["selected"])
+    assert "s1_dup" not in loosened["selected"]  # correlation dedup still applies
 
 
 def test_modeling_business_materials_flow_into_report_and_delivery(client: TestClient, tmp_path: Path):
@@ -253,7 +426,10 @@ def test_modeling_business_materials_flow_into_report_and_delivery(client: TestC
     for column in ["loan_month", "rate", "amount", "term", "drawdown", "limit", "mob1", "mob2", "mob3"]:
         assert column in split_step.inputs["passthrough_cols"]
 
-    for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认"]:
+    # 开始 -> split/spec gate; 确认 -> screen gate; 确认 -> FS-1 refine gate; 确认 ->
+    # tuning-config gate; 确认 -> model-selection gate; 确认 -> report gate; 确认 -> delivery
+    # gate; 确认 -> done.
+    for content in ["开始", "确认", "确认", "确认", "确认", "确认", "确认", "确认"]:
         resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
         assert resp.status_code == 202, resp.text
     done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
@@ -351,9 +527,9 @@ def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: 
     # target_type derived from lgb_multiclass — surfaced in the opening setup message
     assert any("多分类任务" in m["content"] for m in msgs if m["role"] == "assistant")
 
-    # 开始 → split/spec gate, 确认 → feature gate, 确认 → tuning-config gate,
-    # 确认 → model-selection gate (tune skipped, model trained)
-    for content in ["开始", "确认", "确认", "确认"]:
+    # 开始 → split/spec gate, 确认 → screen gate, 确认 → FS-1 refine gate, 确认 →
+    # tuning-config gate, 确认 → model-selection gate (tune skipped, model trained)
+    for content in ["开始", "确认", "确认", "确认", "确认"]:
         resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": content})
         assert resp.status_code == 202, resp.text
     model_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])

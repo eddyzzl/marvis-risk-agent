@@ -10,6 +10,11 @@ NONNEGATIVE_INT_ADJUST_PARAMS = frozenset({"seed"})
 SAMPLE_WEIGHT_ADJUST_PARAMS = frozenset({"sample_weight_col"})
 MODELING_SETUP_ADJUST_PARAMS = frozenset({"target_type", "recipes", "sample_weight_col"})
 TUNING_ADJUST_PARAMS = frozenset({"n_trials", "num_boost_round"})
+# The FS-1 multivariate-refinement gate ("精选特征", select_features): iv_min/corr_max
+# loosen or effectively bypass the funnel (iv_min=0 + corr_max=1.0 lets everything
+# through) without a bespoke "enabled" flag — same generic adjust mechanism as the
+# screen gate's leakage_ks/max_missing_rate.
+SELECT_ADJUST_PARAMS = frozenset({"iv_min", "corr_max"})
 # The G1 split gate ("特征筛选", which depends on the "切分样本"/make_split step) lets
 # users override the default split — e.g. switch a time-extrapolated OOT (SEL-1) back
 # to random, or move the OOT time boundary — by replacing the whole split_config dict
@@ -53,6 +58,13 @@ def has_split_adjust(params: dict | None) -> bool:
     )
 
 
+def has_select_adjust(params: dict | None) -> bool:
+    return bool(
+        isinstance(params, dict)
+        and (set(str(key) for key in params) & SELECT_ADJUST_PARAMS)
+    )
+
+
 def adjust_param_error(params: dict | None) -> str | None:
     for key, value in (params or {}).items():
         if key == "target_type":
@@ -64,7 +76,7 @@ def adjust_param_error(params: dict | None) -> str | None:
             clean = [str(item).strip() for item in value if str(item).strip()]
             if len(clean) != len(value) or any(len(item) > 64 or "\x00" in item for item in clean):
                 return "recipes 包含无效算法名,未重算。"
-        if key in UNIT_INTERVAL_ADJUST_PARAMS:
+        if key in UNIT_INTERVAL_ADJUST_PARAMS or key in SELECT_ADJUST_PARAMS:
             number = _finite_number(value)
             if number is None or number < 0 or number > 1:
                 return f"{key} 必须是 0 到 1 之间的数字,未重算。"
@@ -129,6 +141,7 @@ __all__ = [
     "has_modeling_setup_adjust",
     "has_sample_weight_adjust",
     "has_screen_adjust",
+    "has_select_adjust",
     "has_split_adjust",
     "has_tuning_adjust",
 ]

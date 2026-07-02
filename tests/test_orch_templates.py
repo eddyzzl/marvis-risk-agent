@@ -168,11 +168,13 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
 
     # valid against the real modeling pack tool catalog
     assert PlanValidator(tool_registry).validate(plan) == []
-    # step order: G1 make_split -> G2 spec -> screen -> configure -> tune -> train -> compare -> select -> report -> delivery
+    # step order: G1 make_split -> G2 spec -> screen -> refine (FS-1) -> configure -> tune
+    # -> train -> compare -> select -> report -> delivery
     assert [step.tool_ref for step in plan.steps] == [
         ToolRef("modeling", "make_split"),
         ToolRef("modeling", "choose_modeling_spec"),
         ToolRef("modeling", "screen_features"),
+        ToolRef("modeling", "select_features"),
         ToolRef("modeling", "configure_tuning"),
         ToolRef("modeling", "tune_hyperparameters"),
         ToolRef("modeling", "train_models"),
@@ -183,15 +185,16 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     ]
     # phase tags for right-rail big-step grouping
     assert [step.phase for step in plan.steps] == [
-        "特征", "建模", "特征", "建模", "建模", "建模", "建模", "建模", "报告", "交付"
+        "特征", "建模", "特征", "特征", "建模", "建模", "建模", "建模", "建模", "报告", "交付"
     ]
-    # gates: confirm split/features/tuning config, select final experiment, approve report and delivery.
+    # gates: confirm split/features/refined-features/tuning config, select final
+    # experiment, approve report and delivery.
     assert [step.needs_confirmation for step in plan.steps] == [
-        False, False, True, True, True, False, False, True, True, True
+        False, False, True, True, True, True, False, False, True, True, True
     ]
     assert not any(step.decision_point for step in plan.steps)
 
-    make_split, spec, screen, tuning_config, tune, train, compare, select, report, delivery = plan.steps
+    make_split, spec, screen, refine, tuning_config, tune, train, compare, select, report, delivery = plan.steps
     # screen/tune/train run on the split frame produced by the G1 gate
     split_ref = f"$ref:{make_split.id}.output.result_dataset_id"
     assert spec.inputs["features"] == f"$ref:{make_split.id}.output.feature_cols"
@@ -202,16 +205,28 @@ def test_modeling_template_phases_gates_and_refs(tmp_path):
     assert screen.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
     assert screen.inputs["leakage_ks"] == 0.4
     assert screen.inputs["max_missing_rate"] == 0.95
+    assert screen.inputs["top_k"] == 200
+    # FS-1: multivariate refinement funnel sits between screen and tuning config —
+    # IV floor + correlation dedup on the screen's clean candidate set.
+    assert refine.inputs["dataset_id"] == split_ref
+    assert refine.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert refine.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
+    assert refine.inputs["space"] == "raw"
+    assert refine.inputs["iv_min"] == 0.02
+    assert refine.inputs["corr_max"] == 0.95
+    assert refine.inputs["vif_max"] == 1e9  # VIF off by default (tree recipes don't need it)
+    assert refine.needs_confirmation is True
     assert tune.inputs["dataset_id"] == split_ref
     assert train.inputs["dataset_id"] == split_ref
-    # tune + train consume the screened feature set; train consumes tuned params
+    # tune + train consume the REFINED feature set (not the raw screen output); train
+    # consumes tuned params
     assert tuning_config.inputs["recipe"] == f"$ref:{spec.id}.output.recipe"
     assert tuning_config.inputs["n_trials"] == f"$ref:{spec.id}.output.n_trials"
-    assert tune.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert tune.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert tune.inputs["recipe"] == f"$ref:{tuning_config.id}.output.recipe"
     assert tune.inputs["n_trials"] == f"$ref:{tuning_config.id}.output.n_trials"
     assert tune.inputs["params"] == f"$ref:{tuning_config.id}.output.params"
-    assert train.inputs["features"] == f"$ref:{screen.id}.output.selected"
+    assert train.inputs["features"] == f"$ref:{refine.id}.output.selected"
     assert train.inputs["params"] == f"$ref:{tune.id}.output.best_params"
     assert train.inputs["recipes"] == f"$ref:{spec.id}.output.recipes"
     assert train.inputs["target_type"] == f"$ref:{spec.id}.output.target_type"
@@ -254,10 +269,12 @@ def test_modeling_template_validates_with_optional_slots_omitted(tmp_path):
     assert PlanValidator(tool_registry).validate(plan) == []
     spec = plan.steps[1]
     screen = plan.steps[2]
+    refine = plan.steps[3]
     assert "holdout_values" not in screen.inputs  # omitted optional dropped, not None
+    assert "holdout_values" not in refine.inputs
     assert "sample_weight_candidates" not in spec.inputs
     assert "params" not in spec.inputs
-    tuning_config = plan.steps[3]
+    tuning_config = plan.steps[4]
     assert tuning_config.inputs["sample_weight_col"] == f"$ref:{spec.id}.output.sample_weight_col"
     assert tuning_config.inputs["params"] == f"$ref:{spec.id}.output.params"
     report = plan.steps[-2]

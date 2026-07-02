@@ -1480,6 +1480,117 @@ def test_driver_manual_adjust_params_reruns_without_llm_router(tmp_path):
     assert "保留 **2** 个" in turn.messages[-1].content
 
 
+def test_driver_select_adjust_reruns_refine_step_and_downstream_screen_untouched(tmp_path):
+    """FS-1: iv_min/corr_max are declared inputs of the 'select_features' refinement
+    step (精选特征), sitting between screen and tune. Adjusting them at the gate that
+    depends on select_features (mirrors 配置调参 depending on 精选特征 in the real
+    templates) must re-run ONLY select_features, not re-run screen_features.
+
+    select_features is itself a needs_confirmation gate (like screen_features), so —
+    same as any adjust targeting a needs_confirmation step — the reset step re-pauses
+    for a fresh confirm rather than recomputing immediately; confirming again is what
+    actually re-runs it with the new params."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("screen", index=0, tool="screen_features", phase="特征"),
+            _step(
+                "select",
+                index=1,
+                tool="select_features",
+                depends_on=["screen"],
+                needs_confirmation=True,
+                phase="特征",
+            ),
+            _step(
+                "tune",
+                index=2,
+                tool="tune_hyperparameters",
+                depends_on=["select"],
+                needs_confirmation=True,
+                phase="建模",
+            ),
+        ],
+    )
+    plan.steps[1].inputs = {"iv_min": 0.02, "corr_max": 0.95}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1", "sig2"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+        {"selected": ["sig1"], "dropped": [["sig2", "low IV 0.010"]], "scores": {}, "warnings": [], "fit_rows": 100, "fit_split": "train"},
+        # re-run after the adjust keeps both features (loosened iv_min)
+        {"selected": ["sig1", "sig2"], "dropped": [], "scores": {}, "warnings": [], "fit_rows": 100, "fit_split": "train"},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # screen runs, pause at select gate (not yet run)
+    driver.resume(plan_id="plan-1", user_text="确认", run_seq=1)  # confirm select: it runs, pause at tune gate
+    assert len(runner.calls) == 2
+    assert repo.load_step_output("select")["selected"] == ["sig1"]
+
+    adjust_turn = driver.resume(
+        plan_id="plan-1",
+        user_text="放宽 IV 底线",
+        run_seq=2,
+        adjust_params={"iv_min": 0.0},
+        expected_step_id="tune",
+    )
+    # select was reset (needs_confirmation=True) so it re-pauses for a fresh confirm
+    # instead of recomputing inline — screen was never touched.
+    assert adjust_turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 2
+    assert repo.load_plan("plan-1").steps[1].status == StepStatus.AWAITING_CONFIRM
+    assert any("已按指令调整参数" in m.content for m in adjust_turn.messages)
+
+    rerun_turn = driver.resume(plan_id="plan-1", user_text="确认", run_seq=3)
+
+    assert rerun_turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert len(runner.calls) == 3  # select re-ran with the new iv_min, screen never re-ran
+    assert runner.calls[2][0] == "select_features"
+    assert runner.calls[2][1]["iv_min"] == 0.0
+    assert repo.load_step_output("screen")["selected"] == ["sig1", "sig2"]  # untouched
+    assert repo.load_step_output("select")["selected"] == ["sig1", "sig2"]  # both kept now
+    assert "精选特征完成" in rerun_turn.messages[-1].content
+
+
+def test_driver_select_adjust_rejects_wrong_gate(tmp_path):
+    """iv_min/corr_max only apply at a gate that depends on select_features — the same
+    'wrong gate' contract as split_config/screen_adjust."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_plan()  # screen -> tune (needs_confirmation, depends on screen) -> train
+    plan.steps[0].inputs = {"leakage_ks": 0.4}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {"selected": ["sig1"], "leakage": [], "suspected": [], "n_screened": 9, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pause at the tune gate (depends on screen, not select)
+
+    with pytest.raises(DriverError, match="精选特征"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="放宽 IV 底线",
+            run_seq=1,
+            adjust_params={"iv_min": 0.0},
+            expected_step_id="tune",
+        )
+
+
 def test_driver_adjust_resets_downstream_outputs_before_final_gate(tmp_path):
     """Adjusting an upstream dependency at the final gate must re-run dependent
     train/compare steps, not mix new tune results with stale model outputs."""
