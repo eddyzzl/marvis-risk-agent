@@ -833,9 +833,9 @@ async def test_sync_join_execute_does_not_block_event_loop_for_health_polling(tm
 
     real_execute = JoinEngine.execute_join_plan
 
-    def _slow_execute_join_plan(self, join_plan_id, *, out_dir):
+    def _slow_execute_join_plan(self, join_plan_id, *, out_dir, **kwargs):
         time.sleep(1.5)
-        return real_execute(self, join_plan_id, out_dir=out_dir)
+        return real_execute(self, join_plan_id, out_dir=out_dir, **kwargs)
 
     monkeypatch.setattr(JoinEngine, "execute_join_plan", _slow_execute_join_plan)
 
