@@ -127,6 +127,33 @@ def _gated_modeling_weight_plan() -> Plan:
     )
 
 
+def _gated_modeling_split_plan() -> Plan:
+    """切分样本(make_split) -> 特征筛选(gate) — mirrors the MODELING template's G1 shape
+    so a split_config adjust (SEL-1: switch time-extrapolated OOT back to random, or move
+    the OOT boundary) can reset and rerun make_split, same as the modeling-setup/tuning
+    adjust families above."""
+    return Plan(
+        id="plan-1",
+        task_id="task-1",
+        goal="modeling",
+        source="template",
+        template_id="modeling",
+        autonomy_level=1,
+        status=PlanStatus.VALIDATED,
+        steps=[
+            _step("make_split", index=0, tool="make_split", phase="特征"),
+            _step(
+                "screen",
+                index=1,
+                tool="screen_features",
+                depends_on=["make_split"],
+                needs_confirmation=True,
+                phase="特征",
+            ),
+        ],
+    )
+
+
 def _gated_join_dedup_plan() -> Plan:
     steps = [
         _step("propose", index=0, tool="propose_join", phase="拼接"),
@@ -1009,6 +1036,93 @@ def test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen(tmp_path
     assert turn.messages[-1].metadata["modeling_setup"]["target_type"] == "continuous"
     assert turn.messages[-1].metadata["modeling_setup"]["recipes"] == ["lgb_regressor"]
     assert turn.messages[-1].metadata["modeling_setup"]["n_trials"] == 20
+
+
+def test_driver_split_config_adjust_reruns_make_split(tmp_path):
+    """SEL-1: split_config is a typed, gate-scoped adjust param (has_split_adjust) that
+    resets and reruns the make_split step it belongs to — e.g. switching a default
+    time-extrapolated OOT (oot_by_time) back to a plain random split, or moving the OOT
+    boundary, without needing free-text LLM routing to guess the nested schema."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_split_plan()
+    plan.steps[0].inputs = {
+        "dataset_id": "ds-1",
+        "target_col": "y",
+        "split_config": {"test_size": 0.25, "oot_by_time": "loan_month", "oot_size": 0.2},
+    }
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "result_dataset_id": "ds-split-1",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "holdout_values": ["oot"],
+            "feature_cols": ["x1", "x2"],
+            "sample_analysis": {"split_counts": {"train": 60, "test": 20, "oot": 20}, "total_rows": 100},
+        },
+        {
+            "result_dataset_id": "ds-split-2",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test"},
+            "holdout_values": [],
+            "feature_cols": ["x1", "x2"],
+            "sample_analysis": {"split_counts": {"train": 75, "test": 25}, "total_rows": 100},
+        },
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)  # pauses before "screen" (make_split ran)
+    turn = driver.resume(
+        plan_id="plan-1",
+        user_text="改成随机切分",
+        run_seq=1,
+        adjust_params={"split_config": {"test_size": 0.25}},
+        expected_step_id="screen",
+    )
+
+    assert turn.status == PlanStatus.AWAITING_CONFIRM.value
+    assert [call[0] for call in runner.calls] == ["make_split", "make_split"]
+    assert runner.calls[1][1]["split_config"] == {"test_size": 0.25}
+    assert repo.load_plan("plan-1").steps[1].status == StepStatus.AWAITING_CONFIRM
+
+
+def test_driver_split_config_adjust_rejects_wrong_gate(tmp_path):
+    """split_config is scoped to gates depending on make_split — applying it at an
+    unrelated gate (e.g. the modeling-spec gate) is rejected instead of silently no-op'd
+    or misapplied."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {"sample_weight_col": "", "feature_cols": ["x1", "x2"]}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipes": ["lgb"],
+            "sample_weight_col": "",
+            "sample_weight_candidates": [],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    driver._run_and_handle("plan-1", run_seq=0)
+
+    with pytest.raises(DriverError, match="样本切分确认步骤"):
+        driver.resume(
+            plan_id="plan-1",
+            user_text="改切分",
+            run_seq=1,
+            adjust_params={"split_config": {"test_size": 0.25}},
+            expected_step_id="tune",
+        )
 
 
 def test_driver_n_trials_only_adjust_requires_fresh_modeling_gate_token(tmp_path):

@@ -162,8 +162,16 @@ def _make_split(df: pd.DataFrame, split_config: dict[str, Any] | None, seed: int
             raise ModelingError(f"missing columns: {time_col}")
         free_time = out.loc[free, time_col]
         if not free_time.empty:
-            cutoff = free_time.quantile(1 - oot_size)
-            out.loc[free & (out[time_col] >= cutoff), SPLIT_COLUMN] = "oot"
+            # Rank first, then quantile the (numeric) ranks rather than the raw
+            # values. Time columns are frequently text (e.g. "2025-10" apply-month
+            # strings) and pandas/pyarrow string dtypes have no quantile kernel;
+            # dense rank is a monotonic, dtype-agnostic stand-in that preserves
+            # chronological order for numeric AND lexicographically-sortable
+            # string time columns alike.
+            ranked = free_time.rank(method="dense")
+            cutoff = ranked.quantile(1 - oot_size)
+            oot_mask = (ranked >= cutoff).reindex(out.index, fill_value=False)
+            out.loc[free & oot_mask, SPLIT_COLUMN] = "oot"
             expect_oot = True
     elif config.get("random_oot") and oot_size > 0:
         # OOT means out-of-time; only fabricate a random OOT when explicitly asked.

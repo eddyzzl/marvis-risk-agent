@@ -304,7 +304,11 @@ def test_modeling_business_materials_without_split_survive_auto_split(client: Te
     assert resp.status_code == 202, resp.text
     messages = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     opening = next(m for m in messages if m["role"] == "assistant")
-    assert "已自动" in opening["content"] and "train/test" in opening["content"]
+    # loan_month is present (SEL-1 smoke fixture) -> default split time-extrapolates OOT
+    # from it instead of a plain random train/test (see test_modeling_without_split_...
+    # below for the no-time-column case, which keeps the old "已自动"/no-OOT wording).
+    assert "已按" in opening["content"] and "时间外推 OOT" in opening["content"]
+    assert "loan_month" in opening["content"]
     assert "已识别建模报告业务列" in opening["content"]
 
     plan = client.app.state.plan_repo.list_plans_for_task(task_id)[0]
@@ -320,6 +324,14 @@ def test_modeling_business_materials_without_split_survive_auto_split(client: Te
     assert split_gate["metadata"].get("kind") == "gate"
     assert not split_gate["metadata"].get("error")
     assert "样本切分完成" in split_gate["content"]
+    # SEL-1: OOT is real (time-extrapolated from loan_month), not fabricated/missing —
+    # confirmed by counts on the derived split, all sourced from the latest month.
+    plan = client.app.state.plan_repo.load_plan(plan.id)
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    split_output = client.app.state.plan_repo.load_step_output(split_step.id)
+    counts = (split_output.get("sample_analysis") or {}).get("split_counts") or {}
+    assert set(counts) == {"train", "test", "oot"}
+    assert counts["oot"] > 0
 
 
 def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: Path):
@@ -539,6 +551,69 @@ def test_modeling_multiple_files_without_split_column_auto_splits_after_join(
     assert "extra_score" in split_output["feature_cols"]
     counts = (split_output.get("sample_analysis") or {}).get("split_counts") or {}
     assert set(counts) == {"train", "test"} and all(v > 0 for v in counts.values())
+
+
+def test_modeling_multiple_files_with_time_column_auto_splits_oot_after_join(
+    client: TestClient, tmp_path: Path
+):
+    """SEL-1 (joined path): the anchor carries a loan_month-style business column but no
+    split column. Like the single-file case, the auto split_config generated at setup
+    time (before the joined frame even exists) must default to time-extrapolated OOT via
+    oot_by_time, not a plain random train/test — keeping the joined and single-file
+    default-split paths consistent."""
+    src = tmp_path / "join_time_nosplit"
+    src.mkdir()
+    n = 200
+    rng = np.random.RandomState(13)
+    months = np.array(["2025-10", "2025-11", "2025-12", "2026-01"], dtype=object)
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "sig1": rng.normal(size=n),
+        "sig2": rng.normal(size=n),
+        "long_y": (rng.uniform(size=n) < 0.3).astype(float),
+        "loan_month": months[np.arange(n) % len(months)],
+    }).to_parquet(src / "sample.parquet")
+    pd.DataFrame({
+        "cust_id": np.arange(n),
+        "extra_score": np.linspace(0, 1, n),
+    }).to_parquet(src / "feature_table.parquet")
+    task_id = client.post("/api/tasks", json={
+        "model_name": "多表时间列无切分", "validator": "qa", "source_dir": str(src),
+        "task_type": "modeling", "run_mode": "manual",
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    c1 = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert c1["metadata"]["join_c1"]["anchor_id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    overview = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert not (overview.get("metadata") or {}).get("error"), overview["content"]
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans and plans[-1].template_id == "modeling_with_join"
+    plan = plans[-1]
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    assert split_step.inputs.get("split_col") == ""
+    assert split_step.inputs.get("split_config", {}).get("oot_by_time") == "loan_month"
+
+    # Drive through join and split to prove make_split really produces an OOT set.
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert resp.status_code == 202, resp.text
+    join_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert join_gate["metadata"].get("kind") == "gate"
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+    split_gate = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert split_gate["metadata"].get("kind") == "gate", split_gate["content"]
+    plan = client.app.state.plan_repo.load_plan(plan.id)
+    split_step = next(step for step in plan.steps if step.title == "切分样本")
+    split_output = client.app.state.plan_repo.load_step_output(split_step.id)
+    assert "extra_score" in split_output["feature_cols"]
+    counts = (split_output.get("sample_analysis") or {}).get("split_counts") or {}
+    assert set(counts) == {"train", "test", "oot"} and all(v > 0 for v in counts.values())
 
 
 def test_modeling_without_split_auto_generates_grouped_split(client: TestClient, tmp_path: Path):
