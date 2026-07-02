@@ -173,9 +173,9 @@
 | ✅ | MEM-3 | (type,task,指纹) 幂等去重+support 按独立 task 计（`db996264`） | High/S | ✅ |
 | ✅ | MEM-4 | detect_setup 接 field_hints 决胜（`80ccb858`）：按本任务数据文件名限定来源、只影响候选排序与提示文案 | High/M | ✅ |
 | ✅ | LLM-1 | json_schema 约束解码+能力探测+json_object 回退（`ed09e819`），gate/router/planner/reviewer/intent 全接 schema，抽取重试兜底保留 | High/M | ✅ |
-| 🔄 | LLM-2 | （B3e 在飞：可运行 eval cases + CLI） | High/M | ✅ |
+| ✅ | LLM-2 | run_eval_case 生产实现+`marvis eval-llm` CLI（`aa745e7a`）：真 IntentRouter/Planner/Validator + 注入 LLM，7 个初始 case 可执行 | High/M | ✅ |
 | ✅ | LLM-3 | llm_calls 表+7 类 caller 标签+GET /api/llm/usage 报表（`399d3b8d`） | High/M | ✅ |
-| 🔄 | TST-1 | （B3e 在飞：退化输出评测集六形态×四触点） | High/M | ⚠️ |
+| ✅ | TST-1 | 24 个退化 fixtures（6 形态×4 触点）+回归门（`40bac66f`）；<think> 三例经 LLM-6 修复翻转为回归守卫；仍不安全路径 9 条已 expected_failure 记录（负反馈候选：action/negation 交叉校验、planner 围栏=AGT-10 在修、指标伪造结构检查） | High/M | ⚠️ |
 | ✅ | MEM-5 | recency 加减分+age_days+"(N 天前)"标注（`ef56b2e7`） | Med/S | — |
 | ✅ | MEM-6 | 按 kind 定向查询+各类上限（`42731506`） | Med/S | — |
 | ⬜ | MEM-7 | 记忆质量无负反馈闭环 | Med/M | — |
