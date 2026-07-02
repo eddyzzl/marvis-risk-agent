@@ -2,6 +2,8 @@
 
 Last updated: 2026-07-02
 
+> **SUPERSEDED AS TRACKER (2026-07-02)**: the execution-tracker role of this document has moved to [v2-master-backlog.md](v2-master-backlog.md) — the single source of truth for all remaining V2 work. Its unfinished items have been extracted and mapped there (see its §13). This file is retained as the verification/evidence record for the 2026-06-29 implementation pass; do not update TODO status here.
+
 This document consolidates the remaining V2 work, previous review findings, and a fresh code review across backend architecture, Agent orchestration, modeling workflow, frontend UX, reliability, and release gates. It is now also used as the execution tracker for the implementation pass started on 2026-06-29.
 
 ## Review Scope
