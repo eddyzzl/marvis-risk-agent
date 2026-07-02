@@ -177,3 +177,62 @@ def test_client_wraps_stream_interruptions(monkeypatch):
                 "api_key": "secret",
             }
         ).complete(system_prompt="s", user_prompt="u")
+
+
+def test_client_sends_json_schema_when_profile_supports_it(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    schema = {"name": "decision", "schema": {"type": "object"}, "strict": True}
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "structured_output": "json_schema",
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        response_format={"type": "json_object"},
+        json_schema=schema,
+        stream=False,
+    )
+
+    assert captured["payload"]["response_format"] == {
+        "type": "json_schema",
+        "json_schema": schema,
+    }
+
+
+def test_client_falls_back_to_json_object_when_schema_unsupported(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    schema = {"name": "decision", "schema": {"type": "object"}, "strict": True}
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            # structured_output defaults to json_object -> schema ignored
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        response_format={"type": "json_object"},
+        json_schema=schema,
+        stream=False,
+    )
+
+    assert captured["payload"]["response_format"] == {"type": "json_object"}

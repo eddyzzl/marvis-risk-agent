@@ -55,6 +55,33 @@ PLANNING_EXAMPLES = (
     },
 )
 
+PLAN_STEPS_SCHEMA = {
+    "name": "plan_steps",
+    "strict": False,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "done": {"type": "boolean"},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "tool": {"type": "object"},
+                        "inputs": {"type": "object"},
+                        "depends_on": {"type": "array"},
+                    },
+                    "required": ["title", "tool"],
+                    "additionalProperties": True,
+                },
+            },
+        },
+        "required": ["steps"],
+        "additionalProperties": True,
+    },
+}
+
 
 class PlanningError(Exception):
     pass
@@ -160,6 +187,7 @@ class Planner:
                 system_prompt=PLAN_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
             )
             try:
@@ -217,6 +245,7 @@ class Planner:
                 system_prompt=REPLAN_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
             )
             try:
@@ -261,6 +290,7 @@ class Planner:
                 system_prompt=EXPLORE_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
             )
             try:

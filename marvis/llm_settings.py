@@ -65,6 +65,8 @@ def save_llm_settings(workspace: str | Path, payload: dict) -> dict:
                 "api_key_env": api_key_env,
                 "enable_thinking": bool(raw_model.get("enable_thinking")),
                 "reasoning_effort": _reasoning_effort(raw_model.get("reasoning_effort")),
+                "structured_output": _structured_output(raw_model.get("structured_output")),
+                "thinking_style": _thinking_style(raw_model.get("thinking_style")),
                 "timeout_seconds": _timeout_seconds(raw_model.get("timeout_seconds")),
             }
         )
@@ -164,6 +166,8 @@ def _public_model(model: dict) -> dict:
         "api_key_env": str(model.get("api_key_env") or ""),
         "enable_thinking": bool(model.get("enable_thinking")),
         "reasoning_effort": _reasoning_effort(model.get("reasoning_effort")),
+        "structured_output": _structured_output(model.get("structured_output")),
+        "thinking_style": _thinking_style(model.get("thinking_style")),
         "timeout_seconds": int(model.get("timeout_seconds") or 60),
         "has_api_key": bool(_resolved_api_key(model)),
     }
@@ -220,3 +224,19 @@ _VALID_REASONING_EFFORTS = ("low", "medium", "high")
 def _reasoning_effort(value) -> str:
     effort = str(value or "").strip().lower()
     return effort if effort in _VALID_REASONING_EFFORTS else "high"
+
+
+_VALID_STRUCTURED_OUTPUTS = ("json_schema", "json_object", "none")
+
+
+def _structured_output(value) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in _VALID_STRUCTURED_OUTPUTS else "json_object"
+
+
+_VALID_THINKING_STYLES = ("qwen_chat_template", "openai_reasoning", "anthropic", "none")
+
+
+def _thinking_style(value) -> str:
+    style = str(value or "").strip().lower()
+    return style if style in _VALID_THINKING_STYLES else "none"

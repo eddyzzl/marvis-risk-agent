@@ -65,6 +65,7 @@ class Reviewer:
             raw = self._llm_factory().complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
+                response_format={"type": "json_object"},
                 stream=False,
             )
             passed, reasons, ok = _parse_soft_verdict(raw)
@@ -76,7 +77,8 @@ class Reviewer:
                         raw,
                         '{"passed": true|false, "reasons": ["..."]}',
                     ),
-                    stream=False,
+                    response_format={"type": "json_object"},
+                        stream=False,
                 )
                 passed, reasons, _ok = _parse_soft_verdict(raw)
         except Exception as exc:
@@ -128,6 +130,7 @@ class Reviewer:
             raw = self._llm_factory().complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
+                response_format={"type": "json_object"},
                 stream=False,
             )
             data, error = load_json_object(raw)
@@ -139,7 +142,8 @@ class Reviewer:
                         raw,
                         '{"summary": "...", "open_items": [], "goal_doubt": false, "goal_met": true|false}',
                     ),
-                    stream=False,
+                    response_format={"type": "json_object"},
+                        stream=False,
                 )
                 data, error = load_json_object(raw)
         except Exception:

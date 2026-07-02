@@ -164,3 +164,51 @@ def test_llm_settings_can_resolve_api_key_from_environment(tmp_path, monkeypatch
     assert saved["models"][0]["api_key_env"] == "MARVIS_TEST_LLM_KEY"
     assert "env-secret" not in raw
     assert resolved["api_key"] == "env-secret"
+
+
+def test_structured_output_defaults_and_validation(tmp_path):
+    saved = save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                },
+                {
+                    "model_id": "model-b",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                    "structured_output": "json_schema",
+                    "thinking_style": "qwen_chat_template",
+                },
+                {
+                    "model_id": "model-c",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                    "structured_output": "bogus",
+                    "thinking_style": "bogus",
+                },
+            ],
+        },
+    )
+
+    by_id = {model["model_id"]: model for model in saved["models"]}
+    assert by_id["model-a"]["structured_output"] == "json_object"
+    assert by_id["model-a"]["thinking_style"] == "none"
+    assert by_id["model-b"]["structured_output"] == "json_schema"
+    assert by_id["model-b"]["thinking_style"] == "qwen_chat_template"
+    assert by_id["model-c"]["structured_output"] == "json_object"
+    assert by_id["model-c"]["thinking_style"] == "none"
+
+    private = resolve_llm_model(tmp_path, "model-b")
+    assert private["structured_output"] == "json_schema"
+    assert private["thinking_style"] == "qwen_chat_template"

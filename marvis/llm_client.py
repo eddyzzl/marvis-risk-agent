@@ -22,6 +22,7 @@ class OpenAICompatibleLLMClient:
         user_prompt: str,
         temperature: float = 0.2,
         response_format: dict | None = None,
+        json_schema: dict | None = None,
         on_delta: Callable[[str], None] | None = None,
         stream: bool = True,
     ) -> str:
@@ -47,7 +48,13 @@ class OpenAICompatibleLLMClient:
         extra_request_fields = self.profile.get("extra_request_fields")
         if isinstance(extra_request_fields, dict):
             payload.update(extra_request_fields)
-        if response_format:
+        structured_output = str(self.profile.get("structured_output") or "json_object")
+        if json_schema is not None and structured_output == "json_schema":
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema,
+            }
+        elif response_format:
             payload["response_format"] = response_format
         request = Request(
             f"{api_base_url}/chat/completions",

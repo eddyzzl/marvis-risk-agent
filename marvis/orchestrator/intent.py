@@ -78,6 +78,7 @@ class IntentRouter:
             raw = self._llm_factory().complete(
                 system_prompt=CLASSIFY_SYS,
                 user_prompt=prompt,
+                response_format={"type": "json_object"},
                 stream=False,
             )
         except Exception:
