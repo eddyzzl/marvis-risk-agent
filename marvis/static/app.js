@@ -47,6 +47,8 @@ let lastMetricValues = {};
 let lastMetricValuesTaskId = null;
 let lastMetricTableSections = [];
 const taskBusyActions = new Map();
+let createTaskInFlight = false;
+const agentRequestAbortControllers = new Map();
 const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let globalBusyAction = null;
@@ -5113,10 +5115,13 @@ async function startAgentValidation() {
   updateAgentSendDisabled();
   const optimisticMessage = appendOptimisticAgentUserMessage(content, modelId);
   const optimisticThinkingMessage = appendOptimisticAgentThinkingMessage(modelId);
+  const controller = new AbortController();
+  agentRequestAbortControllers.set(taskId, controller);
   let result;
   try {
     const requestPromise = api(`api/tasks/${taskId}/agent/messages`, {
       method: "POST",
+      signal: controller.signal,
       body: JSON.stringify({
         content,
         model_id: modelId || null,
@@ -5130,11 +5135,21 @@ async function startAgentValidation() {
   } catch (error) {
     removeOptimisticAgentMessage(optimisticMessage.id);
     removeOptimisticAgentMessage(optimisticThinkingMessage.id);
+    if (error?.name === "AbortError") {
+      autoGrowComposerInput();
+      updateAgentSendDisabled();
+      setActionStatus("已停止当前动作，请问有什么指示？", "success");
+      return;
+    }
     input.value = originalValue;
     autoGrowComposerInput();
     updateAgentSendDisabled();
     if (showAgentModelGuidance(agentModelConfigurationErrorMessage(error))) return;
     throw error;
+  } finally {
+    if (agentRequestAbortControllers.get(taskId) === controller) {
+      agentRequestAbortControllers.delete(taskId);
+    }
   }
   agentMessages = result.messages || agentMessages;
   renderAgentConversation();
@@ -5165,6 +5180,8 @@ async function dispatchAgentValidation(taskId = selectedTaskId) {
 
 async function stopAgentValidation(taskId = selectedTaskId) {
   const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "Agent 停止");
+  const controller = agentRequestAbortControllers.get(normalizedTaskId);
+  if (controller) controller.abort();
   const result = await api(`api/tasks/${normalizedTaskId}/agent/stop`, {
     method: "POST",
   });
@@ -5230,6 +5247,13 @@ async function uploadMaterialFiles(files) {
     method: "POST",
     body: formData,
   });
+}
+
+function setCreateTaskSubmitting(isSubmitting) {
+  const button = $("createTaskButton");
+  if (!button) return;
+  button.disabled = isSubmitting;
+  button.dataset.createBusy = isSubmitting ? "true" : "false";
 }
 
 async function createTask() {
@@ -5315,24 +5339,35 @@ async function scanCurrentTask() {
 }
 
 async function createTaskAndScan() {
-  const task = await createTask();
-  if (!task) return;
-  if (task.run_mode === "agent") {
-    const taskId = task.id || selectedTaskId;
-    setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
-    setBusy(null, "", taskId);
-    await loadAgentMessages(taskId);
-    renderAll();
+  if (createTaskInFlight) {
+    setCreateStatus("任务正在创建，请稍候。");
     return;
   }
-  setBusy(null, "", null);
-  setBusy("scan", "任务已创建，正在自动扫描材料...", task.id);
-  setActionStatus("任务已创建，正在自动扫描材料...", "busy");
+  createTaskInFlight = true;
+  setCreateTaskSubmitting(true);
   try {
-    await scanCurrentTask();
-    await loadTaskEvidence(task.id);
+    const task = await createTask();
+    if (!task) return;
+    if (task.run_mode === "agent") {
+      const taskId = task.id || selectedTaskId;
+      setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
+      setBusy(null, "", taskId);
+      await loadAgentMessages(taskId);
+      renderAll();
+      return;
+    }
+    setBusy(null, "", null);
+    setBusy("scan", "任务已创建，正在自动扫描材料...", task.id);
+    setActionStatus("任务已创建，正在自动扫描材料...", "busy");
+    try {
+      await scanCurrentTask();
+      await loadTaskEvidence(task.id);
+    } finally {
+      setBusy(null, "", task.id);
+    }
   } finally {
-    setBusy(null, "", task.id);
+    createTaskInFlight = false;
+    setCreateTaskSubmitting(false);
   }
 }
 
@@ -5546,14 +5581,44 @@ function previewWordReport() {
   openWordPreviewDialog();
 }
 
+async function reconcileTaskBeforeDelete(task) {
+  if (!task?.id) return null;
+  if (taskBusyActions.get(task.id) !== "agent" || taskServerBusyAction(task)) {
+    return task;
+  }
+  try {
+    await refreshTasks();
+  } catch (_) {
+    return task;
+  }
+  const latestTask = findTaskInCache(task.id);
+  if (!latestTask) {
+    setBusy(null, "", task.id);
+    return null;
+  }
+  if (!taskServerBusyAction(latestTask)) {
+    setBusy(null, "", task.id);
+  }
+  return latestTask;
+}
+
 async function deleteTask(task) {
-  if (!task || taskBusyAction(task.id)) return;
-  if (taskServerBusyAction(task)) {
+  if (!task) return;
+  const targetTask = await reconcileTaskBeforeDelete(task);
+  if (!targetTask) {
+    setActionStatus("任务已不存在。", "success");
+    return;
+  }
+  if (taskBusyAction(targetTask.id)) {
+    setActionStatus("当前任务正在处理，请先停止或稍后再删除。", "error");
+    return;
+  }
+  if (taskServerBusyAction(targetTask)) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
   const confirmed = window.confirm(
-    `确认删除任务「${taskDisplayName(task)}」？删除后将移除任务记录和本地输出文件，不能撤销。`
+    `确认删除任务「${taskDisplayName(targetTask)}」？删除后将移除任务记录和本地输出文件，不能撤销。`
   );
   if (!confirmed) {
     setActionStatus("已取消删除。");
@@ -5561,16 +5626,16 @@ async function deleteTask(task) {
   }
 
   try {
-    setBusy("delete", "正在删除任务...", task.id);
+    setBusy("delete", "正在删除任务...", targetTask.id);
     setActionStatus("正在删除任务...", "busy");
     renderAll();
-    await api(`api/tasks/${task.id}`, { method: "DELETE" });
-    if (selectedTaskId === task.id) {
+    await api(`api/tasks/${targetTask.id}`, { method: "DELETE" });
+    if (selectedTaskId === targetTask.id) {
       selectedTaskId = null;
       selectedTask = null;
       rememberSelectedTaskId(null);
     }
-    resultScrollPositionsByTask.delete(task.id);
+    resultScrollPositionsByTask.delete(targetTask.id);
     await refreshTasks();
     renderStoredStateSummaries();
     await loadReportFields();
@@ -5578,7 +5643,7 @@ async function deleteTask(task) {
   } catch (error) {
     setActionStatus(error.message || "删除任务失败。", "error");
   } finally {
-    setBusy(null, "", task.id);
+    setBusy(null, "", targetTask.id);
     renderAll();
   }
 }
