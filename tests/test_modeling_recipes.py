@@ -588,6 +588,94 @@ def test_tune_hyperparameters_is_deterministic_across_runs(tmp_path):
     assert first.best_metrics == second.best_metrics
 
 
+def test_tune_hyperparameters_normalizes_dict_monotone_constraints_for_lgb(tmp_path):
+    """TUNE-7: a dict-form monotone_constraints (the same shape train_lgb accepts
+    via recipes.common.normalized_monotone_constraints) must not crash
+    tune_hyperparameters -- previously it was transplanted unnormalized into
+    lgb.train, which raises TypeError for a dict."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_dict.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(
+            n_trials=3,
+            base_params={"monotone_constraints": {"x1": 1, "x2": -1, "x3": 0}},
+        ),
+    )
+
+    assert result.n_trials == 3
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == [1, -1, 0]
+
+
+def test_tune_monotone_constraints_normalization_matches_train_path_vector(tmp_path):
+    """TUNE-7: tune.py's normalization must produce the exact same constraint
+    vector the training path (recipes.common.normalized_monotone_constraints)
+    would for the same dict input and feature set -- "same config, same result"
+    across tune and train."""
+    from marvis.packs.modeling.recipes.common import normalized_monotone_constraints
+
+    raw = {"x1": 1, "x2": -1, "x3": 0}
+    features = ("x1", "x2", "x3")
+    train_config = TrainConfig(
+        dataset_id="d", features=features, target_col="y", split_col="split",
+        split_values={"train": "train", "test": "test"},
+        params={"monotone_constraints": raw}, seed=1, early_stopping_rounds=None,
+    )
+    train_vector = normalized_monotone_constraints(train_config)
+
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_parity.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(n_trials=2, base_params={"monotone_constraints": raw}),
+    )
+
+    assert list(train_vector) == result.trials[0]["params"]["monotone_constraints"]
+
+
+def test_tune_hyperparameters_normalizes_list_monotone_constraints_for_lgb(tmp_path):
+    """TUNE-7: list-form monotone_constraints is normalized (validated/passed
+    through) the same way, not merely transplanted by feature-order coincidence."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_list.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(n_trials=3, base_params={"monotone_constraints": [1, -1, 0]}),
+    )
+
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == [1, -1, 0]
+
+
+def test_tune_hyperparameters_normalizes_dict_monotone_constraints_for_xgb(tmp_path):
+    """TUNE-7: xgb's tune path normalizes to the same "(1,-1,0)" tuple-string
+    encoding recipes/xgb.py's train_xgb uses, keeping tune/train contracts aligned."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_monotone_xgb.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path,
+        **_tune_kwargs(
+            recipe="xgb",
+            n_trials=3,
+            base_params={"monotone_constraints": {"x1": 1, "x2": -1, "x3": 0}},
+        ),
+    )
+
+    for trial in result.trials:
+        assert trial["params"]["monotone_constraints"] == "(1,-1,0)"
+
+
 def test_tune_hyperparameters_records_deterministic_flag_per_recipe(tmp_path):
     """TUNE-6: every trial (and best_metrics) explicitly records whether this
     recipe's tune trials are reproducible across machines with different core

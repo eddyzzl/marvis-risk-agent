@@ -46,7 +46,11 @@ from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift, weighted_feature_auc, weighted_feature_ks
 from marvis.packs.modeling.defaults import DEFAULT_TRAIN_NUM_THREADS, DEFAULT_TUNE_NUM_THREADS
 from marvis.packs.modeling.errors import ModelingError
-from marvis.packs.modeling.recipes.common import carve_early_stop_fold, cat_feature_indices
+from marvis.packs.modeling.recipes.common import (
+    carve_early_stop_fold,
+    cat_feature_indices,
+    normalize_monotone_constraints_value,
+)
 
 # Reference learning rate used to scale the per-trial boost-round ceiling: lower
 # sampled learning rates get proportionally more rounds (early stopping still
@@ -1316,6 +1320,7 @@ def _recipe_search_hooks(
         import lightgbm as lgb
 
         fixed_params = _lgb_base_params(base_params, pos_weight_hint=pos_weight_hint)
+        fixed_params = _normalize_lgb_monotone_constraints(fixed_params, feats)
         trial_max_boost_round = int(fixed_params.pop("num_boost_round", max_boost_round))
         # SEL-4/TUNE-3: early stopping watches the carved valid fold, not test.
         dtrain = lgb.Dataset(fit_train[feats], label=yfit, weight=wfit, free_raw_data=False)
@@ -1338,6 +1343,7 @@ def _recipe_search_hooks(
 
     if recipe == "xgb":
         fixed_params = _base_params_without_controls(base_params)
+        fixed_params = _normalize_xgb_monotone_constraints(fixed_params, feats)
         n_estimators = int(fixed_params.pop("num_boost_round", fixed_params.pop("n_estimators", max_boost_round)))
 
         def runner(params: dict, stage: str) -> dict:
@@ -1438,6 +1444,46 @@ def _base_params_without_controls(params: dict | None) -> dict:
         for key, value in dict(params or {}).items()
         if str(key) not in blocked and value not in (None, "")
     }
+
+
+_MONOTONE_CONSTRAINT_PARAM_KEYS = ("monotone_constraints", "monotonic_constraints")
+
+
+def _normalize_lgb_monotone_constraints(fixed_params: dict, feats: list[str]) -> dict:
+    """TUNE-7: normalize a raw dict/str/list monotone_constraints value the same
+    way the lgb training path does (recipes.common.normalized_monotone_constraints)
+    before it reaches lgb.train -- a dict form there raises TypeError, and a list
+    form only "works" by feature-order coincidence. Re-expands against ``feats``
+    (the post-feature-selection feature set tune actually searches over), not
+    whatever feature set the constraint was originally authored against."""
+    out = dict(fixed_params)
+    raw = None
+    for key in _MONOTONE_CONSTRAINT_PARAM_KEYS:
+        if key in out:
+            raw = out.pop(key)
+    if raw is None:
+        return out
+    normalized = normalize_monotone_constraints_value(raw, features=feats)
+    if normalized is not None:
+        out["monotone_constraints"] = list(normalized)
+    return out
+
+
+def _normalize_xgb_monotone_constraints(fixed_params: dict, feats: list[str]) -> dict:
+    """TUNE-7: same normalization as ``_normalize_lgb_monotone_constraints`` but
+    formatted as XGBoost's expected ``"(1,-1,0)"`` tuple-string (matches
+    recipes/xgb.py's train_xgb encoding)."""
+    out = dict(fixed_params)
+    raw = None
+    for key in _MONOTONE_CONSTRAINT_PARAM_KEYS:
+        if key in out:
+            raw = out.pop(key)
+    if raw is None:
+        return out
+    normalized = normalize_monotone_constraints_value(raw, features=feats)
+    if normalized is not None:
+        out["monotone_constraints"] = f"({','.join(str(value) for value in normalized)})"
+    return out
 
 
 __all__ = ["DEFAULT_TRIAL_BUDGET", "tune_hyperparameters", "TuneResult"]

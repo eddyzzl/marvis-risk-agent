@@ -239,11 +239,24 @@ def normalized_monotone_constraints(config: TrainConfig) -> tuple[int, ...] | No
         if value not in (None, ""):
             raw = value
             break
+    return normalize_monotone_constraints_value(raw, features=config.features)
+
+
+def normalize_monotone_constraints_value(
+    raw: object, *, features: tuple[str, ...] | list[str],
+) -> tuple[int, ...] | None:
+    """TUNE-7: pure-function core of ``normalized_monotone_constraints`` (no
+    ``TrainConfig`` dependency) so callers without one -- namely tune.py's
+    trial search, which builds no TrainConfig -- can still normalize a raw
+    dict/str/list monotone_constraints value the same way the training path
+    does, instead of transplanting it unnormalized into ``lgb.train`` (a dict
+    raises TypeError there; a list only "works" by feature-order coincidence).
+    """
     if raw in (None, ""):
         return None
-    features = tuple(str(feature) for feature in config.features)
+    resolved_features = tuple(str(feature) for feature in features)
     if isinstance(raw, dict):
-        values = tuple(_constraint_value(raw.get(feature, 0), feature=feature) for feature in features)
+        values = tuple(_constraint_value(raw.get(feature, 0), feature=feature) for feature in resolved_features)
     elif isinstance(raw, str):
         text = raw.strip().strip("()[]")
         values = tuple(
@@ -253,9 +266,9 @@ def normalized_monotone_constraints(config: TrainConfig) -> tuple[int, ...] | No
         )
     else:
         values = tuple(_constraint_value(item, feature=f"index {index}") for index, item in enumerate(raw))
-    if len(values) != len(features):
+    if len(values) != len(resolved_features):
         raise ModelingError(
-            f"monotone_constraints length {len(values)} does not match feature count {len(features)}"
+            f"monotone_constraints length {len(values)} does not match feature count {len(resolved_features)}"
         )
     return values
 
@@ -713,6 +726,7 @@ __all__ = [
     "compute_multiclass_model_metrics",
     "compute_regression_metrics",
     "model_params",
+    "normalize_monotone_constraints_value",
     "normalized_monotone_constraints",
     "sample_weight_col",
     "sample_weight_values",
