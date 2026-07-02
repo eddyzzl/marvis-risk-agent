@@ -23,6 +23,93 @@ const PLAN_STEP_HINTS = {
   "modeling.generate_model_report": "生成模型开发报告",
 };
 
+// UX-5: human copy for loop_event reason codes (marvis/orchestrator/executor.py
+// reason= call sites: failure/decision_point/final_review/user_instruction).
+const LOOP_EVENT_REASON_LABELS = {
+  failure: "步骤执行失败",
+  decision_point: "决策点复核",
+  final_review: "终审未通过",
+  user_instruction: "用户指令",
+};
+
+function loopEventReasonText(event) {
+  if (event?.type === "replan" && event?.reason === "user_instruction" && event?.instruction) {
+    return String(event.instruction);
+  }
+  return LOOP_EVENT_REASON_LABELS[event?.reason] || String(event?.reason || "");
+}
+
+// UX-5: mirrors loop_progress.js's eventLabel() copy (重新规划：<reason> /
+// 暂无进展：<reason>) so the same event reads the same way if that dead module
+// is later deleted per UX-8 — but rendered inline in the live plan rail.
+function loopEventLabel(event) {
+  const reason = loopEventReasonText(event);
+  if (event?.type === "replan") return `已重规划：${reason}`;
+  if (event?.type === "no_progress") return `暂无进展：${reason}`;
+  return `${event?.type || "事件"}：${reason}`;
+}
+
+// UX-5: last-3 loop_events strip at the top of the plan rail, so replan/
+// no_progress branches (invisible before this) surface without digging into
+// dev tools. no_progress gets the attention tone plus an intervene shortcut
+// that hands the user straight to the composer instead of leaving them to
+// guess why the plan looks stuck.
+function loopEventStripHtml(plan) {
+  const events = Array.isArray(plan?.loop_events) ? plan.loop_events : [];
+  if (!events.length) return "";
+  const recent = events.slice(-3);
+  const rows = recent.map((event) => {
+    const attention = event?.type === "no_progress" ? " attention" : "";
+    const intervene = event?.type === "no_progress"
+      ? '<button type="button" class="button compact secondary plan-rail-intervene" data-plan-rail-intervene="1">发消息介入</button>'
+      : "";
+    return `<div class="plan-rail-event${attention}">`
+      + `<span>${escapeHtml(loopEventLabel(event))}</span>`
+      + intervene
+      + "</div>";
+  });
+  return `<div class="plan-rail-events" data-plan-rail-events="1">${rows.join("")}</div>`;
+}
+
+// UX-5: 已重规划 N 次 badge next to the plan title once at least one replan
+// has happened, so a returning user can tell at a glance the plan already
+// deviated from its original shape.
+function replanBadgeHtml(plan) {
+  const count = Number(plan?.replan_count) || 0;
+  if (count <= 0) return "";
+  return `<span class="plan-rail-replan-badge" title="该计划已重新规划 ${count} 次">已重规划 ${count} 次</span>`;
+}
+
+// UX-5: sub-agent activity rows, ported from subagent_view.js's status
+// vocabulary (pending/running/done/failed/cancelled) into the live rail.
+const SUB_AGENT_STATUS_LABELS = {
+  spawned: "待执行",
+  running: "运行中",
+  returned: "已完成",
+  failed: "失败",
+  killed: "已终止",
+};
+
+function subAgentStatusLabel(status) {
+  return SUB_AGENT_STATUS_LABELS[status] || String(status || "未知");
+}
+
+function subAgentRowsHtml(plan) {
+  const subAgents = Array.isArray(plan?.sub_agents) ? plan.sub_agents : [];
+  const active = subAgents.filter((sub) => sub?.status === "spawned" || sub?.status === "running");
+  if (!active.length) return "";
+  const rows = active.map((sub) => {
+    const scope = escapeHtml(sub?.scope || "子任务");
+    const status = escapeHtml(subAgentStatusLabel(sub?.status));
+    return `<div class="plan-rail-subagent" data-plan-rail-subagent="${escapeHtml(String(sub?.id || ""))}">`
+      + '<span class="plan-rail-subagent-badge">子任务运行中</span>'
+      + `<span class="plan-rail-subagent-scope">${scope}</span>`
+      + `<span class="plan-rail-subagent-status">${status}</span>`
+      + "</div>";
+  });
+  return `<div class="plan-rail-subagents" data-plan-rail-subagents="1">${rows.join("")}</div>`;
+}
+
 // Map a plan step's status to the validation stepper's status vocabulary so it
 // reuses stepCheckerHtml() (the checkmark / ring / etc.) and the .step CSS.
 function planStepToCheckerStatus(status) {
@@ -252,6 +339,10 @@ export function createPlanRailController({
   renderAll,
   apiClient = api,
   artifactRenderer = renderArtifact,
+  // UX-5: fills the agent composer so "发消息介入" on a no_progress event can
+  // hand the user straight into typing a steering instruction. Optional so
+  // callers that don't wire the composer (tests) don't need a stub.
+  fillComposer,
 } = {}) {
   const v2PlanCache = new Map();
   const v2PlanLastFetch = new Map();
@@ -536,7 +627,14 @@ export function createPlanRailController({
       : "";
     // The report download now lives inline on the producing step row (see
     // planSubstepGroupHtml), not as a floating button at the rail bottom.
-    return fetchErrorBanner + phasesHtml + startControl;
+    // UX-5: replan badge + last-3 loop_events + active sub-agent rows, kept
+    // above the phase list and rendered only when there is something to show
+    // (no chrome on the common, uneventful plan).
+    const replanBadge = replanBadgeHtml(plan);
+    const headerBadge = replanBadge ? `<div class="plan-rail-header">${replanBadge}</div>` : "";
+    const eventStrip = loopEventStripHtml(plan);
+    const subAgentRows = subAgentRowsHtml(plan);
+    return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;
   }
 
   function render({ force = false, renderSignatures = {} } = {}) {
@@ -577,6 +675,15 @@ export function createPlanRailController({
       event.preventDefault();
       event.stopPropagation();
       retryFetch();
+      return true;
+    }
+    // UX-5: "发消息介入" on a no_progress event strip row — hands the user
+    // straight into the composer instead of leaving them to hunt for it.
+    const interveneButton = event.target?.closest?.("[data-plan-rail-intervene]");
+    if (interveneButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      fillComposer?.();
       return true;
     }
     return false;

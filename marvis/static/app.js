@@ -240,6 +240,7 @@ const planRailController = createPlanRailController({
   refreshTasks,
   loadAgentMessages,
   renderAll,
+  fillComposer: focusAgentComposerForIntervene,
 });
 const taskSearchController = createTaskSearchController({
   getElementById: $,
@@ -5920,6 +5921,14 @@ function prefillAgentTaskInstruction(task) {
   input.value = definition.initialGoal;
   autoGrowComposerInput();
   updateAgentSendDisabled();
+}
+
+// UX-5: "发消息介入" on a plan-rail no_progress event — focuses the composer
+// without overwriting anything the user may already be drafting there.
+function focusAgentComposerForIntervene() {
+  const input = $("agentComposerInput");
+  if (!input) return;
+  input.focus();
 }
 
 async function createTask() {

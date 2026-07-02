@@ -108,7 +108,7 @@ def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
     assert "计划读取失败" in plan_js
     assert "当前显示的是上次缓存的计划" in plan_js
     assert "const fetchErrorBanner = fetchError" in plan_js
-    assert "return fetchErrorBanner + phasesHtml + startControl;" in plan_js
+    assert "return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;" in plan_js
     assert "data-plan-rail-retry" in plan_js
     assert "function retryFetch" in plan_js
 
@@ -9495,3 +9495,83 @@ def test_artifact_panel_loading_state_uses_table_skeleton():
     assert "正在加载输出..." not in plan_js
     assert "skeletonTableHtml" in plan_js
     assert 'data-skeleton="artifact"' in plan_js
+
+
+
+def test_plan_rail_renders_replan_badge_loop_events_and_subagent_rows():
+    """UX-5: replan/no_progress/sub_agents were fully persisted in the plan
+    payload but the plan rail rendered none of it — verify the rail now shows
+    a "已重规划 N 次" badge, the last-3 loop_events (with an intervene button
+    on no_progress rows), and a "子任务运行中" badge for active sub-agents.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "const plan = {",
+            "  id: 'plan-1',",
+            "  status: 'running',",
+            "  replan_count: 2,",
+            "  loop_events: [",
+            "    { type: 'replan', reason: 'failure', at: 't1', trigger_step_id: 'step-1', tool_ref: 'data_ops.propose_join' },",
+            "    { type: 'no_progress', reason: 'failure', at: 't2', trigger_step_id: 'step-2' },",
+            "  ],",
+            "  sub_agents: [",
+            "    { id: 'sub-1', scope: 'feature <scan>', status: 'running', granted_tools: [] },",
+            "    { id: 'sub-2', scope: 'done scope', status: 'returned', granted_tools: [] },",
+            "  ],",
+            "  steps: [",
+            "    { id: 'step-1', index: 0, title: 'Propose join', status: 'done', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  ],",
+            "};",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "已重规划 2 次" in html
+    assert "已重规划：步骤执行失败" in html
+    assert "暂无进展：步骤执行失败" in html
+    assert 'data-plan-rail-intervene="1"' in html
+    assert "发消息介入" in html
+    assert "子任务运行中" in html
+    assert "feature &lt;scan&gt;" in html
+    # returned sub-agent is not "active" — only running/spawned rows render.
+    assert "done scope" not in html
+
+
+def test_plan_rail_omits_event_chrome_when_plan_has_no_events():
+    """UX-5: the common uneventful plan (no replans, no active sub-agents)
+    must not grow any of the new chrome — quiet by default per the review's
+    "克制不喧宾" instruction.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "function loopEventStripHtml(plan)" in plan_js
+    assert "function replanBadgeHtml(plan)" in plan_js
+    assert "function subAgentRowsHtml(plan)" in plan_js
