@@ -13,6 +13,7 @@ INITIAL_EVAL_CASES: tuple[EvalCase, ...] = (
         goal="Validate a submitted notebook, model, and sample file with the stable V1 workflow.",
         task_context={
             "workflow_family": "fixed",
+            "task_id": "eval-fixed-model-validation-template",
             "materials": ["notebook.ipynb", "model.pmml", "sample.csv"],
             "template_candidates": ["model_validation"],
             "requires_user_confirmation": True,
