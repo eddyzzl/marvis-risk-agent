@@ -383,7 +383,11 @@ def test_plan_executor_keeps_goal_doubt_in_review(tmp_path):
     assert resumed.summary_ref == result.summary_ref
 
 
-def test_plan_executor_fails_when_final_reviewer_marks_goal_unmet(tmp_path):
+def test_plan_executor_routes_to_review_when_llm_alone_marks_goal_unmet(tmp_path):
+    # AGT-3: with the step DONE and no configured/failed success_criteria, a bare
+    # llm_goal_met=false is doubt, not a veto — the plan routes to REVIEW (human
+    # re-check) instead of FAILED, and workflow.completed does NOT fire (that
+    # event is reserved for a plan reaching a genuine terminal DONE/FAILED state).
     plan = _plan(_step("step-1"))
     repo = _repo(tmp_path, plan)
     runner = FakeRunner([_ok({"echoed": "hi"})])
@@ -408,16 +412,66 @@ def test_plan_executor_fails_when_final_reviewer_marks_goal_unmet(tmp_path):
 
     loaded = repo.load_plan("plan-1")
     summary = repo.load_plan_summary(result.summary_ref)
-    assert result.status == PlanStatus.FAILED
-    assert loaded.status == PlanStatus.FAILED
+    assert result.status == PlanStatus.REVIEW
+    assert loaded.status == PlanStatus.REVIEW
     assert summary["goal_met"] is False
     assert summary["llm_goal_met"] is False
+    assert summary["goal_doubt"] is True
     assert summary["open_items"] == ["select production model"]
+    assert [call[0] for call in hooks.calls] == ["step.completed"]
+
+
+def test_plan_executor_still_fails_when_success_criteria_fail_alongside_llm_doubt(tmp_path):
+    # The narrowed LLM authority (AGT-3) does not touch the deterministic path:
+    # a real success_criteria failure still fails the plan even if the LLM also
+    # (redundantly) says goal_met=false.
+    plan = _plan(
+        _step("step-1"),
+        success_criteria=[
+            {
+                "metric": "oot_ks",
+                "min": 0.3331,
+                "aggregate": "max",
+                "label": "OOT KS",
+                "target_type": "binary",
+            }
+        ],
+    )
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"target_type": "binary", "metrics": {"oot_ks": 0.2}})])
+    hooks = FakeHooks()
+    llm = FakeLLM(
+        json.dumps(
+            {
+                "summary": "Needs final model selection.",
+                "open_items": [],
+                "goal_doubt": False,
+                "goal_met": False,
+            }
+        )
+    )
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    summary = repo.load_plan_summary(result.summary_ref)
+    assert result.status == PlanStatus.FAILED
+    assert loaded.status == PlanStatus.FAILED
+    assert summary["goal_doubt"] is False
+    assert "OOT KS=0.2 < 0.3331" in summary["open_items"]
     assert [call[0] for call in hooks.calls] == ["step.completed", "workflow.completed"]
 
 
 def test_plan_executor_surfaces_llm_critique_warnings_without_blocking_step(tmp_path):
-    plan = _plan(_step("step-1"))
+    # AGT-6: llm_critique is now scoped to decision_point/needs_confirmation steps
+    # (or metric-bearing output) — use a decision_point step so this test still
+    # exercises the "soft warning surfaces but does not block DONE" behavior.
+    plan = _plan(_step("step-1", decision_point=True))
     repo = _repo(tmp_path, plan)
     runner = FakeRunner([_ok({"echoed": "hi"})])
     hooks = FakeHooks()
@@ -437,9 +491,60 @@ def test_plan_executor_surfaces_llm_critique_warnings_without_blocking_step(tmp_
     assert loaded.steps[0].review_verdicts[-1].reviewer == "llm_critic"
     assert loaded.steps[0].review_verdicts[-1].passed is False
     assert completed_payload["review_warning_count"] == 1
-    assert completed_payload["review_warnings"] == [
-        {"reviewer": "llm_critic", "reasons": ["needs human review"]}
+
+
+def test_plan_executor_skips_llm_critique_for_plain_steps_without_confirmation_or_metrics(tmp_path):
+    # AGT-6: a plain read/profile-type step (no decision_point, no
+    # needs_confirmation, no metric-shaped output) skips the LLM round-trip
+    # entirely — no llm_critic verdict at all, since llm_critique is never called
+    # for that step (final_review's own single end-of-plan LLM call is separate
+    # and still happens, so we assert on the per-step verdict shape, not on
+    # whether the shared FakeLLM was ever invoked).
+    plan = _plan(_step("step-1"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"echoed": "hi"})])
+    hooks = FakeHooks()
+    llm = FakeLLM(json.dumps({"passed": False, "reasons": ["should not be called"]}))
+
+    result = _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    completed_payload = hooks.calls[0][1]
+    assert result.status == PlanStatus.DONE
+    assert loaded.steps[0].status == StepStatus.DONE
+    assert [verdict.reviewer for verdict in loaded.steps[0].review_verdicts] == ["deterministic"]
+    assert completed_payload["review_warning_count"] == 0
+
+
+def test_plan_executor_critiques_plain_steps_whose_output_carries_metrics(tmp_path):
+    # AGT-6: even a step that is neither decision_point nor needs_confirmation
+    # still gets critiqued when its output carries metric-shaped values (e.g. a
+    # training step's KS/AUC) — the trigger surface is metric-aware, not just
+    # gate-aware.
+    plan = _plan(_step("step-1"))
+    repo = _repo(tmp_path, plan)
+    runner = FakeRunner([_ok({"metrics": {"oot_ks": 0.41}})])
+    hooks = FakeHooks()
+    llm = FakeLLM(json.dumps({"passed": True, "reasons": []}))
+
+    _executor(
+        repo,
+        runner,
+        reviewer=Reviewer(lambda: llm),
+        hooks=hooks,
+    ).run("plan-1")
+
+    loaded = repo.load_plan("plan-1")
+    assert [verdict.reviewer for verdict in loaded.steps[0].review_verdicts] == [
+        "deterministic",
+        "llm_critic",
     ]
+    assert llm.calls
 
 
 def test_plan_executor_fails_final_review_when_success_criteria_fail(tmp_path):

@@ -623,6 +623,105 @@ def test_modeling_persists_sample_weight_col_and_passes_to_plan(client: TestClie
     assert train_step.inputs["sample_weight_col"] == f"$ref:{spec_step.id}.output.sample_weight_col"
 
 
+def test_modeling_persists_oot_ks_min_and_injects_success_criteria(client: TestClient, tmp_path: Path):
+    """AGT-4: an optional per-task oot_ks_min becomes a deterministic
+    success_criteria entry on the plan (never hard-coded — absent by default)."""
+    src = _sample_dir(tmp_path, n=300)
+    resp = client.post("/api/tasks", json={
+        "model_name": "带成功标准建模",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+        "oot_ks_min": 0.3331,
+    })
+    assert resp.status_code == 200, resp.text
+    task = resp.json()
+    assert task["oot_ks_min"] == 0.3331
+
+    task_id = task["id"]
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans
+    assert plans[0].success_criteria == [
+        {
+            "metric": "oot_ks",
+            "min": 0.3331,
+            "aggregate": "max",
+            "label": "OOT KS",
+            "target_type": "binary",
+        }
+    ]
+
+
+def test_modeling_without_oot_ks_min_injects_no_success_criteria(client: TestClient, tmp_path: Path):
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "无成功标准建模",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    assert plans
+    assert plans[0].success_criteria == []
+
+
+def test_modeling_rejects_out_of_range_oot_ks_min(client: TestClient, tmp_path: Path):
+    src = _sample_dir(tmp_path, n=100)
+    resp = client.post("/api/tasks", json={
+        "model_name": "非法成功标准",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "oot_ks_min": 1.5,
+    })
+    assert resp.status_code == 422, resp.text
+
+
+def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client: TestClient, tmp_path: Path):
+    """An unreachable oot_ks_min (manual mode: no LLM, so a criteria failure cannot
+    be auto-replanned — the executor's LLMSettingsError fallback lets the plan
+    surface the deterministic failure instead) drives the plan to FAILED with the
+    success-criteria open item, proving the injected criterion is actually
+    evaluated by final_review (not just stored)."""
+    src = _sample_dir(tmp_path, n=300)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "不可达成功标准",
+        "validator": "qa",
+        "source_dir": str(src),
+        "task_type": "modeling",
+        "run_mode": "manual",
+        "recipes": ["lgb"],
+        "oot_ks_min": 0.999,
+    }).json()["id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert resp.status_code == 202, resp.text
+    for _ in range(8):
+        plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+        if plans[0].status.value in {"failed", "done", "review"}:
+            break
+        resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+        assert resp.status_code == 202, resp.text
+
+    plans = client.app.state.plan_repo.list_plans_for_task(task_id)
+    final_plan = plans[0]
+    assert final_plan.status.value == "failed"
+    summary = client.app.state.plan_repo.load_plan_summary(
+        client.app.state.plan_repo.latest_plan_summary_ref(final_plan.id)
+    )
+    assert any("OOT KS" in item for item in summary["open_items"])
+
+
 def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClient, tmp_path: Path):
     src = _sample_dir(tmp_path, n=200)
     pd.DataFrame({

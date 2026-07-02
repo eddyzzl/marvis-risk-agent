@@ -84,6 +84,8 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
         algorithm = normalize_algorithm(payload.algorithm, allow_empty=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if payload.oot_ks_min is not None and not (0.0 <= payload.oot_ks_min <= 1.0):
+        raise HTTPException(status_code=422, detail="oot_ks_min 必须是 0 到 1 之间的数字。")
     # Normalize source_dir once at write time so pipeline.py and /scan agree on
     # the canonical absolute path.
     normalized_source_dir = str(
@@ -107,6 +109,7 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
             target_type=normalized_target_type(payload.target_type),
             recipes=payload.recipes,
             sample_weight_col=str(payload.sample_weight_col or "").strip(),
+            oot_ks_min=payload.oot_ks_min,
             metrics=payload.metrics,
             capability_tier=normalized_capability_tier(payload.capability_tier),
             notebook_path=payload.notebook_path,

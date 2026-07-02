@@ -90,6 +90,57 @@ def test_plan_html_renders_ordered_steps_confirmation_and_review_verdicts():
     )
 
 
+def test_plan_html_renders_no_warning_for_skipped_llm_critique():
+    # AGT-6: manual mode (no LLM configured) previously rendered a "警告" line for
+    # every step's llm_critic verdict. A status="skipped" verdict must render
+    # nothing at all — no pass badge, no warning badge — so an all-manual-mode
+    # plan shows zero warning noise even though every step still carries a
+    # deterministic verdict.
+    run_node(
+        """
+        import assert from "node:assert/strict";
+        import { planHtml } from "./marvis/static/js/v2/plan_view.js";
+
+        const html = planHtml({
+          id: "plan-1",
+          goal: "manual mode plan",
+          status: "done",
+          tier: "balanced",
+          novel_mode: "plan_ahead",
+          steps: [
+            {
+              id: "step-1",
+              index: 0,
+              title: "Train model",
+              status: "done",
+              tool_ref: { plugin: "modeling", tool: "train_model" },
+              depends_on: [],
+              review_verdicts: [
+                {
+                  reviewer: "deterministic",
+                  passed: true,
+                  reasons: [],
+                  at: "2026-07-02T00:00:00Z",
+                },
+                {
+                  reviewer: "llm_critic",
+                  passed: true,
+                  reasons: ["skipped: no LLM configured"],
+                  at: "2026-07-02T00:00:01Z",
+                  status: "skipped",
+                },
+              ],
+            },
+          ],
+        });
+
+        assert.equal(html.includes("警告"), false);
+        assert.equal(html.includes("skipped: no LLM configured"), false);
+        assert.equal(html.includes("reviewer-llm_critic"), false);
+        """
+    )
+
+
 def test_artifact_view_fetches_versioned_metric_refs():
     run_node(
         """

@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from marvis.agent.json_reply import load_json_object
+from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
     Plan,
     PlanStep,
@@ -15,6 +16,7 @@ from marvis.orchestrator.contracts import (
     ReviewVerdict,
     StepStatus,
 )
+from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.schema_validation import validate_against_schema
 
@@ -52,6 +54,21 @@ class Reviewer:
         )
 
     def llm_critique(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict:
+        # AGT-6: no LLM configured is the common manual-mode case, not a failure —
+        # every step used to deterministically render a "failed" llm_critic verdict
+        # (a full English exception message) purely because settings had no model
+        # enabled. Skip cleanly instead: passed=True, status="skipped", so manual
+        # mode doesn't drown real deterministic failures in critique noise.
+        try:
+            llm = self._llm_factory()
+        except LLMSettingsError:
+            return ReviewVerdict(
+                reviewer="llm_critic",
+                passed=True,
+                reasons=["skipped: no LLM configured"],
+                at=_now_iso(),
+                status="skipped",
+            )
         try:
             prompt = json.dumps(
                 {
@@ -62,7 +79,7 @@ class Reviewer:
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            raw = self._llm_factory().complete(
+            raw = llm.complete(
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 stream=False,
@@ -100,6 +117,17 @@ class Reviewer:
             summary = f"{summary} 成功标准未达成: {'; '.join(criteria_failures)}"
         if llm_goal_met is False and not llm_items:
             llm_items = ["LLM final review marked goal_met=false"]
+        # AGT-3: narrow the LLM's authority. A weak model saying goal_met=false on a
+        # plan where every step passed its deterministic post_checks (no incomplete
+        # steps) and no configured success_criteria failed is treated as *doubt*, not
+        # a veto — it routes to REVIEW (human re-check, executor.py already has this
+        # channel) instead of FAILED or an automatic "fill in remaining steps" replan.
+        # Only deterministic success_criteria failures — or genuinely incomplete
+        # steps — may still trigger FAILED / replan; the LLM's opinion can pause a
+        # plan but never fail one outright (INV-1: the platform, not the LLM,
+        # computes truth).
+        if llm_goal_met is False and not incomplete and not criteria_failures:
+            goal_doubt = True
         return FinalReview(
             goal_met=not incomplete and not criteria_failures and not goal_doubt and llm_goal_met is not False,
             summary=summary,
@@ -289,20 +317,104 @@ def _parse_soft_verdict(raw) -> tuple[bool, list[str], bool]:
     return bool(data.get("passed", True)), reasons, error is None
 
 
-def _summarize_output(output) -> dict:
+# AGT-3: final_review/llm_critique previously saw only key names (dict -> {"type":
+# "object", "keys": [...10 names...]}), so a step's train/test/oot KS/AUC never
+# reached the LLM at all — it could only guess from field names. Keep real numeric
+# values one level deeper (depth 2) for entries that are themselves metrics (key in
+# METRIC_FIELDS) or plain numbers, so the critic/final-review prompts actually see
+# the platform-computed metrics instead of just their names. Bounded to 20 keys /
+# 600 characters per nested object so a wide experiments table can't blow the
+# prompt budget.
+_SUMMARY_MAX_KEYS = 20
+_SUMMARY_MAX_CHARS = 600
+
+
+def _summarize_output(output, _depth: int = 0) -> dict:
     if not isinstance(output, dict):
         return {"type": type(output).__name__}
     summary = {}
     for key, value in output.items():
-        if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, bool) or value is None:
+            summary[key] = value
+        elif isinstance(value, (int, float)):
+            summary[key] = value
+        elif isinstance(value, str):
             summary[key] = value
         elif isinstance(value, list):
-            summary[key] = {"type": "list", "count": len(value)}
+            summary[key] = _summarize_list(value, _depth)
         elif isinstance(value, dict):
-            summary[key] = {"type": "object", "keys": sorted(value)[:10]}
+            summary[key] = _summarize_nested_dict(value, _depth)
         else:
             summary[key] = {"type": type(value).__name__}
     return summary
+
+
+def _summarize_nested_dict(value: dict, depth: int) -> dict:
+    if depth >= 2:
+        # Depth 2 is as deep as we recurse with real values (outputs -> step ->
+        # metrics is exactly 2 dict layers); beyond that, fall back to the
+        # original key-name-only shape to keep the summary bounded.
+        return _bounded_keys_summary(value)
+    if _has_metric_values(value):
+        return _bounded_metric_summary(value, depth)
+    return _summarize_output(value, depth + 1)
+
+
+def _summarize_list(value: list, depth: int) -> dict:
+    if not value:
+        return {"type": "list", "count": len(value)}
+    # A list of metric dicts (e.g. experiments: [{"metrics": {...}}, ...]) is a
+    # common modeling-step shape; summarizing each element preserves the numbers
+    # instead of collapsing the whole list to a bare count. Depth is not
+    # advanced here — the dicts inside the list are the object of interest, not
+    # an extra nesting layer to budget against.
+    if all(isinstance(item, dict) for item in value):
+        return {
+            "type": "list",
+            "count": len(value),
+            "items": [_summarize_output(item, depth) for item in value[:5]],
+        }
+    return {"type": "list", "count": len(value)}
+
+
+def _has_metric_values(value: dict) -> bool:
+    """True when this dict is worth keeping real numbers for: any key is a known
+    metric name (METRIC_FIELDS, e.g. "ks") or a numeric leaf whose name carries a
+    metric field as a token (e.g. "oot_ks", "test_auc" — the platform's actual
+    train/test/oot-prefixed naming convention), or any value is simply numeric."""
+    for key, item in value.items():
+        name = str(key)
+        if name in METRIC_FIELDS or any(part in METRIC_FIELDS for part in name.split("_")):
+            return True
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            return True
+    return False
+
+
+def _bounded_metric_summary(value: dict, depth: int) -> dict:
+    bounded = {}
+    used_chars = 0
+    for key in sorted(value)[:_SUMMARY_MAX_KEYS]:
+        item = value[key]
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            bounded[key] = item
+            used_chars += len(f"{key}={item}")
+        elif isinstance(item, bool) or item is None:
+            bounded[key] = item
+        elif isinstance(item, str):
+            bounded[key] = item
+            used_chars += len(f"{key}={item}")
+        elif isinstance(item, dict) and depth + 1 < 2:
+            bounded[key] = _summarize_nested_dict(item, depth + 1)
+        else:
+            bounded[key] = {"type": type(item).__name__}
+        if used_chars > _SUMMARY_MAX_CHARS:
+            break
+    return {"type": "object", "metrics": bounded}
+
+
+def _bounded_keys_summary(value: dict) -> dict:
+    return {"type": "object", "keys": sorted(value)[:10]}
 
 
 def _evaluate_success_criteria(

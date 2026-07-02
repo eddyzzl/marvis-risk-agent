@@ -16,8 +16,9 @@ from marvis.orchestrator.contracts import (
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
 from marvis.orchestrator.plan_recovery import PlanStepRecovery
-from marvis.orchestrator.reviewer import FinalReview
+from marvis.orchestrator.reviewer import FinalReview, ReviewVerdict
 from marvis.orchestrator.safety import is_safety_step
+from marvis.orchestrator.validator import METRIC_FIELDS
 from marvis.plugins.manifest import manifest_to_dict
 from marvis.plugins.runner import ToolResult
 
@@ -206,8 +207,9 @@ class PlanExecutor:
                 self._handle_step_failure(step, failed, apply_policy=False)
                 return
 
-            critique = self._reviewer.llm_critique(step, output, plan.goal)
-            step.review_verdicts.append(critique)
+            critique = self._critique_step(step, output, plan.goal)
+            if critique is not None:
+                step.review_verdicts.append(critique)
             step.status = StepStatus.DONE
             self._repo.update_step(step)
             self._dispatch_step_completed(plan, step, output)
@@ -225,6 +227,18 @@ class PlanExecutor:
                     self._set_step_status(step, StepStatus.FAILED)
                     return
             self._handle_step_exception(step, exc)
+
+    def _critique_step(self, step: PlanStep, output: dict, goal: str) -> ReviewVerdict | None:
+        # AGT-6: llm_critique used to run unconditionally for every step, adding a
+        # synchronous 5-20s LLM round-trip per step and rendering "skipped: no LLM
+        # configured" noise even where the deterministic checks are all that
+        # matters. Narrow the trigger surface to steps where a soft second opinion
+        # is actually useful: decision points, confirmation gates, and any step
+        # whose output carries metric values worth a sanity check. Plain read/
+        # profile-type steps skip outright — no call, no verdict, no noise.
+        if not (step.decision_point or step.needs_confirmation or _output_has_metrics(output)):
+            return None
+        return self._reviewer.llm_critique(step, output, goal)
 
     def _finish_step_run(self, run_id: str, **kwargs) -> None:
         self._repo.finish_step_run(run_id, **kwargs)
@@ -744,6 +758,31 @@ def _parent_output_refs(repo, step: PlanStep) -> list[str]:
         if ref:
             refs.append(ref)
     return refs
+
+
+_METRIC_SCAN_MAX_DEPTH = 3
+
+
+def _output_has_metrics(output: Any, *, _depth: int = 0) -> bool:
+    """True when a tool output carries at least one metric-shaped value (a known
+    METRIC_FIELDS key, a numeric leaf whose name carries a metric token like
+    "oot_ks"/"test_auc", or a plain numeric value nested in the output) — the
+    AGT-6 trigger surface for llm_critique on steps that aren't already a
+    decision_point/needs_confirmation gate. Bounded depth keeps this a cheap
+    pre-check, not a full tree walk."""
+    if _depth > _METRIC_SCAN_MAX_DEPTH:
+        return False
+    if isinstance(output, dict):
+        for key, value in output.items():
+            name = str(key)
+            if name in METRIC_FIELDS or any(part in METRIC_FIELDS for part in name.split("_")):
+                return True
+            if _output_has_metrics(value, _depth=_depth + 1):
+                return True
+        return False
+    if isinstance(output, (list, tuple)):
+        return any(_output_has_metrics(item, _depth=_depth + 1) for item in output)
+    return False
 
 
 def _find_step(plan: Plan, step_id: str) -> PlanStep | None:

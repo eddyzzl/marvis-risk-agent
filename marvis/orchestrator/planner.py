@@ -118,7 +118,7 @@ class Planner:
         return Plan(
             id=plan_id,
             task_id=task_id,
-            goal=template.title,
+            goal=_template_goal_with_slot_summary(template, slots),
             source="template",
             template_id=template.id,
             steps=steps,
@@ -626,6 +626,27 @@ def _post_check_from_json(value: Any, index: int) -> PostCheck:
     if not isinstance(spec, dict):
         raise PlanningError(f"post_checks[{index}].spec must be an object")
     return PostCheck(kind=_required_text(value, "kind", f"post_checks[{index}]"), spec=spec)
+
+
+# AGT-3 (final_review's LLM sees only a "key-name-level" summary of a plan whose
+# from_template goal is otherwise just the four-character template title, e.g.
+# "标准建模" — giving llm_critique/final_review essentially nothing to reason
+# about). Splice a compact summary of the key identifying slots onto the goal so
+# the LLM has at least "which dataset/target/recipe" context, without leaking the
+# full slot payload (which can contain large lists) into every LLM prompt.
+_GOAL_SUMMARY_SLOTS = ("dataset_id", "anchor_id", "target_col", "recipe")
+
+
+def _template_goal_with_slot_summary(template: WorkflowTemplate, slots: dict) -> str:
+    parts = []
+    for name in _GOAL_SUMMARY_SLOTS:
+        value = slots.get(name)
+        if value is None or value == "":
+            continue
+        parts.append(f"{name}={value}")
+    if not parts:
+        return template.title
+    return f"{template.title}: {' '.join(parts)}"
 
 
 def _title_to_step_id(template: WorkflowTemplate, plan_id: str) -> dict[str, str]:

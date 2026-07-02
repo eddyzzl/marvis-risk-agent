@@ -112,16 +112,37 @@ class PlanDriver:
         )
 
     # -- entry points ---------------------------------------------------------
-    def start(self, *, task_id, template_id, slots, autonomy=None, tier=None, run_seq=0) -> DriverTurn:
+    def start(
+        self,
+        *,
+        task_id,
+        template_id,
+        slots,
+        autonomy=None,
+        tier=None,
+        run_seq=0,
+        success_criteria=None,
+    ) -> DriverTurn:
         """Build the plan and show its overview, then PAUSE at the plan-level 开始 gate.
 
         Spec §9 #2 (已锁): both modes first show the whole plan and only run after the
         user confirms 「开始」. The plan is left VALIDATED — nothing executes until
         resume() receives the 开始 confirm (the agent auto-driver feeds it in AUTO
         mode). This is what makes the first analysis step never run unprompted.
+
+        ``success_criteria`` (optional, AGT-4): user/AUTO-supplied deterministic
+        thresholds (e.g. [{"metric": "oot_ks", "min": 0.3, ...}]) layered on top of
+        the template's own success_criteria (empty for the built-in modeling
+        templates today). Only final_review's deterministic evaluation reads this —
+        never a hard-coded platform default.
         """
         plan = self.build_plan(
-            task_id=task_id, template_id=template_id, slots=slots, autonomy=autonomy, tier=tier
+            task_id=task_id,
+            template_id=template_id,
+            slots=slots,
+            autonomy=autonomy,
+            tier=tier,
+            success_criteria=success_criteria,
         )
         return DriverTurn(plan.id, plan.status.value, [self._composer.plan_overview_message(plan)])
 
@@ -239,7 +260,16 @@ class PlanDriver:
         )
 
     # -- plan build -----------------------------------------------------------
-    def build_plan(self, *, task_id, template_id, slots, autonomy=None, tier=None) -> Plan:
+    def build_plan(
+        self,
+        *,
+        task_id,
+        template_id,
+        slots,
+        autonomy=None,
+        tier=None,
+        success_criteria=None,
+    ) -> Plan:
         if self._planner is None:
             raise DriverError("driver has no planner to build plans")
         plan = self._planner.from_template(
@@ -247,6 +277,11 @@ class PlanDriver:
         )
         if tier:
             plan.tier = tier
+        if success_criteria:
+            # AGT-4: layer user/AUTO-supplied criteria on top of the template's own
+            # (empty for the built-in modeling templates today) rather than replacing
+            # it, so a future template with real defaults still gets to keep them.
+            plan.success_criteria = [*plan.success_criteria, *success_criteria]
         if self._validator is not None:
             problems = self._validator.validate(plan)
             if problems:

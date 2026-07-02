@@ -400,6 +400,7 @@ def run_modeling_driver_turn(
             template_id=proposal.template_id,
             slots=slots,
             tier=runtime.tier,
+            success_criteria=_modeling_success_criteria(task),
         )
         append_driver_messages(repo, task.id, turn)
         return join_turn_response(repo, task.id)
@@ -710,6 +711,25 @@ def _modeling_recipes(task: TaskRecord) -> list[str] | None:
 def _modeling_target_type(task: TaskRecord) -> str | None:
     target_type = str(getattr(task, "target_type", "") or "").strip()
     return target_type or None
+
+
+def _modeling_success_criteria(task: TaskRecord) -> list[dict] | None:
+    """AGT-4: turn the task's optional oot_ks_min into a deterministic success
+    criterion final_review can evaluate. None/absent oot_ks_min (the default) means
+    no criterion is injected — the platform never hard-codes a threshold; only a
+    value the user (or AUTO, once wired) explicitly set produces one."""
+    oot_ks_min = getattr(task, "oot_ks_min", None)
+    if oot_ks_min is None:
+        return None
+    return [
+        {
+            "metric": "oot_ks",
+            "min": float(oot_ks_min),
+            "aggregate": "max",
+            "label": "OOT KS",
+            "target_type": "binary",
+        }
+    ]
 
 
 def _modeling_project_meta(task: TaskRecord) -> dict[str, str]:

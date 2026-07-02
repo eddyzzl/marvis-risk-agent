@@ -871,6 +871,7 @@ def _task_record_from_create(payload: TaskCreate) -> TaskRecord:
         target_type=payload.target_type,
         recipes=list(payload.recipes),
         sample_weight_col=payload.sample_weight_col,
+        oot_ks_min=payload.oot_ks_min,
         metrics=list(payload.metrics),
         capability_tier=payload.capability_tier,
         notebook_path=payload.notebook_path,
@@ -898,12 +899,12 @@ def _insert_task_record_row(
         (
             id, task_type, model_name, model_version, validator, source_dir,
             algorithm, run_mode, target_col, score_col, split_col,
-            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, metrics_json, capability_tier, notebook_path, sample_path,
+            time_col, feature_columns_json, target_type, recipes_json, sample_weight_col, oot_ks_min, metrics_json, capability_tier, notebook_path, sample_path,
             pmml_path, dictionary_path, report_values_json,
             report_values_revision, status, status_message,
             status_reason_code, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.id,
@@ -922,6 +923,7 @@ def _insert_task_record_row(
             record.target_type,
             _dump_json_list(record.recipes),
             record.sample_weight_col,
+            record.oot_ks_min,
             _dump_json_list(record.metrics),
             record.capability_tier,
             record.notebook_path,
@@ -957,6 +959,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRecord:
         target_type=(row["target_type"] if "target_type" in row.keys() else "") or "",
         recipes=_load_json_list(row["recipes_json"]),
         sample_weight_col=(row["sample_weight_col"] if "sample_weight_col" in row.keys() else "") or "",
+        oot_ks_min=(row["oot_ks_min"] if "oot_ks_min" in row.keys() else None),
         metrics=_load_json_list(row["metrics_json"]),
         capability_tier=(row["capability_tier"] if "capability_tier" in row.keys() else "") or "",
         notebook_path=row["notebook_path"],

@@ -307,6 +307,22 @@ export function createCreateTaskDialogController({
         }
         payload.sample_weight_col = sampleWeightCol;
       }
+      // AGT-4: optional minimum OOT KS success criterion. Left blank by default —
+      // never defaulted to a platform-chosen number. Only meaningful for binary
+      // targets (KS is not computed for continuous/multiclass recipes).
+      const ootKsMinRaw = $("modelOotKsMin")?.value.trim();
+      if (ootKsMinRaw) {
+        const ootKsMin = Number(ootKsMinRaw);
+        if (!Number.isFinite(ootKsMin) || ootKsMin < 0 || ootKsMin > 1) {
+          setCreateStatus("成功标准（OOT KS 下限）必须是 0 到 1 之间的数字。", "error");
+          return null;
+        }
+        if (payload.target_type !== "binary") {
+          setCreateStatus("成功标准（OOT KS 下限）仅适用于二分类算法。", "error");
+          return null;
+        }
+        payload.oot_ks_min = ootKsMin;
+      }
     }
     if (definition.metricField && selectedRunMode === "manual") {
       payload.metrics = [...document.querySelectorAll('input[name="featureMetric"]:checked')].map((box) => box.value);

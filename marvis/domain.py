@@ -66,6 +66,10 @@ class TaskCreate:
     target_type: str = ""
     recipes: list[str] = field(default_factory=list)
     sample_weight_col: str = ""
+    # AGT-4 (optional, modeling tasks only): a user/AUTO-supplied minimum OOT KS the
+    # final model must clear. None/absent → no success criterion is injected into the
+    # plan (the pre-fix behavior); the platform never hard-codes a default threshold.
+    oot_ks_min: float | None = None
     # Optional feature metrics the user selected at creation (e.g. "vif"); empty → base
     # per-feature metrics only (spec §2: 选了才算). Only used for feature_analysis tasks.
     metrics: list[str] = field(default_factory=list)
@@ -108,6 +112,7 @@ class TaskRecord:
     target_type: str = ""
     recipes: list[str] = field(default_factory=list)
     sample_weight_col: str = ""
+    oot_ks_min: float | None = None
     metrics: list[str] = field(default_factory=list)
     capability_tier: str = ""
 
