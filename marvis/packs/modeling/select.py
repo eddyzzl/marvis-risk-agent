@@ -176,11 +176,12 @@ def _select_features_raw(
         else:
             kept.append(feature)
 
+    warnings: list[str] = []
     kept, dropped = _drop_collinear(frame, features, kept, dropped, scores, corr_max, label="")
-    kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="")
+    kept, dropped = _drop_high_vif(frame, features, kept, dropped, scores, vif_max, label="", warnings=warnings)
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
     return SelectionResult(
-        tuple(kept), tuple(dropped), scores, nan_labels_dropped,
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped, tuple(warnings),
         fit_rows=fit_rows, fit_split=fit_split,
     )
 
@@ -239,12 +240,14 @@ def _select_features_woe(
         else:
             kept.append(feature)
 
+    warnings: list[str] = []
     kept, dropped = _drop_collinear(encoded, features, kept, dropped, scores, corr_max, label="WOE ")
-    kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ")
+    kept, dropped = _drop_high_vif(encoded, features, kept, dropped, scores, vif_max, label="WOE ", warnings=warnings)
     kept, dropped = _apply_top_k(features, kept, dropped, scores, top_k)
-    warnings = tuple(_woe_sign_warnings(encoded, kept, target_arr, scores, directions) if sign_check else ())
+    if sign_check:
+        warnings.extend(_woe_sign_warnings(encoded, kept, target_arr, scores, directions))
     return SelectionResult(
-        tuple(kept), tuple(dropped), scores, nan_labels_dropped, warnings,
+        tuple(kept), tuple(dropped), scores, nan_labels_dropped, tuple(warnings),
         fit_rows=fit_rows, fit_split=fit_split,
     )
 
@@ -281,15 +284,31 @@ def _drop_high_vif(
     vif_max: float,
     *,
     label: str,
+    warnings: list[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
     vifs = vif(frame, kept)
     for feature in features:
         if feature in vifs:
-            scores.setdefault(feature, {})["vif"] = float(vifs[feature])
+            # FS-8: keep None (VIF unavailable) visible instead of coercing to a number.
+            value = vifs[feature]
+            scores.setdefault(feature, {})["vif"] = None if value is None else float(value)
+    skipped = 0
     for feature, value in vifs.items():
-        if value > vif_max and feature in kept:
+        if feature not in kept:
+            continue
+        # FS-8: VIF unavailable (insufficient complete-row sample) -> do NOT drop and do
+        # NOT compare None; record that the gate was skipped for this feature.
+        if value is None:
+            skipped += 1
+            continue
+        if value > vif_max:
             kept.remove(feature)
             dropped.append((feature, f"high {label}VIF {value:.1f}"))
+    if skipped:
+        warnings.append(
+            f"{label}VIF 样本不足（完整行数不足 max(30, 2×特征数)），"
+            f"已跳过 {skipped} 个特征的 VIF 门（其 vif 记为 None）"
+        )
     return kept, dropped
 
 

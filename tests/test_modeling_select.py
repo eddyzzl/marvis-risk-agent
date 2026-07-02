@@ -100,6 +100,45 @@ def test_select_features_records_high_vif_drop_reason(tmp_path):
     assert all("vif" in result.scores[feature] for feature in ("x1", "x2", "x3"))
 
 
+def test_select_features_vif_unavailable_is_skipped_and_warned(tmp_path):
+    """FS-8: when the listwise-complete row intersection is too small, VIF is unavailable —
+    select_features must NOT drop those features on VIF, must record vif=None, and must emit
+    a single aggregate warning rather than silently skipping the gate."""
+    rows = 200
+    rng = np.random.RandomState(9)
+    target = np.array([0, 1] * (rows // 2))
+    x1 = target + rng.normal(scale=0.3, size=rows)
+    x2 = x1 + rng.normal(scale=0.05, size=rows)  # collinear with x1
+    frame = pd.DataFrame({"x1": x1, "x2": x2, "y": target, "split": ["train"] * rows})
+    # Make the x1/x2 complete-row intersection small but non-empty (10 rows < max(30, 4)):
+    # only the first 10 rows carry BOTH values; elsewhere exactly one column is NaN. This
+    # exercises the FS-8 "too few complete rows" branch (not the empty-frame branch).
+    frame.loc[10:104, "x2"] = np.nan
+    frame.loc[105:, "x1"] = np.nan
+    path = tmp_path / "vif_unavail.parquet"
+    frame.to_parquet(path, index=False)
+
+    result = select_features(
+        DataBackend(tmp_path),
+        path,
+        features=["x1", "x2"],
+        target_col="y",
+        iv_min=0.0,
+        corr_max=1.1,          # keep both past the collinearity gate so VIF is exercised
+        vif_max=5.0,
+        split_col="split",
+        allow_full_fit=True,
+    )
+
+    # neither feature dropped for VIF (unavailable, not high)
+    assert not any(reason.startswith("high VIF") for _f, reason in result.dropped)
+    # vif recorded as None (attempted but unavailable), not omitted or 0.0
+    assert result.scores["x1"]["vif"] is None
+    assert result.scores["x2"]["vif"] is None
+    # exactly one aggregate warning about insufficient VIF sample
+    assert any("VIF 样本不足" in w for w in result.warnings)
+
+
 def test_select_features_without_split_raises_typed_error_unless_allow_full_fit(tmp_path):
     """FS-2: select_features must stop with a typed error when it has no split column
     to exclude holdout rows from fitting, mirroring PREP-1's woe/impute/normalize/cap gate."""

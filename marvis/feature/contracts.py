@@ -83,7 +83,7 @@ class CorrelationReport:
     features: tuple[str, ...]
     matrix: tuple[tuple[float, ...], ...]
     collinear_pairs: tuple[tuple[str, str, float], ...]
-    vif: dict[str, float]
+    vif: dict[str, float | None]
 
 
 __all__ = [
