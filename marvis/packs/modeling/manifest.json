@@ -744,7 +744,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -941,7 +942,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -1106,7 +1108,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1
@@ -1198,7 +1201,8 @@
               "scorecard",
               "mlp",
               "lgb_regressor",
-              "lgb_multiclass"
+              "lgb_multiclass",
+              "ensemble"
             ]
           },
           "features": {
@@ -1318,7 +1322,8 @@
                 "scorecard",
                 "mlp",
                 "lgb_regressor",
-                "lgb_multiclass"
+                "lgb_multiclass",
+                "ensemble"
               ]
             },
             "minItems": 1

@@ -119,9 +119,12 @@ class ModelingProposal:
 
 # Recipes selectable for the binary credit-risk default; lgb is the recommended
 # starting algorithm. mlp = a sklearn DNN (impute→scale→MLP pipeline).
-# lgb_regressor = the continuous-target (regression) recipe.
-_SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass")
-_BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
+# lgb_regressor = the continuous-target (regression) recipe. ensemble (SEL-6) is
+# an explicit opt-in only -- never part of any DEFAULT recipe list (see
+# _default_recipe_for_target_type), selectable by naming it explicitly in
+# `recipes`.
+_SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass", "ensemble")
+_BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "ensemble"})
 _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
 _BUSINESS_COLUMN_ALIASES = {
     "loan_month_col": ("loan_month", "apply_month", "book_month", "放款月", "贷款月份", "申请月份"),

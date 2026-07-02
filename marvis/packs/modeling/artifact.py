@@ -22,6 +22,10 @@ _MODEL_SUFFIX = {
     "lr": ".joblib",
     "scorecard": ".joblib",
     "mlp": ".joblib",
+    # SEL-6: seed-bagging/blend ensemble -- model_path holds a joblib dict of
+    # member {algorithm, model_path, artifact_id} + weights, not a fitted
+    # estimator (see recipes/ensemble.py._save_ensemble_artifact).
+    "ensemble": ".joblib",
 }
 
 
@@ -203,7 +207,7 @@ def load_model(artifact: ModelArtifact, *, base_dir: Path):
         model = xgb.Booster()
         model.load_model(path)
         return model
-    if artifact.algorithm in {"catboost", "lr", "scorecard", "mlp"}:
+    if artifact.algorithm in {"catboost", "lr", "scorecard", "mlp", "ensemble"}:
         return joblib.load(path)
     raise ModelingError(f"unsupported model algorithm: {artifact.algorithm}")
 
@@ -216,6 +220,15 @@ def export_pmml(
     base_dir: Path,
     target_col: str | None = None,
 ) -> Path:
+    if artifact.algorithm == "ensemble":
+        # SEL-6: explicit, algorithm-specific rejection -- a seed-bagging/blend
+        # ensemble is a weighted average over heterogeneous member models with
+        # no single PMML pipeline representation (mirrors the model-card
+        # message in tools.py._unsupported_pmml_reason).
+        raise ModelingError(
+            "PMML export is not supported for algorithm: ensemble "
+            "(multi-member probability blend has no single PMML pipeline representation)"
+        )
     if artifact.algorithm not in {"lr", "lgb", "xgb", "scorecard"}:
         raise ModelingError(f"PMML export is not supported for algorithm: {artifact.algorithm}")
     try:

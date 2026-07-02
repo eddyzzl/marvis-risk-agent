@@ -59,6 +59,7 @@ from marvis.packs.modeling.prepare import SPLIT_COLUMN, prepare_modeling_frame
 from marvis.packs.modeling.reject_inference import reject_inference
 from marvis.packs.modeling.training_dataset import TrainingDataset
 from marvis.packs.modeling.recipes.catboost import train_catboost
+from marvis.packs.modeling.recipes.ensemble import train_ensemble
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
 from marvis.packs.modeling.recipes.lgb_regressor import train_lgb_regressor
@@ -93,6 +94,10 @@ SUPPORTED_MODELING_RECIPES = frozenset({
     "mlp",
     "lgb_regressor",
     "lgb_multiclass",
+    # SEL-6: seed-bagging ensemble -- deliberately NOT in BINARY_MODELING_RECIPES
+    # (never joins the default multi-algorithm arena / tuning budget), an
+    # explicit opt-in participant only.
+    "ensemble",
 })
 BINARY_MODELING_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp"})
 CONTINUOUS_MODELING_RECIPES = frozenset({"lgb_regressor"})
@@ -3968,6 +3973,8 @@ def _train_recipe(
         return train_scorecard(backend, dataset_path, config, out_dir=out_dir)
     if recipe == "mlp":
         return train_mlp(backend, dataset_path, config, out_dir=out_dir)
+    if recipe == "ensemble":
+        return train_ensemble(backend, dataset_path, config, out_dir=out_dir)
     raise ModelingError(f"unsupported modeling recipe: {recipe}")
 
 
@@ -4011,6 +4018,12 @@ def _unsupported_pmml_reason(artifact: ModelArtifact, payload_reason: str | None
         return (
             "CatBoost 可保留原生 .pkl 模型和报告;当前 sklearn2pmml/JPMML "
             "不支持 CatBoostClassifier 直接导出 PMML,因此验证移交需使用 lr/lgb/xgb/scorecard。"
+        )
+    if artifact.algorithm == "ensemble":
+        return (
+            "模型融合(seed-bagging/blend)由多个异构成员模型概率加权平均得到,"
+            "不存在单一 PMML 管线可表达该融合逻辑;PMML 导出/验证移交明确不支持,"
+            "可保留原生成员模型列表(members/weights)与报告用于内部复现。"
         )
     return (
         f"当前 PMML 导出/验证移交支持 lr/lgb/xgb/scorecard;"
@@ -4892,6 +4905,8 @@ class _ModelArtifactScorer:
     def raw_score(self, dataframe: pd.DataFrame) -> list[float]:
         dataframe = self._replay_preprocessing(dataframe)
         features = list(self.artifact.feature_list)
+        if self.artifact.algorithm == "ensemble" and isinstance(self.model, dict):
+            return self._ensemble_raw_score(dataframe, features)
         if self.artifact.algorithm == "xgb" and not hasattr(self.model, "predict_proba"):
             import xgboost as xgb
 
@@ -4906,6 +4921,42 @@ class _ModelArtifactScorer:
         if hasattr(self.model, "predict_proba"):
             return [float(value) for value in self.model.predict_proba(dataframe[features])[:, 1]]
         return [float(value) for value in self.model.predict(dataframe[features])]
+
+    def _ensemble_raw_score(self, dataframe: pd.DataFrame, features: list[str]) -> list[float]:
+        """SEL-6: score every member (each loaded fresh via its own algorithm's
+        load_model dispatch, relative to this artifact's base_dir) and return
+        the weight-averaged probability. Mirrors
+        recipes/ensemble.py._member_score_fn's per-algorithm dispatch, kept
+        separate since that module cannot import tools.py (circular import)."""
+        members = self.model.get("members") or []
+        weights = self.model.get("weights") or [1.0 / len(members)] * len(members)
+        if not members:
+            raise ModelingError(f"ensemble artifact has no members: {self.artifact.id}")
+        predictions = []
+        for member in members:
+            member_artifact = ModelArtifact(
+                id=str(member.get("artifact_id") or ""),
+                experiment_id="",
+                algorithm=str(member.get("algorithm") or ""),
+                model_path=str(member.get("model_path") or ""),
+                pmml_path=None,
+                feature_list=tuple(features),
+                params={},
+                woe_maps=None,
+                created_at="",
+            )
+            member_model = load_model(member_artifact, base_dir=self.base_dir)
+            if member_artifact.algorithm == "xgb" and not hasattr(member_model, "predict_proba"):
+                import xgboost as xgb
+
+                matrix = xgb.DMatrix(dataframe[features], feature_names=features)
+                predictions.append(np.asarray(member_model.predict(matrix), dtype=float))
+            else:
+                predictions.append(
+                    np.asarray(member_model.predict_proba(dataframe[features])[:, 1], dtype=float)
+                )
+        averaged = np.average(np.array(predictions, dtype=float), axis=0, weights=weights)
+        return [float(value) for value in averaged]
 
     def scorecard_points(self, dataframe: pd.DataFrame) -> list[float] | None:
         if self.artifact.algorithm != "scorecard" or not isinstance(self.model, dict):

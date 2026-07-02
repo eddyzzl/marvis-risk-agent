@@ -1910,6 +1910,82 @@ def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
     assert "## 入模特征" in markdown_text
 
 
+def test_train_models_accepts_ensemble_as_opt_in_participant(tmp_path):
+    """SEL-6: ensemble is a legal recipe id in the multi-algorithm arena when
+    explicitly requested (opt-in participant), but never appears unless the
+    caller names it -- default_recipe_for_target_type/choose_modeling_spec never
+    add it on their own (covered separately in test_modeling_recipes.py and
+    modeling_setup tests). This exercises the full train_models -> compare ->
+    select_experiment chain with a per-recipe params dict, the shape ensemble
+    needs to receive its own base_recipe/n_members (the legacy flat-params
+    shape only threads through to the lgb slot)."""
+    runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+
+    trained = runner.invoke(
+        ToolRef("modeling", "train_models"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipes": ["lgb", "ensemble"],
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {
+                "lgb": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+                "ensemble": {
+                    "base_recipe": "lgb",
+                    "n_members": 3,
+                    "num_boost_round": 5,
+                    "learning_rate": 0.1,
+                    "num_leaves": 4,
+                },
+            },
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    assert {exp["recipe"] for exp in trained.output["experiments"]} == {"lgb", "ensemble"}
+    assert trained.output["failed"] == []
+
+    compared = runner.invoke(
+        ToolRef("modeling", "compare_experiments"),
+        {"experiment_ids": trained.output["experiment_ids"], "target_type": "binary"},
+        task_id=task.id,
+    )
+    assert compared.ok is True, compared.error
+    ensemble_row = next(row for row in compared.output["experiments"] if row["recipe"] == "ensemble")
+    assert ensemble_row["capabilities"]["pmml_supported"] is False
+    assert "PMML" in ensemble_row["capabilities"]["reason"]
+
+    # select_experiment must be able to pick the ensemble explicitly (it is a
+    # legitimate delivery-limited candidate, not silently excluded from
+    # selection when the caller asks for it by id).
+    ensemble_experiment_id = next(
+        exp["experiment_id"] for exp in trained.output["experiments"] if exp["recipe"] == "ensemble"
+    )
+    selected = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": trained.output["experiment_ids"],
+            "selected_experiment_id": ensemble_experiment_id,
+            "target_type": "binary",
+            "refit_on_train_plus_test": False,
+        },
+        task_id=task.id,
+    )
+    assert selected.ok is True, selected.error
+    assert selected.output["recipe"] == "ensemble"
+    assert selected.output["capabilities"]["pmml_supported"] is False
+
+
 def test_pick_best_experiment_is_target_type_aware():
     from marvis.packs.modeling.tools import _pick_best_experiment
 

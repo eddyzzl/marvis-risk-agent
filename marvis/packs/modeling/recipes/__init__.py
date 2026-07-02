@@ -109,6 +109,17 @@ def _register_builtin_recipes() -> None:
             param_space={},
             requires_woe=False,
         ),
+        # SEL-6: seed-bagging/blend ensemble -- no fixed default_params of its own
+        # (each member recipe supplies its own defaults via its own get_recipe()
+        # call inside recipes/ensemble.py); registered mainly for discoverability
+        # via list_recipes()/get_recipe("ensemble").
+        ModelRecipe(
+            id="ensemble",
+            algorithm="ensemble",
+            default_params={},
+            param_space={},
+            requires_woe=False,
+        ),
     ):
         register_recipe(recipe)
 
