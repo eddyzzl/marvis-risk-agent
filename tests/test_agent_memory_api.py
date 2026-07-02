@@ -421,7 +421,7 @@ def test_memory_api_can_trigger_manual_consolidation(tmp_path):
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["consolidated"] == {"field_convention": 1}
+    assert response.json()["consolidated"] == {"field_convention": {"count": 1, "errors": 0}}
     listed = client.get(
         "/api/agent-memory/distillations",
         params={"category": "field_convention"},

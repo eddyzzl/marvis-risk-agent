@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from marvis.agent_memory.models import MemoryCandidate
 from marvis.agent_memory.retrieval import (
     MemoryQuery,
@@ -5,6 +7,10 @@ from marvis.agent_memory.retrieval import (
     normalize_model_family,
     retrieve_relevant_memories,
 )
+
+
+def _iso_days_ago(days: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
 def _model_payload(**overrides):
@@ -82,6 +88,8 @@ def test_exact_model_scope_channel_month_match_is_high_confidence():
         "source_task_id": "task-202601",
         "confidence": "high",
         "match_reason": results[0].match_reason,
+        "observed_at": None,
+        "age_days": None,
     }
 
 
@@ -126,7 +134,7 @@ def test_retrieval_supports_field_convention_and_task_experience_categories():
         {
             "id": "task-1",
             "memory_type": "task_experience",
-            "summary": "Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
+            "summary": "A卡模型 Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
             "payload": {"status": "failed"},
             "source_task_id": "task-pitfall",
             "confidence": "medium",
@@ -142,6 +150,29 @@ def test_retrieval_supports_field_convention_and_task_experience_categories():
         "target_col": "bad_flag",
         "time_col": "apply_month",
     }
+
+
+def test_low_confidence_single_keyword_hit_is_excluded_from_raw_results():
+    # A generic keyword hit alone (score=15, below the medium threshold of 25)
+    # must not reach the caller: it is exactly the "unrelated task experience
+    # fished out because your message happened to mention a keyword" noise
+    # that would otherwise waste a weak model's prompt budget (MEM-8).
+    entries = [
+        {
+            "id": "task-1",
+            "memory_type": "task_experience",
+            "summary": "Notebook 缺少 RMC_SAMPLE_DF 时需要先补运行契约。",
+            "payload": {"status": "failed"},
+            "source_task_id": "task-pitfall",
+            "confidence": "medium",
+            "status": "active",
+        },
+    ]
+    query = MemoryQuery(model_name="A卡模型", keywords=("RMC_SAMPLE_DF",))
+
+    results = retrieve_relevant_memories(entries, query)
+
+    assert results == []
 
 
 def test_low_confidence_candidates_are_excluded_from_comparison_context():
@@ -316,3 +347,88 @@ def test_bounded_payload_preserves_non_model_memory_fields():
         "field": "apply_month",
         "meaning": "申请月份",
     }
+
+
+
+def test_recent_entry_scores_higher_than_stale_entry_with_same_match_strength():
+    recent_entry = {
+        "id": "mem-recent",
+        "memory_type": "model_experience",
+        "summary": "A卡模型近期经验",
+        "payload": _model_payload(source_task_id="task-recent"),
+        "source_task_id": "task-recent",
+        "confidence": "medium",
+        "status": "active",
+        "created_at": _iso_days_ago(10),
+    }
+    stale_entry = {
+        "id": "mem-stale",
+        "memory_type": "model_experience",
+        "summary": "A卡模型陈旧经验",
+        "payload": _model_payload(source_task_id="task-stale"),
+        "source_task_id": "task-stale",
+        "confidence": "medium",
+        "status": "active",
+        "created_at": _iso_days_ago(400),
+    }
+    query = MemoryQuery(
+        model_name="分润通用A卡模型",
+        scope="mob3贷前A卡",
+        channel="自营",
+        month="202601",
+    )
+
+    results = retrieve_relevant_memories([recent_entry, stale_entry], query, limit=2)
+
+    scores = {result.entry["id"]: result.score for result in results}
+    assert scores["mem-recent"] - scores["mem-stale"] == 20
+    recent_result = next(r for r in results if r.entry["id"] == "mem-recent")
+    stale_result = next(r for r in results if r.entry["id"] == "mem-stale")
+    assert recent_result.context_packet["age_days"] == 10
+    assert stale_result.context_packet["age_days"] == 400
+    assert "recent" in recent_result.match_reason
+    assert "stale" in stale_result.match_reason
+
+
+def test_missing_created_at_gets_neutral_recency_and_null_age():
+    entry = {
+        "id": "mem-unknown-age",
+        "memory_type": "model_experience",
+        "summary": "A卡模型经验",
+        "payload": _model_payload(source_task_id="task-unknown"),
+        "source_task_id": "task-unknown",
+        "confidence": "medium",
+        "status": "active",
+    }
+    query = MemoryQuery(model_name="分润通用A卡模型", scope="mob3贷前A卡")
+
+    results = retrieve_relevant_memories([entry], query, limit=1)
+
+    assert results[0].context_packet["age_days"] is None
+    assert results[0].context_packet["observed_at"] is None
+    assert "recent" not in results[0].match_reason
+    assert "stale" not in results[0].match_reason
+
+
+def test_memory_packet_annotates_summary_with_age_in_days():
+    from marvis.agent_memory.prompting import normalize_memory_context
+
+    normalized = normalize_memory_context(
+        {
+            "memories": [
+                {
+                    "id": "mem-1",
+                    "memory_type": "model_experience",
+                    "summary": "A卡模型历史表现稳定",
+                    "confidence": "high",
+                    "age_days": 5,
+                    "observed_at": "2026-06-27T00:00:00+00:00",
+                }
+            ]
+        }
+    )
+
+    packet = normalized["memories"][0]
+    assert packet["summary"] == "A卡模型历史表现稳定（5 天前）"
+    assert packet["age_days"] == 5
+    assert packet["observed_at"] == "2026-06-27T00:00:00+00:00"

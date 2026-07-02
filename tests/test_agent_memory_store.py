@@ -433,3 +433,72 @@ def test_store_create_enforces_policy_and_never_saves_unsafe_active_memory(tmp_p
     events = store.list_events(rejected.id)
     assert [event["event_type"] for event in events] == ["reject"]
     assert events[0]["details"]["reasons"] == ["secret"]
+
+
+
+def test_store_create_deduplicates_identical_rerun_of_same_task(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    candidate = MemoryCandidate(
+        memory_type="model_experience",
+        summary="分润通用A卡模型V2026在202601自营渠道KS为30。",
+        payload=_model_experience_payload(),
+        source_task_id="task-rerun",
+        confidence="high",
+        reason="validation complete",
+    )
+
+    first = store.create(candidate, task_id="task-rerun")
+    second = store.create(candidate, task_id="task-rerun")
+    third = store.create(candidate, task_id="task-rerun")
+
+    assert second.id == first.id
+    assert third.id == first.id
+    assert len(store.list_entries(memory_type="model_experience")) == 1
+
+    events = store.list_events(first.id)
+    event_types = [event["event_type"] for event in events]
+    assert event_types.count("create") == 3
+    assert events[-1]["details"]["dedup"] is True
+
+
+def test_store_create_does_not_dedup_across_different_tasks_or_payloads(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    base_payload = _model_experience_payload()
+
+    same_content_other_task = store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="分润通用A卡模型V2026在202601自营渠道KS为30。",
+            payload=dict(base_payload),
+            source_task_id="task-a",
+        ),
+        task_id="task-a",
+    )
+    other_task_entry = store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="分润通用A卡模型V2026在202601自营渠道KS为30。",
+            payload=dict(base_payload),
+            source_task_id="task-b",
+        ),
+        task_id="task-b",
+    )
+    different_payload = dict(base_payload)
+    different_payload["ks"] = 0.42
+    different_content_entry = store.create(
+        MemoryCandidate(
+            memory_type="model_experience",
+            summary="分润通用A卡模型V2026在202601自营渠道KS为42。",
+            payload=different_payload,
+            source_task_id="task-a",
+        ),
+        task_id="task-a",
+    )
+
+    assert other_task_entry.id != same_content_other_task.id
+    assert different_content_entry.id != same_content_other_task.id
+    assert len(store.list_entries(memory_type="model_experience")) == 3

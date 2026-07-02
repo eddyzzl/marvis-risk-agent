@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import re
 from typing import Any, Iterable
+
+from marvis.agent_memory.models import MEMORY_TYPES
 
 
 METRIC_FIELDS = ("ks", "auc", "psi")
@@ -27,6 +30,16 @@ GENERAL_PAYLOAD_FIELDS = (
     "failure_kind",
 )
 LOW_CONFIDENCE_VALUES = {"low", "very_low", "rejected"}
+RECENCY_HALF_LIFE_DAYS = 90
+RECENCY_STALE_DAYS = 365
+RECENCY_RECENT_BONUS = 10
+RECENCY_STALE_PENALTY = -10
+# Raw-memory recall ceiling, per memory_type: model_experience is the highest
+# volume, highest-value category (comparison anchors), so it gets its own
+# generous window instead of being crowded out by preference/convention
+# entries once the store grows past a couple hundred rows.
+RAW_RECALL_LIMIT_PER_KIND = 200
+RAW_RECALL_LIMIT_OTHER_KINDS = 200
 MODEL_FAMILY_PATTERNS = (
     ("a_card", (r"\ba\s*card\b", r"a卡")),
     ("b_card", (r"\bb\s*card\b", r"b卡")),
@@ -84,6 +97,12 @@ def retrieve_relevant_memories(
             continue
 
         confidence = _score_confidence(score)
+        if confidence == "low":
+            # Symmetric with the distillation-side policy (retrieve_with_distillations
+            # already skips confidence == 'low' distillations): a single generic
+            # keyword hit is not enough signal to spend a weak model's limited
+            # prompt budget on an otherwise-unrelated raw memory.
+            continue
         packet = _context_packet(record, confidence, ", ".join(reasons))
         results.append(
             MemorySearchResult(
@@ -103,24 +122,50 @@ def retrieve_with_distillations(
     query_context: dict[str, Any] | MemoryQuery,
     *,
     limit: int = 6,
+    raw_quota: int | None = None,
 ) -> list[dict[str, Any]]:
     query = _query_from_context(query_context)
     context = _query_context_dict(query)
     packets: list[dict[str, Any]] = []
+    distillation_limit = limit if raw_quota is None else max(0, limit - raw_quota)
     distillations = store.search_distillations(context, active_only=True, limit=limit)
     for distillation in distillations:
         if distillation.confidence == "low":
             continue
         packets.append(_distillation_packet(distillation))
-        if len(packets) >= limit:
-            return packets[:limit]
+        if len(packets) >= distillation_limit:
+            break
 
     remaining = limit - len(packets)
+    if raw_quota is not None:
+        remaining = min(remaining, raw_quota)
     if remaining <= 0:
         return packets[:limit]
-    raw_results = retrieve_relevant_memories(store.list_entries(limit=200), query, limit=remaining)
+    raw_results = retrieve_relevant_memories(_recall_raw_entries(store), query, limit=remaining)
     packets.extend(_raw_packet(result.context_packet) for result in raw_results)
     return packets[:limit]
+
+
+def _recall_raw_entries(store) -> list[Any]:
+    """Pull candidate raw entries for scoring, targeted by memory_type instead
+    of a single "most recent 200 across all types" scan. Without this,
+    model_experience anchors (and any other type) silently fall out of the
+    recall window as unrelated preference/convention entries accumulate."""
+    entries: list[Any] = []
+    seen_ids: set[str] = set()
+    for memory_type in MEMORY_TYPES:
+        per_kind_limit = (
+            RAW_RECALL_LIMIT_PER_KIND
+            if memory_type == "model_experience"
+            else RAW_RECALL_LIMIT_OTHER_KINDS
+        )
+        for entry in store.list_entries(memory_type=memory_type, limit=per_kind_limit):
+            entry_id = str(entry.get("id") if isinstance(entry, dict) else getattr(entry, "id", None))
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            entries.append(entry)
+    return entries
 
 
 def compare_model_experience(
@@ -218,6 +263,15 @@ class _MemoryRecord:
     def status(self) -> str:
         return str(self._get("status") or "active").strip().lower()
 
+    @property
+    def created_at(self) -> str | None:
+        value = self._get("created_at")
+        return str(value) if value not in (None, "") else None
+
+    @property
+    def age_days(self) -> int | None:
+        return _age_in_days(self.created_at)
+
     def _get(self, field_name: str) -> Any:
         if isinstance(self.entry, dict):
             return self.entry.get(field_name)
@@ -274,6 +328,11 @@ def _score_record(record: _MemoryRecord, query: MemoryQuery) -> tuple[int, list[
             score += 5
             reasons.append(f"keyword:{keyword}")
 
+    recency_delta, recency_reason = _recency_bonus(record.age_days)
+    score += recency_delta
+    if recency_reason:
+        reasons.append(recency_reason)
+
     return score, reasons
 
 
@@ -297,7 +356,39 @@ def _score_general_record(
     if query.channel and _text_contains(searchable, query.channel):
         score += 10
         reasons.append("channel keyword")
+
+    recency_delta, recency_reason = _recency_bonus(record.age_days)
+    score += recency_delta
+    if recency_reason:
+        reasons.append(recency_reason)
+
     return score, reasons
+
+
+def _age_in_days(created_at: str | None) -> int | None:
+    if not created_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    delta = datetime.now(UTC) - parsed
+    return max(0, delta.days)
+
+
+def _recency_bonus(age_days: int | None) -> tuple[int, str | None]:
+    # Deterministic recency term: entries observed within the half-life window
+    # get a small boost, entries older than the stale threshold get a small
+    # penalty, everything in between (and entries with unknown age) is neutral.
+    if age_days is None:
+        return 0, None
+    if age_days <= RECENCY_HALF_LIFE_DAYS:
+        return RECENCY_RECENT_BONUS, "recent"
+    if age_days > RECENCY_STALE_DAYS:
+        return RECENCY_STALE_PENALTY, "stale"
+    return 0, None
 
 
 def _score_confidence(score: int) -> str:
@@ -329,10 +420,13 @@ def _context_packet(
         "source_task_id": record.source_task_id,
         "confidence": confidence,
         "match_reason": match_reason,
+        "observed_at": record.created_at,
+        "age_days": record.age_days,
     }
 
 
 def _distillation_packet(distillation) -> dict[str, Any]:
+    observed_at = str(getattr(distillation, "updated_at", "") or "") or None
     return {
         "kind": "distillation",
         "id": distillation.id,
@@ -345,6 +439,8 @@ def _distillation_packet(distillation) -> dict[str, Any]:
         "source_memory_ids": list(distillation.source_memory_ids),
         "source_task_id": None,
         "match_reason": "distilled memory",
+        "observed_at": observed_at,
+        "age_days": _age_in_days(observed_at),
     }
 
 

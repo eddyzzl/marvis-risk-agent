@@ -241,11 +241,20 @@ export function attachMemoryHandlers(root, deps = {}) {
       try {
         const payload = await actions.consolidateMemory(category);
         await actions.refreshMemories(refreshQuery());
-        const count = Object.values(payload?.consolidated || {}).reduce(
-          (total, value) => total + Number(value || 0),
+        const consolidated = Object.values(payload?.consolidated || {});
+        const count = consolidated.reduce(
+          (total, value) => total + Number((value && typeof value === "object" ? value.count : value) || 0),
           0,
         );
-        actions.showMessage(`已合并 ${count} 条记忆沉淀。`);
+        const errors = consolidated.reduce(
+          (total, value) => total + Number((value && typeof value === "object" ? value.errors : 0) || 0),
+          0,
+        );
+        actions.showMessage(
+          errors > 0
+            ? `已合并 ${count} 条记忆沉淀，${errors} 个分类合并失败，详情见日志。`
+            : `已合并 ${count} 条记忆沉淀。`,
+        );
       } catch (error) {
         actions.showError(error?.message || "记忆沉淀合并失败");
       }

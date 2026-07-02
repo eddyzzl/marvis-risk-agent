@@ -106,6 +106,108 @@ def test_distillation_engine_skips_non_numeric_model_metrics_instead_of_dropping
     assert metric_ranges["auc"] == {"min": 0.72, "max": 0.72}
 
 
+def test_distillation_support_counts_distinct_tasks_not_entries(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    payload = {
+        "model_name": "A卡",
+        "model_version": "V1",
+        "scope": "train",
+        "channel": "app",
+        "month": "202601",
+        "ks": 0.31,
+        "auc": 0.72,
+        "psi": 0.08,
+        "source_task_id": "task-1",
+        "important_feature_sources": ["征信"],
+    }
+    for _ in range(4):
+        store.create(
+            MemoryCandidate(
+                memory_type="model_experience",
+                summary="模型经验 task-1",
+                payload=dict(payload),
+                source_task_id="task-1",
+            )
+        )
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "model_experience"
+    )
+
+    assert len(distillations) == 1
+    distilled = distillations[0]
+    # Rerunning the same task 4 times deduplicates at capture time (MEM-3), so
+    # only one entry exists to distill; support/confidence must reflect the
+    # single independent data point, not 4 duplicate rows.
+    assert distilled.support_count == 1
+    assert distilled.confidence == "low"
+
+
+def test_distillation_model_experience_carries_months_covered_range(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    for task_id, month in [("task-1", "202503"), ("task-2", "202601")]:
+        store.create(
+            MemoryCandidate(
+                memory_type="model_experience",
+                summary=f"模型经验 {task_id}",
+                payload={
+                    "model_name": "A卡",
+                    "model_version": "V1",
+                    "scope": "train",
+                    "channel": "app",
+                    "month": month,
+                    "ks": 0.31,
+                    "auc": 0.72,
+                    "psi": 0.08,
+                    "source_task_id": task_id,
+                    "important_feature_sources": ["征信"],
+                },
+                source_task_id=task_id,
+            )
+        )
+
+    distillations = DistillationEngine(store, llm_factory=lambda: _BrokenLLM()).distill_category(
+        "model_experience"
+    )
+
+    assert len(distillations) == 1
+    assert distillations[0].structured["months_covered"] == {"min": "202503", "max": "202601"}
+
+
+def test_distill_category_logs_and_counts_group_failures_instead_of_swallowing(tmp_path, caplog):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    store = AgentMemoryStore(db_path)
+    store.create(
+        MemoryCandidate(
+            memory_type="user_preference",
+            summary="正常偏好经验。",
+            payload={"preference": "正常偏好经验。"},
+            source_task_id="task-ok",
+        )
+    )
+    engine = DistillationEngine(store)
+    original_distill_group = engine._distill_group
+
+    def _boom(category, scope_key, members):
+        if scope_key == "user_preference:general":
+            raise RuntimeError("boom")
+        return original_distill_group(category, scope_key, members)
+
+    engine._distill_group = _boom
+
+    with caplog.at_level("WARNING"):
+        results = engine.distill_category("user_preference")
+
+    assert results == []
+    assert engine.last_error_count == 1
+    assert any("distill group failed" in record.message for record in caplog.records)
+
+
 class _BrokenLLM:
     def complete(self, **_kwargs):
         raise RuntimeError("unavailable")

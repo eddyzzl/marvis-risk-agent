@@ -316,7 +316,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     draft_sandbox = DraftSandbox(tool_runner, draft_registry, draft_repo)
     memory_store = AgentMemoryStore(settings.db_path)
     memory_consolidation_scheduler = ConsolidationScheduler(
-        DistillationEngine(memory_store),
+        DistillationEngine(memory_store, llm_factory=_llm_factory(settings)),
         EvolutionManager(memory_store),
         memory_store,
         auto_enabled=lambda: load_memory_policy(settings.workspace).auto_distill,
