@@ -9751,3 +9751,29 @@ def test_acceptance_mode_chip_explains_auto_mode_scope():
     # fires the composer notice once on switching INTO auto mode.
     assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
     assert "setAgentComposerNotice(\"自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。\", \"info\")" in app_js
+
+
+def test_welcome_sample_data_entry_is_wired_end_to_end():
+    """UX-9: the "用示例数据试跑" welcome-page entry must exist as a real button
+    (not just copy), be bound to a click handler that calls the sample-data +
+    task-creation endpoints, and use a task-name prefix that survives the
+    backend's model_name validator (MODEL_ID_RE has no full-width bracket
+    support, so a naive "【示例】" prefix would 422 at creation time)."""
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    welcome_css = _read_static("css/welcome.css")
+
+    assert 'id="welcomeSampleDataButton"' in index_html
+    assert "用示例数据试跑" in index_html
+
+    assert 'const sampleDataTaskNamePrefix = "示例-";' in app_js
+    assert "示例-" in app_js
+    assert "【" not in app_js.split("sampleDataTaskNamePrefix")[1][:40]
+    assert "async function createSampleDataTask" in app_js
+    assert 'api("api/sample-data", { method: "POST" })' in app_js
+    assert '$("welcomeSampleDataButton").onclick = handleWelcomeSampleDataClick;' in app_js
+    # Reuses the same manual-mode driver-start path as a real task creation
+    # (createTaskAndScan's taskUsesPlanRail branch), not a bespoke flow.
+    assert "await dispatchDriverStart(task.id);" in app_js
+
+    assert ".welcome-sample-data-link" in welcome_css

@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from marvis.safe_paths import assert_within
+from marvis.sample_data import write_sample_materials
 
 
 router = APIRouter(prefix="/api", tags=["materials"])
@@ -114,3 +115,23 @@ async def upload_materials(
         raise
 
     return {"source_dir": str(upload_dir), "files": saved_files}
+
+
+@router.post("/sample-data", status_code=201)
+def generate_sample_data(request: Request) -> dict:
+    """UX-9: one-click sample data for a first-run trial. Generates the built-in
+    deterministic credit sample (+ a matching data dictionary, GAP-4) into a fresh
+    material_uploads directory and returns it in the same {source_dir, files} shape
+    as /api/material-uploads, so the frontend can hand it straight to POST /api/tasks
+    exactly like a real upload — no new task-creation code path needed."""
+    upload_dir = _new_material_upload_dir(request.app.state.settings)
+    try:
+        write_sample_materials(upload_dir)
+    except Exception:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
+    files = [
+        {"relative_path": path.name, "size_bytes": path.stat().st_size}
+        for path in sorted(upload_dir.iterdir())
+    ]
+    return {"source_dir": str(upload_dir), "files": files}
