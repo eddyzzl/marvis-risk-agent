@@ -2205,6 +2205,26 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 }
 .dedup-table .dedup-feat {
   font-weight: 600;
+  white-space: normal;
+}
+/* UX-6: evidence rows (conflicting columns + a real value example) rendered under the
+   feature id — normal wrapping so a wide column list or example doesn't force the
+   table wider than the gate panel. */
+.dedup-conflict-columns,
+.dedup-example {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: normal;
+}
+.dedup-picker .dedup-strategy-note {
+  margin: 0;
+  padding: 7px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border-color);
 }
 .dedup-table select.dedup-strategy {
   font-size: 12px;
@@ -2212,6 +2232,9 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   border-radius: var(--radius);
   border: 1px solid var(--border-color);
   background: var(--surface);
+}
+.dedup-table .dedup-exclude {
+  margin-left: 6px;
 }
 .dedup-foot {
   display: flex;

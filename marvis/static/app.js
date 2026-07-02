@@ -62,9 +62,11 @@ import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js
 import {
   handleC1ConfirmClick as handleC1ConfirmClickController,
   handleDedupConfirmClick as handleDedupConfirmClickController,
+  handleDedupExcludeClick as handleDedupExcludeClickController,
   renderDedupPicker,
   renderJoinC1Form,
   submitC1Assignment as submitC1AssignmentController,
+  submitDedupExclude as submitDedupExcludeController,
   submitDedupStrategies as submitDedupStrategiesController,
 } from "./js/v2/join_gate_controller.js";
 import {
@@ -5484,8 +5486,17 @@ async function submitDedupStrategies(button) {
 function handleDedupConfirmClick(event) {
   return handleDedupConfirmClickController(event, joinGateControllerContext());
 }
+
+async function submitDedupExclude(button) {
+  return submitDedupExcludeController(button, joinGateControllerContext());
+}
+
+function handleDedupExcludeClick(event) {
+  return handleDedupExcludeClickController(event, joinGateControllerContext());
+}
 if (typeof document !== "undefined") {
   document.addEventListener("click", handleDedupConfirmClick);
+  document.addEventListener("click", handleDedupExcludeClick);
 }
 
 function agentMessageGateButtonHtml(message) {

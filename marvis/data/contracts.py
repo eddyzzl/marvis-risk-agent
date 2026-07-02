@@ -89,6 +89,10 @@ class ConflictReport:
     n_conflict_rows: int
     safe_dropped: int                   # level-1 whole-row duplicates removed (lossless)
     sample_keys: tuple[tuple, ...]      # capped sample of conflicting key-value tuples
+    # UX-6: for each key in sample_keys (same order, same cap), the row-level values the
+    # conflict_columns actually took for that key -- e.g. {"amount": [500, 800]} -- so a
+    # dedup gate can show "k=123 时 amount 两行分别为 500/800" instead of a bare count.
+    sample_conflicts: tuple[dict, ...] = ()
 
     @property
     def has_conflicts(self) -> bool:

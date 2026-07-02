@@ -5,11 +5,34 @@ from __future__ import annotations
 from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
 
 
+# UX-6: sample_keys/sample_conflicts are already capped (dedup._SAMPLE_CAP=50) by the
+# backend two_level_dedup computation; re-cap here to a much smaller number of *example*
+# keys shown at the gate (the picker's job is "show why", not dump the whole sample).
+_DEDUP_EXAMPLE_CAP = 3
+
+
+def _dedup_examples(sample_keys: list, sample_conflicts: list, key_columns: list[str]) -> list[dict]:
+    examples = []
+    for key_tuple, values in zip(sample_keys, sample_conflicts):
+        if not isinstance(values, dict) or not values:
+            continue
+        key_label = ", ".join(
+            f"{col}={val}" for col, val in zip(key_columns, key_tuple)
+        ) if key_columns else str(key_tuple)
+        examples.append({"key": key_label, "values": values})
+        if len(examples) >= _DEDUP_EXAMPLE_CAP:
+            break
+    return examples
+
+
 def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict | None:
     """Per-feature dedup picker payload for a join gate (§4). Returns None unless
     ``confirm_join`` left features awaiting a dedup strategy. For each such feature,
-    attach the conflict-key count + conflicting columns from the propose-step
-    diagnostics so the picker shows *why* a strategy is needed."""
+    attach the conflict-key count + conflicting columns + a few real conflict-value
+    examples from the propose-step diagnostics so the picker shows *why* a strategy is
+    needed and what first/last would each keep (UX-6: the picker previously showed only
+    a bare conflict count, dropping the conflict_columns/sample data the backend already
+    computes)."""
     confirm = confirm_o if isinstance(confirm_o, dict) else {}
     needs = [str(f) for f in (confirm.get("needs_dedup") or [])]
     if not needs:
@@ -22,12 +45,19 @@ def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict 
         fid = str(join.get("feature_id"))
         diag = join.get("diagnostics") if isinstance(join.get("diagnostics"), dict) else {}
         report = diag.get("conflict_report") if isinstance(diag.get("conflict_report"), dict) else {}
+        key_columns = [str(c) for c in (report.get("key_columns") or [])]
+        sample_keys = list(report.get("sample_keys") or [])
+        sample_conflicts = list(report.get("sample_conflicts") or [])
         info[fid] = {
             "conflict_keys": int(report.get("n_conflict_keys") or 0),
             "conflict_columns": [str(c) for c in (report.get("conflict_columns") or [])],
+            "examples": _dedup_examples(sample_keys, sample_conflicts, key_columns),
         }
     features = [
-        {"feature_id": fid, **info.get(fid, {"conflict_keys": 0, "conflict_columns": []})}
+        {
+            "feature_id": fid,
+            **info.get(fid, {"conflict_keys": 0, "conflict_columns": [], "examples": []}),
+        }
         for fid in needs
     ]
     return {"needs_dedup": needs, "features": features, "strategies": ["first", "last"]}

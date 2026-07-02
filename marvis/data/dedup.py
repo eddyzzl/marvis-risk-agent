@@ -62,6 +62,16 @@ def two_level_dedup(frame: pd.DataFrame, key_cols: list[str]) -> tuple[pd.DataFr
         tuple(_scalar(value) for value in row)
         for row in distinct_keys.itertuples(index=False, name=None)
     )
+    # UX-6: for each sampled key (same order/cap as sample_keys), the actual row values
+    # the conflict columns took -- lets a dedup gate show "k=123 时 amount 两行分别为
+    # 500/800" instead of a bare conflict count. `grouped` was built from `conflicts`
+    # (already dropna(subset=keys)-filtered above), so every sampled key is a real,
+    # non-NaN group -- get_group cannot KeyError here. groupby(keys, ...) with `keys` a
+    # list always keys get_group by tuple, even for a single-column key.
+    sample_conflicts = tuple(
+        _conflict_sample(grouped.get_group(row), conflict_columns)
+        for row in distinct_keys.itertuples(index=False, name=None)
+    )
     report = ConflictReport(
         key_columns=tuple(keys),
         conflict_columns=conflict_columns,
@@ -69,6 +79,7 @@ def two_level_dedup(frame: pd.DataFrame, key_cols: list[str]) -> tuple[pd.DataFr
         n_conflict_rows=int(len(conflicts)),
         safe_dropped=int(safe_dropped),
         sample_keys=sample_keys,
+        sample_conflicts=sample_conflicts,
     )
     return deduped, report
 
@@ -82,6 +93,16 @@ def _empty_report(keys: tuple[str, ...], safe_dropped: int) -> ConflictReport:
         safe_dropped=int(safe_dropped),
         sample_keys=(),
     )
+
+
+def _conflict_sample(rows: pd.DataFrame, conflict_columns: tuple[str, ...]) -> dict:
+    """The conflict_columns values a single conflicting key's rows actually took, capped
+    to avoid a pathological same-key conflict (many disagreeing rows) bloating the
+    payload."""
+    return {
+        str(col): [_scalar(value) for value in rows[col].head(_SAMPLE_CAP).tolist()]
+        for col in conflict_columns
+    }
 
 
 def _scalar(value):

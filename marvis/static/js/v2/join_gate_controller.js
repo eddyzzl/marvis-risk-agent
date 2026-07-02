@@ -1,6 +1,10 @@
 import { escapeHtml } from "../ui-utils.js";
 
 const DEDUP_STRATEGY_LABELS = { first: "保留首条 (first)", last: "保留末条 (last)" };
+// UX-6: first/last follows raw file row order (not a business timestamp), so the
+// picker states that plainly next to the strategy select instead of letting the user
+// assume it means something like "most recent".
+const DEDUP_STRATEGY_NOTE = "「首条/末条」按当前文件行序保留,行序无业务含义时建议改用聚合或先按时间列排序后再拼接。";
 
 function joinGateContext(context = {}) {
   return {
@@ -158,6 +162,34 @@ export function handleC1ConfirmClick(event, context = {}) {
   return true;
 }
 
+// UX-6: cap the conflicting-column list shown per row so a wide table with many
+// disagreeing columns doesn't blow out the picker layout.
+const DEDUP_CONFLICT_COLUMNS_DISPLAY_CAP = 5;
+
+function dedupConflictColumnsHtml(feature) {
+  const columns = Array.isArray(feature?.conflict_columns) ? feature.conflict_columns : [];
+  if (!columns.length) return "";
+  const shown = columns.slice(0, DEDUP_CONFLICT_COLUMNS_DISPLAY_CAP);
+  const more = columns.length > shown.length ? ` 等 ${columns.length} 列` : "";
+  return `<div class="dedup-conflict-columns">冲突列：${escapeHtml(shown.join("、"))}${more}</div>`;
+}
+
+// UX-6: one real conflicting-value example per feature (e.g. "k=138... 时 balance
+// 两行分别为 0、999"), sourced from the backend's sample_conflicts — replaces the
+// previous "conflict_keys number only" black box with a concrete case the user can
+// reason about before picking first/last.
+function dedupExampleHtml(feature) {
+  const examples = Array.isArray(feature?.examples) ? feature.examples : [];
+  if (!examples.length) return "";
+  const example = examples[0];
+  const values = example?.values && typeof example.values === "object" ? example.values : {};
+  const valueParts = Object.entries(values)
+    .map(([col, vals]) => `${col} 两行分别为 ${(Array.isArray(vals) ? vals : [vals]).join("、")}`)
+    .join("；");
+  if (!valueParts) return "";
+  return `<div class="dedup-example">示例：k=${escapeHtml(String(example.key || ""))} 时 ${escapeHtml(valueParts)}</div>`;
+}
+
 export function renderDedupPicker(message, options = {}) {
   const dedup = message?.metadata?.dedup;
   if (!dedup || !Array.isArray(dedup.features) || !dedup.features.length) return "";
@@ -179,15 +211,25 @@ export function renderDedupPicker(message, options = {}) {
           return `<option value="${escapeHtml(value)}">${escapeHtml(DEDUP_STRATEGY_LABELS[value] || value)}</option>`;
         })
         .join("");
+      const evidence = dedupConflictColumnsHtml(feature) + dedupExampleHtml(feature);
+      // UX-6: "排除该特征表" — an exit for a table whose conflicts are too dirty to
+      // resolve with first/last. Submits the same free-text instruction channel the
+      // driver already routes adjust/replan through (agent mode acts on it; manual
+      // mode — no LLM — shows the existing canned "回复「确认」或调参" hint, which is
+      // still an honest, non-broken response).
       return `<tr>
-      <td class="dedup-feat">${escapeHtml(fid)}</td>
+      <td class="dedup-feat">${escapeHtml(fid)}${evidence}</td>
       <td>${escapeHtml(conflicts)}</td>
-      <td><select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}"${disabledAttr}>${options}</select></td>
+      <td>
+        <select class="dedup-strategy" data-dedup-feature="${escapeHtml(fid)}"${disabledAttr}>${options}</select>
+        <button type="button" class="button compact secondary dedup-exclude" data-dedup-exclude="${escapeHtml(fid)}"${disabledAttr}>排除该特征表</button>
+      </td>
     </tr>`;
     })
     .join("");
   return `<div class="dedup-picker" data-dedup-form="${escapeHtml(messageId)}" data-dedup-gate-step-id="${escapeHtml(gateStepId)}"${interactive ? "" : ' data-dedup-readonly="true"'}>
     <p class="dedup-note">以下特征表的拼接键不唯一(同键多行),请选择去重策略后再拼接:</p>
+    <p class="dedup-strategy-note">${escapeHtml(DEDUP_STRATEGY_NOTE)}</p>
     <table class="dedup-table">
       <thead><tr><th>特征表</th><th>冲突</th><th>去重策略</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -246,5 +288,53 @@ export function handleDedupConfirmClick(event, context = {}) {
   if (!button) return false;
   event.preventDefault();
   void submitDedupStrategies(button, context);
+  return true;
+}
+
+// UX-6: "排除该特征表" — sends the same free-text instruction channel a typed
+// composer message would use (agent mode's instruction router treats it as a
+// structural replan dropping the table; manual mode has no LLM router, so the
+// driver responds with its existing canned adjust hint rather than applying it
+// silently — never a broken request either way).
+export async function submitDedupExclude(button, rawContext = {}) {
+  const form = button.closest(".dedup-picker");
+  const { taskId, api, acceptanceMode, setActionStatus, setAgentMessages, renderAgentConversation } = joinGateContext(rawContext);
+  if (!form || !taskId || typeof api !== "function") return;
+  if (form.dataset.dedupReadonly === "true") {
+    setActionStatus("这是历史去重结果,请使用最新待确认步骤确认。", "error");
+    return;
+  }
+  const featureId = button.getAttribute("data-dedup-exclude") || "";
+  if (!featureId) return;
+  const expectedStepId = form.dataset.dedupGateStepId || "";
+  button.disabled = true;
+  const context = joinGateContext(rawContext);
+  try {
+    await withDriverTurnBusyFeedback(taskId, context, async (pollAgentMessagesUntilSettled) => {
+      const requestPromise = api(`/api/tasks/${taskId}/agent/messages`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: `排除特征表 ${featureId}，其余按当前拼接方案继续`,
+          expected_step_id: expectedStepId,
+          acceptance_mode: acceptanceMode,
+        }),
+      });
+      const streamPollPromise = pollAgentMessagesUntilSettled(taskId, requestPromise, { preserveOptimistic: true });
+      const result = await requestPromise;
+      await streamPollPromise;
+      setAgentMessages(result.messages);
+      renderAgentConversation();
+    });
+  } catch (error) {
+    button.disabled = false;
+    setActionStatus(error?.message || "排除特征表失败", "error");
+  }
+}
+
+export function handleDedupExcludeClick(event, context = {}) {
+  const button = event.target?.closest?.("[data-dedup-exclude]");
+  if (!button) return false;
+  event.preventDefault();
+  void submitDedupExclude(button, context);
   return true;
 }
