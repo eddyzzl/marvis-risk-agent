@@ -122,6 +122,7 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(tmp_path))
 
 
+@pytest.mark.slow
 def test_modeling_end_to_end(client: TestClient, tmp_path: Path):
     src = _sample_dir(tmp_path)
     resp = client.post("/api/tasks", json={
@@ -251,6 +252,7 @@ def _refinement_funnel_dir(root: Path, n: int = 6000) -> Path:
     return src
 
 
+@pytest.mark.slow
 def test_modeling_refinement_funnel_drops_noise_and_redundant_features(client: TestClient, tmp_path: Path):
     """FS-1 end-to-end: the multivariate refinement step (精选特征) between screen and
     tuning must (a) drop the 3 pure-noise columns via the IV floor, (b) drop the
@@ -329,6 +331,7 @@ def test_modeling_refinement_funnel_drops_noise_and_redundant_features(client: T
     assert set(artifact.feature_list) == {"s1", "s2"}  # trained on exactly the refined set
 
 
+@pytest.mark.slow
 def test_modeling_refinement_funnel_gate_adjust_loosens_iv_floor(client: TestClient, tmp_path: Path):
     """FS-1 decision #5 (escape hatch): iv_min is adjustable at the gate that depends
     on select_features (配置调参) — loosening it to 0 lets the previously-dropped noise
@@ -383,6 +386,7 @@ def test_modeling_refinement_funnel_gate_adjust_loosens_iv_floor(client: TestCli
     assert "s1_dup" not in loosened["selected"]  # correlation dedup still applies
 
 
+@pytest.mark.slow
 def test_modeling_business_materials_flow_into_report_and_delivery(client: TestClient, tmp_path: Path):
     src = _business_material_dir(tmp_path)
     resp = client.post("/api/tasks", json={
@@ -510,6 +514,7 @@ def test_modeling_business_materials_without_split_survive_auto_split(client: Te
     assert counts["oot"] > 0
 
 
+@pytest.mark.slow
 def test_modeling_multiclass_completes_end_to_end(client: TestClient, tmp_path: Path):
     """§8.3 multiclass runs through the WHOLE conversational flow (split → screen → tune →
     train → report). Guards two real bugs fixed together: (1) a non-lgb primary recipe skips
@@ -687,6 +692,7 @@ def test_modeling_rejects_out_of_range_oot_ks_min(client: TestClient, tmp_path: 
     assert resp.status_code == 422, resp.text
 
 
+@pytest.mark.slow
 def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client: TestClient, tmp_path: Path):
     """An unreachable oot_ks_min (manual mode: no LLM, so a criteria failure cannot
     be auto-replanned — the executor's LLMSettingsError fallback lets the plan
@@ -722,6 +728,7 @@ def test_modeling_fails_final_review_when_oot_ks_min_unmet_in_manual_mode(client
     assert any("OOT KS" in item for item in summary["open_items"])
 
 
+@pytest.mark.slow
 def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClient, tmp_path: Path):
     src = _sample_dir(tmp_path, n=200)
     pd.DataFrame({
@@ -768,6 +775,7 @@ def test_modeling_multiple_files_runs_join_then_modeling_setup(client: TestClien
     assert "extra_score" in split_output["feature_cols"]
 
 
+@pytest.mark.slow
 def test_modeling_multiple_files_without_split_column_auto_splits_after_join(
     client: TestClient, tmp_path: Path
 ):
@@ -828,6 +836,7 @@ def test_modeling_multiple_files_without_split_column_auto_splits_after_join(
     assert set(counts) == {"train", "test"} and all(v > 0 for v in counts.values())
 
 
+@pytest.mark.slow
 def test_modeling_multiple_files_with_time_column_auto_splits_oot_after_join(
     client: TestClient, tmp_path: Path
 ):

@@ -112,6 +112,7 @@ def test_bin_feature_can_enforce_monotonic_bad_rates(tmp_path):
     assert result.output["total_iv_before_monotonic"] > result.output["total_iv"]
 
 
+@pytest.mark.slow
 def test_feature_pack_tools_round_trip_via_runner(tmp_path):
     runner, registry, repo, backend = _runtime(tmp_path)
     dataset = _register_sample(registry, tmp_path)
@@ -946,6 +947,7 @@ def _assert_registered_frame(repo, registry, backend, dataset_id: str, expected_
         assert column in frame.columns
 
 
+@pytest.mark.slow
 def test_impute_cap_normalize_onehot_persist_preprocessing_chain_sidecar(tmp_path):
     """PREP-2: impute/cap/normalize/onehot must write a lineage sidecar next to the
     derived dataset's parquet so a model trained downstream can replay the exact
@@ -1322,6 +1324,7 @@ def test_screen_features_reports_sentinel_columns_notice(tmp_path):
     assert "sentinel_values" in result.output["sentinel_notice"]
 
 
+@pytest.mark.slow
 def test_impute_cap_normalize_bin_woe_accept_sentinel_values(tmp_path):
     """PREP-4: sentinel_values on impute/cap/normalize/bin_feature/woe_encode must be
     treated as missing before fitting/binning, not as real observations."""

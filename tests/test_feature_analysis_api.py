@@ -96,6 +96,7 @@ def test_feature_analysis_with_vif_metric_shows_collinear_section(client: TestCl
     assert "VIF(共线性)" in titles  # the selected optional metric was computed + shown
 
 
+@pytest.mark.slow
 def test_feature_analysis_multiple_files_runs_join_then_feature_analysis(client: TestClient, tmp_path: Path):
     src = _sample_dir(tmp_path, n=200)
     pd.DataFrame({

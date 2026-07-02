@@ -94,6 +94,7 @@ def test_data_ops_ingest_excel_rejects_paths_outside_material_roots(tmp_path):
     assert "allowed material root" in ingest.error
 
 
+@pytest.mark.slow
 def test_data_ops_align_propose_and_execute_join_via_runner(tmp_path):
     runner, registry, repo = _runtime(tmp_path)
     anchor = _register_csv(
@@ -308,6 +309,7 @@ def test_dedup_rows_reports_same_key_conflict_without_dropping(tmp_path):
     assert repo.get_dataset(resolved.output["dataset_id"]).row_count == 2
 
 
+@pytest.mark.slow
 def test_data_ops_confirm_join_enables_execute(tmp_path):
     runner, registry, repo = _runtime(tmp_path)
     phones = ["13800138000", "13900139000"]
@@ -346,6 +348,7 @@ def test_data_ops_confirm_join_enables_execute(tmp_path):
     assert executed.output["anchor_rows"] == executed.output["joined_rows"] == 2
 
 
+@pytest.mark.slow
 def test_data_ops_confirm_join_reports_needs_dedup_without_hard_failing(tmp_path):
     """A non-unique feature key no longer hard-fails confirm_join (JOIN-G2 dead-end): it
     reports needs_dedup so the flow can reach the C2 gate; execute stays blocked until a

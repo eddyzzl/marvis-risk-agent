@@ -193,6 +193,7 @@ def test_run_notebook_tool_runner_converts_missing_material_to_structured_error(
     assert audit["outcome"] == "failed"
 
 
+@pytest.mark.slow
 def test_tool_runner_runs_metrics_and_reports_after_notebook_in_separate_workers(tmp_path):
     runner, _plugin_repo = _runner(tmp_path)
     repo = TaskRepository(tmp_path / "workspace" / "marvis.sqlite")
@@ -452,6 +453,7 @@ def test_model_validation_plan_api_uses_v1_compat_template(tmp_path):
     ]
 
 
+@pytest.mark.slow
 def test_model_validation_workflow_executes_v1_compat_until_report_confirmation(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)
