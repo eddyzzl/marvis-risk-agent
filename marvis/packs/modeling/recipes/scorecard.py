@@ -14,7 +14,12 @@ from marvis.data.labels import resolve_modeling_splits
 from marvis.feature.binning import chimerge_edges, monotonic_direction, monotonic_edges
 from marvis.feature.encode import woe_encode
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
-from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
+from marvis.packs.modeling.artifact import (
+    persist_model_meta,
+    points_direction_for_algorithm,
+    score_direction_for_algorithm,
+    write_artifact_file,
+)
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
@@ -204,6 +209,8 @@ def _save_scorecard_model(
         woe_maps=serializable_woe,
         created_at=datetime.now(UTC).isoformat(),
         scorecard_table=scorecard_table,
+        score_direction=score_direction_for_algorithm("scorecard"),
+        points_direction=points_direction_for_algorithm("scorecard"),
     )
     persist_model_meta(out_dir, artifact, config=config)
     return artifact

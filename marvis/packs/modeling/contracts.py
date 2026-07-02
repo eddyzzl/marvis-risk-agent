@@ -94,6 +94,15 @@ class ModelArtifact:
     created_at: str
     feature_importance: tuple[tuple[str, float], ...] = ()
     scorecard_table: tuple[dict[str, Any], ...] = ()
+    # S1a: direction metadata for the two score products an artifact can carry.
+    # score_direction describes raw_score()/score() (the PD/model-native output,
+    # always "higher_is_riskier" -- see _ModelArtifactScorer.raw_score). points_direction
+    # describes scorecard_points() (only non-None when algorithm == "scorecard",
+    # always "higher_is_better" -- score-card convention). Both are None for artifacts
+    # trained before this field existed (old DB rows have NULL columns); readers must
+    # treat None as "unknown, fall back to the caller's own default direction".
+    score_direction: str | None = None
+    points_direction: str | None = None
 
 
 @dataclass(frozen=True)

@@ -168,7 +168,7 @@ class ModelingRepository:
                 """
                 SELECT id, experiment_id, algorithm, model_path, pmml_path,
                        feature_list_json, feature_importance_json, params_json, woe_maps_json,
-                       scorecard_table_json, created_at
+                       scorecard_table_json, created_at, score_direction, points_direction
                   FROM model_artifacts
                  WHERE id = ?
                 """,
@@ -189,7 +189,7 @@ class ModelingRepository:
         query = """
             SELECT id, experiment_id, algorithm, model_path, pmml_path,
                    feature_list_json, feature_importance_json, params_json, woe_maps_json,
-                   scorecard_table_json, created_at
+                   scorecard_table_json, created_at, score_direction, points_direction
               FROM model_artifacts
         """
         if experiment_id is not None:
@@ -301,6 +301,8 @@ def _model_artifact_insert_values(artifact: ModelArtifact) -> tuple:
         None if artifact.woe_maps is None else _dump_json_any(artifact.woe_maps),
         _dump_json_any(list(artifact.scorecard_table)),
         artifact.created_at,
+        artifact.score_direction,
+        artifact.points_direction,
     )
 
 
@@ -310,9 +312,9 @@ def _insert_model_artifact_row(conn: sqlite3.Connection, artifact: ModelArtifact
         INSERT INTO model_artifacts(
             id, experiment_id, algorithm, model_path, pmml_path,
             feature_list_json, feature_importance_json, params_json, woe_maps_json,
-            scorecard_table_json, created_at
+            scorecard_table_json, created_at, score_direction, points_direction
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _model_artifact_insert_values(artifact),
     )
@@ -370,6 +372,10 @@ def _model_artifact_from_row(row: sqlite3.Row) -> ModelArtifact:
             for item in _load_json_array(row["scorecard_table_json"])
             if isinstance(item, dict)
         ),
+        # S1a: nullable, absent on rows written before the migration -- callers must
+        # treat None as "unknown" (see marvis/packs/modeling/contracts.py::ModelArtifact).
+        score_direction=_optional_str(row["score_direction"]) if "score_direction" in row.keys() else None,
+        points_direction=_optional_str(row["points_direction"]) if "points_direction" in row.keys() else None,
     )
 
 

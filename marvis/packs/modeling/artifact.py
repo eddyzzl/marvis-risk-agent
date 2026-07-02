@@ -29,6 +29,24 @@ _MODEL_SUFFIX = {
 }
 
 
+def score_direction_for_algorithm(algorithm: str) -> str:
+    """S1a: direction of ModelArtifact.score() / raw_score() -- a compile-time
+    constant of the implementation (predict_proba[:, 1] / tree raw margin is
+    higher-is-riskier for every algorithm this platform trains), not a
+    statistical inference. Single source of truth for save_model() and every
+    recipes/*.py artifact-construction site, so the two can never drift apart.
+    """
+    return "higher_is_riskier"
+
+
+def points_direction_for_algorithm(algorithm: str) -> str | None:
+    """S1a: direction of ModelArtifact.scorecard_points() -- only defined for the
+    scorecard algorithm (offset - factor*logits is higher-is-better by score-card
+    convention); every other algorithm has no points product, so None.
+    """
+    return "higher_is_better" if algorithm == "scorecard" else None
+
+
 def write_artifact_file(
     out_dir: Path,
     filename: str,
@@ -92,6 +110,8 @@ def save_model(
         woe_maps=woe_maps,
         created_at=datetime.now(UTC).isoformat(),
         scorecard_table=tuple(dict(item) for item in (scorecard_table or [])),
+        score_direction=score_direction_for_algorithm(algorithm),
+        points_direction=points_direction_for_algorithm(algorithm),
     )
     persist_model_meta(out_dir, artifact)
     return artifact
@@ -121,6 +141,8 @@ def persist_model_meta(
         "recipe_id": getattr(config, "recipe_id", None),
         "scorecard_table": _jsonable(artifact.scorecard_table),
         "created_at": artifact.created_at,
+        "score_direction": artifact.score_direction,
+        "points_direction": artifact.points_direction,
     }
     meta_path = out_dir / f"{artifact.id}.model_meta.json"
     payload = json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False, default=str)
@@ -421,7 +443,9 @@ __all__ = [
     "export_pmml",
     "load_model",
     "persist_model_meta",
+    "points_direction_for_algorithm",
     "save_model",
+    "score_direction_for_algorithm",
     "validate_scorecard_pmml_payload",
     "write_artifact_file",
 ]
