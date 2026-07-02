@@ -30,8 +30,8 @@
 |---|---|---|---|
 | ✅ | PR-1 | 未跟踪文件已收口（2026-07-02）：task-search.js 已随早前提交入库；glow 脚本/assets 已被用户从磁盘移除（VD-5 实施时需重新生成素材）；审查报告已入 `30877a4c`；master backlog + 策略计划 + 指针改动已入 `5f6bb17c`；`git status` 干净 | 追踪器 L499-502 |
 | ✅ | PR-2 | 已提交树 `5f6bb17c` 全量门禁通过（2026-07-02）：diff/ruff/node 全过，pytest **1988 passed, 4 skipped**（8m37s，py_313） | 追踪器 L497/1015 |
-| ⬜ | PR-3 | 人工 smoke 六项：建 JOIN 任务 / 特征分析 / 建模 G2–G5 / 导出 PMML+PKL / 交接验证 / 强制一次可重试失败并恢复 | 追踪器 Phase H |
-| ⬜ | PR-4 | PR 描述：已完成项、剩余风险（引用本清单）、全量测试结果 | 用户清单 |
+| ✅ | PR-3 | 六旅程 smoke 全 PASS（2026-07-02，真服务+合成数据+manual 模式）：JOIN 2000==2000、特征报告落盘、G2–G5 走通选定实验、PMML4.4+PKL 落盘、交接任务+5 材料、强制失败经 retry 端点真实恢复。两个产品发现：time_col 不触发时间切分（佐证 SEL-1）；retry inputs 整体替换语义（备注入 LT-4） | 追踪器 Phase H |
+| ✅ | PR-4 | PR 描述完稿：docs/releases/2026-07-02-intermediate-pr.md（含全量门禁 1988 passed 与六旅程 smoke 结果、剩余风险清单、v1 拍板记录） | 用户清单 |
 | ✅ | PR-5 | Open Decisions 4 项已拍板记录（见下方"PR-5 拍板记录"） | 追踪器 L1002-1007 |
 | ✅ | PR-6 | 决议：选"随 AGT-1 一并修"（阶段一第 1 项将同时收紧手动文本确认面）；PR 描述中列为已知限制待修 | 追踪器 L851 |
 
@@ -47,17 +47,17 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | AGT-1 | is_confirm 仍把疑问句与内嵌肯定词当确认，在 LLM 路由前短路直接放行副作用门（H4 未修净） | High/S | ✅ |
+| ✅ | AGT-1 | is_confirm 已加疑问句守卫 + 整串锚定（`bfd075b2`，4 个误判串回归覆盖；PR-6 的手动文本确认面同步收紧） | High/S | ✅ |
 | ⬜ | DOM-1 | 复发/未修净：tune_hyperparameters 仍在 NaN 标签上静默调参，NaN 确认门在调参路径完全缺失 | High/S | ✅ |
-| ⬜ | PERF-2 | H3 未修净：键唯一性与去重仍在原始键空间计算，JOIN 却在变换键上匹配——用户确认+选了去重后仍必然 execute 期 fan-out 硬失败（已复现） | High/M | ✅ |
-| ⬜ | NEW-1 | `marvis/validation/vintage.py:93` `cum_bad_rate=bad_rate` 假累计——6-21 定级 critical 至今未修，三轮审查漏网（策略计划 S3/B1/B5 硬前置） | High/S | ✅ |
-| ⬜ | ARCH-3 | 审计 `getattr(*_with_audit)` 鸭子类型软探测残留 15 处，其中 2 处 fallback 完全不写审计 | High/S | ⚠️ |
-| ⬜ | UX-3 | 跨任务消息串台：门控件回调 setAgentMessages 无『任务未切换』守卫 | High/S | ✅ |
-| ⬜ | UX-7 | C1 角色确认表单把第二个『样本主表』静默丢弃 | Med/S | — |
+| ✅ | PERF-2 | 唯一性/去重已改在变换键空间计算（`57d25038`，DuckDB+pandas 双路径，exact_lower/date/hash 三场景回归；复现脚本验证修复） | High/M | ✅ |
+| ✅ | NEW-1 | vintage 内核已真累计（`95863f0b`）：cohort 固定基数（max sample_count/balance_sum）+ 单调不减 + 超 1 clip 并出 data_quality_warnings；report_compute 快照口径已识别防双重累计；S3/B1/B5 前置解除 | High/S | ✅ |
+| ✅ | ARCH-3 | 全部软探测已收口（`2785fa0a`，11 文件 -184 行）：直调审计方法+删 fallback；仅剩 JoinEngine 构造器 3 处有意硬失败守卫；测试替身补齐 *_with_audit | High/S | ⚠️ |
+| ✅ | UX-3 | 四个门控件 context 工厂已捕获发起时 taskId，写回前校验未切换（`36097f54`，含行为级回归） | High/S | ✅ |
+| ✅ | UX-7 | C1 双主表前后端双重校验：前端即时拦截+后端 typed JoinSetupError 点名多余表（`12801be5`） | Med/S | — |
 | ⬜ | DOM-9 | 多配方冠军按 OOT KS 选择，与 tune "OOT 只报告不参与选择"方针自相矛盾（与 §3 TUNE-5/SEL-7 合并成一份"冠军选择标准" spec） | Med/S | — |
 | ⬜ | DOM-10 | 报告评分列静默回退：artifact 缺失时用第一个特征列冒充模型分生成正式报告 | Med/S | — |
-| ⬜ | REL-9 | execute_join_plan 同步分支无 job 守卫：TOCTOU 双执行窗口 | Low/S | — |
-| ⬜ | REL-8 | execution_environment.json 非原子写入且读取无容错 | Low/S | — |
+| ✅ | REL-9 | execute_join_plan 同步分支已加与 async 对称的 job 守卫（`4ed8e44e`，并发二次调用 409） | Low/S | — |
+| ✅ | REL-8 | execution_environment.json 已改原子写（write_json_atomic）+ 损坏自愈回退默认（`e71cf3c0`） | Low/S | — |
 
 ## 3. 阶段二：建模方法学极致专项（EXC）——高影响 8 条约 2–3 周；全部 37 条约 4–6 周
 
@@ -281,7 +281,7 @@
 | ⬜ | LT-1 | 建模 fixtures 扩面：现有算法族之外的 exporter 边缘用例 + 端到端 policy/report-language fixtures（追踪器判定 workflow complete 的门槛） | 追踪器 |
 | ⬜ | LT-2 | AUTO 安全 fixtures 持续补（未来新门与前端 stale-control 路径） | 追踪器 |
 | ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
-| ⬜ | LT-4 | 失败/重试 UX 的 per-tool schema 表单 adapters（JSON fallback 已有） | 追踪器+6-28 |
+| ⬜ | LT-4 | 失败/重试 UX 的 per-tool schema 表单 adapters（JSON fallback 已有）；smoke 发现：retry inputs 是整体替换非合并——表单实现前先在前端 JSON 编辑器旁明示该语义 | 追踪器+6-28 |
 | ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
 | ⬜ | LT-6 | TrainingDataset adapter 扩到剩余辅助读路径（按 profiling 证据） | 追踪器 |
 | ⬜ | LT-7 | 特征筛选/大摘要加 DuckDB query-backed helpers 替代全帧 pandas | 追踪器 |

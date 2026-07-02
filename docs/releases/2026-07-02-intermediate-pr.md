@@ -12,7 +12,7 @@ Key hardening landed since the 2026-06-28 reviews (verified fixed by the 2026-07
 
 - `scripts/check` (git diff --check, ruff, node --check on all static JS, full pytest) from the committed tree `5f6bb17c`: **PASS — 1988 passed, 4 skipped, 2 warnings (sklearn MLP ConvergenceWarning) in 8m37s** (2026-07-02).
 - Canonical environment: `py_313` (`/opt/miniconda3/envs/py_313/bin/python`).
-- Manual smoke (six journeys: JOIN task, feature analysis, modeling G2–G5, PMML+PKL export, validation handoff, forced retryable failure + recovery): **<PENDING — fill in result>**
+- Manual smoke (six journeys, live server + synthetic credit data, manual mode): **ALL PASS** (2026-07-02) — JOIN 2000==2000 rows (INV-3); feature report on disk; modeling gates G2–G5 through selected experiment (test_ks 0.31); `.pmml` (valid PMML 4.4) + `.pkl` on disk; validation handoff task + 5 material files; forced failure recovered via step retry endpoint. Two product findings recorded in the backlog: `time_col` alone does not trigger a time-based split (falls back to random 75/25 — confirms SEL-1), and step-retry `inputs` are full-replacement rather than merge semantics.
 
 ## Remaining risks and known limitations (tracked, not blocking this intermediate PR)
 
