@@ -86,14 +86,14 @@
 | ✅ | FS-1 | 两模板已插入"精选特征"漏斗步（`c00032fe`）：IV≥0.02 → 相关去冗余 0.95（高 IV 胜出）→ 可选 VIF；门内 adjust 可调阈值；screen 加 top_k=200 兜底；含 2 强+3 噪声+1 冗余端到端回归（迭代剪枝/null-importance 归 roadmap-1d 长线备注） | High/M | ✅ |
 | ✅ | FS-2 | select_features 默认排除 test+oot、自动识别 SPLIT_COLUMN、typed error 兜底（`bc537dba`）；legacy 模板筛选步已接 split_col | Med/S | — |
 | ✅ | FS-3 | （随 PREP-3 落地）excluded_categorical 上报 + woe_encode_categorical 防泄漏编码 | Med/M | — |
-| ⬜ | FS-4 | 泄漏检测只有'合并样本单变量强度'一条线：无按 split 突变检测、无时间维度审计 | Med/M | — |
-| ⬜ | FS-5 | 特征衍生工作流最终筛选步骤筛的是原始列——新衍生列从未进入筛选 | Med/S | — |
-| ⬜ | FS-6 | 无按 split 的特征区分力衰减筛选（train vs test/OOT KS 衰减；与 DOM-7 PSI 缺口互补） | Med/S | — |
-| ⬜ | FS-7 | 筛选排名 KS 忽略缺失行，'缺失即信息'特征被系统性低估 | Low/S | — |
-| ⬜ | FS-8 | VIF 在高缺失数据上静默失效（listwise dropna 清空后全返 0） | Low/S | — |
-| ⬜ | FS-9 | IV 分箱口径跨工具不一致（等频10箱 vs 卡方6箱）且无敏感性检查 | Low/S | — |
-| ⬜ | FS-10 | 非二分类目标的筛选无排序力指标：top_k 按列顺序截断 | Low/S | — |
-| ⬜ | FS-11 | 派生算子缺趋势/变换类；aggregate_feature 允许 value_col=目标列（泄漏通道） | Low/S | — |
+| ✅ | FS-4 | split_shift（|Δks|>0.15）+ leakage_watch 软区间双线落地（`b93ea353`），进门文案 | Med/M | — |
+| ✅ | FS-5 | 衍生模板筛选步改指衍生数据集+新列并集（`d927fa4c`，validator 支持容器内 $ref） | Med/S | — |
+| ✅ | FS-6 | ks_train/ks_test/ks_decay 进 scores + 可选 max_ks_decay 观察阈值（`502a22d9`） | Med/S | — |
+| ✅ | FS-7 | coverage 列+缺失即信息候选 note（`21647039`），排序不变 | Low/S | — |
+| ✅ | FS-8 | 样本不足返回 None+聚合告警，VIF 门显式跳过（`c4b9a6b5`） | Low/S | — |
+| ✅ | FS-9 | iv_binning 口径字段全路径记录+DEFAULT_IV_BINS 统一（`1bc6c9bf`） | Low/S | — |
+| ✅ | FS-10 | continuous→|Spearman|、multiclass→OvR macro-AUC 排名（`cfeb328b`） | Low/S | — |
+| ✅ | FS-11 | log1p/rank 变换算子（`a35c05f3`）；目标列泄漏通道已随 PREP-10 关闭；真时序 diff 因平台无 panel 概念明确出界 | Low/S | — |
 
 #### 调参与训练方法学
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
@@ -167,8 +167,8 @@
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | MEM-1 | 记忆与 V2 三阶段 driver 双向断链：实验不写入、gate 不读取、compare_model_experience 零调用（AGT-2 同一件事，合并） | Critical/M | ✅ |
-| ⬜ | AGT-3 | final_review 只见键名级摘要却有权 FAIL 全成功计划/触发盲目重规划 | High/M | ✅ |
-| ⬜ | AGT-4 | 内置建模模板 success_criteria=() 且无任务级注入口——闭环空转 | High/M | ✅ |
+| ✅ | AGT-3 | metric-aware 摘要（深度2/20键/600字符）+goal 带 slots 摘要+LLM 意见降权为 goal_doubt→REVIEW（`5ada60a2`） | High/M | ✅ |
+| ✅ | AGT-4 | build_plan 支持 success_criteria+任务级 oot_ks_min 可选控件（不写死数值）→未达标走既有 replan 环（`a0f5c19c`） | High/M | ✅ |
 | ⬜ | MEM-2 | 蒸馏 LLM 摘要因 llm_factory 未接线永久休眠 | High/S | ✅ |
 | ⬜ | MEM-3 | 记忆捕获无幂等去重：重跑灌水 support/confidence 并主导检索排序 | High/S | ✅ |
 | ⬜ | MEM-4 | field_convention 口径记忆没喂给 V2 槽位探测：目标列/切分列每次从零猜 | High/M | ✅ |
@@ -181,7 +181,7 @@
 | ⬜ | MEM-7 | 记忆质量无负反馈闭环 | Med/M | — |
 | ⬜ | MEM-8 | 低置信噪声直进 prompt：raw 侧无过滤与蒸馏侧不对称 | Med/S | — |
 | ⬜ | AGT-5 | route_instruction 上下文只有 gate 标题：抽参数盲猜 | Med/S | — |
-| ⬜ | AGT-6 | 每步同步阻塞近零信号 llm_critique；manual 模式满屏警告噪声 | Med/M | — |
+| ✅ | AGT-6 | 无 LLM→status=skipped 不渲染警告；触发面收窄到 decision/confirm/带指标步骤（`b53254cd`） | Med/M | — |
 | ⬜ | AGT-7 | AUTO 8 门预算对 ≥9 门流程必然静默耗尽；confidence 从未使用 | Med/S | — |
 | ⬜ | AGT-8 | AUTO replan_goal 当用户文本回灌：双跳 LLM 且可能被 is_confirm 抢跑 | Med/S | — |
 | ⬜ | AGT-9 | 门决策红旗 checklist 不覆盖建模门（调参/选实验） | Med/S | — |
