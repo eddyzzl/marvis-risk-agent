@@ -212,3 +212,157 @@ def test_structured_output_defaults_and_validation(tmp_path):
     private = resolve_llm_model(tmp_path, "model-b")
     assert private["structured_output"] == "json_schema"
     assert private["thinking_style"] == "qwen_chat_template"
+
+
+# --- LLM-4: per-caller-role model routing -----------------------------------
+def test_role_overrides_route_to_mapped_model(tmp_path):
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "role_overrides": {"planner": "model-b", "gate": "unknown-model"},
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "default-model",
+                    "api_key": "secret-a",
+                },
+                {
+                    "model_id": "model-b",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "small-model",
+                    "api_key": "secret-b",
+                },
+            ],
+        },
+    )
+
+    # Known role with a valid mapping routes to the mapped model.
+    planner_profile = resolve_llm_model(tmp_path, role="planner")
+    assert planner_profile["model_id"] == "model-b"
+    assert planner_profile["model_name"] == "small-model"
+
+    # role_overrides entry pointing at an unknown model_id is dropped at save
+    # time, so an unmapped role falls back to default_model_id exactly like an
+    # absent role_overrides entry (today's behavior is preserved).
+    gate_profile = resolve_llm_model(tmp_path, role="gate")
+    assert gate_profile["model_id"] == "model-a"
+
+    # No role given (or role unmapped) falls back to default_model_id.
+    default_profile = resolve_llm_model(tmp_path)
+    assert default_profile["model_id"] == "model-a"
+    unmapped_role_profile = resolve_llm_model(tmp_path, role="critic")
+    assert unmapped_role_profile["model_id"] == "model-a"
+
+
+def test_explicit_model_id_wins_over_role_override(tmp_path):
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "role_overrides": {"planner": "model-b"},
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "default-model",
+                    "api_key": "secret-a",
+                },
+                {
+                    "model_id": "model-b",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "small-model",
+                    "api_key": "secret-b",
+                },
+            ],
+        },
+    )
+
+    profile = resolve_llm_model(tmp_path, "model-a", role="planner")
+    assert profile["model_id"] == "model-a"
+
+
+def test_role_overrides_reject_unknown_role_names(tmp_path):
+    saved = save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "role_overrides": {"planner": "model-a", "not_a_real_role": "model-a"},
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "default-model",
+                    "api_key": "secret-a",
+                },
+            ],
+        },
+    )
+
+    assert saved["role_overrides"] == {"planner": "model-a"}
+
+
+def test_role_overrides_round_trip_through_load(tmp_path):
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "role_overrides": {"critic": "model-a"},
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "default-model",
+                    "api_key": "secret-a",
+                },
+            ],
+        },
+    )
+
+    loaded = load_llm_settings(tmp_path)
+    assert loaded["role_overrides"] == {"critic": "model-a"}
+
+
+# --- LLM-5: context_window / max_output_tokens profile fields ---------------
+def test_context_window_and_max_output_tokens_defaults_and_bounds(tmp_path):
+    saved = save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                },
+                {
+                    "model_id": "model-b",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                    "context_window": 8192,
+                    "max_output_tokens": 512,
+                },
+            ],
+        },
+    )
+
+    by_id = {model["model_id"]: model for model in saved["models"]}
+    assert by_id["model-a"]["context_window"] == 32768
+    assert by_id["model-a"]["max_output_tokens"] == 2048
+    assert by_id["model-b"]["context_window"] == 8192
+    assert by_id["model-b"]["max_output_tokens"] == 512
+
+    resolved = resolve_llm_model(tmp_path, "model-b")
+    assert resolved["context_window"] == 8192
+    assert resolved["max_output_tokens"] == 512

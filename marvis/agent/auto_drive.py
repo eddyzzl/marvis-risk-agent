@@ -19,6 +19,9 @@ from typing import Any
 
 from marvis.agent.gates import DEFAULT_GATE_ACTIONS, extract_gate_envelope
 from marvis.agent.json_reply import load_json_object
+from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
+from marvis.llm_prompts import GATE_SYSTEM_TEMPLATE as _GATE_SYSTEM_TEMPLATE_SPEC
+from marvis.orchestrator.context.budget import truncate_text_to_token_budget
 
 AUTO_SAFE_ADJUST_CONTROLS = frozenset({
     "dedup_strategies",
@@ -65,18 +68,9 @@ AUTO_HIGH_RISK_RESET_SCOPES = frozenset({
 })
 AUTO_MAX_AUTO_RESET_STEPS = 2
 
-_SYSTEM_TEMPLATE = (
-    "你是信贷风控建模 Agent,正在自动执行一个分步计划。每到一个需要确认的节点,"
-    "你会看到刚刚算出的结果(可能含表格)。请只在当前节点声明允许的动作内决策。\n"
-    "允许动作:{allowed_actions}\n"
-    "- confirm: 结果正常,继续下一步;\n"
-    "- adjust: 仅在当前节点允许且低风险控件可安全调整时使用,必须返回 params/selection/dedup_strategies;\n"
-    "- replan: 当前计划结构需要改变时使用,必须返回 replan_goal;\n"
-    "- clarify: 需要用户补充一个明确问题时使用,必须返回 clarifying_question;\n"
-    "- halt: 结果异常或动作超出权限,停下来请人工核对。\n"
-    "严格只返回 JSON 对象。字段: action, reason, params, selection, dedup_strategies,"
-    " replan_goal, clarifying_question, confidence。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of _SYSTEM_TEMPLATE from here keep working unchanged.
+_SYSTEM_TEMPLATE = _GATE_SYSTEM_TEMPLATE_SPEC.text
 
 
 def decide_gate(client, *, gate: dict) -> dict:
@@ -90,14 +84,23 @@ def decide_gate(client, *, gate: dict) -> dict:
     envelope = extract_gate_envelope(gate)
     allowed_actions = envelope.allowed_actions
     schema = _gate_decision_schema(allowed_actions)
+    system_prompt = _system_prompt(allowed_actions)
+    # LLM-5: this is one of the three named highest-volume touch points (gate
+    # content can carry many wide tables) — truncate proactively instead of
+    # relying solely on complete()'s pre-flight rejection, so a busy gate still
+    # gets a decision instead of an outright context-window error.
+    prompt, truncated = _truncate_gate_prompt(prompt, client, system_prompt)
     raw = client.complete(
-        system_prompt=_system_prompt(allowed_actions),
+        system_prompt=system_prompt,
         user_prompt=prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
         caller="gate",
+        prompt_name=_GATE_SYSTEM_TEMPLATE_SPEC.name,
+        prompt_version=_GATE_SYSTEM_TEMPLATE_SPEC.version,
+        truncated=truncated,
     )
     decision, ok = _parse_decision(raw, allowed_actions=allowed_actions)
     decision = _apply_safety_policy(decision, envelope)
@@ -109,15 +112,35 @@ def decide_gate(client, *, gate: dict) -> dict:
         f"请严格只返回 JSON 对象,action 必须是以下之一:{', '.join(allowed_actions)}。"
     )
     raw = client.complete(
-        system_prompt=_system_prompt(allowed_actions),
+        system_prompt=system_prompt,
         user_prompt=retry_prompt,
         temperature=0.0,
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
         caller="gate",
+        prompt_name=_GATE_SYSTEM_TEMPLATE_SPEC.name,
+        prompt_version=_GATE_SYSTEM_TEMPLATE_SPEC.version,
+        truncated=truncated,
     )
     return _apply_safety_policy(parse_decision(raw, allowed_actions=allowed_actions), envelope)
+
+
+# LLM-5: reserve roughly a quarter of the model's context window for the gate
+# content — the rest covers the system prompt, JSON schema, retry round-trip and
+# completion budget. This is deliberately conservative (a fixed fraction, not a
+# tight computation) since the exact system-prompt/schema overhead varies by
+# gate type.
+_GATE_PROMPT_BUDGET_FRACTION = 0.25
+
+
+def _truncate_gate_prompt(prompt: str, client, system_prompt: str) -> tuple[str, bool]:
+    profile = getattr(client, "profile", None) or {}
+    context_window = int(profile.get("context_window") or DEFAULT_CONTEXT_WINDOW)
+    budget = max(int(context_window * _GATE_PROMPT_BUDGET_FRACTION), 256)
+    if estimate_tokens(prompt) <= budget:
+        return prompt, False
+    return truncate_text_to_token_budget(prompt, max_tokens=budget)
 
 
 def _system_prompt(allowed_actions: tuple[str, ...]) -> str:

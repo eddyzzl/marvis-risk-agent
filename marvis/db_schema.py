@@ -16,6 +16,7 @@ _MIGRATION_TABLES = frozenset({
     "plan_step_output_versions",
     "plan_step_runs",
     "model_artifacts",
+    "llm_calls",
 })
 
 
@@ -296,9 +297,33 @@ def init_db(db_path: Path) -> None:
                 error_kind TEXT,
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 streamed INTEGER NOT NULL DEFAULT 0,
+                prompt_name TEXT,
+                prompt_version INTEGER,
+                truncated INTEGER NOT NULL DEFAULT 0,
                 at TEXT NOT NULL
             )
             """
+        )
+        # LLM-10: prompt_name/prompt_version trace which marvis.llm_prompts
+        # PromptSpec was live for a call. LLM-5: truncated flags a call whose
+        # prompt was cut down to fit the model's context_window budget.
+        _ensure_column(
+            conn,
+            table="llm_calls",
+            column="prompt_name",
+            definition="TEXT",
+        )
+        _ensure_column(
+            conn,
+            table="llm_calls",
+            column="prompt_version",
+            definition="INTEGER",
+        )
+        _ensure_column(
+            conn,
+            table="llm_calls",
+            column="truncated",
+            definition="INTEGER NOT NULL DEFAULT 0",
         )
         conn.execute(
             """

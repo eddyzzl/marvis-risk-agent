@@ -9,6 +9,7 @@ import pandas as pd
 
 from marvis.feature.errors import FeatureError
 from marvis.feature.metrics import feature_metrics
+from marvis.llm_prompts import CROSS_SYS as _CROSS_SYS_SPEC
 
 
 ALLOWED_CROSS_OPS = {"add", "sub", "mul", "div", "ratio"}
@@ -20,11 +21,9 @@ ALLOWED_DATE_KINDS = {"datediff", "month", "tenure_months"}
 # exists anywhere in marvis.data or marvis.feature) — scoped out until that exists.
 ALLOWED_TRANSFORMS = {"log1p", "rank"}
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
-CROSS_SYS = (
-    "你基于特征的业务含义推荐值得交叉的特征对和运算，给出理由。"
-    "你不计算任何 IV/KS/指标，那些由平台算。"
-    "只输出特征对、运算和理由的 JSON。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of CROSS_SYS from here keep working unchanged.
+CROSS_SYS = _CROSS_SYS_SPEC.text
 
 
 @dataclass(frozen=True)

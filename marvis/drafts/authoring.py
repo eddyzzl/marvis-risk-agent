@@ -10,6 +10,7 @@ from jsonschema import Draft202012Validator
 from marvis.agent.json_reply import load_json_object
 from marvis.drafts.contracts import DraftTool, LearningNote
 from marvis.drafts.errors import AuthoringError
+from marvis.llm_prompts import AUTHOR_SYS as _AUTHOR_SYS_SPEC
 
 
 TOOL_TEMPLATE = '''
@@ -18,10 +19,9 @@ def {entrypoint}(inputs: dict, ctx) -> dict:
     {body}
     return {return_expr}
 '''
-AUTHOR_SYS = (
-    "你在为 MARVIS 写一个数据/特征/分析工具。只用 pandas/numpy/标准库做纯计算；"
-    "不读写任意文件、不联网、不执行系统命令。必须声明 input_schema/output_schema/determinism。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of AUTHOR_SYS from here keep working unchanged.
+AUTHOR_SYS = _AUTHOR_SYS_SPEC.text
 REQUIRED_DRAFT_KEYS = (
     "name",
     "summary",

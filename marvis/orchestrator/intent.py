@@ -4,14 +4,14 @@ from dataclasses import dataclass
 import json
 import re
 
+from marvis.llm_prompts import CLASSIFY_SYS as _CLASSIFY_SYS_SPEC
 from marvis.orchestrator.templates import WorkflowTemplate, get_template, list_templates
 
 
 STRONG_MATCH_THRESHOLD = 0.75
-CLASSIFY_SYS = (
-    "You are MARVIS intent router. Choose exactly one candidate workflow id "
-    "or novel. Do not invent workflow steps."
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of CLASSIFY_SYS from here keep working unchanged.
+CLASSIFY_SYS = _CLASSIFY_SYS_SPEC.text
 
 
 @dataclass(frozen=True)

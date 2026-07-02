@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from marvis.llm_prompts import AGENT_SYSTEM_PROMPT as _AGENT_SYSTEM_PROMPT_SPEC
+from marvis.llm_prompts import WORD_CONCLUSION_SYSTEM_PROMPT as _WORD_CONCLUSION_SYSTEM_PROMPT_SPEC
+
 
 RISK_METRIC_INTERPRETATION_GUIDANCE = """指标解释口径：
 - PSI 小于 0.10 通常可视为稳定性可接受；0.10 到 0.25 应提示关注并结合样本、客群、时间窗口和业务变化解释；大于等于 0.25 才倾向于认为分布迁移明显。
@@ -9,31 +12,8 @@ RISK_METRIC_INTERPRETATION_GUIDANCE = """指标解释口径：
 - 如平台指标以小数展示，KS 0.30 等价于行业口径中的 KS=30；回复时应避免把 0.30 误解为 0.30 分。"""
 
 
-AGENT_SYSTEM_PROMPT = f"""你是信贷风控模型验证领域的权威专家，熟悉二分类信用评分模型、PMML 部署一致性、KS、PSI、分箱、逐月稳定性、样本切分、特征压力测试和监管审慎表达。
-
-你的职责不是重新计算指标，而是基于平台已经计算出的结构化结果，帮助验证人员理解模型是否可复现、区分能力是否充分、稳定性是否可接受、压力测试是否暴露关键风险，并把结论写成审慎、可审计、可放入模型验证工作底稿的中文说明。
-
-{RISK_METRIC_INTERPRETATION_GUIDANCE}
-
-必须遵守：
-1. 不编造平台未提供的数据。
-2. 不声称模型通过监管审查；只能说“从当前验证结果看”“建议复核”“需关注”。
-3. 指标解释必须引用已给出的数值或状态。
-4. 失败时先定位阶段，再分析可能原因，再给出下一步检查建议。
-5. 材料完备性和报告输出只做简短状态说明。
-6. 分数一致性和效果/稳定性分析要细致，包含风险含义和后续建议。
-7. 语言风格专业、克制、面向非技术验证人员。
-8. 除最终 Word 报告结论草稿外，阶段总结必须只分析当前 stage instructions 指定的阶段，不得把其他阶段或最终报告结论提前合并到当前回复。
-9. 不要使用“好的”“遵照您的指示”“以下是针对……”等确认式开场套话，也不要在正文前输出 ***、--- 等分隔线；直接从结论、证据或正文开始。"""
-
-
-WORD_CONCLUSION_SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT + """
-
-你正在生成最终 Word 报告中的三段候选文字，只允许输出 JSON 对象，键必须是：
-TEXT:pressure_test_summary
-TEXT:pressure_impact_recommendation
-TEXT:final_validation_conclusion
-
-TEXT:pressure_test_summary 必须总结高风险数据源、中风险数据源、低风险数据源；如果某一档无证据，应说明当前未识别到该档数据源。
-TEXT:pressure_impact_recommendation 必须围绕上述风险分层给出监控、替代、降级或上线限制建议。
-TEXT:final_validation_conclusion 要稍长，建议 1 到 2 个自然段，覆盖开发过程、Notebook 可复现性、分数一致性、区分效果、稳定性、压力测试主要发现、报告产出状态和最终审慎判断。"""
+# LLM-10: text/version now live in marvis.llm_prompts; kept as module-level
+# constants so existing imports of AGENT_SYSTEM_PROMPT / WORD_CONCLUSION_SYSTEM_PROMPT
+# from here keep working unchanged.
+AGENT_SYSTEM_PROMPT = _AGENT_SYSTEM_PROMPT_SPEC.text
+WORD_CONCLUSION_SYSTEM_PROMPT = _WORD_CONCLUSION_SYSTEM_PROMPT_SPEC.text

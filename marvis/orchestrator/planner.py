@@ -4,31 +4,25 @@ import json
 from typing import Any
 import uuid
 
+from marvis.llm_client import DEFAULT_CONTEXT_WINDOW, estimate_tokens
+from marvis.llm_prompts import EXPLORE_SYS as _EXPLORE_SYS_SPEC
+from marvis.llm_prompts import PLAN_SYS as _PLAN_SYS_SPEC
+from marvis.llm_prompts import REPLAN_SYS as _REPLAN_SYS_SPEC
 from marvis.orchestrator.capability import CapabilityTier, resolve_tier
-from marvis.orchestrator.context.budget import fit_to_budget
+from marvis.orchestrator.context.budget import fit_to_budget, truncate_items_to_token_budget
 from marvis.orchestrator.context.ledger import build_progress_ledger
 from marvis.orchestrator.contracts import Plan, PlanStep, PostCheck, StepStatus
 from marvis.orchestrator.templates import WorkflowTemplate
 from marvis.plugins.manifest import ToolRef
 
 
-PLAN_SYS = (
-    "你是 MARVIS 的规划器。只能从给定工具目录选工具、把它们连成 DAG。"
-    "铁律：你不计算任何指标；指标由工具产出。"
-    "你只决定调用哪些工具、参数怎么接、依赖顺序。输出严格 JSON。"
-)
-
+# LLM-10: prompt text/versions now live in marvis.llm_prompts; these module-level
+# constants are kept so existing call sites and tests that import PLAN_SYS /
+# REPLAN_SYS / EXPLORE_SYS from here keep working unchanged.
+PLAN_SYS = _PLAN_SYS_SPEC.text
 _OMIT = object()
-REPLAN_SYS = (
-    "你在修订一个 MARVIS 执行计划的剩余步骤。已完成步骤和结果在进度里，"
-    "不要重做。只能从工具目录选工具。不要计算任何指标。不要偏离原始目标。"
-    "输出严格 JSON，格式为 {\"steps\": [...]}。"
-)
-EXPLORE_SYS = (
-    "你在 MARVIS explore 模式下规划下一小段步骤。基于进度判断目标是否已完成。"
-    "若已完成，输出 {\"done\": true, \"steps\": []}；否则只输出下一小段 steps。"
-    "只能从工具目录选工具，不计算指标，输出严格 JSON。"
-)
+REPLAN_SYS = _REPLAN_SYS_SPEC.text
+EXPLORE_SYS = _EXPLORE_SYS_SPEC.text
 MAX_REPLAN_PARSE_RETRY = 1
 MAX_CATALOG_FIELDS = 12
 
@@ -171,7 +165,8 @@ class Planner:
             if effective_mode == "explore"
             else tier.max_plan_depth
         )
-        catalog = self._tools.catalog_for_planner()
+        client = self._llm_factory()
+        catalog, catalog_truncated = _truncate_catalog(self._tools.catalog_for_planner(), client)
         last_error = None
         for _attempt in range(max_retries + 1):
             prompt = build_plan_prompt(
@@ -183,13 +178,16 @@ class Planner:
                 novel_mode=effective_mode,
                 max_steps=max_steps,
             )
-            raw = self._llm_factory().complete(
+            raw = client.complete(
                 system_prompt=PLAN_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
                 caller="planner",
+                prompt_name=_PLAN_SYS_SPEC.name,
+                prompt_version=_PLAN_SYS_SPEC.version,
+                truncated=catalog_truncated,
             )
             try:
                 plan = self._parse_plan_json(
@@ -222,7 +220,8 @@ class Planner:
         if plan.replan_count >= tier.max_replan_iterations:
             raise ReplanError(f"replan budget exhausted ({tier.max_replan_iterations})")
 
-        catalog = self._tools.catalog_for_planner()
+        client = self._llm_factory()
+        catalog, catalog_truncated = _truncate_catalog(self._tools.catalog_for_planner(), client)
         ledger = build_progress_ledger(plan, completed_summaries)
         context_items = fit_to_budget(
             [
@@ -242,13 +241,16 @@ class Planner:
                 last_error=last_error,
                 instruction=instruction,
             )
-            raw = self._llm_factory().complete(
+            raw = client.complete(
                 system_prompt=REPLAN_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
                 caller="planner",
+                prompt_name=_REPLAN_SYS_SPEC.name,
+                prompt_version=_REPLAN_SYS_SPEC.version,
+                truncated=catalog_truncated,
             )
             try:
                 revised_remaining = _parse_steps_json(
@@ -277,7 +279,8 @@ class Planner:
         if plan.replan_count >= tier.max_replan_iterations:
             return [], True
 
-        catalog = self._tools.catalog_for_planner()
+        client = self._llm_factory()
+        catalog, catalog_truncated = _truncate_catalog(self._tools.catalog_for_planner(), client)
         ledger = build_progress_ledger(plan, completed_summaries)
         last_error = None
         for _attempt in range(MAX_REPLAN_PARSE_RETRY + 1):
@@ -288,13 +291,16 @@ class Planner:
                 max_steps=tier.explore_segment_size,
                 last_error=last_error,
             )
-            raw = self._llm_factory().complete(
+            raw = client.complete(
                 system_prompt=EXPLORE_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
                 caller="planner",
+                prompt_name=_EXPLORE_SYS_SPEC.name,
+                prompt_version=_EXPLORE_SYS_SPEC.version,
+                truncated=catalog_truncated,
             )
             try:
                 data = _parse_json_object(str(raw), label="explore JSON")
@@ -468,6 +474,30 @@ def compact_catalog_for_prompt(catalog: list[dict]) -> list[dict]:
         }
         for item in catalog
     ]
+
+
+# LLM-5: the planner's tool catalog is one of the three named highest-volume
+# touch points — as the plugin ecosystem grows it balloons linearly with every
+# installed pack. Reserve roughly half the model's context window for the
+# catalog (the rest covers the system prompt, planning examples, memory/task
+# context and completion budget); tools are dropped from the tail (a stable,
+# but otherwise arbitrary, cut — the registry does not currently rank tools by
+# relevance) once the budget is exceeded.
+_CATALOG_PROMPT_BUDGET_FRACTION = 0.5
+
+
+def _truncate_catalog(catalog: list[dict], client) -> tuple[list[dict], bool]:
+    profile = getattr(client, "profile", None) or {}
+    context_window = int(profile.get("context_window") or DEFAULT_CONTEXT_WINDOW)
+    budget = max(int(context_window * _CATALOG_PROMPT_BUDGET_FRACTION), 256)
+    if estimate_tokens(json.dumps(catalog, ensure_ascii=False, sort_keys=True)) <= budget:
+        return catalog, False
+    kept, truncated = truncate_items_to_token_budget(
+        catalog,
+        max_tokens=budget,
+        render=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
+    )
+    return kept, truncated
 
 
 def _schema_required(schema) -> list[str]:

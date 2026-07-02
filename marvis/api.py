@@ -594,8 +594,14 @@ def _resolve_driver_agent_client(request, task: TaskRecord, payload):
     silently runs the manual flow). Manual mode operates the gates by hand → None."""
     if task.run_mode != "agent":
         return None
+    # LLM-4: this client drives agent_autodrive_turn -> decide_gate exclusively
+    # (see marvis.agent.turn_handlers), so role="gate" — an explicit per-request
+    # model_id (from the UI) still wins over any role_overrides mapping.
     profile = _resolve_agent_model(
-        request, getattr(payload, "model_id", None), getattr(payload, "effort", None)
+        request,
+        getattr(payload, "model_id", None),
+        getattr(payload, "effort", None),
+        role="gate",
     )
     return OpenAICompatibleLLMClient(profile)
 
@@ -607,7 +613,10 @@ def _driver_llm_client(request, task: TaskRecord):
     if task.run_mode != "agent":
         return None
     try:
-        return OpenAICompatibleLLMClient(resolve_llm_model(request.app.state.settings.workspace, None))
+        # LLM-4: route_instruction (caller="router") drives this client exclusively.
+        return OpenAICompatibleLLMClient(
+            resolve_llm_model(request.app.state.settings.workspace, None, role="router")
+        )
     except LLMSettingsError:
         return None
 
@@ -872,10 +881,14 @@ def _agent_auto_accept(mode: str | None) -> bool:
 
 
 def _resolve_agent_model(
-    request: Request, model_id: str | None, effort: str | None = None
+    request: Request,
+    model_id: str | None,
+    effort: str | None = None,
+    *,
+    role: str | None = None,
 ) -> dict:
     try:
-        profile = resolve_llm_model(request.app.state.settings.workspace, model_id)
+        profile = resolve_llm_model(request.app.state.settings.workspace, model_id, role=role)
     except LLMSettingsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     # An explicit per-request effort wins; otherwise fall back to the value
