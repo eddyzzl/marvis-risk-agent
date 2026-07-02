@@ -153,6 +153,43 @@ def test_dataset_upload_list_and_preview_api(tmp_path):
     assert invalid_preview.status_code == 422
 
 
+def test_dataset_upload_reuses_dataset_by_content_hash_across_tasks(tmp_path):
+    client, settings = _client(tmp_path)
+    task_a = _create_task(settings)
+    task_b = _create_task(settings)
+    csv_bytes = b"mobile,bad_flag\n13800138000,0\n13900139000,1\n"
+
+    upload_a = client.post(
+        f"/api/tasks/{task_a.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", csv_bytes, "text/csv")},
+    )
+    upload_b = client.post(
+        f"/api/tasks/{task_b.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("sample.csv", csv_bytes, "text/csv")},
+    )
+
+    assert upload_a.status_code == 201
+    assert upload_b.status_code == 201
+    dataset_a = upload_a.json()["datasets"][0]
+    dataset_b = upload_b.json()["datasets"][0]
+
+    assert dataset_a["content_hash"] is not None
+    assert dataset_a["content_hash"] == dataset_b["content_hash"]
+    assert dataset_a["source_path"] == dataset_b["source_path"]
+    assert dataset_b["task_id"] == task_b.id
+    # no second parquet file was written for task_b's own directory
+    assert not list((settings.datasets_dir / task_b.id).glob("*.parquet"))
+
+    from marvis.repositories.audit import _list_audit_rows
+
+    audit_rows = _list_audit_rows(settings.db_path, kind="dataset.dedup_reference")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["target_ref"] == dataset_b["id"]
+    assert audit_rows[0]["detail"]["reused_dataset_id"] == dataset_a["id"]
+
+
 def test_dataset_preview_returns_column_profiles_and_masked_samples(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)

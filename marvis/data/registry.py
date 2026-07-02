@@ -16,6 +16,7 @@ from marvis.data.errors import DataBackendError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.profiler import profile_dataset
 from marvis.data.schema_infer import detect_target_column
+from marvis.files import sha256_file
 
 
 class DatasetRegistry:
@@ -41,6 +42,31 @@ class DatasetRegistry:
         artifact = uow.stage_file(dataset_dir, final_name)
         try:
             sheet = self._write_upload_as_parquet(source_path, artifact.path)
+            content_hash = sha256_file(artifact.path)
+            find_by_hash = getattr(self._repo, "find_dataset_by_content_hash", None)
+            existing = find_by_hash(content_hash) if callable(find_by_hash) else None
+            if existing is not None:
+                # GAP-7: identical file content already registered (possibly by a
+                # different task) -- reuse its parquet + profiling instead of
+                # writing a duplicate file and re-profiling. The staged upload
+                # parquet is never promoted; only a new dataset row is created,
+                # pointing at the existing dataset's source_path.
+                uow.rollback()
+                dataset = Dataset(
+                    id=_new_dataset_id(),
+                    task_id=task_id,
+                    role=role,
+                    source_path=existing.source_path,
+                    format=existing.format,
+                    sheet=existing.sheet,
+                    row_count=existing.row_count,
+                    columns=existing.columns,
+                    has_target=existing.has_target,
+                    target_col=existing.target_col,
+                    created_at=_now_iso(),
+                    content_hash=content_hash,
+                )
+                return self._create_dedup_reference(dataset, existing)
             profiles = profile_dataset(self._backend, artifact.path, seed=seed)
             sample = self._backend.sample_rows(artifact.path, 1000, seed=seed)
             target = detect_target_column(profiles, sample)
@@ -56,6 +82,7 @@ class DatasetRegistry:
                 has_target=target is not None,
                 target_col=target,
                 created_at=_now_iso(),
+                content_hash=content_hash,
             )
             create_on_connection = getattr(self._repo, "create_dataset_on_connection", None)
             transaction = getattr(self._repo, "transaction", None)
@@ -68,6 +95,26 @@ class DatasetRegistry:
         except Exception:
             uow.rollback()
             raise
+
+    def _create_dedup_reference(self, dataset: Dataset, existing: Dataset) -> Dataset:
+        audit = {
+            "kind": "dataset.dedup_reference",
+            "target_ref": dataset.id,
+            "outcome": "succeeded",
+            "detail": {
+                "task_id": dataset.task_id,
+                "content_hash": dataset.content_hash,
+                "reused_dataset_id": existing.id,
+                "reused_task_id": existing.task_id,
+                "source_path": dataset.source_path,
+            },
+        }
+        create_with_audit = getattr(self._repo, "create_dataset_with_audit", None)
+        if callable(create_with_audit):
+            create_with_audit(dataset, audit=audit)
+            return dataset
+        self._repo.create_dataset(dataset)
+        return dataset
 
     def register_existing(
         self,

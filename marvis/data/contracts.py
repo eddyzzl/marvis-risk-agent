@@ -64,6 +64,11 @@ class Dataset:
     has_target: bool
     target_col: str | None
     created_at: str
+    # GAP-7: sha256 of the registered parquet's file bytes, used to detect when a
+    # new upload is byte-identical to an already-registered dataset (possibly
+    # owned by a different task) so the parquet + profiling work can be reused
+    # instead of duplicated. None for datasets written before this field existed.
+    content_hash: str | None = None
 
 
 @dataclass(frozen=True)

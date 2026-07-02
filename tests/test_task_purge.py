@@ -90,46 +90,28 @@ def test_delete_task_removes_dataset_files_and_writes_delete_audit(tmp_path):
 
 
 def test_delete_task_keeps_dataset_file_still_referenced_by_another_task(tmp_path):
+    # GAP-2 x GAP-7: uses the real content-fingerprint dedup upload path (see
+    # GET /api/tasks/{id}/purge-preview and register_from_upload) so both tasks'
+    # dataset rows point at the same physical parquet file.
     client, settings = _client(tmp_path)
     owner_task = _create_task(client)
-    dataset = _upload_dataset(
-        client, owner_task["id"], pd.DataFrame({"acct_id": ["A1", "B2"]})
-    )
+    frame = pd.DataFrame({"acct_id": ["A1", "B2"]})
+    dataset = _upload_dataset(client, owner_task["id"], frame)
     dataset_path = settings.datasets_dir / dataset["source_path"]
+    assert dataset_path.exists()
 
     other_task = _create_task(client)
-    from marvis.data.contracts import ColumnFingerprint, ColumnProfile, Dataset
-    from marvis.db import DatasetRepository
-
-    shared_dataset = Dataset(
-        id="ds-shared-ref",
-        task_id=other_task["id"],
-        role="sample",
-        source_path=dataset["source_path"],
-        format="parquet",
-        sheet=None,
-        row_count=2,
-        columns=(
-            ColumnProfile(
-                name="acct_id",
-                dtype="object",
-                semantic_role="id",
-                fingerprint=ColumnFingerprint(
-                    "categorical", None, None, False, None, None, None
-                ),
-                null_rate=0.0,
-                cardinality=2,
-                sample_values=("A1", "B2"),
-            ),
-        ),
-        has_target=False,
-        target_col=None,
-        created_at="2026-06-19T00:00:00Z",
-    )
-    DatasetRepository(settings.db_path).create_dataset(shared_dataset)
+    other_dataset = _upload_dataset(client, other_task["id"], frame)
+    assert other_dataset["source_path"] == dataset["source_path"]
 
     response = client.delete(f"/api/tasks/{owner_task['id']}")
 
     assert response.status_code == 204
     # the physical file is still referenced by other_task's dataset row
     assert dataset_path.exists()
+
+    second_response = client.delete(f"/api/tasks/{other_task['id']}")
+
+    assert second_response.status_code == 204
+    # once the last referencing task is gone, the file is finally removed
+    assert not dataset_path.exists()
