@@ -306,6 +306,104 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
     }
 
 
+def tool_score_dataset(inputs: dict, ctx) -> dict:
+    """S1b/DOM-3: apply a trained artifact to a new (unscored) dataset, closing the
+    "no tool applies a trained model to new data" gap. Reuses load_model +
+    _ModelArtifactScorer with replay_preprocessing=True (the PREP-2 escape hatch
+    reserved for exactly this: scoring genuinely new raw data, as opposed to the
+    already-transformed modeling frame the model trained on) so impute/cap/
+    normalize/onehot/woe steps are replayed deterministically before scoring.
+    Missing preprocessing input columns / unseen WOE categories fall back to each
+    step's own existing tolerance (marvis.feature.preprocessing); a feature that is
+    still absent after replay surfaces as a normal KeyError from the scorer, not a
+    silent zero-fill.
+
+    Writes a PD column (``model_score``) and, for scorecard artifacts, a points
+    column (``scorecard_points``), then registers the scored frame as a derived
+    dataset with direction metadata copied verbatim from the artifact (never
+    re-inferred) and a ``modeling.dataset.scored`` audit entry.
+    """
+    runtime = _runtime(ctx)
+    experiment = runtime.experiments.get(str(inputs["experiment_id"]))
+    if experiment.artifact_id is None:
+        raise ModelingError(f"experiment has no artifact: {experiment.id}")
+    artifact = _artifact(runtime, experiment.artifact_id)
+    base_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
+
+    dataset = runtime.registry.get(str(inputs["dataset_id"]))
+    dataset_path = runtime.registry.resolve_path(dataset.id)
+    frame = runtime.backend.read_frame(dataset_path)
+    row_count = int(len(frame))
+
+    score_col = str(inputs.get("output_col") or "model_score").strip() or "model_score"
+    scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
+    scores = scorer.score(frame)
+    frame[score_col] = scores
+    score_missing_rate = float(np.mean(~np.isfinite(np.asarray(scores, dtype=float)))) if row_count else 0.0
+
+    points_col = None
+    points_missing_rate = None
+    scorecard_points = scorer.scorecard_points(frame)
+    if scorecard_points is not None:
+        points_col = str(inputs.get("points_col") or "scorecard_points").strip() or "scorecard_points"
+        frame[points_col] = scorecard_points
+        points_missing_rate = (
+            float(np.mean(~np.isfinite(np.asarray(scorecard_points, dtype=float)))) if row_count else 0.0
+        )
+
+    out_dir = runtime.datasets_root / str(ctx.task_id) / "modeling"
+    uow = ArtifactUnitOfWork()
+    staged = uow.stage_file(out_dir, f"scored_{uuid.uuid4().hex}.parquet")
+    try:
+        frame.to_parquet(staged.path, index=False)
+
+        def audit_factory(registered_dataset):
+            return {
+                "kind": "modeling.dataset.scored",
+                "target_ref": registered_dataset.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "source_dataset_id": dataset.id,
+                    "experiment_id": experiment.id,
+                    "artifact_id": artifact.id,
+                    "score_col": score_col,
+                    "points_col": points_col,
+                    "score_direction": artifact.score_direction,
+                    "points_direction": artifact.points_direction,
+                    "row_count": row_count,
+                    "score_missing_rate": score_missing_rate,
+                },
+            }
+
+        registered = uow.finalize_with_connection(
+            runtime.repo.transaction,
+            lambda conn: runtime.registry.register_existing_with_audit_on_connection(
+                conn,
+                staged.final_path,
+                audit_factory=audit_factory,
+                task_id=str(ctx.task_id),
+                role="modeling.scored",
+                anchor_target=dataset.id,
+                seed=_effective_seed(inputs, ctx),
+            ),
+        )
+    except Exception:
+        uow.rollback()
+        raise
+    return {
+        "result_dataset_id": registered.id,
+        "experiment_id": experiment.id,
+        "artifact_id": artifact.id,
+        "score_col": score_col,
+        "points_col": points_col,
+        "score_direction": artifact.score_direction,
+        "points_direction": artifact.points_direction,
+        "row_count": row_count,
+        "score_missing_rate": score_missing_rate,
+        "points_missing_rate": points_missing_rate,
+    }
+
+
 def tool_prepare_modeling_frame(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
@@ -5909,6 +6007,7 @@ __all__ = [
     "tool_modeling_readiness",
     "tool_prepare_modeling_frame",
     "tool_reject_inference",
+    "tool_score_dataset",
     "tool_segment_value_evaluation",
     "tool_select_features",
     "tool_train_model",

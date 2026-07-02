@@ -903,6 +903,25 @@ def _render_make_split(o: dict):
     return text, tables
 
 
+def _render_score_dataset(o: dict):
+    direction_label = "分数越高风险越高" if o.get("score_direction") == "higher_is_riskier" else "分数越高风险越低"
+    text = (
+        f"**打分完成**（{direction_label}）:"
+        f"{_fmt(o.get('row_count'))} 行,分数列 `{o.get('score_col')}`,"
+        f"缺失率 {_pct(o.get('score_missing_rate'))}。"
+    )
+    rows = [
+        ["数据集", o.get("result_dataset_id") or ""],
+        ["分数列", o.get("score_col") or ""],
+        ["分数缺失率", _pct(o.get("score_missing_rate"))],
+    ]
+    if o.get("points_col"):
+        text += f" 评分卡 points 列 `{o.get('points_col')}`。"
+        rows.append(["points 列", o.get("points_col") or ""])
+        rows.append(["points 缺失率", _pct(o.get("points_missing_rate"))])
+    return text, [{"title": "打分结果摘要", "columns": ["项", "值"], "rows": rows}]
+
+
 _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
@@ -925,6 +944,7 @@ _RENDERERS = {
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
     "vintage_curve": _render_vintage_curve,
+    "score_dataset": _render_score_dataset,
 }
 
 
