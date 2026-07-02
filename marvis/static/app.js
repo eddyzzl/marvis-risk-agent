@@ -5183,26 +5183,110 @@ function agentMemoryReferencesHtml(references = []) {
   ].join("");
 }
 
+// VD-1: infer a rich-cell kind from a driver table's header text, mirroring the
+// column_specs mechanism the validation metric preview uses (app.js:3502+),
+// since generic driver tables (JOIN diagnostics / feature metrics / model
+// compare) carry no explicit specs — only a {title, columns, rows} shape.
+function driverColumnKindFromHeader(headerLabel) {
+  const label = String(headerLabel || "").trim();
+  if (!label) return "text";
+  if (/^PSI$/i.test(label)) return "psi";
+  if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率)/i.test(label)) return "databar-percent";
+  if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|lift)/i.test(label)) return "databar";
+  return "text";
+}
+
+// Champion / winning candidate rows in comparison tables (候选模型对比 etc.) are
+// marked by the backend appending " ★" to the first cell (marvis/agent/
+// renderers.py:350); render that as a highlighted row instead of a literal star.
+function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fractionsForColumn) {
+  const raw = value ?? "";
+  if (columnIndex === 0 && typeof value === "string" && /\s★$/.test(value)) {
+    const label = String(raw).replace(/\s★$/, "");
+    return {
+      cls: "cell-text cell-champion",
+      html: `<span class="champion-badge" data-tip="表现最优,当前推荐候选">${escapeHtml(label)}</span>`,
+    };
+  }
+  if (kind === "psi") {
+    const numeric = parseNumeric(raw);
+    const thresholds = [0.02, 0.10];
+    const tier = psiTier(numeric, thresholds);
+    const tip = psiTooltipText(numeric, thresholds);
+    const stripMarker = numeric === null
+      ? ""
+      : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`;
+    return {
+      cls: "cell-psi",
+      html: `<span class="psi-cell" data-tip="${escapeHtml(tip)}">`
+        + `<span class="psi-value" data-tier="${tier}">${escapeHtml(String(raw))}</span>`
+        + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
+        + `</span>`,
+    };
+  }
+  if (kind === "databar" || kind === "databar-percent") {
+    const fraction = fractionsForColumn.get(rowIndex);
+    if (fraction !== undefined && parseNumeric(raw) !== null) {
+      const tip = `${headerLabel} ${raw}`;
+      return {
+        cls: "cell-databar",
+        html: `<span class="databar" data-color="primary" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)}">`
+          + `<span class="databar-fill"></span>`
+          + `<span class="databar-label">${escapeHtml(String(raw))}</span>`
+          + `</span>`,
+      };
+    }
+    if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+      return { cls: "cell-number", html: escapeHtml(String(raw)) };
+    }
+    return { cls: "cell-text", html: escapeHtml(String(raw)) };
+  }
+  if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+    return { cls: "cell-number", html: escapeHtml(String(raw)) };
+  }
+  return { cls: "cell-text", html: escapeHtml(String(raw)) };
+}
+
 // Inline rich tables carried by the generic plan driver (data_join / future
 // feature / modeling). Format is the driver's simple {title, columns, rows};
-// validation metric tables use a different path (metadata.sections) and are
-// untouched. Each driver message is appended whole, so this renders once on the
-// full timeline rebuild — no streaming fast-path interaction.
+// validation metric tables use a different path (metadata.sections). VD-1:
+// column kind is inferred from the header text (no column_specs on this path)
+// and rendered with the same databar / PSI-band / tabular-nums primitives the
+// validation metric preview already uses (render-metrics.js). Each driver
+// message is appended whole, so this renders once on the full timeline
+// rebuild — no streaming fast-path interaction.
 function agentMessageTablesHtml(message) {
   const tables = message?.metadata?.tables;
   if (!Array.isArray(tables) || !tables.length) return "";
   const blocks = tables
     .map((table) => {
       const columns = Array.isArray(table?.columns) ? table.columns : [];
-      const rows = Array.isArray(table?.rows) ? table.rows : [];
+      const rows = Array.isArray(table?.rows) ? table.rows.map((row) => (Array.isArray(row) ? row : [row])) : [];
       if (!columns.length && !rows.length) return "";
+      const kinds = columns.map((col) => driverColumnKindFromHeader(col));
+      const fractionsByColumn = new Map();
+      kinds.forEach((kind, columnIndex) => {
+        if (kind === "databar" || kind === "databar-percent") {
+          fractionsByColumn.set(columnIndex, columnFractions(rows, columnIndex));
+        }
+      });
       const head = columns.length
         ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(String(col))}</th>`).join("")}</tr></thead>`
         : "";
       const body = `<tbody>${rows
-        .map((row) => {
-          const cells = Array.isArray(row) ? row : [row];
-          return `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`;
+        .map((cells, rowIndex) => {
+          const tds = cells.map((cell, columnIndex) => {
+            const rendered = driverTableCellHtml(
+              cell,
+              rowIndex,
+              columnIndex,
+              columns[columnIndex] ?? "",
+              kinds[columnIndex] || "text",
+              fractionsByColumn.get(columnIndex) || new Map(),
+            );
+            return `<td class="${rendered.cls}">${rendered.html}</td>`;
+          });
+          return `<tr>${tds.join("")}</tr>`;
         })
         .join("")}</tbody>`;
       const caption = table?.title

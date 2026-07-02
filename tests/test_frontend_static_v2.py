@@ -9029,3 +9029,89 @@ def test_base_pet_mood_writing_artifacts_idle_is_complete():
         "writing_artifacts without an active job must fall into the same "
         "complete bucket as scanned and executed."
     )
+
+
+
+def test_driver_gate_tables_render_databar_psi_and_champion_row():
+    """VD-1: agentMessageTablesHtml (the generic plan-driver inline table
+    renderer used by JOIN diagnostics / feature metrics / model comparison
+    gate tables) must sink the same rich-cell language the validation metric
+    preview already has — databar for match/hit-rate columns, PSI three-band
+    cells, tabular-nums right-aligned numeric columns, and a highlighted
+    champion row for backend-flagged (" \u2605" suffixed) winning candidates —
+    instead of leaving every cell as bare escaped text.
+    """
+    app_js = _read_static("app.js")
+    kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
+    cell_body = _slice_function(app_js, "function driverTableCellHtml")
+    align_body = _slice_function(app_js, "function metricHeaderShouldRightAlign")
+    tables_body = _slice_function(app_js, "function agentMessageTablesHtml")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "import {"
+            " columnFractions, parseNumeric, psiTier, psiTooltipText,"
+            f" }} from {json.dumps(render_metrics_url)};",
+            kind_body,
+            cell_body,
+            align_body,
+            tables_body,
+            "const message = {",
+            "  metadata: {",
+            "    tables: [",
+            "      {",
+            "        title: '拼接诊断(逐特征表)',",
+            "        columns: ['特征表', '匹配键', '命中率', '键唯一'],",
+            "        rows: [",
+            "          ['features.parquet', 'id=id', '92.30%', '是'],",
+            "          ['bureau.parquet', 'id=id', '41.10%', '否'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '特征指标',",
+            "        columns: ['特征', 'IV', 'KS', 'PSI', '样本量'],",
+            "        rows: [",
+            "          ['age', '0.31', '0.42', '0.015', '12000'],",
+            "          ['income', '0.12', '0.20', '0.25', '12000'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '候选模型对比',",
+            "        columns: ['算法', 'train_ks', 'test_ks', 'oot_ks'],",
+            "        rows: [",
+            "          ['lightgbm ★', '0.55', '0.50', '0.48'],",
+            "          ['xgboost', '0.50', '0.45', '0.40'],",
+            "        ],",
+            "      },",
+            "    ],",
+            "  },",
+            "};",
+            "const html = agentMessageTablesHtml(message);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = json.loads(result.stdout)["html"]
+
+    # 命中率 (match/hit-rate) gets a databar, not a bare cell.
+    assert 'class="databar"' in html
+    assert 'data-tip="命中率 92.30%"' in html
+    # PSI gets the three-band tiered cell, not a bare 4-decimal string.
+    assert 'class="psi-cell"' in html
+    assert 'data-tier=' in html
+    # 样本量 (row count) is tabular-nums right-aligned, not left-aligned text.
+    assert '<td class="cell-number">12000</td>' in html
+    # The backend's " ★"-flagged champion candidate renders as a highlighted
+    # badge, not a literal star character glued onto plain text.
+    assert 'class="champion-badge"' in html
+    assert "lightgbm ★" not in html
+    assert ">lightgbm<" in html
