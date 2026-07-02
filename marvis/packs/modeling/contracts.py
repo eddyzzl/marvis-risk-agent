@@ -115,6 +115,13 @@ class ModelArtifact:
     # treat None as "unknown, fall back to the caller's own default direction".
     score_direction: str | None = None
     points_direction: str | None = None
+    # S1b: training-time baseline distribution snapshot (score bins + in-model
+    # feature quantile summaries), the monitoring reference for monitor_run's PSI/
+    # CSI checks. None for artifacts trained before this field existed (old DB rows
+    # have a NULL column, and .model_meta.json written before S1b has no key) --
+    # monitor_run must treat None as "no baseline, cannot monitor" and report that
+    # explicitly rather than fabricating a reference distribution.
+    baseline_distributions: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -87,6 +87,7 @@ from marvis.packs.modeling.select import select_features
 from marvis.packs.modeling.tune import DEFAULT_TRIAL_BUDGET, tune_hyperparameters
 from marvis.packs.modeling.errors import ModelingError, ReportScoreMissingError
 from marvis.settings import build_settings
+from marvis.validation.binning import bin_distribution, equal_frequency_bin_edges
 from marvis.validation.config import ValidationConfig
 from marvis.validation.stress_test import run_stress_test
 
@@ -4355,6 +4356,106 @@ def _refit_champion_on_train_plus_test(
         scratch_path.unlink(missing_ok=True)
 
 
+#: S1b: number of equal-frequency score bins in the training-time baseline
+#: distribution snapshot -- matches the platform's existing OOT bin-table
+#: convention (_report_bin_table above / DEFAULT_IV_BINS-independent, a fixed
+#: monitoring-grade granularity rather than the IV-binning knob).
+BASELINE_SCORE_BIN_COUNT = 10
+
+
+def _compute_baseline_distributions(
+    backend,
+    dataset_path: Path,
+    config: TrainConfig,
+    artifact: ModelArtifact,
+    *,
+    base_dir: Path,
+) -> dict | None:
+    """S1b: snapshot the training-time score distribution (equal-frequency bin
+    edges + per-split bin proportions) and in-model feature distributions, so a
+    later monitor_run has a deterministic reference to compare new data against
+    (DOM-3's monitoring-policy execution gap). Computed once, at training time,
+    from the same dataset_path/config the artifact was just trained on -- this
+    covers train_model, train_models, and the champion refit path uniformly
+    since all three route through this function.
+
+    Returns None (never raises) when the frame carries no usable ``train`` split
+    to build a reference from -- callers must treat that as "no baseline could be
+    computed", not silently skip persisting the field."""
+    split_col = str(config.split_col)
+    try:
+        columns = _unique_columns([*artifact.feature_list, split_col])
+        frame = backend.read_frame(dataset_path, columns=columns)
+    except Exception:
+        return None
+    if split_col not in frame.columns:
+        return None
+    train_value = config.split_values.get("train", "train")
+    train_frame = frame[frame[split_col] == train_value]
+    if train_frame.empty:
+        return None
+
+    try:
+        scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, load_calibration=False)
+        train_scores = np.asarray(scorer.score(train_frame, use_calibration=False), dtype=float)
+    except Exception:
+        return None
+    finite_train_scores = train_scores[np.isfinite(train_scores)]
+    if finite_train_scores.size == 0:
+        return None
+    edges = equal_frequency_bin_edges(finite_train_scores, BASELINE_SCORE_BIN_COUNT)
+
+    score_distribution: dict[str, dict] = {
+        "train": {
+            "sample_count": int(finite_train_scores.size),
+            "bin_proportions": [float(value) for value in bin_distribution(finite_train_scores, edges)],
+        }
+    }
+    for split_name in ("test", "oot"):
+        split_value = config.split_values.get(split_name)
+        if split_value is None:
+            continue
+        split_frame = frame[frame[split_col] == split_value]
+        if split_frame.empty:
+            continue
+        try:
+            split_scores = np.asarray(scorer.score(split_frame, use_calibration=False), dtype=float)
+        except Exception:
+            continue
+        finite_split_scores = split_scores[np.isfinite(split_scores)]
+        if finite_split_scores.size == 0:
+            continue
+        score_distribution[split_name] = {
+            "sample_count": int(finite_split_scores.size),
+            "bin_proportions": [float(value) for value in bin_distribution(finite_split_scores, edges)],
+        }
+
+    feature_distributions: dict[str, dict] = {}
+    for feature in artifact.feature_list:
+        if feature not in train_frame.columns:
+            continue
+        values = pd.to_numeric(train_frame[feature], errors="coerce").to_numpy(dtype=float)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size == 0:
+            continue
+        quantiles = np.quantile(finite_values, np.linspace(0.0, 1.0, BASELINE_SCORE_BIN_COUNT + 1))
+        feature_distributions[str(feature)] = {
+            "sample_count": int(finite_values.size),
+            "missing_rate": float(1.0 - finite_values.size / values.size) if values.size else 0.0,
+            "quantile_edges": [float(value) for value in quantiles],
+        }
+
+    return {
+        "schema_version": 1,
+        "created_at": datetime.now(UTC).isoformat(),
+        "bin_count": BASELINE_SCORE_BIN_COUNT,
+        "score_edges": [float(value) for value in edges],
+        "score_direction": artifact.score_direction,
+        "score_distribution": score_distribution,
+        "feature_distributions": feature_distributions,
+    }
+
+
 def _train_recipe(
     recipe: str,
     backend,
@@ -4364,24 +4465,58 @@ def _train_recipe(
     out_dir: Path,
 ) -> TrainResult:
     if recipe == "lgb":
-        return train_lgb(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "lgb_regressor":
-        return train_lgb_regressor(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "lgb_multiclass":
-        return train_lgb_multiclass(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "xgb":
-        return train_xgb(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "catboost":
-        return train_catboost(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "lr":
-        return train_lr(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "scorecard":
-        return train_scorecard(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "mlp":
-        return train_mlp(backend, dataset_path, config, out_dir=out_dir)
-    if recipe == "ensemble":
-        return train_ensemble(backend, dataset_path, config, out_dir=out_dir)
-    raise ModelingError(f"unsupported modeling recipe: {recipe}")
+        result = train_lgb(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "lgb_regressor":
+        result = train_lgb_regressor(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "lgb_multiclass":
+        result = train_lgb_multiclass(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "xgb":
+        result = train_xgb(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "catboost":
+        result = train_catboost(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "lr":
+        result = train_lr(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "scorecard":
+        result = train_scorecard(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "mlp":
+        result = train_mlp(backend, dataset_path, config, out_dir=out_dir)
+    elif recipe == "ensemble":
+        result = train_ensemble(backend, dataset_path, config, out_dir=out_dir)
+    else:
+        raise ModelingError(f"unsupported modeling recipe: {recipe}")
+    return _attach_baseline_distributions(backend, dataset_path, config, result, out_dir=out_dir)
+
+
+def _attach_baseline_distributions(
+    backend,
+    dataset_path: Path,
+    config: TrainConfig,
+    result: TrainResult,
+    *,
+    out_dir: Path,
+) -> TrainResult:
+    """S1b: compute and persist the training-time baseline distribution snapshot
+    (see _compute_baseline_distributions) onto the freshly-trained artifact, both
+    channels (DB field + .model_meta.json), mirroring the S1a score_direction
+    double-channel persistence paradigm. Scoped to binary target_type -- score()
+    on a multiclass Booster returns a 2D array _compute_baseline_distributions
+    cannot reduce to a single score distribution, and a continuous regressor's
+    raw output isn't a PD/points product monitor_run's PSI checks are meant for.
+    Never lets a computation failure break training: on any error the artifact is
+    persisted exactly as before, with baseline_distributions left None."""
+    if getattr(config, "target_type", "binary") != "binary":
+        return result
+    try:
+        baseline = _compute_baseline_distributions(
+            backend, dataset_path, config, result.artifact, base_dir=out_dir
+        )
+    except Exception:
+        baseline = None
+    if baseline is None:
+        return result
+    updated_artifact = replace(result.artifact, baseline_distributions=baseline)
+    persist_model_meta(out_dir, updated_artifact, config=config)
+    return replace(result, artifact=updated_artifact)
 
 
 def _artifact(runtime: _Runtime, artifact_id: str) -> ModelArtifact:
