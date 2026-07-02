@@ -488,6 +488,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=_optional_int(inputs.get("top_k")),
         batch_size=int(inputs.get("batch_size", 500)),
+        max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
     )
     payload = {
         "selected": list(result.selected),
@@ -505,6 +506,8 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         payload["split_shift"] = [[feature, delta, reason] for feature, delta, reason in result.split_shift]
     if result.leakage_watch:
         payload["leakage_watch"] = [[feature, ks, reason] for feature, ks, reason in result.leakage_watch]
+    if result.ks_decay_watch:
+        payload["ks_decay_watch"] = [[feature, decay, reason] for feature, decay, reason in result.ks_decay_watch]
     if result.sentinel_columns:
         payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
         payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)

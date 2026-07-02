@@ -75,6 +75,10 @@ class ScreenResult:
     """FS-4 watch-band: features whose pooled-dev KS lands in [LEAKAGE_WATCH_LOW, leakage_ks)
     — strong-but-below the hard leakage gate, surfaced for confirmation rather than blocked:
     (feature, ks, reason)."""
+    ks_decay_watch: tuple[tuple[str, float, str], ...] = ()
+    """FS-6 KS-decay flags (only when ``max_ks_decay`` is set): features whose test/train KS
+    retention ratio falls below the threshold — worked in-sample, decayed out-of-sample.
+    Informational, never dropped: (feature, ks_decay, reason)."""
 
 
 def _dev_mask(
@@ -124,6 +128,7 @@ def screen_features(
     min_unique: int = 2,
     top_k: int | None = None,
     batch_size: int = 500,
+    max_ks_decay: float | None = None,
 ) -> ScreenResult:
     """Screen ``features`` against ``target_col`` and propose a clean candidate set.
 
@@ -133,6 +138,10 @@ def screen_features(
       or a near-duplicate of it).
     - ``holdout_values``: split labels (in ``split_col``) excluded from screening.
     - ``top_k``: size of the proposed candidate set (default: all clean features).
+    - ``max_ks_decay`` (FS-6): when a train/test split exists, ``scores`` always carries
+      per-feature ``ks_train``/``ks_test``/``ks_decay`` (test KS ÷ train KS). Default
+      ``None`` is display-only — no filtering. When set, features whose retention ratio
+      falls *below* it are flagged in ``ks_decay_watch`` (still informational, not dropped).
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     base_cols = [target_col] + ([split_col] if split_col else [])
@@ -154,6 +163,7 @@ def screen_features(
     sentinel_columns: dict[str, list[tuple[float, float]]] = {}
     split_shift: list[tuple[str, float, str]] = []
     leakage_watch: list[tuple[str, float, str]] = []
+    ks_decay_watch: list[tuple[str, float, str]] = []
 
     for start in range(0, len(feats), max(1, batch_size)):
         batch = feats[start : start + batch_size]
@@ -177,12 +187,17 @@ def screen_features(
             scores[col] = {"ks": ks, "missing_rate": missing_rate, "unique_count": unique}
             # FS-4/FS-6: per-split train vs test KS (only when both splits exist). Recorded
             # for every screened column so the split-shift flag and KS-decay report share it.
-            ks_train = ks_test = None
+            ks_train = ks_test = ks_decay = None
             if target_train is not None and target_test is not None:
                 ks_train = feature_ks(values[train_mask], target_train)
                 ks_test = feature_ks(values[test_mask], target_test)
+                # FS-6 KS decay/retention ratio: test KS as a fraction of train KS. None when
+                # train KS is 0 (no train signal to retain). A low ratio means "worked in
+                # sample, failed out-of-sample" — surfaced (and optionally gated by max_ks_decay).
+                ks_decay = (ks_test / ks_train) if ks_train > 0 else None
                 scores[col]["ks_train"] = ks_train
                 scores[col]["ks_test"] = ks_test
+                scores[col]["ks_decay"] = ks_decay
             if ks >= leakage_ks:
                 leakage.append((col, ks, f"univariate KS {ks:.3f} >= {leakage_ks} — suspected target leakage"))
                 continue
@@ -204,6 +219,14 @@ def screen_features(
                     ks,
                     f"leakage_watch: univariate KS {ks:.3f} in [{LEAKAGE_WATCH_LOW}, {leakage_ks}) "
                     "— strong single-variable signal, confirm it is not partial/conditional leakage",
+                ))
+            # FS-6 KS decay: only flags when the caller opts in via max_ks_decay (default off).
+            if max_ks_decay is not None and ks_decay is not None and ks_decay < max_ks_decay:
+                ks_decay_watch.append((
+                    col,
+                    ks_decay,
+                    f"ks_decay {ks_decay:.3f} < {max_ks_decay} (ks_train {ks_train:.3f} -> "
+                    f"ks_test {ks_test:.3f}) — discrimination decays out-of-sample, confirm stability",
                 ))
             if _SUSPECTED_OUTPUT.search(col):
                 suspected.append((col, ks, "name looks like a model output/score — confirm it is an allowed input"))
@@ -240,6 +263,7 @@ def screen_features(
         sentinel_columns=sentinel_columns,
         split_shift=tuple(sorted(split_shift, key=lambda z: z[1], reverse=True)),
         leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
+        ks_decay_watch=tuple(sorted(ks_decay_watch, key=lambda z: z[1])),
     )
 
 

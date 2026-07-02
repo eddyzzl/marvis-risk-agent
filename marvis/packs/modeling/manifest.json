@@ -442,6 +442,9 @@
           "batch_size": {
             "type": "integer",
             "minimum": 1
+          },
+          "max_ks_decay": {
+            "type": "number"
           }
         },
         "required": [
@@ -544,6 +547,12 @@
             }
           },
           "leakage_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "ks_decay_watch": {
             "type": "array",
             "items": {
               "type": "array"

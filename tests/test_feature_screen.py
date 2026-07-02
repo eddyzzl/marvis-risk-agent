@@ -85,3 +85,33 @@ def test_screen_no_split_produces_no_split_flags(tmp_path):
 
     assert result.split_shift == ()
     assert "ks_train" not in result.scores["f"]
+
+
+def test_screen_records_ks_decay_and_flags_only_when_threshold_set(tmp_path):
+    """FS-6: per-split KS decay (ks_test/ks_train) is always recorded when a train/test
+    split exists; the ks_decay_watch flag only fires when max_ks_decay is set."""
+    rows = 400
+    rng = np.random.RandomState(11)
+    split = np.array((["train"] * 200 + ["test"] * 200))
+    y = np.array(([0, 1] * 200))
+    # Strong in train, weak in test -> low retention ratio.
+    train_signal = np.where(y == 1, 0.7, 0.3) + rng.normal(scale=0.3, size=rows)
+    decayer = np.where(split == "train", train_signal, rng.normal(size=rows))
+    frame = pd.DataFrame({"decayer": decayer, "y": y, "split": split})
+    backend, path = _write(tmp_path, frame)
+
+    display_only = screen_features(
+        backend, path, features=["decayer"], target_col="y", split_col="split",
+    )
+    assert "ks_decay" in display_only.scores["decayer"]
+    assert display_only.ks_decay_watch == ()  # default: display-only, no flags
+
+    gated = screen_features(
+        backend, path, features=["decayer"], target_col="y", split_col="split",
+        max_ks_decay=0.9,
+    )
+    decay = gated.scores["decayer"]["ks_decay"]
+    if decay is not None and decay < 0.9:
+        assert "decayer" in {feature for feature, _decay, _reason in gated.ks_decay_watch}
+    # gating never drops the feature from the ranked/clean set.
+    assert "decayer" in {c for c, _ in gated.ranked}
