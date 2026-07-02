@@ -348,3 +348,245 @@ def test_tool_compare_strategies_round_trip(tmp_path):
     assert "summary_text" in cmp.output
     assert isinstance(cmp.output["red_flags"], list)
     _ = PluginRepository  # keep import used across slow/fast paths
+
+
+# ---------------------------------------------------------------------------
+# Deliverables + doc cores (fast).
+# ---------------------------------------------------------------------------
+def test_decision_table_csv_content():
+    from marvis.packs.strategy.deliverables import decision_table_csv
+
+    rules = [{"condition": "score < 300", "decision": "reject", "value": None}]
+    bands = [
+        {"lo": 100, "hi": 300, "pop_pct": 0.3333, "bad_rate": 1.0, "expected_profit": -50.0},
+    ]
+    csv_text = decision_table_csv(rules, bands)
+    lines = csv_text.strip().splitlines()
+    assert lines[0] == "序号,条件,决策,取值,band区间,样本占比,坏率,预期利润"
+    assert "score < 300" in lines[1]
+    assert "[100,300)" in lines[1]
+    assert "33.33%" in lines[1]
+    assert "100.00%" in lines[1]
+    assert "-50.00" in lines[1]
+
+
+def test_build_monitoring_plan_shape():
+    from marvis.packs.strategy.deliverables import build_monitoring_plan
+
+    plan = build_monitoring_plan(
+        strategy_id="s-1", version=2, approved_bad_rate=0.04, approval_rate=0.7
+    )
+    assert plan["strategy_id"] == "s-1"
+    assert plan["version"] == 2
+    thresholds = plan["thresholds"]
+    assert set(thresholds) == {"approved_bad_rate", "approval_rate"}
+    assert thresholds["approved_bad_rate"]["direction"] == "max"
+    assert round(thresholds["approved_bad_rate"]["warn"], 4) == 0.06
+    assert thresholds["approval_rate"]["direction"] == "min"
+
+
+def test_render_strategy_doc_markdown_sections():
+    from marvis.packs.strategy.doc import render_strategy_doc_markdown
+
+    markdown, sections = render_strategy_doc_markdown(
+        strategy={
+            "id": "s-1",
+            "strategy_type": "approval",
+            "rules": [{"condition": "score < 600", "decision": "reject", "value": None}],
+            "default_decision": "approve",
+        },
+        meta={"version": 2, "status": "adopted", "parent_strategy_id": "s-0",
+              "adopted_at": "2026-06-20T00:00:00Z", "adoption_reason": "committee"},
+        backtests=[{"approval_rate": 0.7, "approved_bad_rate": 0.04, "rejected_bad_rate": 0.2,
+                    "expected_profit": 100.0, "swap_in_count": 5, "swap_out_count": 3,
+                    "swap_in_bad_rate": 0.1, "swap_out_bad_rate": 0.02}],
+        artifacts=[{"kind": "monitoring_plan_json", "path": "workspace/tasks/t/strategy/mon.json"}],
+        band_stats=[{"lo": 100, "hi": 600, "pop_pct": 0.5, "bad_rate": 0.2,
+                     "cum_approval_rate": 0.5, "cum_bad_rate": 0.2, "decision": "approve"}],
+        red_flags=[{"level": "amber", "code": "sparse_band", "message": "示例"}],
+    )
+    assert sections == ["策略概览", "规则清单", "回测摘要", "分数带", "红旗与处置记录", "监控计划摘要"]
+    for heading in ("## 策略概览", "## 规则清单", "## 回测摘要", "## 分数带",
+                    "## 红旗与处置记录", "## 监控计划摘要"):
+        assert heading in markdown
+    assert "v2" in markdown
+    assert "已采纳" in markdown
+    assert "s-0" in markdown  # lineage parent
+    assert "sparse_band" in markdown
+
+
+# ---------------------------------------------------------------------------
+# Renderer table structure (fast).
+# ---------------------------------------------------------------------------
+def test_render_design_cutoff_bands_tables():
+    from marvis.agent.renderers import _render_design_cutoff_bands
+
+    text, tables = _render_design_cutoff_bands({
+        "bands": [
+            {"lo": 100, "hi": 300, "pop_pct": 0.5, "bad_rate": 0.2,
+             "cum_approval_rate": 0.5, "cum_bad_rate": 0.2, "decision": "decline"},
+            {"lo": 300, "hi": 600, "pop_pct": 0.5, "bad_rate": 0.0,
+             "cum_approval_rate": 0.5, "cum_bad_rate": 0.0, "decision": "approve"},
+        ],
+        "recommended_rules": [{"condition": "score < 300", "decision": "reject"}],
+        "red_flags": [{"level": "red", "code": "infeasible_constraints", "message": "x"}],
+    })
+    assert "分数带设计完成" in text
+    assert "红项" in text  # red flag surfaced
+    assert tables[0]["columns"] == ["band 区间", "样本占比", "坏率", "累计审批率", "累计坏率", "决策"]
+    assert len(tables[0]["rows"]) == 2
+    assert tables[-1]["title"] == "红旗清单"
+
+
+def test_render_compare_strategies_matrix_table():
+    from marvis.agent.renderers import _render_compare_strategies
+
+    text, tables = _render_compare_strategies({
+        "matrix_2x2": {
+            "both_approve": {"count": 2, "bad_rate": 0.0},
+            "only_new": {"count": 2, "bad_rate": 0.5},
+            "only_baseline": {"count": 0, "bad_rate": 0.0},
+            "both_decline": {"count": 2, "bad_rate": 1.0},
+        },
+        "deltas": {"approval_rate": 0.33, "approved_bad_rate": 0.1, "expected_profit": -5.0},
+        "summary_text": "示例摘要",
+        "red_flags": [{"level": "red", "code": "swap_in_worse", "message": "x"}],
+    })
+    assert "策略对比完成" in text
+    assert tables[0]["columns"] == ["", "基线通过", "基线拒绝"]
+    assert len(tables[0]["rows"]) == 2
+    assert tables[1]["title"] == "关键差异"
+
+
+def test_render_adopt_strategy_table():
+    from marvis.agent.renderers import _render_adopt_strategy
+
+    text, tables = _render_adopt_strategy({
+        "strategy_id": "s-1", "version": 2, "status": "adopted",
+        "retired_strategy_ids": ["s-0"],
+        "artifacts": [
+            {"kind": "decision_table_csv", "path": "a.csv"},
+            {"kind": "monitoring_plan_json", "path": "b.json"},
+        ],
+    })
+    assert "策略已采纳" in text
+    assert tables[0]["title"] == "交付物"
+    assert len(tables[0]["rows"]) == 2
+    assert tables[1]["title"] == "退役策略"
+
+
+def test_render_strategy_doc_table():
+    from marvis.agent.renderers import _render_strategy_doc
+
+    text, tables = _render_strategy_doc({
+        "doc_path": "workspace/tasks/t/strategy/doc.md",
+        "sections": ["策略概览", "规则清单"],
+    })
+    assert "策略文档已生成" in text
+    assert tables[0]["columns"] == ["#", "章节"]
+    assert len(tables[0]["rows"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# adopt + doc via the runner (slow).
+# ---------------------------------------------------------------------------
+def _build_and_backtest(runner, dataset, task, condition="score < 250"):
+    built = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_type": "approval",
+         "rules": [{"condition": condition, "decision": "reject"}],
+         "score_col": "score", "default_decision": "approve"},
+        task_id=task.id,
+    )
+    backtest = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {"dataset_id": dataset.id, "strategy_id": built.output["strategy_id"],
+         "target_col": "bad"},
+        task_id=task.id,
+    )
+    return built.output["strategy_id"], backtest.output["backtest_id"]
+
+
+@pytest.mark.slow
+def test_tool_adopt_strategy_rejects_foreign_backtest(tmp_path):
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({"score": [100, 200, 300, 400, 500, 600], "bad": [1, 0, 1, 0, 0, 0]})
+    dataset = _register(registry, tmp_path, frame, "adopt_foreign", task.id)
+    sid_a, _ = _build_and_backtest(runner, dataset, task, "score < 250")
+    _, bid_b = _build_and_backtest(runner, dataset, task, "score < 450")
+    adopt = runner.invoke(
+        ToolRef("strategy", "adopt_strategy"),
+        {"strategy_id": sid_a, "backtest_id": bid_b, "adoption_reason": "x"},
+        task_id=task.id,
+    )
+    assert adopt.ok is False
+    assert "does not belong" in (adopt.error or "")
+
+
+@pytest.mark.slow
+def test_tool_adopt_strategy_lands_and_registers_deliverables(tmp_path):
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({"score": [100, 200, 300, 400, 500, 600], "bad": [1, 0, 1, 0, 0, 0]})
+    dataset = _register(registry, tmp_path, frame, "adopt_ok", task.id)
+    sid, bid = _build_and_backtest(runner, dataset, task, "score < 250")
+    band_stats = {
+        "bands": [
+            {"lo": 100, "hi": 300, "pop_pct": 0.3333, "bad_rate": 0.5, "expected_profit": 0.0,
+             "cum_approval_rate": 1.0, "cum_bad_rate": 0.3, "decision": "decline"},
+        ]
+    }
+    adopt = runner.invoke(
+        ToolRef("strategy", "adopt_strategy"),
+        {"strategy_id": sid, "backtest_id": bid, "adoption_reason": "approved",
+         "band_stats": band_stats},
+        task_id=task.id,
+    )
+    assert adopt.ok is True, adopt.error
+    assert adopt.output["status"] == "adopted"
+    assert adopt.output["version"] == 1
+    kinds = {a["kind"] for a in adopt.output["artifacts"]}
+    assert kinds == {"decision_table_csv", "monitoring_plan_json"}
+    for artifact in adopt.output["artifacts"]:
+        assert Path(artifact["path"]).exists()
+    csv_path = next(a["path"] for a in adopt.output["artifacts"] if a["kind"] == "decision_table_csv")
+    csv_text = Path(csv_path).read_text(encoding="utf-8")
+    assert "序号,条件,决策" in csv_text
+    assert "score < 250" in csv_text
+
+    settings = build_settings(tmp_path / "workspace")
+    audits = PluginRepository(settings.db_path).list_audit()
+    kinds_audit = {a["kind"] for a in audits}
+    assert "strategy.adopt" in kinds_audit
+    assert "strategy.artifact" in kinds_audit
+
+    # render doc reads persisted results and registers a third artifact.
+    doc = runner.invoke(
+        ToolRef("strategy", "render_strategy_doc"),
+        {"strategy_id": sid, "band_stats": band_stats},
+        task_id=task.id,
+    )
+    assert doc.ok is True, doc.error
+    assert Path(doc.output["doc_path"]).exists()
+    assert doc.output["sections"][0] == "策略概览"
+    md = Path(doc.output["doc_path"]).read_text(encoding="utf-8")
+    assert "已采纳" in md
+
+
+@pytest.mark.slow
+def test_tool_adopt_strategy_double_adopt_conflicts(tmp_path):
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({"score": [100, 200, 300, 400, 500, 600], "bad": [1, 0, 1, 0, 0, 0]})
+    dataset = _register(registry, tmp_path, frame, "adopt_twice", task.id)
+    sid, bid = _build_and_backtest(runner, dataset, task, "score < 250")
+    first = runner.invoke(
+        ToolRef("strategy", "adopt_strategy"),
+        {"strategy_id": sid, "backtest_id": bid, "adoption_reason": "first"},
+        task_id=task.id,
+    )
+    assert first.ok is True, first.error
+    second = runner.invoke(
+        ToolRef("strategy", "adopt_strategy"),
+        {"strategy_id": sid, "backtest_id": bid, "adoption_reason": "again"},
+        task_id=task.id,
+    )
+    assert second.ok is False

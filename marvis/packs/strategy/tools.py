@@ -17,6 +17,11 @@ from marvis.packs.strategy.backtest import backtest_strategy
 from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import BacktestResult, Strategy
+from marvis.packs.strategy.deliverables import (
+    build_monitoring_plan,
+    decision_table_csv,
+)
+from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
@@ -334,6 +339,129 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     payload = _jsonable(result)
     payload["nan_labels_dropped"] = nan_labels_dropped
     return payload
+
+
+def tool_adopt_strategy(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    strategy_id = str(inputs["strategy_id"])
+    strategy = _strategy(runtime, strategy_id)
+    backtest_id = str(inputs["backtest_id"])
+    backtest = runtime.strategies.get_backtest(backtest_id)
+    if backtest is None or backtest.strategy_id != strategy_id:
+        raise StrategyError(
+            f"backtest {backtest_id} does not belong to strategy {strategy_id}"
+        )
+    adoption_reason = str(inputs["adoption_reason"])
+    adopt_result = runtime.strategies.adopt_strategy_with_audit(
+        strategy_id,
+        reason=adoption_reason,
+        audit={
+            "kind": "strategy.adopt",
+            "target_ref": strategy_id,
+            "outcome": "succeeded",
+            "detail": {
+                "task_id": str(ctx.task_id),
+                "backtest_id": backtest_id,
+                "approval_rate": backtest.approval_rate,
+                "approved_bad_rate": backtest.approved_bad_rate,
+                "expected_profit": backtest.expected_profit,
+            },
+        },
+    )
+    version = int(adopt_result["version"])
+    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{strategy_id}_v{version}"
+
+    band_stats = _band_stats_from_inputs(inputs.get("band_stats"))
+    rules = [_jsonable(rule) for rule in strategy.rules]
+    csv_text = decision_table_csv(rules, band_stats)
+    csv_path = strategy_dir / f"decision_table_{stem}.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    monitoring_plan = build_monitoring_plan(
+        strategy_id=strategy_id,
+        version=version,
+        approved_bad_rate=backtest.approved_bad_rate,
+        approval_rate=backtest.approval_rate,
+    )
+    json_path = strategy_dir / f"monitoring_plan_{stem}.json"
+    json_path.write_text(
+        json.dumps(monitoring_plan, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    artifacts = []
+    for kind, path in (
+        ("decision_table_csv", csv_path),
+        ("monitoring_plan_json", json_path),
+    ):
+        runtime.strategies.save_strategy_artifact(strategy_id, kind=kind, path=str(path))
+        _write_strategy_artifact_audit(runtime, ctx, strategy_id, kind, path)
+        artifacts.append({"kind": kind, "path": str(path)})
+
+    return {
+        "strategy_id": strategy_id,
+        "version": version,
+        "status": "adopted",
+        "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
+        "artifacts": artifacts,
+    }
+
+
+def tool_render_strategy_doc(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    strategy_id = str(inputs["strategy_id"])
+    strategy = _strategy(runtime, strategy_id)
+    meta = runtime.strategies.get_strategy_meta(strategy_id)
+    backtests = [_jsonable(result) for result in runtime.strategies.list_backtests(strategy_id)]
+    artifacts = runtime.strategies.list_strategy_artifacts(strategy_id)
+    band_stats = _band_stats_from_inputs(inputs.get("band_stats"))
+    markdown, sections = render_strategy_doc_markdown(
+        strategy=_jsonable(strategy),
+        meta=meta or {},
+        backtests=backtests,
+        artifacts=artifacts,
+        band_stats=band_stats,
+    )
+    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    version = int((meta or {}).get("version", 1))
+    doc_path = strategy_dir / f"strategy_doc_{strategy_id}_v{version}.md"
+    doc_path.write_text(markdown, encoding="utf-8")
+    runtime.strategies.save_strategy_artifact(
+        strategy_id, kind="strategy_doc_md", path=str(doc_path)
+    )
+    _write_strategy_artifact_audit(runtime, ctx, strategy_id, "strategy_doc_md", doc_path)
+    return {"doc_path": str(doc_path), "sections": list(sections)}
+
+
+def _write_strategy_artifact_audit(runtime, ctx, strategy_id: str, kind: str, path) -> None:
+    from marvis.repositories.strategy import _write_audit_row
+
+    from marvis.db_schema import connect
+
+    with connect(runtime.settings.db_path) as conn:
+        _write_audit_row(
+            conn,
+            kind="strategy.artifact",
+            target_ref=strategy_id,
+            outcome="succeeded",
+            detail={"task_id": str(ctx.task_id), "kind": kind, "path": str(path)},
+        )
+
+
+def _band_stats_from_inputs(value) -> list[dict]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        bands = value.get("bands")
+        if isinstance(bands, list):
+            return [dict(band) for band in bands if isinstance(band, dict)]
+        return []
+    if isinstance(value, list):
+        return [dict(band) for band in value if isinstance(band, dict)]
+    return []
 
 
 class _Runtime:

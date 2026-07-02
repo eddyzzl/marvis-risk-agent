@@ -85,6 +85,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "tradeoff_view",
         "design_cutoff_bands",
         "compare_strategies",
+        "adopt_strategy",
+        "render_strategy_doc",
     }
     assert build_tool.determinism == "deterministic"
     assert "write:strategy" in build_tool.side_effects

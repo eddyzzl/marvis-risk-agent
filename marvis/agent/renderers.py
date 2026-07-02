@@ -620,21 +620,157 @@ def _render_tradeoff_view(o: dict):
         )
     else:
         text = f"**策略权衡视图完成**（{direction_label}）。"
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红旗：{names}。"
     tables = []
     if points:
         tables.append({
             "title": "cutoff 权衡点",
-            "columns": ["cutoff", "审批率", "坏率", "预期利润"],
+            "columns": ["cutoff", "审批率", "坏率", "预期利润", "可行"],
             "rows": [
                 [
                     _fmt(point.get("cutoff")),
                     _pct(point.get("approval_rate")),
                     _pct(point.get("bad_rate")),
                     _num(point.get("expected_profit")),
+                    "是" if point.get("feasible", True) else "否",
                 ]
                 for point in points[:20]
             ],
         })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+_STRATEGY_DECISION_LABEL = {"approve": "通过", "review": "复核", "decline": "拒绝"}
+
+
+def _red_flag_table(red_flags: list) -> dict:
+    return {
+        "title": "红旗清单",
+        "columns": ["等级", "code", "说明"],
+        "rows": [
+            [
+                str(flag.get("level", "")),
+                str(flag.get("code", "")),
+                str(flag.get("message", "")),
+            ]
+            for flag in red_flags
+            if isinstance(flag, dict)
+        ],
+    }
+
+
+def _render_design_cutoff_bands(o: dict):
+    bands = [band for band in (o.get("bands") or []) if isinstance(band, dict)]
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    approved = [band for band in bands if band.get("decision") == "approve"]
+    rules = [rule for rule in (o.get("recommended_rules") or []) if isinstance(rule, dict)]
+    rule_text = rules[0].get("condition") if rules else "无"
+    text = (
+        f"**分数带设计完成**：推荐切法 `{rule_text}`（拒绝规则），"
+        f"通过 {len(approved)}/{len(bands)} 个分数带，红旗 {len(red_flags)} 项。"
+    )
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红项：{names}。"
+    tables = [{
+        "title": "分数带",
+        "columns": ["band 区间", "样本占比", "坏率", "累计审批率", "累计坏率", "决策"],
+        "rows": [
+            [
+                f"[{_fmt(band.get('lo'))},{_fmt(band.get('hi'))})",
+                _pct(band.get("pop_pct")),
+                _pct(band.get("bad_rate")),
+                _pct(band.get("cum_approval_rate")),
+                _pct(band.get("cum_bad_rate")),
+                _STRATEGY_DECISION_LABEL.get(str(band.get("decision")), str(band.get("decision", ""))),
+            ]
+            for band in bands
+        ],
+    }]
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_compare_strategies(o: dict):
+    matrix = o.get("matrix_2x2") if isinstance(o.get("matrix_2x2"), dict) else {}
+    deltas = o.get("deltas") if isinstance(o.get("deltas"), dict) else {}
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    text = f"**策略对比完成**：{o.get('summary_text') or ''}"
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红旗：{names}。"
+
+    def _cell(key: str) -> tuple[str, str]:
+        cell = matrix.get(key) if isinstance(matrix.get(key), dict) else {}
+        return _fmt(cell.get("count")), _pct(cell.get("bad_rate"))
+
+    ba_c, ba_b = _cell("both_approve")
+    on_c, on_b = _cell("only_new")
+    ob_c, ob_b = _cell("only_baseline")
+    bd_c, bd_b = _cell("both_decline")
+    tables = [
+        {
+            "title": "2×2 决策一致性矩阵",
+            "columns": ["", "基线通过", "基线拒绝"],
+            "rows": [
+                ["新策略通过", f"{ba_c}（坏率{ba_b}）", f"{on_c}（坏率{on_b}）"],
+                ["新策略拒绝", f"{ob_c}（坏率{ob_b}）", f"{bd_c}（坏率{bd_b}）"],
+            ],
+        },
+        {
+            "title": "关键差异",
+            "columns": ["指标", "delta"],
+            "rows": [
+                ["审批率", _pct(deltas.get("approval_rate"))],
+                ["通过坏率", _pct(deltas.get("approved_bad_rate"))],
+                ["预期利润", _num(deltas.get("expected_profit"))],
+            ],
+        },
+    ]
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_adopt_strategy(o: dict):
+    retired = [str(item) for item in (o.get("retired_strategy_ids") or [])]
+    artifacts = [a for a in (o.get("artifacts") or []) if isinstance(a, dict)]
+    text = (
+        f"**策略已采纳**：`{o.get('strategy_id', '')}` v{o.get('version', '')}，"
+        f"状态 {o.get('status', '')}，退役 {len(retired)} 个旧版本，"
+        f"生成 {len(artifacts)} 份交付物。"
+    )
+    tables = [{
+        "title": "交付物",
+        "columns": ["类型", "路径"],
+        "rows": [[str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts],
+    }]
+    if retired:
+        tables.append({
+            "title": "退役策略",
+            "columns": ["策略 id"],
+            "rows": [[item] for item in retired],
+        })
+    return text, tables
+
+
+def _render_strategy_doc(o: dict):
+    sections = [str(item) for item in (o.get("sections") or [])]
+    text = f"**策略文档已生成**：`{o.get('doc_path', '')}`，共 {len(sections)} 个章节。"
+    tables = [{
+        "title": "文档章节",
+        "columns": ["#", "章节"],
+        "rows": [[str(index), section] for index, section in enumerate(sections, start=1)],
+    }]
     return text, tables
 
 
@@ -998,6 +1134,10 @@ _RENDERERS = {
     "build_strategy": _render_build_strategy,
     "backtest_strategy": _render_backtest_strategy,
     "tradeoff_view": _render_tradeoff_view,
+    "design_cutoff_bands": _render_design_cutoff_bands,
+    "compare_strategies": _render_compare_strategies,
+    "adopt_strategy": _render_adopt_strategy,
+    "render_strategy_doc": _render_strategy_doc,
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,

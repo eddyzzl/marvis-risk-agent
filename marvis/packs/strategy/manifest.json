@@ -814,6 +814,127 @@
         "read:strategy"
       ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "adopt_strategy",
+      "summary": "Adopt a backtested strategy behind a mandatory confirmation gate and emit decision-table and monitoring-plan deliverables.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backtest_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "adoption_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_stats": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "strategy_id",
+          "backtest_id",
+          "adoption_reason"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "retired_strategy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "strategy_id",
+          "version",
+          "status",
+          "retired_strategy_ids",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_adopt_strategy",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "render_strategy_doc",
+      "summary": "Render a Chinese-language strategy markdown document from persisted strategy, backtests, and artifacts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_stats": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "doc_path": {
+            "type": "string"
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "doc_path",
+          "sections"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_strategy_doc",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
     }
   ],
   "hooks": [],
