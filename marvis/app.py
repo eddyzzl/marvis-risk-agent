@@ -62,6 +62,7 @@ from marvis.recovery import reclaim_running_plans, reclaim_stale_running_tasks
 from marvis.routers.agent_memory import router as agent_memory_router
 from marvis.routers.llm import router as llm_router
 from marvis.routers.artifacts import router as artifacts_router
+from marvis.routers.audit import router as audit_router
 from marvis.routers.branding import router as branding_router
 from marvis.routers.data import router as data_router
 from marvis.routers.drafts import router as drafts_router
@@ -255,6 +256,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.include_router(agent_memory_router)
     app.include_router(llm_router)
     app.include_router(artifacts_router)
+    app.include_router(audit_router)
     app.include_router(branding_router)
     app.include_router(data_router)
     app.include_router(plugins_router)

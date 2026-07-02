@@ -14,7 +14,7 @@ from marvis.domain import (
 )
 from marvis.model_algorithms import normalize_algorithm
 from marvis.report_texts import COMPUTED_REPORT_TEXT_KEYS
-from marvis.repositories.audit import _write_audit_row
+from marvis.repositories.audit import _count_audit_rows, _list_audit_rows, _write_audit_row
 from marvis.repositories.modeling import _set_experiment_status_row
 from marvis.state_machine import (
     ConflictError,
@@ -193,6 +193,54 @@ class TaskRepository:
                     "SELECT * FROM tasks ORDER BY created_at DESC, id DESC"
                 ).fetchall()
         return [_row_to_task(row) for row in rows]
+
+    def list_audit(
+        self,
+        *,
+        kind: str | None = None,
+        kind_prefix: str | None = None,
+        target_ref: str | None = None,
+        target_ref_prefix: str | None = None,
+        task_id: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        return _list_audit_rows(
+            self.db_path,
+            kind=kind,
+            kind_prefix=kind_prefix,
+            target_ref=target_ref,
+            target_ref_prefix=target_ref_prefix,
+            task_id=task_id,
+            after=after,
+            before=before,
+            limit=limit,
+            offset=offset,
+        )
+
+    def count_audit(
+        self,
+        *,
+        kind: str | None = None,
+        kind_prefix: str | None = None,
+        target_ref: str | None = None,
+        target_ref_prefix: str | None = None,
+        task_id: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> int:
+        return _count_audit_rows(
+            self.db_path,
+            kind=kind,
+            kind_prefix=kind_prefix,
+            target_ref=target_ref,
+            target_ref_prefix=target_ref_prefix,
+            task_id=task_id,
+            after=after,
+            before=before,
+        )
 
     def update_status(
         self,

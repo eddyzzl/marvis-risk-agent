@@ -652,6 +652,7 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at_id ON audit(kind, at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_at_id ON audit(at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_target_ref_at ON audit(target_ref, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_caller_at ON llm_calls(caller, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
