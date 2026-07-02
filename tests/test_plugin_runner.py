@@ -1217,3 +1217,67 @@ def test_tool_runner_adhoc_validates_input_and_output_schema(tmp_path):
     assert mismatch.ok is False
     assert mismatch.error_kind == "schema"
     assert "echoed" in mismatch.error
+
+
+def test_worker_entrypoint_import_stays_dependency_free():
+    """PERF-5: the worker entrypoint must not reverse-import the DB/registry/
+    modeling dependency chain at module load time. Cold start should only pay
+    for the stdlib plus the lightweight ToolContext dataclass; heavy pack
+    modules are imported on demand inside _run_tool/_load_module."""
+    probe_lines = [
+        "import sys, json",
+        "before = set(sys.modules)",
+        "import marvis.plugins.subprocess_worker",
+        "after = set(sys.modules)",
+        "new_modules = after - before",
+        "print(json.dumps(sorted(new_modules)))",
+    ]
+    probe = "\n".join(probe_lines)
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    new_modules = json.loads(completed.stdout.strip().splitlines()[-1])
+    heavy_prefixes = ("marvis.db", "sklearn", "lightgbm", "scipy", "pandas", "marvis.repositories.modeling")
+    leaked = [name for name in new_modules if any(name == p or name.startswith(p + ".") for p in heavy_prefixes)]
+    assert leaked == [], f"worker entrypoint import pulled in heavy modules: {leaked}"
+
+
+def test_tool_runner_kills_worker_when_rss_exceeds_soft_limit(tmp_path):
+    runner, repo = _runtime(tmp_path)
+    runner._rss_memory_limit_mb = 64
+
+    result = runner.invoke(
+        ToolRef("_sample", "memory_hog"),
+        {"megabytes": 200, "hold_seconds": 5},
+        task_id="task-1",
+    )
+
+    assert result.ok is False
+    assert result.error_kind == "resource_limit"
+    assert result.resource_limits is not None
+    assert result.resource_limits["memory_limit_mb"] == 64
+    assert result.resource_limits["peak_rss_mb"] > 64
+    assert result.resource_limits["memory_limit_exceeded"] is True
+
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[-1]["outcome"] == "failed"
+    assert audits[-1]["detail"]["error_kind"] == "resource_limit"
+    assert audits[-1]["detail"]["resource_limits"]["memory_limit_exceeded"] is True
+
+
+def test_tool_runner_records_resource_usage_when_under_rss_limit(tmp_path):
+    runner, repo = _runtime(tmp_path)
+    runner._rss_memory_limit_mb = 4096
+
+    result = runner.invoke(ToolRef("_sample", "echo"), {"message": "hi"}, task_id="task-1")
+
+    assert result.ok is True
+    assert result.error_kind is None
+    audits = repo.list_audit(kind="tool.invoke")
+    assert audits[-1]["outcome"] == "succeeded"
+    assert audits[-1]["detail"]["resource_limits"]["memory_limit_applied"] in (True, False)
+

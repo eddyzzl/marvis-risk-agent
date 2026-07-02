@@ -267,6 +267,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
         datasets_root=settings.datasets_dir,
         workspace=settings.workspace,
         plugin_paths=[settings.plugins_dir],
+        rss_memory_limit_mb=environment.rss_memory_limit_mb,
     )
     hook_dispatcher = HookDispatcher(plugin_registry, tool_runner, plugin_repo)
     hook_dispatcher.rebuild_index()
@@ -293,6 +294,7 @@ def _configure_plugin_runtime(app: FastAPI, settings: Settings) -> None:
     app.state.memory_consolidation_scheduler = memory_consolidation_scheduler
     app.state.plugin_python_executable = python_executable
     app.state.plugin_paths = [settings.plugins_dir]
+    app.state.plugin_rss_memory_limit_mb = environment.rss_memory_limit_mb
 
 
 def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
@@ -319,6 +321,7 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
             datasets_root=settings.datasets_dir,
             workspace=settings.workspace,
             plugin_paths=app.state.plugin_paths,
+            rss_memory_limit_mb=app.state.plugin_rss_memory_limit_mb,
         )
         return PlanExecutor(
             plan_repo,

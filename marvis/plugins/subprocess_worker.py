@@ -18,7 +18,7 @@ import subprocess
 import sys
 import traceback
 
-from marvis.plugins.runner import ToolContext
+from marvis.plugins.contracts import ToolContext
 
 
 def worker_main() -> None:

@@ -10,6 +10,7 @@ from marvis.drafts.learning import distill_learning
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.drafts.web_search import fetch_url, web_search
+from marvis.execution_environment import load_execution_environment
 from marvis.llm_client import OpenAICompatibleLLMClient
 from marvis.llm_settings import resolve_llm_model
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
@@ -126,6 +127,7 @@ class _Runtime:
         self.plugin_repo = PluginRepository(settings.db_path)
         self.plugin_registry = PluginRegistry(self.plugin_repo)
         self.plugin_registry.load_from_db()
+        environment = load_execution_environment(settings.workspace)
         self.tool_runner = ToolRunner(
             ToolRegistry(self.plugin_registry),
             self.plugin_repo,
@@ -133,6 +135,7 @@ class _Runtime:
             datasets_root=Path(ctx.datasets_root),
             workspace=settings.workspace,
             plugin_paths=[settings.plugins_dir],
+            rss_memory_limit_mb=environment.rss_memory_limit_mb,
         )
         self.sandbox = DraftSandbox(self.tool_runner, self.drafts, self.draft_repo)
 

@@ -127,6 +127,32 @@
       "failure_policy": "fail",
       "entrypoint": "tool_random",
       "side_effects": []
+    },
+    {
+      "name": "memory_hog",
+      "summary": "Allocate a large buffer for RSS soft-monitor testing",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "megabytes": {"type": "integer", "minimum": 1},
+          "hold_seconds": {"type": "number", "minimum": 0}
+        },
+        "required": ["megabytes"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "allocated_mb": {"type": "integer"}
+        },
+        "required": ["allocated_mb"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_memory_hog",
+      "side_effects": []
     }
   ],
   "hooks": [],

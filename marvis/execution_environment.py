@@ -19,6 +19,10 @@ class ExecutionEnvironmentSettings:
     kernel_name: str = "python3"
     conda_env_name: str = ""
     python_executable: str = ""
+    # Soft RSS ceiling (MB) applied to plugin/pack tool worker subprocesses
+    # via marvis.resource_monitor.ProcessTreeResourceMonitor (REL-3). None
+    # disables RSS monitoring; setrlimit remains active regardless.
+    rss_memory_limit_mb: int | None = 4096
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,9 @@ def load_execution_environment(workspace: Path) -> ExecutionEnvironmentSettings:
         kernel_name=str(payload.get("kernel_name") or "python3"),
         conda_env_name=str(payload.get("conda_env_name") or ""),
         python_executable=str(payload.get("python_executable") or ""),
+        rss_memory_limit_mb=_normalize_rss_memory_limit_mb(
+            payload.get("rss_memory_limit_mb", 4096)
+        ),
     )
 
 
@@ -74,6 +81,16 @@ def save_execution_environment(
     path = _settings_path(workspace)
     write_json_atomic(path, asdict(settings), ensure_ascii=False, indent=2)
     return settings
+
+
+def _normalize_rss_memory_limit_mb(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return 4096
+    return limit if limit > 0 else None
 
 
 def available_kernel_names() -> list[str]:
