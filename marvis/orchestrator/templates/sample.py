@@ -425,9 +425,10 @@ MODELING = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "configure_tuning"),
             inputs_template={
                 "recipe": "$ref:选择建模规格.output.recipe",
+                "recipes": "$ref:选择建模规格.output.recipes",
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
-                "n_trials": "$ref:选择建模规格.output.n_trials",
+                "n_trials_by_recipe": "$ref:选择建模规格.output.n_trials_by_recipe",
                 "params": "$ref:选择建模规格.output.params",
                 "seed": "$ref:选择建模规格.output.seed",
             },
@@ -448,18 +449,20 @@ MODELING = WorkflowTemplate(
                 "split_col": "{slot:split_col}",
                 "split_values": "{slot:split_values}",
                 "recipe": "$ref:配置调参.output.recipe",
+                "recipes": "$ref:配置调参.output.recipes",
                 "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
                 "seed": "$ref:配置调参.output.seed",
                 "params": "$ref:配置调参.output.params",
-                # Bounded random search so the synchronous driver turn stays
-                # responsive; users can request a wider search later (G3). Non-lgb
-                # recipes skip the search and train with their own defaults.
-                "n_trials": "$ref:配置调参.output.n_trials",
+                # Bounded two-stage random search per recipe so the synchronous
+                # driver turn stays responsive; users can request a wider search
+                # later (G3). Every BINARY_MODELING_RECIPES family now tunes
+                # (TUNE-1/SEL-2) — each with its own budget from n_trials_by_recipe.
+                "n_trials_by_recipe": "$ref:配置调参.output.n_trials_by_recipe",
             },
             depends_on_titles=("切分样本", "特征筛选", "配置调参"),
-            # best_params must be present + a dict, but MAY be empty: only lgb runs the random
-            # search; every other recipe (lr/xgb/scorecard/mlp/regressor/multiclass) skips it
-            # and trains with its own defaults ({}), so "nonempty" would wrongly fail them.
+            # best_params must be present + a dict: single recipe -> flat params
+            # dict (possibly empty for a non-tunable family); multiple recipes ->
+            # a dict keyed by recipe id, each value itself the tuned params dict.
             post_checks=(PostCheck("schema", {
                 "type": "object",
                 "properties": {"best_params": {"type": "object"}},
@@ -681,9 +684,10 @@ MODELING_WITH_JOIN = WorkflowTemplate(
             tool_ref=ToolRef("modeling", "configure_tuning"),
             inputs_template={
                 "recipe": "$ref:选择建模规格.output.recipe",
+                "recipes": "$ref:选择建模规格.output.recipes",
                 "target_type": "$ref:选择建模规格.output.target_type",
                 "sample_weight_col": "$ref:选择建模规格.output.sample_weight_col",
-                "n_trials": "$ref:选择建模规格.output.n_trials",
+                "n_trials_by_recipe": "$ref:选择建模规格.output.n_trials_by_recipe",
                 "params": "$ref:选择建模规格.output.params",
                 "seed": "$ref:选择建模规格.output.seed",
             },
@@ -704,10 +708,11 @@ MODELING_WITH_JOIN = WorkflowTemplate(
                 "split_col": "$ref:切分样本.output.split_col",
                 "split_values": "$ref:切分样本.output.split_values",
                 "recipe": "$ref:配置调参.output.recipe",
+                "recipes": "$ref:配置调参.output.recipes",
                 "sample_weight_col": "$ref:配置调参.output.sample_weight_col",
                 "seed": "$ref:配置调参.output.seed",
                 "params": "$ref:配置调参.output.params",
-                "n_trials": "$ref:配置调参.output.n_trials",
+                "n_trials_by_recipe": "$ref:配置调参.output.n_trials_by_recipe",
             },
             depends_on_titles=("切分样本", "特征筛选", "配置调参"),
             post_checks=(PostCheck("schema", {

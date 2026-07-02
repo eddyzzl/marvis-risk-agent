@@ -159,22 +159,39 @@ def _render_choose_modeling_spec(o: dict):
 def _render_configure_tuning(o: dict):
     tune_enabled = bool(o.get("tune_enabled"))
     sample_weight_col = str(o.get("sample_weight_col") or "")
-    text = (
-        f"**调参配置已生成**:算法 `{o.get('recipe', '')}`,"
-        f"{'执行' if tune_enabled else '跳过'}随机搜索,"
-        f"轮数 {o.get('n_trials', 0)}。"
-    )
+    budgets = o.get("n_trials_by_recipe") if isinstance(o.get("n_trials_by_recipe"), dict) else {}
+    recipes = [str(item) for item in (o.get("recipes") or []) if str(item)]
+    total_n_trials = o.get("total_n_trials")
+    multi = len(budgets) > 1
+    if multi:
+        budget_note = "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)
+        text = (
+            f"**调参配置已生成**:候选算法 {'/'.join(recipes)},"
+            f"{'每个算法各自执行' if tune_enabled else '跳过'}两阶段随机搜索"
+            f"(按算法预算 {budget_note};多算法总预算=Σ各配方预算={_fmt(total_n_trials)} 轮)。"
+        )
+    else:
+        text = (
+            f"**调参配置已生成**:算法 `{o.get('recipe', '')}`,"
+            f"{'执行' if tune_enabled else '跳过'}两阶段随机搜索,"
+            f"轮数 {o.get('n_trials', 0)}。"
+        )
+    rows = [
+        ["目标类型", str(o.get("target_type") or "")],
+        ["算法", "/".join(recipes) if recipes else str(o.get("recipe") or "")],
+        ["随机搜索", "是" if tune_enabled else "否"],
+    ]
+    if multi:
+        rows.append(["按算法调参预算(轮数,总预算=Σ各配方预算)", "、".join(f"{recipe}={budgets[recipe]}" for recipe in recipes if recipe in budgets)])
+        rows.append(["总预算", _fmt(total_n_trials)])
+    else:
+        rows.append(["调参轮数", _fmt(o.get("n_trials", ""))])
+    rows.append(["样本权重列", sample_weight_col or "不使用"])
+    rows.append(["说明", str(o.get("reason") or "")])
     tables = [{
         "title": "调参配置",
         "columns": ["项目", "值"],
-        "rows": [
-            ["目标类型", str(o.get("target_type") or "")],
-            ["算法", str(o.get("recipe") or "")],
-            ["随机搜索", "是" if tune_enabled else "否"],
-            ["调参轮数", _fmt(o.get("n_trials", ""))],
-            ["样本权重列", sample_weight_col or "不使用"],
-            ["说明", str(o.get("reason") or "")],
-        ],
+        "rows": rows,
     }]
     params = o.get("params") if isinstance(o.get("params"), dict) else {}
     if params:
