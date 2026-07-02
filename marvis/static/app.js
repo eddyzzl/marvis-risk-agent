@@ -3453,6 +3453,12 @@ function renderMetricPreview(
   renderSignatures.metricPreviewTaskId = previewTaskId;
   renderSignatures.metricPreview = nextSignature;
 
+  // VD-9: play the databar/KPI-bar entry animation only on the first
+  // populated metric render for this task - later rebuilds triggered by
+  // real data drift (polling) still rebuild the DOM but skip the replay,
+  // mirroring the reproducibility precision-bar animation policy above.
+  const shouldAnimateMetricBars = renderSignatures.metricPreviewAnimatedTaskId !== previewTaskId;
+
   // Extract the standalone ROC&KS section so each curve can sit beneath
   // its matching KPI card. The original section is dropped from the
   // visible list (we render 6 sections, not 7).
@@ -3475,11 +3481,14 @@ function renderMetricPreview(
     return;
   }
   const sectionHtml = visibleSections
-    .map((section, index) => renderMetricTableSection(section, index, { rocCurves }))
+    .map((section, index) => renderMetricTableSection(section, index, { rocCurves, animate: shouldAnimateMetricBars }))
     .join("");
   $("metricPreview").innerHTML = sectionHtml;
   attachRocInteractions($("metricPreview"));
   attachMetricTooltip($("metricPreview"));
+  if (shouldAnimateMetricBars) {
+    renderSignatures.metricPreviewAnimatedTaskId = previewTaskId;
+  }
 }
 
 function renderMetricTableSection(section = {}, index = 0, options = {}) {
@@ -3496,9 +3505,9 @@ function renderMetricTableSection(section = {}, index = 0, options = {}) {
     '<div class="metric-table-stack">',
     ...tables.map((table) => {
       if (isOverallEffect && table.layout === "kpi_cards") {
-        return renderKpiCards(table, { curves: options.rocCurves || null });
+        return renderKpiCards(table, { curves: options.rocCurves || null, animate: options.animate });
       }
-      return renderMetricTable(table);
+      return renderMetricTable(table, { animate: options.animate });
     }),
     "</div>",
     "</section>",
@@ -3536,7 +3545,7 @@ function renderCellByKind(spec, value, context) {
       const tip = `${headerLabel} ${value} · ${rank}`;
       return {
         cls: "cell-databar",
-        html: `<span class="databar" data-color="${color}" data-emphasize="${emphasize}" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)}">`
+        html: `<span class="databar" data-color="${color}" data-emphasize="${emphasize}" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)};--bar-index:${context.rowIndex ?? 0}">`
           + `<span class="databar-fill"></span>`
           + `<span class="databar-label">${escapeHtml(String(value ?? ""))}</span>`
           + `</span>`,
@@ -3590,18 +3599,18 @@ function metricHeaderShouldRightAlign(headerLabel) {
   return /^(KS|KS\(%\)|AUC|AUC\(%\)|PSI|IV|样本量|坏样本量|好样本量|逾期率|坏账率|通过率|命中率|缺失率|占比|比例|分数|评分|重要性|Gain|Split|Coverage|Lift|5%头部lift|5%尾部lift)$/i.test(label);
 }
 
-function renderMetricTable(table = {}) {
+function renderMetricTable(table = {}, options = {}) {
   const layout = table.layout || "table";
   switch (layout) {
     case "kpi_cards":
-      return renderKpiCards(table);
+      return renderKpiCards(table, options);
     case "trend_table":
       return renderTrendTable(table);
     case "roc_ks_curve":
       return renderRocKsCurve(table);
     case "table":
     default:
-      return renderEnhancedTable(table);
+      return renderEnhancedTable(table, options);
   }
 }
 
@@ -3610,6 +3619,10 @@ function renderKpiCards(table = {}, options = {}) {
   const rows = Array.isArray(table.rows) ? table.rows : [];
   const specs = Array.isArray(table.column_specs) ? table.column_specs : [];
   const curves = (options && options.curves) || null;
+  // VD-9: default to animating (e.g. standalone callers/tests) unless a
+  // caller explicitly opts out via options.animate === false.
+  const animate = options.animate !== false;
+  const animationAttribute = animate ? "" : ' data-animation="none"';
 
   const idx = (label) => headers.indexOf(label);
   const idxAny = (...labels) => labels.map(idx).find((index) => index >= 0) ?? -1;
@@ -3650,12 +3663,12 @@ function renderKpiCards(table = {}, options = {}) {
       `  <div class="kpi-card-primary" data-tip="${escapeHtml(`KS ${cell(ksIdx)} · ${columnRanks(rows, ksIdx).get(rowIndex) || ""}`)}">`,
       `    <span class="kpi-card-primary-label">KS</span>`,
       `    <span class="kpi-card-primary-value">${escapeHtml(String(cell(ksIdx) ?? ""))}</span>`,
-      `    <span class="kpi-card-primary-bar" style="--fraction:${(ksFractions.get(rowIndex) ?? 0).toFixed(4)}"><i></i></span>`,
+      `    <span class="kpi-card-primary-bar" style="--fraction:${(ksFractions.get(rowIndex) ?? 0).toFixed(4)};--bar-index:0"><i></i></span>`,
       `  </div>`,
       `  <div class="kpi-card-rule"></div>`,
-      kpiCardRow("AUC", cell(aucIdx), aucFractions.get(rowIndex), rowIndex, aucIdx, rows, "var(--accent)"),
-      kpiCardRow("5%头部lift", cell(headLiftIdx), headLiftFractions.get(rowIndex), rowIndex, headLiftIdx, rows, "var(--metric-databar-accent)"),
-      kpiCardRow("5%尾部lift", cell(tailLiftIdx), tailLiftFractions.get(rowIndex), rowIndex, tailLiftIdx, rows, "var(--metric-databar-accent)"),
+      kpiCardRow("AUC", cell(aucIdx), aucFractions.get(rowIndex), rowIndex, aucIdx, rows, "var(--accent)", 1),
+      kpiCardRow("5%头部lift", cell(headLiftIdx), headLiftFractions.get(rowIndex), rowIndex, headLiftIdx, rows, "var(--metric-databar-accent)", 2),
+      kpiCardRow("5%尾部lift", cell(tailLiftIdx), tailLiftFractions.get(rowIndex), rowIndex, tailLiftIdx, rows, "var(--metric-databar-accent)", 3),
       kpiPsiRow(psiDisplay, psiNumeric, psiThresholds),
       `  <footer class="kpi-card-footer">`,
       `    <span class="kpi-card-footer-cell"><span class="kpi-card-footer-label">样本量</span><span class="kpi-card-footer-value">${escapeHtml(String(cell(sampleIdx) ?? ""))}</span></span>`,
@@ -3669,7 +3682,7 @@ function renderKpiCards(table = {}, options = {}) {
   }).join("");
 
   return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "")}">`,
+    `<div class="metric-table-wrap"${animationAttribute} data-metric-key="${escapeHtml(table.key || "")}">`,
     `<div class="kpi-cards" style="--kpi-count:${rows.length}">`,
     cardHtml,
     `</div>`,
@@ -3677,12 +3690,12 @@ function renderKpiCards(table = {}, options = {}) {
   ].join("");
 }
 
-function kpiCardRow(label, displayValue, fraction, rowIndex, columnIndex, rows, color) {
+function kpiCardRow(label, displayValue, fraction, rowIndex, columnIndex, rows, color, barIndex = 0) {
   const tip = `${label} ${displayValue} · ${columnRanks(rows, columnIndex).get(rowIndex) || ""}`;
   return [
     `<div class="kpi-card-row" data-tip="${escapeHtml(tip)}">`,
     `  <span class="kpi-card-row-label">${escapeHtml(label)}</span>`,
-    `  <span class="kpi-card-row-bar" style="--fraction:${(fraction ?? 0).toFixed(4)};--bar-color:${color}"><i></i></span>`,
+    `  <span class="kpi-card-row-bar" style="--fraction:${(fraction ?? 0).toFixed(4)};--bar-color:${color};--bar-index:${barIndex}"><i></i></span>`,
     `  <span class="kpi-card-row-value">${escapeHtml(String(displayValue ?? ""))}</span>`,
     `</div>`,
   ].join("");
@@ -3951,15 +3964,17 @@ function attachMetricTooltip(rootEl) {
   document.addEventListener("scroll", hide, { passive: true, capture: true });
 }
 
-function renderEnhancedTable(table = {}) {
-  return renderEnhancedTableExplicit(table);
+function renderEnhancedTable(table = {}, options = {}) {
+  return renderEnhancedTableExplicit(table, options);
 }
 
-function renderEnhancedTableExplicit(table) {
+function renderEnhancedTableExplicit(table, options = {}) {
   const headers = Array.isArray(table.headers) ? table.headers : [];
   const rows = Array.isArray(table.rows) ? table.rows : [];
   const specs = Array.isArray(table.column_specs) ? table.column_specs : [];
   const columnCount = headers.length;
+  // VD-9: default to animating unless a caller explicitly opts out.
+  const animationAttribute = options.animate === false ? ' data-animation="none"' : "";
 
   const fractionsByColumn = new Map();
   const heatByColumn = new Map();
@@ -4006,7 +4021,7 @@ function renderEnhancedTableExplicit(table) {
       }).join("");
 
   return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "")}">`,
+    `<div class="metric-table-wrap"${animationAttribute} data-metric-key="${escapeHtml(table.key || "")}">`,
     '<div class="metric-table-scroll">',
     '<table class="metric-table metric-table-hoverable">',
     '<thead><tr>',
@@ -5255,7 +5270,11 @@ function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fr
       const tip = `${headerLabel} ${raw}`;
       return {
         cls: "cell-databar",
-        html: `<span class="databar" data-color="primary" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)}">`
+        // VD-9: driver-timeline tables render once and are never rebuilt in
+        // place (see comment on agentMessageTablesHtml below), so the entry
+        // animation is always safe to play here - no data-animation gate
+        // needed, unlike the polled validation metric preview above.
+        html: `<span class="databar" data-color="primary" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)};--bar-index:${rowIndex}">`
           + `<span class="databar-fill"></span>`
           + `<span class="databar-label">${escapeHtml(String(raw))}</span>`
           + `</span>`,

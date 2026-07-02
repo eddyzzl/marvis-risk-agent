@@ -34,6 +34,11 @@ export function createRenderSignatures() {
     workflowStepper: "",
     metricPreview: "",
     metricPreviewTaskId: "",
+    // VD-9: gate the databar/KPI-bar entry animation (like the
+    // reproducibility precision-bar below) so it plays only on the first
+    // populated metric render for a given task, not on every polling
+    // rebuild once real data drift changes the signature again.
+    metricPreviewAnimatedTaskId: "",
     // Reproducibility precision-bar chart lives in a second highly-animated
     // region. We track its structural signature here (instead of on the DOM
     // dataset) and gate the CSS entry animation so it only plays for the

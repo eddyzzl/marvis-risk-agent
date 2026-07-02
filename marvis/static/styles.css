@@ -5807,6 +5807,22 @@ dialog.draft-tools-dialog,
   -webkit-backdrop-filter: blur(12px) saturate(1.4);
   backdrop-filter: blur(12px) saturate(1.4);
   box-shadow: var(--glass-edge);
+  /* VD-9: gate cards are appended once per driver turn and never rebuilt
+     in place (the timeline only re-renders on real structural change), so
+     a one-shot entry animation here is always safe - no replay-on-poll
+     risk like the databar/KPI-bar animations above. */
+  animation: gate-card-enter 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes gate-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .gate-card[data-gate-tone="review"] {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -5886,7 +5902,8 @@ dialog.draft-tools-dialog,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gate-card-pill::before {
+  .gate-card-pill::before,
+  .gate-card {
     animation: none;
   }
 }
@@ -6852,6 +6869,19 @@ body[data-theme="dark"] .metric-table-section {
   background: var(--bar-color, var(--accent));
   opacity: 0.85;
   transition: width .35s ease-out;
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+/* VD-9: skip the entry animation on rebuilds where the wrapping metric
+   table isn't rendering for the first time (polling redraws with the same
+   or newer data must not keep replaying the grow-in). */
+.metric-table-wrap[data-animation="none"] .databar-fill {
+  animation: none;
+}
+@keyframes bar-grow-x {
+  from { transform: scaleX(0); opacity: 0; }
+  to { transform: scaleX(1); opacity: 0.85; }
 }
 .databar-label {
   position: relative;
@@ -7075,7 +7105,26 @@ body[data-theme="dark"] .period-text {
   margin-bottom: 10px;
 }
 .kpi-card-primary-label { font-size: 11px; color: var(--metric-text-muted); }
-.kpi-card-primary-value { font-size: 28px; font-weight: 700; color: var(--metric-text-strong); }
+.kpi-card-primary-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--metric-text-strong);
+  animation: kpi-value-reveal 0.4s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: 80ms;
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-value {
+  animation: none;
+}
+@keyframes kpi-value-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 .kpi-card-primary-bar {
   flex: 1;
   position: relative;
@@ -7084,7 +7133,18 @@ body[data-theme="dark"] .period-text {
   border-radius: 4px;
   overflow: hidden;
 }
-.kpi-card-primary-bar > i { position: absolute; inset: 0 auto 0 0; background: var(--accent); width: calc(var(--fraction, 0) * 100%); }
+.kpi-card-primary-bar > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-primary-bar > i {
+  animation: none;
+}
 .kpi-card-rule { height: 1px; background: var(--metric-border); margin: 6px 0 8px; }
 .kpi-card-row {
   display: grid;
@@ -7107,6 +7167,20 @@ body[data-theme="dark"] .period-text {
   inset: 0 auto 0 0;
   background: var(--bar-color, var(--accent));
   width: calc(var(--fraction, 0) * 100%);
+  transform-origin: left center;
+  animation: bar-grow-x 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--bar-index, 0) * 50ms);
+}
+.metric-table-wrap[data-animation="none"] .kpi-card-row-bar > i {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .databar-fill,
+  .kpi-card-primary-bar > i,
+  .kpi-card-row-bar > i,
+  .kpi-card-primary-value {
+    animation: none;
+  }
 }
 .kpi-card-row-value { text-align: right; font-weight: 700; color: var(--metric-text-strong); }
 .kpi-card-footer {
