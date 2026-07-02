@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.data.labels import resolve_modeling_splits
-from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift
+from marvis.feature.metrics import feature_auc, feature_ks, head_tail_lift, weighted_feature_auc, weighted_feature_ks
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.recipes.common import carve_early_stop_fold, cat_feature_indices
 
@@ -217,6 +217,7 @@ def _make_cv_trial_runner(
     that wins consistently across folds.
     """
     fold_indices = _cv_folds(train, cv_folds=cv_folds, seed=seed, group_cols=group_cols)
+    fold_woot = _sample_weight(oot, weight_col) if oot is not None and weight_col else None
     fold_runners: list[Callable[[dict, str], dict]] = []
     for fold in range(cv_folds):
         fold_test_idx = fold_indices[fold]
@@ -243,7 +244,7 @@ def _make_cv_trial_runner(
             train=fold_train, test=fold_test, oot=oot,
             fit_train=fold_fit_train, valid=fold_valid,
             feats=feats, target_col=target_col,
-            ytr=fold_ytr, yte=fold_yte, wtr=fold_wtr, wte=fold_wte,
+            ytr=fold_ytr, yte=fold_yte, wtr=fold_wtr, wte=fold_wte, woot=fold_woot,
             yfit=fold_yfit, yva=fold_yva, wfit=fold_wfit, wva=fold_wva,
             seed=seed, early_stopping_rounds=early_stopping_rounds,
             max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
@@ -260,21 +261,37 @@ def _make_cv_trial_runner(
         "train_auc", "test_auc", "oot_ks", "oot_auc",
         "lift_head_5", "lift_tail_5", "lift_head_10", "lift_tail_10",
         "overfit_gap_to", "oot_stability_gap",
+        "weighted_train_auc", "weighted_test_auc", "weighted_oot_ks", "weighted_oot_auc",
     )
 
     def cv_runner(params: dict, stage: str) -> dict:
         fold_records = [runner(params, stage) for runner in fold_runners]
-        fold_test_ks = [record["test_ks"] for record in fold_records]
+        # TUNE-5: fold spread/score use the weighted test KS when weights exist
+        # (same fallback _score_trial already applies per fold) -- otherwise CV
+        # would optimise the weighted objective per-fold but rank param sets by
+        # the unweighted one when combining folds.
+        fold_test_ks = [
+            record["weighted_test_ks"] if record.get("weighted_test_ks") is not None else record["test_ks"]
+            for record in fold_records
+        ]
+        fold_train_ks = [
+            record["weighted_train_ks"] if record.get("weighted_train_ks") is not None else record["train_ks"]
+            for record in fold_records
+        ]
         mean_ks = float(np.mean(fold_test_ks))
         std_ks = float(np.std(fold_test_ks))
         score = mean_ks - overfit_penalty * std_ks
         merged = dict(fold_records[0])
         merged["train_ks"] = float(np.mean([record["train_ks"] for record in fold_records]))
-        merged["test_ks"] = mean_ks
+        merged["test_ks"] = float(np.mean([record["test_ks"] for record in fold_records]))
+        if any(record.get("weighted_train_ks") is not None for record in fold_records):
+            merged["weighted_train_ks"] = float(np.mean(fold_train_ks))
+        if any(record.get("weighted_test_ks") is not None for record in fold_records):
+            merged["weighted_test_ks"] = mean_ks
         merged["test_ks_std"] = std_ks
         merged["cv_fold_test_ks"] = fold_test_ks
         merged["score"] = score
-        merged["overfit_gap_tt"] = merged["train_ks"] - mean_ks
+        merged["overfit_gap_tt"] = float(np.mean(fold_train_ks)) - mean_ks
         for key in _AVERAGED_KEYS:
             values = [record.get(key) for record in fold_records]
             merged[key] = float(np.mean(values)) if all(v is not None for v in values) else None
@@ -440,6 +457,9 @@ def _run_lgb_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     import lightgbm as lgb
 
@@ -465,6 +485,7 @@ def _run_lgb_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=rounds,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -496,23 +517,45 @@ def _score_trial(
     overfit_penalty: float,
     stage: str,
     best_iteration: int | None = None,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
+    """Score one trial's predictions. TUNE-5: when ``wtr``/``wte`` (sample weights)
+    are given, the score driving trial/champion selection uses weighted KS
+    (``weighted_train_ks``/``weighted_test_ks``) instead of the unweighted KS --
+    a trial tuned against weighted training data must also be *selected* against
+    the weighted population, or the search optimises one objective while picking
+    winners by another. Unweighted train_ks/test_ks/oot_ks are still computed and
+    reported alongside (never dropped) so both readings stay auditable."""
     train_ks = feature_ks(train_preds, ytr)
     test_ks = feature_ks(test_preds, yte)
     train_auc = feature_auc(train_preds, ytr)
     test_auc = feature_auc(test_preds, yte)
     lift = head_tail_lift(test_preds, yte)
+    weighted_train_ks = weighted_feature_ks(train_preds, ytr, wtr) if wtr is not None else None
+    weighted_test_ks = weighted_feature_ks(test_preds, yte, wte) if wte is not None else None
+    weighted_train_auc = weighted_feature_auc(train_preds, ytr, wtr) if wtr is not None else None
+    weighted_test_auc = weighted_feature_auc(test_preds, yte, wte) if wte is not None else None
     if oot is None or not oot_has_labels:
-        oot_ks = oot_auc = None
+        oot_ks = oot_auc = weighted_oot_ks = weighted_oot_auc = None
     else:
         yoot = oot[target_col].to_numpy(dtype=float)
         oot_preds = score_fn(oot)
         oot_ks = feature_ks(oot_preds, yoot)
         oot_auc = feature_auc(oot_preds, yoot)
-    gap_tt = train_ks - test_ks
-    gap_to = (train_ks - oot_ks) if oot_ks is not None else None
-    oot_stability_gap = abs(test_ks - oot_ks) if oot_ks is not None else None
-    score = _trial_score(train_ks=train_ks, test_ks=test_ks, overfit_penalty=overfit_penalty)
+        weighted_oot_ks = weighted_feature_ks(oot_preds, yoot, woot) if woot is not None else None
+        weighted_oot_auc = weighted_feature_auc(oot_preds, yoot, woot) if woot is not None else None
+    # TUNE-5: score by the weighted KS when weights exist, else the unweighted one --
+    # same fallback used for train_ks/test_ks below so gaps stay on the same footing
+    # as whichever metric actually drove selection.
+    score_train_ks = weighted_train_ks if weighted_train_ks is not None else train_ks
+    score_test_ks = weighted_test_ks if weighted_test_ks is not None else test_ks
+    score_oot_ks = weighted_oot_ks if weighted_oot_ks is not None else oot_ks
+    gap_tt = score_train_ks - score_test_ks
+    gap_to = (score_train_ks - score_oot_ks) if score_oot_ks is not None else None
+    oot_stability_gap = abs(score_test_ks - score_oot_ks) if score_oot_ks is not None else None
+    score = _trial_score(train_ks=score_train_ks, test_ks=score_test_ks, overfit_penalty=overfit_penalty)
     record = {
         "params": params,
         "train_ks": train_ks, "test_ks": test_ks, "oot_ks": oot_ks, "score": score,
@@ -523,6 +566,18 @@ def _score_trial(
         "oot_stability_gap": oot_stability_gap,
         "search_stage": stage,
     }
+    if weighted_train_ks is not None:
+        record["weighted_train_ks"] = weighted_train_ks
+    if weighted_test_ks is not None:
+        record["weighted_test_ks"] = weighted_test_ks
+    if weighted_oot_ks is not None:
+        record["weighted_oot_ks"] = weighted_oot_ks
+    if weighted_train_auc is not None:
+        record["weighted_train_auc"] = weighted_train_auc
+    if weighted_test_auc is not None:
+        record["weighted_test_auc"] = weighted_test_auc
+    if weighted_oot_auc is not None:
+        record["weighted_oot_auc"] = weighted_oot_auc
     if best_iteration is not None:
         record["best_iteration"] = best_iteration
     return record
@@ -607,6 +662,9 @@ def _run_xgb_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     import xgboost as xgb
 
@@ -642,6 +700,7 @@ def _run_xgb_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=best_iteration,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -694,6 +753,9 @@ def _run_catboost_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wtr: np.ndarray | None = None,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from catboost import CatBoostClassifier
 
@@ -738,6 +800,7 @@ def _run_catboost_trial(
         overfit_penalty=overfit_penalty,
         stage=stage,
         best_iteration=best_iteration,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -776,6 +839,8 @@ def _run_lr_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.linear_model import LogisticRegression
 
@@ -797,6 +862,7 @@ def _run_lr_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -845,6 +911,8 @@ def _run_scorecard_trial(
     target_col: str,
     enforce_monotonic: bool,
     monotonic_direction_hint: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.linear_model import LogisticRegression
 
@@ -889,6 +957,7 @@ def _run_scorecard_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
     return record
 
@@ -938,6 +1007,8 @@ def _run_mlp_trial(
     overfit_penalty: float,
     oot_has_labels: bool,
     target_col: str,
+    wte: np.ndarray | None = None,
+    woot: np.ndarray | None = None,
 ) -> dict:
     from sklearn.impute import SimpleImputer
     from sklearn.neural_network import MLPClassifier
@@ -967,6 +1038,7 @@ def _run_mlp_trial(
         score_fn=score_fn,
         overfit_penalty=overfit_penalty,
         stage=stage,
+        wtr=wtr, wte=wte, woot=woot,
     )
 
 
@@ -1045,6 +1117,10 @@ def tune_hyperparameters(
     yte = test[target_col].to_numpy(dtype=float)
     wtr = _sample_weight(train, weight_col)
     wte = _sample_weight(test, weight_col)
+    # TUNE-5: OOT sample weight, for the (report-only) weighted_oot_ks/auc trial
+    # fields -- mirrors compute_model_metrics' weighted OOT metrics on the training
+    # path. OOT is never scored/selected on either way (DOM-9).
+    woot = _sample_weight(oot, weight_col) if oot is not None and weight_col else None
     pos = _weighted_count(ytr, wtr, 1.0)
     neg = _weighted_count(ytr, wtr, 0.0)
     pos_weight_hint = round(neg / pos, 1) if pos > 0 else 1.0
@@ -1072,7 +1148,7 @@ def tune_hyperparameters(
         train=train, test=test, oot=oot,
         fit_train=fit_train, valid=valid,
         feats=feats, target_col=target_col,
-        ytr=ytr, yte=yte, wtr=wtr, wte=wte,
+        ytr=ytr, yte=yte, wtr=wtr, wte=wte, woot=woot,
         yfit=yfit, yva=yva, wfit=wfit, wva=wva,
         seed=seed, early_stopping_rounds=early_stopping_rounds,
         max_boost_round=max_boost_round, overfit_penalty=overfit_penalty,
@@ -1147,6 +1223,15 @@ def tune_hyperparameters(
             # from "got lucky on one fold".
             **({"test_ks_std": best["test_ks_std"]} if "test_ks_std" in best else {}),
             **({"cv_fold_test_ks": best["cv_fold_test_ks"]} if "cv_fold_test_ks" in best else {}),
+            # TUNE-5: only present when sample_weight_col was given -- the weighted
+            # KS/AUC that actually drove trial/champion selection, reported
+            # alongside the always-present unweighted reading above.
+            **({"weighted_train_ks": best["weighted_train_ks"]} if "weighted_train_ks" in best else {}),
+            **({"weighted_test_ks": best["weighted_test_ks"]} if "weighted_test_ks" in best else {}),
+            **({"weighted_oot_ks": best["weighted_oot_ks"]} if "weighted_oot_ks" in best else {}),
+            **({"weighted_train_auc": best["weighted_train_auc"]} if "weighted_train_auc" in best else {}),
+            **({"weighted_test_auc": best["weighted_test_auc"]} if "weighted_test_auc" in best else {}),
+            **({"weighted_oot_auc": best["weighted_oot_auc"]} if "weighted_oot_auc" in best else {}),
         },
         trials=tuple(trials),
         n_trials=len(trials),
@@ -1169,6 +1254,7 @@ def _recipe_search_hooks(
     yte: np.ndarray,
     wtr: np.ndarray | None,
     wte: np.ndarray | None,
+    woot: np.ndarray | None,
     yfit: np.ndarray,
     yva: np.ndarray,
     wfit: np.ndarray | None,
@@ -1204,6 +1290,7 @@ def _recipe_search_hooks(
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _sample_coarse_params, _sample_fine_params, runner
@@ -1223,6 +1310,7 @@ def _recipe_search_hooks(
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _xgb_sample_coarse, _xgb_sample_fine, runner
@@ -1242,6 +1330,7 @@ def _recipe_search_hooks(
                 early_stopping_rounds=early_stopping_rounds,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wtr=wtr, wte=wte, woot=woot,
             )
 
         return _catboost_sample_coarse, _catboost_sample_fine, runner
@@ -1257,6 +1346,7 @@ def _recipe_search_hooks(
                 ytr=ytr, yte=yte, wtr=wtr,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wte=wte, woot=woot,
             )
 
         return _lr_sample_coarse, _lr_sample_fine, runner
@@ -1276,6 +1366,7 @@ def _recipe_search_hooks(
                 oot_has_labels=oot_has_labels, target_col=target_col,
                 enforce_monotonic=enforce_monotonic,
                 monotonic_direction_hint=monotonic_direction_hint,
+                wte=wte, woot=woot,
             )
 
         return _scorecard_sample_coarse, _scorecard_sample_fine, runner
@@ -1291,6 +1382,7 @@ def _recipe_search_hooks(
                 ytr=ytr, yte=yte, wtr=wtr,
                 overfit_penalty=overfit_penalty,
                 oot_has_labels=oot_has_labels, target_col=target_col,
+                wte=wte, woot=woot,
             )
 
         return _mlp_sample_coarse, _mlp_sample_fine, runner

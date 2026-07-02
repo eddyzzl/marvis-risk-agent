@@ -1690,6 +1690,38 @@ def test_pick_best_experiment_binary_selects_by_test_ks_not_oot_ks():
     assert metric == "test_ks(overfit-penalized)"
 
 
+def test_pick_best_experiment_prefers_weighted_ks_when_present():
+    """TUNE-5: when an experiment's metrics carry weighted_test_ks/weighted_train_ks
+    (i.e. it trained with a sample_weight_col), champion selection must compare on
+    the weighted reading, not the unweighted one -- a candidate with a WORSE
+    unweighted test_ks but a BETTER weighted_test_ks should win."""
+    from marvis.packs.modeling.tools import _pick_best_experiment
+
+    experiments = [
+        {
+            "experiment_id": "high-unweighted-low-weighted",
+            "recipe": "lgb",
+            "metrics": {
+                "train_ks": 0.50, "test_ks": 0.45, "oot_ks": 0.40,
+                "weighted_train_ks": 0.30, "weighted_test_ks": 0.20,
+            },
+        },
+        {
+            "experiment_id": "low-unweighted-high-weighted",
+            "recipe": "lr",
+            "metrics": {
+                "train_ks": 0.40, "test_ks": 0.35, "oot_ks": 0.30,
+                "weighted_train_ks": 0.42, "weighted_test_ks": 0.40,
+            },
+        },
+    ]
+
+    best, metric = _pick_best_experiment(experiments, target_type="binary")
+
+    assert best["experiment_id"] == "low-unweighted-high-weighted"
+    assert metric == "test_ks(overfit-penalized)"
+
+
 def test_pick_best_comparison_row_prefers_delivery_ready_candidate():
     from marvis.packs.modeling.tools import _pick_best_comparison_row
 

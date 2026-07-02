@@ -1008,14 +1008,26 @@ BINARY_SELECTION_METRIC = "test_ks(overfit-penalized)"
 def _overfit_penalized_test_ks(metrics: dict) -> float:
     """``test_ks - penalty * max(0, train_ks - test_ks)``; ``-inf`` when test_ks is missing.
 
+    TUNE-5: uses ``weighted_test_ks``/``weighted_train_ks`` when the experiment has
+    them (i.e. it trained with a sample_weight_col) instead of the unweighted
+    reading — a model trained against a weighted population must also be
+    *compared* against the weighted population, or champion selection silently
+    optimises a different objective than training did. Falls back to the
+    unweighted KS when no weighted metric is present (the historical, unweighted
+    contract, unchanged).
+
     OOT is intentionally excluded from the score — using it for champion selection would
     contradict tune_hyperparameters' explicit "OOT metrics are reported for transparency
     but are not used for hyperparameter selection" policy (DOM-9).
     """
-    test_ks = metrics.get("test_ks")
+    test_ks = metrics.get("weighted_test_ks")
+    if not isinstance(test_ks, (int, float)):
+        test_ks = metrics.get("test_ks")
     if not isinstance(test_ks, (int, float)):
         return float("-inf")
-    train_ks = metrics.get("train_ks")
+    train_ks = metrics.get("weighted_train_ks")
+    if not isinstance(train_ks, (int, float)):
+        train_ks = metrics.get("train_ks")
     gap = float(train_ks) - float(test_ks) if isinstance(train_ks, (int, float)) else 0.0
     return float(test_ks) - _CHAMPION_OVERFIT_PENALTY * max(0.0, gap)
 
@@ -1642,7 +1654,7 @@ def _score_first(row: dict, keys: tuple[str, ...], *, minimize: bool = False) ->
 
 
 def _is_metric_key(key: str) -> bool:
-    return key.startswith(("train_", "test_", "oot_", "psi_")) or key == "overfit_flag"
+    return key.startswith(("train_", "test_", "oot_", "psi_", "weighted_")) or key == "overfit_flag"
 
 
 def tool_calibrate_model(inputs: dict, ctx) -> dict:
@@ -2549,6 +2561,14 @@ def _model_card_key_metrics(metrics: dict) -> list[dict]:
         "psi_oot_vs_train",
         "psi_test_vs_train",
         "overfit_flag",
+        # TUNE-5: weighted KS/AUC, only present when the model trained with a
+        # sample_weight_col -- the口径 that actually drove selection, alongside
+        # the unweighted reading above.
+        "weighted_oot_ks",
+        "weighted_test_ks",
+        "weighted_train_ks",
+        "weighted_oot_auc",
+        "weighted_test_auc",
     ]:
         if metric in metrics and metrics.get(metric) is not None:
             rows.append({"metric": metric, "value": metrics.get(metric)})

@@ -769,6 +769,59 @@ def test_tune_hyperparameters_cv_folds_works_for_non_tree_recipe(tmp_path):
     assert len(result.best_metrics["cv_fold_test_ks"]) == 3
 
 
+def _weighted_tune_fixture_frame(rows: int = 400) -> pd.DataFrame:
+    """Same shape as _tune_fixture_frame plus a business sample_weight column with
+    real spread (not all-1) so weighted vs unweighted KS actually differ."""
+    frame = _tune_fixture_frame(rows)
+    frame["weight"] = [3.0 if i % 5 == 0 else 1.0 for i in range(rows)]
+    return frame
+
+
+def test_tune_hyperparameters_scores_trials_by_weighted_ks_when_weights_exist(tmp_path):
+    """TUNE-5: when sample_weight_col is given, trial/champion score uses
+    weighted_test_ks/weighted_train_ks (not the unweighted reading) -- a trial
+    tuned against weighted training data must also be selected against the
+    weighted population. Unweighted train_ks/test_ks/oot_ks stay reported
+    alongside, never dropped."""
+    frame = _weighted_tune_fixture_frame()
+    path = tmp_path / "tune_weighted.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(
+        backend, path, **_tune_kwargs(n_trials=4, sample_weight_col="weight"),
+    )
+
+    assert "weighted_train_ks" in result.best_metrics
+    assert "weighted_test_ks" in result.best_metrics
+    assert "weighted_oot_ks" in result.best_metrics
+    # unweighted readings are still present, never dropped.
+    assert "train_ks" in result.best_metrics
+    assert "test_ks" in result.best_metrics
+    for trial in result.trials:
+        assert "weighted_train_ks" in trial
+        assert "weighted_test_ks" in trial
+        expected_score = trial["weighted_test_ks"] - 0.5 * max(
+            0.0, trial["weighted_train_ks"] - trial["weighted_test_ks"]
+        )
+        assert trial["score"] == pytest.approx(expected_score)
+
+
+def test_tune_hyperparameters_without_weight_col_omits_weighted_keys(tmp_path):
+    """TUNE-5 back-compat: no sample_weight_col -> no weighted_* keys at all (not
+    even as None), matching the historical unweighted-only contract."""
+    frame = _tune_fixture_frame()
+    path = tmp_path / "tune_unweighted.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+
+    result = tune_hyperparameters(backend, path, **_tune_kwargs(n_trials=3))
+
+    assert "weighted_test_ks" not in result.best_metrics
+    for trial in result.trials:
+        assert "weighted_test_ks" not in trial
+
+
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
     rows = 160
     labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]

@@ -119,6 +119,18 @@ def _comparison_row(experiment: Experiment) -> dict:
         "train_auc": None if metrics is None else metrics.train_auc,
         "test_auc": None if metrics is None else metrics.test_auc,
         "oot_auc": None if metrics is None else metrics.oot_auc,
+        # TUNE-5: weighted KS/AUC (populated only when the recipe trained with a
+        # sample_weight_col) alongside the always-present unweighted reading above,
+        # so champion selection can prefer the weighted metric when it exists
+        # instead of silently comparing on an objective the model wasn't tuned for.
+        "weighted_train_ks": None if metrics is None else metrics.weighted_train_ks,
+        "weighted_test_ks": None if metrics is None else metrics.weighted_test_ks,
+        "weighted_oot_ks": None if metrics is None else metrics.weighted_oot_ks,
+        "weighted_train_auc": None if metrics is None else metrics.weighted_train_auc,
+        "weighted_test_auc": None if metrics is None else metrics.weighted_test_auc,
+        "weighted_oot_auc": None if metrics is None else metrics.weighted_oot_auc,
+        "weighted_psi_test_vs_train": None if metrics is None else metrics.weighted_psi_test_vs_train,
+        "weighted_psi_oot_vs_train": None if metrics is None else metrics.weighted_psi_oot_vs_train,
         "train_rmse": None if metrics is None else metrics.train_rmse,
         "test_rmse": None if metrics is None else metrics.test_rmse,
         "oot_rmse": None if metrics is None else metrics.oot_rmse,
