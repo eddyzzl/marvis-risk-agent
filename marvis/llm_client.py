@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from http.client import HTTPException
 import json
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -12,8 +13,14 @@ class LLMClientError(RuntimeError):
 
 
 class OpenAICompatibleLLMClient:
-    def __init__(self, profile: dict):
+    def __init__(
+        self,
+        profile: dict,
+        *,
+        on_call_recorded: Callable[[dict], None] | None = None,
+    ):
         self.profile = profile
+        self._on_call_recorded = on_call_recorded
 
     def complete(
         self,
@@ -25,7 +32,10 @@ class OpenAICompatibleLLMClient:
         json_schema: dict | None = None,
         on_delta: Callable[[str], None] | None = None,
         stream: bool = True,
+        caller: str = "unknown",
+        on_call_recorded: Callable[[dict], None] | None = None,
     ) -> str:
+        recorder = on_call_recorded or self._on_call_recorded
         api_base_url = str(self.profile.get("api_base_url") or "").rstrip("/")
         model_name = str(self.profile.get("model_name") or "")
         api_key = str(self.profile.get("api_key") or "")
@@ -42,6 +52,8 @@ class OpenAICompatibleLLMClient:
             "stream": bool(stream),
             "temperature": temperature,
         }
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
         if self.profile.get("enable_thinking"):
             payload["reasoning_effort"] = str(self.profile.get("reasoning_effort") or "high")
             payload["thinking"] = {"type": "enabled"}
@@ -66,9 +78,14 @@ class OpenAICompatibleLLMClient:
             method="POST",
         )
         timeout = int(self.profile.get("timeout_seconds") or 60)
+        prompt_chars = len(system_prompt or "") + len(user_prompt or "")
+        usage: dict = {}
+        started = time.monotonic()
         try:
             with urlopen(request, timeout=timeout) as response:
-                content = _read_completion_content(response, on_delta=on_delta)
+                content = _read_completion_content(
+                    response, on_delta=on_delta, usage_out=usage
+                )
         except HTTPError as exc:
             # Drain the body to free the socket, but never surface it: error bodies
             # can echo the rejected prompt and would be persisted into
@@ -77,20 +94,101 @@ class OpenAICompatibleLLMClient:
                 exc.read()
             except Exception:
                 pass
+            self._record_call(
+                recorder, caller=caller, model_name=model_name,
+                prompt_chars=prompt_chars, usage={}, started=started,
+                streamed=bool(stream), ok=False,
+                error_kind=_http_error_kind(exc.code),
+            )
             raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
         except URLError as exc:
+            self._record_call(
+                recorder, caller=caller, model_name=model_name,
+                prompt_chars=prompt_chars, usage={}, started=started,
+                streamed=bool(stream), ok=False, error_kind="connection",
+            )
             raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
         except TimeoutError as exc:
+            self._record_call(
+                recorder, caller=caller, model_name=model_name,
+                prompt_chars=prompt_chars, usage={}, started=started,
+                streamed=bool(stream), ok=False, error_kind="timeout",
+            )
             raise LLMClientError("LLM request timed out") from exc
         except (OSError, HTTPException) as exc:
+            self._record_call(
+                recorder, caller=caller, model_name=model_name,
+                prompt_chars=prompt_chars, usage={}, started=started,
+                streamed=bool(stream), ok=False, error_kind="stream_interrupted",
+            )
             raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
+        self._record_call(
+            recorder, caller=caller, model_name=model_name,
+            prompt_chars=prompt_chars, usage=usage, started=started,
+            streamed=bool(stream), ok=True, error_kind=None,
+        )
         return content.strip()
+
+    def _record_call(
+        self,
+        on_call_recorded: Callable[[dict], None] | None,
+        *,
+        caller: str,
+        model_name: str,
+        prompt_chars: int,
+        usage: dict,
+        started: float,
+        streamed: bool,
+        ok: bool,
+        error_kind: str | None,
+    ) -> None:
+        if on_call_recorded is None:
+            return
+        latency_ms = int((time.monotonic() - started) * 1000)
+        record = {
+            "caller": caller,
+            "model_id": (str(self.profile.get("model_id") or "") or None),
+            "model_name": model_name,
+            "prompt_chars": prompt_chars,
+            "prompt_tokens": _usage_int(usage, "prompt_tokens"),
+            "completion_tokens": _usage_int(usage, "completion_tokens"),
+            "latency_ms": latency_ms,
+            "ok": ok,
+            "error_kind": error_kind,
+            "streamed": streamed,
+        }
+        try:
+            on_call_recorded(record)
+        except Exception:
+            # Observability must never break the call path.
+            pass
+
+
+def _http_error_kind(code) -> str:
+    try:
+        status = int(code)
+    except (TypeError, ValueError):
+        return "http_error"
+    if 400 <= status < 500:
+        return "http_4xx"
+    if 500 <= status < 600:
+        return "http_5xx"
+    return "http_error"
+
+
+def _usage_int(usage: dict, key: str) -> int | None:
+    value = usage.get(key) if isinstance(usage, dict) else None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_completion_content(
     response,
     *,
     on_delta: Callable[[str], None] | None = None,
+    usage_out: dict | None = None,
 ) -> str:
     raw_parts: list[bytes] = []
     stream_parts: list[str] = []
@@ -110,7 +208,7 @@ def _read_completion_content(
         event_data = line.removeprefix("data:").strip()
         if event_data == "[DONE]":
             break
-        content = _content_from_stream_event(event_data)
+        content = _content_from_stream_event(event_data, usage_out=usage_out)
         stream_parts.append(content)
         if content and on_delta:
             on_delta(content)
@@ -122,12 +220,14 @@ def _read_completion_content(
         raw = b"".join(raw_parts).decode("utf-8", errors="replace")
     else:
         raw = response.read().decode("utf-8")
-    return _content_from_json_response(raw)
+    return _content_from_json_response(raw, usage_out=usage_out)
 
 
-def _content_from_stream_event(event_data: str) -> str:
+def _content_from_stream_event(event_data: str, *, usage_out: dict | None = None) -> str:
     try:
         data = json.loads(event_data)
+        if usage_out is not None:
+            _merge_usage(usage_out, data.get("usage"))
         choices = data.get("choices") or []
         choice = choices[0] if choices else {}
         delta = choice.get("delta") or {}
@@ -143,10 +243,19 @@ def _content_from_stream_event(event_data: str) -> str:
     return ""
 
 
-def _content_from_json_response(raw: str) -> str:
+def _content_from_json_response(raw: str, *, usage_out: dict | None = None) -> str:
     try:
         data = json.loads(raw)
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise LLMClientError("LLM response did not contain message content") from exc
+    if usage_out is not None:
+        _merge_usage(usage_out, data.get("usage"))
     return str(content or "")
+
+
+def _merge_usage(usage_out: dict, usage) -> None:
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if usage.get(key) is not None:
+                usage_out[key] = usage[key]

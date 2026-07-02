@@ -59,6 +59,7 @@ def route_instruction(client, *, gate_context, instruction, tables=None):
         response_format={"type": "json_object"},
         json_schema=_ROUTE_SCHEMA,
         stream=False,
+        caller="router",
     )
     route, ok = _parse_route(raw)
     if ok:
@@ -76,6 +77,7 @@ def route_instruction(client, *, gate_context, instruction, tables=None):
         response_format={"type": "json_object"},
         json_schema=_ROUTE_SCHEMA,
         stream=False,
+        caller="router",
     )
     return parse_route(raw)
 

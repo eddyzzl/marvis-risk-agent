@@ -278,6 +278,24 @@ def init_db(db_path: Path) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS llm_calls (
+                id TEXT PRIMARY KEY,
+                caller TEXT NOT NULL,
+                model_id TEXT,
+                prompt_chars INTEGER,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                latency_ms INTEGER,
+                ok INTEGER NOT NULL,
+                error_kind TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                streamed INTEGER NOT NULL DEFAULT 0,
+                at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS plans (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -593,6 +611,7 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at_id ON audit(kind, at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_at_id ON audit(at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_caller_at ON llm_calls(caller, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_experiments_task ON experiments(task_id)")

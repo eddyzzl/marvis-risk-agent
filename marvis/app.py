@@ -26,6 +26,7 @@ from marvis.branding import (
 from marvis.data.backend import DataBackend, duckdb_health
 from marvis.db import (
     DraftRepository,
+    record_llm_call,
     PlanRepository,
     PluginRepository,
     TaskRepository,
@@ -58,6 +59,7 @@ from marvis.job_watchdog import (
 )
 from marvis.recovery import reclaim_running_plans, reclaim_stale_running_tasks
 from marvis.routers.agent_memory import router as agent_memory_router
+from marvis.routers.llm import router as llm_router
 from marvis.routers.artifacts import router as artifacts_router
 from marvis.routers.branding import router as branding_router
 from marvis.routers.data import router as data_router
@@ -220,6 +222,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app.include_router(api_router)
     app.include_router(agent_memory_router)
+    app.include_router(llm_router)
     app.include_router(artifacts_router)
     app.include_router(branding_router)
     app.include_router(data_router)
@@ -405,7 +408,19 @@ def _configure_orchestrator(app: FastAPI, settings: Settings) -> None:
 
 
 def _llm_factory(settings: Settings):
+    db_path = settings.db_path
+
+    def _record(record: dict) -> None:
+        try:
+            record_llm_call(db_path, record)
+        except Exception:
+            # Observability writes must never break an orchestration call.
+            pass
+
     def factory():
-        return OpenAICompatibleLLMClient(resolve_llm_model(settings.workspace))
+        return OpenAICompatibleLLMClient(
+            resolve_llm_model(settings.workspace),
+            on_call_recorded=_record,
+        )
 
     return factory

@@ -236,3 +236,72 @@ def test_client_falls_back_to_json_object_when_schema_unsupported(monkeypatch):
     )
 
     assert captured["payload"]["response_format"] == {"type": "json_object"}
+
+
+class _JsonResponseWithUsage:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def __iter__(self):
+        return iter([
+            b'{"choices":[{"message":{"content":"ok"}}],'
+            b'"usage":{"prompt_tokens":11,"completion_tokens":7}}',
+        ])
+
+
+def test_complete_invokes_on_call_recorded_with_usage(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _JsonResponseWithUsage()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    records = []
+    OpenAICompatibleLLMClient(
+        {
+            "model_id": "m1",
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(
+        system_prompt="sys",
+        user_prompt="user",
+        stream=False,
+        caller="gate",
+        on_call_recorded=records.append,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["caller"] == "gate"
+    assert record["model_id"] == "m1"
+    assert record["prompt_tokens"] == 11
+    assert record["completion_tokens"] == 7
+    assert record["ok"] is True
+    assert record["error_kind"] is None
+    assert record["streamed"] is False
+    assert record["prompt_chars"] == len("sys") + len("user")
+    assert record["latency_ms"] >= 0
+
+
+def test_streaming_requests_include_usage_stream_option(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _StreamingResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(system_prompt="s", user_prompt="u")
+
+    assert captured["payload"]["stream_options"] == {"include_usage": True}

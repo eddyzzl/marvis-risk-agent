@@ -79,6 +79,7 @@ class IntentRouter:
                 system_prompt=CLASSIFY_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                caller="router_intent",
                 stream=False,
             )
         except Exception:

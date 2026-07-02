@@ -189,6 +189,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                caller="planner",
             )
             try:
                 plan = self._parse_plan_json(
@@ -247,6 +248,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                caller="planner",
             )
             try:
                 revised_remaining = _parse_steps_json(
@@ -292,6 +294,7 @@ class Planner:
                 response_format={"type": "json_object"},
                 json_schema=PLAN_STEPS_SCHEMA,
                 stream=False,
+                caller="planner",
             )
             try:
                 data = _parse_json_object(str(raw), label="explore JSON")

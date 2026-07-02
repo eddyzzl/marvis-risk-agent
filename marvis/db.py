@@ -11,6 +11,10 @@ from marvis.repositories.audit import (
     _write_audit_row as _write_audit_row,
 )
 from marvis.repositories.datasets import DatasetRepository as DatasetRepository  # noqa: F401
+from marvis.repositories.llm_calls import (
+    llm_usage_summary as llm_usage_summary,
+    record_llm_call as record_llm_call,
+)
 from marvis.repositories.drafts import DraftRepository as DraftRepository  # noqa: F401
 from marvis.repositories.modeling import ModelingRepository as ModelingRepository  # noqa: F401
 from marvis.repositories.plans import PlanRepository as PlanRepository  # noqa: F401

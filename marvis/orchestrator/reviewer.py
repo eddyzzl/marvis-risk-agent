@@ -66,6 +66,7 @@ class Reviewer:
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                caller="critic",
                 stream=False,
             )
             passed, reasons, ok = _parse_soft_verdict(raw)
@@ -78,7 +79,8 @@ class Reviewer:
                         '{"passed": true|false, "reasons": ["..."]}',
                     ),
                     response_format={"type": "json_object"},
-                        stream=False,
+                    caller="critic",
+                    stream=False,
                 )
                 passed, reasons, _ok = _parse_soft_verdict(raw)
         except Exception as exc:
@@ -131,6 +133,7 @@ class Reviewer:
                 system_prompt=CRITIC_SYS,
                 user_prompt=prompt,
                 response_format={"type": "json_object"},
+                caller="reviewer_summary",
                 stream=False,
             )
             data, error = load_json_object(raw)
@@ -143,7 +146,8 @@ class Reviewer:
                         '{"summary": "...", "open_items": [], "goal_doubt": false, "goal_met": true|false}',
                     ),
                     response_format={"type": "json_object"},
-                        stream=False,
+                    caller="reviewer_summary",
+                    stream=False,
                 )
                 data, error = load_json_object(raw)
         except Exception:

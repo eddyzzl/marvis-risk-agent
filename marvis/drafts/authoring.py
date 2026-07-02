@@ -93,6 +93,7 @@ def draft_script(
         system_prompt=AUTHOR_SYS,
         user_prompt=_authoring_prompt(goal, learning_note),
         response_format={"type": "json_object"},
+        caller="author",
         stream=False,
     )
     spec = _safe_json_loads(str(raw))

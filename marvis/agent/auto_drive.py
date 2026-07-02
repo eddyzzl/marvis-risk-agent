@@ -97,6 +97,7 @@ def decide_gate(client, *, gate: dict) -> dict:
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
+        caller="gate",
     )
     decision, ok = _parse_decision(raw, allowed_actions=allowed_actions)
     decision = _apply_safety_policy(decision, envelope)
@@ -114,6 +115,7 @@ def decide_gate(client, *, gate: dict) -> dict:
         response_format={"type": "json_object"},
         json_schema=schema,
         stream=False,
+        caller="gate",
     )
     return _apply_safety_policy(parse_decision(raw, allowed_actions=allowed_actions), envelope)
 
