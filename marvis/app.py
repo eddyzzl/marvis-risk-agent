@@ -23,7 +23,14 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.db import DraftRepository, PlanRepository, PluginRepository, init_db, sqlite_health
+from marvis.db import (
+    DraftRepository,
+    PlanRepository,
+    PluginRepository,
+    TaskRepository,
+    init_db,
+    sqlite_health,
+)
 from marvis.drafts.registry import DraftRegistry
 from marvis.drafts.sandbox import DraftSandbox
 from marvis.execution_environment import load_execution_environment
@@ -43,7 +50,7 @@ from marvis.plugins.hooks import HookDispatcher
 from marvis.plugins.loader import load_builtin_packs, sync_builtin_packs
 from marvis.plugins.registry import PluginRegistry, ToolRegistry
 from marvis.plugins.runner import ToolRunner
-from marvis.recovery import reclaim_stale_running_tasks
+from marvis.recovery import reclaim_running_plans, reclaim_stale_running_tasks
 from marvis.routers.agent_memory import router as agent_memory_router
 from marvis.routers.artifacts import router as artifacts_router
 from marvis.routers.branding import router as branding_router
@@ -169,6 +176,13 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     _configure_orchestrator(app, settings)
+    reclaim_running_plans(
+        app.state.plan_repo,
+        app.state.reviewer,
+        app.state.hook_dispatcher,
+        app.state.harness_state,
+        TaskRepository(settings.db_path),
+    )
 
     @app.middleware("http")
     async def _local_access_guard(request, call_next):
