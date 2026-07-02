@@ -445,6 +445,9 @@
           },
           "max_ks_decay": {
             "type": "number"
+          },
+          "max_feature_psi": {
+            "type": "number"
           }
         },
         "required": [
@@ -553,6 +556,12 @@
             }
           },
           "ks_decay_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "psi_watch": {
             "type": "array",
             "items": {
               "type": "array"

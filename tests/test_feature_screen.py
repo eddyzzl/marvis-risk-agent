@@ -1,8 +1,11 @@
 """Unit tests for marvis.feature.screen library-level behavior (FS-4/FS-6/FS-7/FS-10)."""
 import numpy as np
 import pandas as pd
+import pytest
 
 from marvis.data.backend import DataBackend
+from marvis.feature.binning import equal_frequency_edges
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_psi
 from marvis.feature.screen import (
     LEAKAGE_WATCH_LOW,
     SPLIT_SHIFT_THRESHOLD,
@@ -231,3 +234,76 @@ def test_screen_non_binary_ties_preserve_input_order(tmp_path):
     )
 
     assert [c for c, _ks in result.ranked] == ["good1", "good2"]
+
+
+def test_screen_records_psi_split_matching_direct_feature_psi_computation(tmp_path):
+    """DOM-7b: scores['psi_split'] (train vs the holdout split) matches feature_psi
+    computed directly off the same train/holdout arrays with the same train-derived
+    equal-frequency edges — no drift between the screen path and the primitive."""
+    rng = np.random.RandomState(7)
+    train_values = rng.normal(loc=0.0, scale=1.0, size=200)
+    # oot: shifted distribution -> non-trivial PSI.
+    oot_values = rng.normal(loc=1.5, scale=1.0, size=200)
+    values = np.concatenate([train_values, oot_values])
+    y = np.concatenate([
+        rng.randint(0, 2, size=200),
+        np.full(200, np.nan),  # OOT unlabeled -- PSI must not require labels.
+    ])
+    split = np.array((["train"] * 200) + (["oot"] * 200))
+    frame = pd.DataFrame({"drifter": values, "y": y, "split": split})
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(
+        backend, path, features=["drifter"], target_col="y", split_col="split",
+    )
+
+    assert "psi_split" in result.scores["drifter"]
+    psi_split = result.scores["drifter"]["psi_split"]
+    assert psi_split is not None
+    edges = equal_frequency_edges(train_values, DEFAULT_IV_BINS)
+    expected = feature_psi(train_values, oot_values, edges)
+    assert psi_split == pytest.approx(expected)
+
+
+def test_screen_psi_watch_flags_only_when_max_feature_psi_set(tmp_path):
+    """DOM-7b: psi_watch stays empty by default (display-only) and only fires when the
+    caller opts in via max_feature_psi — mirrors the ks_decay_watch/max_ks_decay pattern.
+    Gating never drops the feature from ranked/clean."""
+    rng = np.random.RandomState(9)
+    train_values = rng.normal(loc=0.0, scale=1.0, size=200)
+    oot_values = rng.normal(loc=3.0, scale=1.0, size=200)  # large shift -> high PSI
+    values = np.concatenate([train_values, oot_values])
+    y = np.concatenate([rng.randint(0, 2, size=200), rng.randint(0, 2, size=200)])
+    split = np.array((["train"] * 200) + (["oot"] * 200))
+    frame = pd.DataFrame({"drifter": values, "y": y.astype(float), "split": split})
+    backend, path = _write(tmp_path, frame)
+
+    display_only = screen_features(
+        backend, path, features=["drifter"], target_col="y", split_col="split",
+    )
+    assert display_only.psi_watch == ()
+    psi_split = display_only.scores["drifter"]["psi_split"]
+    assert psi_split is not None and psi_split > 0
+
+    gated = screen_features(
+        backend, path, features=["drifter"], target_col="y", split_col="split",
+        max_feature_psi=0.05,
+    )
+    watch_cols = {feature for feature, _psi, _reason in gated.psi_watch}
+    assert "drifter" in watch_cols
+    # gating never drops the feature from the ranked/clean set (informational only).
+    assert "drifter" in {c for c, _ in gated.ranked}
+
+
+def test_screen_no_holdout_split_produces_no_psi(tmp_path):
+    """DOM-7b: without a usable train/holdout split, psi_split is absent from scores and
+    psi_watch stays empty — never an error (mirrors test_screen_no_split_produces_no_split_flags)."""
+    rows = 200
+    y = np.array(([0, 1] * 100))
+    frame = pd.DataFrame({"f": y.astype(float) + np.linspace(0, 0.5, rows), "y": y})
+    backend, path = _write(tmp_path, frame)
+
+    result = screen_features(backend, path, features=["f"], target_col="y")
+
+    assert "psi_split" not in result.scores["f"]
+    assert result.psi_watch == ()

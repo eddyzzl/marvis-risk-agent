@@ -8,6 +8,8 @@ from openpyxl import load_workbook
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
+from marvis.feature.binning import equal_frequency_edges
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_psi
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
 from marvis.output.model_report import ModelReportPayload, render_model_report
@@ -750,6 +752,7 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
     univariate_sheet = workbook["单变量分析"]
     univariate_headers = [cell.value for cell in univariate_sheet[1]]
     assert univariate_headers[:4] == ["feature", "split", "iv", "ks"]
+    assert "psi_vs_train" in univariate_headers
     univariate_rows = [
         {
             header: univariate_sheet.cell(row=row, column=index).value
@@ -768,6 +771,19 @@ def test_generate_model_report_tool_round_trips_via_runner(tmp_path):
         ("x2", "test"),
         ("x2", "oot"),
     }
+    # DOM-7a: train itself has nothing to compare against (psi=None); test/oot report
+    # a numeric PSI vs. train that matches feature_psi computed directly off the frame.
+    by_key = {(row["feature"], row["split"]): row for row in univariate_rows}
+    assert by_key[("x1", "train")]["psi_vs_train"] is None
+    scored_train = scored_frame[scored_frame["split"] == "train"]
+    scored_test = scored_frame[scored_frame["split"] == "test"]
+    edges = equal_frequency_edges(scored_train["x1"].to_numpy(dtype=float), DEFAULT_IV_BINS)
+    expected_psi = feature_psi(
+        scored_train["x1"].to_numpy(dtype=float),
+        scored_test["x1"].to_numpy(dtype=float),
+        edges,
+    )
+    assert by_key[("x1", "test")]["psi_vs_train"] == pytest.approx(expected_psi)
 
     stress_sheet = workbook["压力测试"]
     stress_headers = [

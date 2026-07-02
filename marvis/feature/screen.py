@@ -21,8 +21,15 @@ import re
 import numpy as np
 import pandas as pd
 
+from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.correlation import safe_correlation
-from marvis.feature.metrics import DEFAULT_IV_BINS, feature_auc, feature_ks, feature_metrics
+from marvis.feature.metrics import (
+    DEFAULT_IV_BINS,
+    feature_auc,
+    feature_ks,
+    feature_metrics,
+    feature_psi,
+)
 from marvis.feature.transform import detect_sentinel_values
 
 # Columns whose names strongly suggest a model output / score that would leak the
@@ -86,6 +93,10 @@ class ScreenResult:
     """FS-6 KS-decay flags (only when ``max_ks_decay`` is set): features whose test/train KS
     retention ratio falls below the threshold — worked in-sample, decayed out-of-sample.
     Informational, never dropped: (feature, ks_decay, reason)."""
+    psi_watch: tuple[tuple[str, float, str], ...] = ()
+    """DOM-7b PSI flags (only when ``max_feature_psi`` is set): features whose train-vs-
+    holdout PSI (``scores[col]["psi_split"]``) meets or exceeds the threshold — elevated
+    temporal drift. Informational, never dropped: (feature, psi_split, reason)."""
 
 
 def _dev_mask(
@@ -122,6 +133,27 @@ def _split_value_masks(
     return train_mask, test_mask
 
 
+def _holdout_value_masks(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    holdout_values: tuple[str, ...],
+    train_values: tuple[str, ...] = _TRAIN_VALUES,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """DOM-7b: rows labelled train vs the (first available) holdout split — the pair PSI
+    is computed over, since holdout (e.g. OOT) is the split that actually tests temporal
+    stability (test is typically a random split of the same time window as train, so a
+    train-vs-test PSI would rarely show drift). Returns ``(None, None)`` when either side
+    is empty or ``split_col``/``holdout_values`` is absent, so callers simply skip PSI."""
+    if not split_col or split_col not in frame.columns or not holdout_values:
+        return None, None
+    split = frame[split_col].astype("string")
+    train_mask = split.isin(list(train_values)).to_numpy(na_value=False)
+    holdout_mask = split.isin(list(holdout_values)).to_numpy(na_value=False)
+    if not train_mask.any() or not holdout_mask.any():
+        return None, None
+    return train_mask, holdout_mask
+
+
 def screen_features(
     backend,
     dataset_path: Path,
@@ -136,6 +168,7 @@ def screen_features(
     top_k: int | None = None,
     batch_size: int = 500,
     max_ks_decay: float | None = None,
+    max_feature_psi: float | None = None,
 ) -> ScreenResult:
     """Screen ``features`` against ``target_col`` and propose a clean candidate set.
 
@@ -149,6 +182,12 @@ def screen_features(
       per-feature ``ks_train``/``ks_test``/``ks_decay`` (test KS ÷ train KS). Default
       ``None`` is display-only — no filtering. When set, features whose retention ratio
       falls *below* it are flagged in ``ks_decay_watch`` (still informational, not dropped).
+    - ``max_feature_psi`` (DOM-7b): when a train/holdout split exists, ``scores`` always
+      carries per-feature ``psi_split`` (PSI of the feature's distribution, train vs the
+      first holdout split in ``holdout_values`` — no labels required, unlike KS). Default
+      ``None`` is display-only — no filtering. When set, features whose ``psi_split`` meets
+      or exceeds it are flagged in ``psi_watch`` (informational, never auto-dropped — same
+      confirm-don't-block pattern as ``leakage_watch``/``ks_decay_watch``).
     """
     feats = [f for f in dict.fromkeys(features) if f != target_col]
     base_cols = [target_col] + ([split_col] if split_col else [])
@@ -161,6 +200,10 @@ def screen_features(
     train_mask, test_mask = _split_value_masks(base, split_col)
     target_train = target[train_mask] if train_mask is not None else None
     target_test = target[test_mask] if test_mask is not None else None
+    # DOM-7b: train vs holdout (e.g. OOT) masks for PSI — a distribution-only check that
+    # needs no labels, so it is computed independently of target_train/target_test above.
+    psi_train_mask, psi_holdout_mask = _holdout_value_masks(base, split_col, holdout_values)
+    psi_edges_by_col: dict[str, np.ndarray] = {}
 
     scores: dict[str, dict[str, float | None]] = {}
     leakage: list[tuple[str, float, str]] = []
@@ -171,6 +214,7 @@ def screen_features(
     split_shift: list[tuple[str, float, str]] = []
     leakage_watch: list[tuple[str, float, str]] = []
     ks_decay_watch: list[tuple[str, float, str]] = []
+    psi_watch: list[tuple[str, float, str]] = []
 
     for start in range(0, len(feats), max(1, batch_size)):
         batch = feats[start : start + batch_size]
@@ -218,6 +262,25 @@ def screen_features(
                 scores[col]["ks_train"] = ks_train
                 scores[col]["ks_test"] = ks_test
                 scores[col]["ks_decay"] = ks_decay
+            # DOM-7b: train-vs-holdout PSI — distribution-only, no labels needed, so it
+            # is computed for every screened column regardless of leakage/watch outcome
+            # below (a leaked feature can still be worth knowing is drifting, and a
+            # dropped/unusable feature never reaches this line in the first place).
+            psi_split = None
+            if psi_train_mask is not None and psi_holdout_mask is not None:
+                edges = psi_edges_by_col.get(col)
+                if edges is None:
+                    train_values_for_psi = values[psi_train_mask]
+                    finite_train_for_psi = train_values_for_psi[np.isfinite(train_values_for_psi)]
+                    if finite_train_for_psi.size:
+                        edges = equal_frequency_edges(finite_train_for_psi, DEFAULT_IV_BINS)
+                        psi_edges_by_col[col] = edges
+                if edges is not None:
+                    try:
+                        psi_split = feature_psi(values[psi_train_mask], values[psi_holdout_mask], edges)
+                    except Exception:
+                        psi_split = None
+                scores[col]["psi_split"] = psi_split
             if ks >= leakage_ks:
                 leakage.append((col, ks, f"univariate KS {ks:.3f} >= {leakage_ks} — suspected target leakage"))
                 continue
@@ -247,6 +310,15 @@ def screen_features(
                     ks_decay,
                     f"ks_decay {ks_decay:.3f} < {max_ks_decay} (ks_train {ks_train:.3f} -> "
                     f"ks_test {ks_test:.3f}) — discrimination decays out-of-sample, confirm stability",
+                ))
+            # DOM-7b PSI watch: only flags when the caller opts in via max_feature_psi
+            # (default off, same display-only-unless-set pattern as max_ks_decay).
+            if max_feature_psi is not None and psi_split is not None and psi_split >= max_feature_psi:
+                psi_watch.append((
+                    col,
+                    psi_split,
+                    f"psi_split {psi_split:.3f} >= {max_feature_psi} (train vs holdout) "
+                    "— elevated temporal drift, confirm the field is stable over time",
                 ))
             if _SUSPECTED_OUTPUT.search(col):
                 suspected.append((col, ks, "name looks like a model output/score — confirm it is an allowed input"))
@@ -288,6 +360,7 @@ def screen_features(
         split_shift=tuple(sorted(split_shift, key=lambda z: z[1], reverse=True)),
         leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
         ks_decay_watch=tuple(sorted(ks_decay_watch, key=lambda z: z[1])),
+        psi_watch=tuple(sorted(psi_watch, key=lambda z: z[1], reverse=True)),
     )
 
 

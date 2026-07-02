@@ -18,12 +18,13 @@ from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
+from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.candidates import (
     candidate_numeric_features,
     excluded_categorical_columns,
     suspected_categorical_columns,
 )
-from marvis.feature.metrics import feature_metrics
+from marvis.feature.metrics import DEFAULT_IV_BINS, feature_metrics, feature_psi
 from marvis.feature.encode import woe_encode
 from marvis.feature.screen import sentinel_screen_notice
 from marvis.feature.preprocessing import (
@@ -490,6 +491,7 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         top_k=_optional_int(inputs.get("top_k")),
         batch_size=int(inputs.get("batch_size", 500)),
         max_ks_decay=float(inputs["max_ks_decay"]) if inputs.get("max_ks_decay") is not None else None,
+        max_feature_psi=float(inputs["max_feature_psi"]) if inputs.get("max_feature_psi") is not None else None,
     )
     payload = {
         "selected": list(result.selected),
@@ -509,6 +511,8 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         payload["leakage_watch"] = [[feature, ks, reason] for feature, ks, reason in result.leakage_watch]
     if result.ks_decay_watch:
         payload["ks_decay_watch"] = [[feature, decay, reason] for feature, decay, reason in result.ks_decay_watch]
+    if result.psi_watch:
+        payload["psi_watch"] = [[feature, psi, reason] for feature, psi, reason in result.psi_watch]
     if result.sentinel_columns:
         payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
         payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
@@ -4660,23 +4664,51 @@ def _annotate_score_band_ks(rows: list[dict], overall_bad_rate_by_split: dict[st
             row["ks_contribution"] = float(abs(cum_bad_pct - cum_good_pct))
 
 
-
 def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: TrainConfig) -> list[dict]:
+    """DOM-7a: per-feature/per-split univariate metrics, plus a train-vs-split PSI
+    column. PSI needs no labels (feature_psi compares two value distributions), so it
+    is computed for every non-train split against train regardless of whether that
+    split carries labels — train itself reports psi=None (nothing to compare against).
+    """
     if artifact is None:
         return []
     frame = runtime.backend.read_frame(dataset_path, columns=[*artifact.feature_list, config.target_col, config.split_col])
+    train_value = config.split_values.get("train")
+    train_frame = frame[frame[config.split_col] == train_value] if train_value is not None else frame.iloc[0:0]
     rows = []
     for feature in artifact.feature_list:
+        train_values = pd.to_numeric(train_frame[feature], errors="coerce").to_numpy(dtype=float) if not train_frame.empty else np.array([])
+        psi_edges = equal_frequency_edges(train_values, DEFAULT_IV_BINS) if train_values.size else None
         for split_name, split_value in config.split_values.items():
             split_frame = frame[frame[config.split_col] == split_value]
             if split_frame.empty:
                 continue
+            split_values_arr = pd.to_numeric(split_frame[feature], errors="coerce").to_numpy(dtype=float)
+            psi = None
+            if psi_edges is not None and split_name != "train":
+                try:
+                    psi = feature_psi(train_values, split_values_arr, psi_edges)
+                except Exception:
+                    psi = None
             target_series = pd.to_numeric(split_frame[config.target_col], errors="coerce")
             if target_series.notna().sum() == 0:
-                # Scoring-only split (no labels): skip univariate label metrics for it.
+                # Scoring-only split (no labels): skip label-dependent metrics, but PSI
+                # (no labels required) still gets reported for this split.
+                rows.append({
+                    "feature": feature,
+                    "split": split_name,
+                    "iv": None,
+                    "ks": None,
+                    "auc": None,
+                    "sample_count": int(len(split_frame)),
+                    "coverage": None,
+                    "missing_rate": None,
+                    "unique_count": None,
+                    "psi_vs_train": psi,
+                })
                 continue
             metrics = feature_metrics(
-                split_frame[feature].to_numpy(dtype=float),
+                split_values_arr,
                 target_series.to_numpy(dtype=float),
                 feature=feature,
             )
@@ -4690,6 +4722,7 @@ def _univariate_rows(runtime: _Runtime, dataset_path: Path, artifact, config: Tr
                 "coverage": 1.0 - metrics.missing_rate,
                 "missing_rate": metrics.missing_rate,
                 "unique_count": metrics.unique_count,
+                "psi_vs_train": psi,
             })
     return rows
 
