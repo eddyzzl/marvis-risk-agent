@@ -12,7 +12,7 @@ from marvis.data.backend import DataBackend
 from marvis.data.labels import require_labels_confirmed
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
-from marvis.feature.candidates import candidate_numeric_features
+from marvis.feature.candidates import candidate_numeric_features, excluded_categorical_columns
 from marvis.feature.binning import (
     chimerge_edges,
     equal_frequency_edges,
@@ -24,7 +24,7 @@ from marvis.feature.binning import (
 )
 from marvis.feature.correlation import correlation_report
 from marvis.feature.derive import derive_batch
-from marvis.feature.encode import onehot_encode, woe_encode
+from marvis.feature.encode import apply_categorical_woe, categorical_woe_encode, onehot_encode, woe_encode
 from marvis.feature.errors import FeatureError, FitRequiresSplitError
 from marvis.feature.iv import compute_woe_iv, woe_result_from_binning
 from marvis.feature.metrics import feature_metrics, feature_psi, head_tail_lift
@@ -125,10 +125,18 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset = runtime.registry.get(str(inputs["dataset_id"]))
     split_col = inputs.get("split_col")
+    requested_features = inputs.get("features") or []
     features = _resolve_feature_cols(
         runtime,
         dataset.id,
-        inputs.get("features") or [],
+        requested_features,
+        target_col=str(inputs["target_col"]),
+        split_col=str(split_col) if split_col else None,
+    )
+    excluded_categorical = _excluded_categorical_for_screen(
+        runtime,
+        dataset.id,
+        requested_features,
         target_col=str(inputs["target_col"]),
         split_col=str(split_col) if split_col else None,
     )
@@ -154,7 +162,33 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
         "unusable": [[feature, reason] for feature, reason in result.unusable],
         "scores": _jsonable(result.scores),
         "n_screened": result.n_screened,
+        "excluded_categorical": excluded_categorical,
     }
+
+
+def _excluded_categorical_for_screen(
+    runtime: "_Runtime",
+    dataset_id: str,
+    requested_features: list,
+    *,
+    target_col: str,
+    split_col: str | None,
+) -> list[dict]:
+    """String/object columns silently dropped by candidate inference (PREP-3/FS-3).
+
+    Only meaningful when ``features`` was NOT explicitly provided — an explicit
+    feature list is the caller's own choice, not an inference the platform made
+    on their behalf, so there is nothing to surface."""
+    if [str(item) for item in requested_features if str(item).strip()]:
+        return []
+    dataset = runtime.registry.get(str(dataset_id))
+    excluded = excluded_categorical_columns(
+        runtime.backend,
+        runtime.registry.resolve_path(dataset.id),
+        target_col=target_col,
+        split_col=split_col,
+    )
+    return [{"column": item.column, "cardinality": item.cardinality} for item in excluded]
 
 
 def _screen_features_non_binary(inputs: dict, ctx) -> dict:
@@ -338,7 +372,9 @@ def tool_woe_encode(inputs: dict, ctx) -> dict:
     }
 
 
-def _woe_fit_frame(frame: pd.DataFrame, inputs: dict, dataset_id: str) -> tuple[pd.DataFrame, str]:
+def _woe_fit_frame(
+    frame: pd.DataFrame, inputs: dict, dataset_id: str, *, tool: str = "woe_encode"
+) -> tuple[pd.DataFrame, str]:
     """Rows used to fit the WOE mapping — excludes holdout (default test+OOT) so the
     mapping never peeks at evaluation labels (PREP-1). No ``split_col`` means the caller
     cannot express train-only fitting; that's a typed-error stop unless the caller
@@ -347,13 +383,61 @@ def _woe_fit_frame(frame: pd.DataFrame, inputs: dict, dataset_id: str) -> tuple[
     if not split_col:
         if bool(inputs.get("allow_full_fit")):
             return frame, "full"
-        raise FitRequiresSplitError(tool="woe_encode", dataset_id=dataset_id)
+        raise FitRequiresSplitError(tool=tool, dataset_id=dataset_id)
     holdout_values = tuple(str(value) for value in (inputs.get("holdout_values") or ("test", "oot")))
     mask = ~frame[str(split_col)].astype(str).isin(holdout_values)
     fit_frame = frame.loc[mask]
     if fit_frame.empty:
         raise FeatureError("WOE fit frame is empty after excluding holdout rows")
     return fit_frame, "train"
+
+
+def tool_woe_encode_categorical(inputs: dict, ctx) -> dict:
+    """Category -> WOE encode string/object columns (PREP-3/FS-3) — the categorical
+    analogue of ``woe_encode``. Same train-only fitting contract: fits on the non-
+    holdout rows (default excludes test+OOT) and raises ``FitRequiresSplitError``
+    unless ``split_col`` is given or the caller passes ``allow_full_fit=true``."""
+    runtime = _runtime(ctx)
+    features = [str(item) for item in inputs["features"]]
+    target_col = str(inputs["target_col"])
+    dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
+    required_columns = [*features, target_col]
+    if inputs.get("split_col"):
+        required_columns.append(str(inputs["split_col"]))
+    _assert_columns(frame, required_columns)
+    out = frame.copy()
+    fit_frame, fit_split = _woe_fit_frame(out, inputs, dataset.id, tool="woe_encode_categorical")
+    nan_labels_dropped = require_labels_confirmed(
+        fit_frame,
+        target_col,
+        drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        scope="categorical woe fit",
+    )
+    min_count = inputs.get("min_count")
+    smoothing = float(inputs.get("smoothing", 0.5))
+    woe_maps = {}
+    new_columns = []
+    for feature in features:
+        woe = categorical_woe_encode(
+            fit_frame[feature],
+            _target_values(fit_frame, target_col),
+            feature=feature,
+            min_count=int(min_count) if min_count is not None else None,
+            smoothing=smoothing,
+        )
+        encoded = apply_categorical_woe(out, feature, woe)
+        out[encoded.name] = encoded
+        new_columns.append(encoded.name)
+        woe_maps[feature] = _jsonable(woe)
+    result = _register_frame(runtime, out, dataset, ctx, "catwoe")
+    return {
+        "result_dataset_id": result.id,
+        "new_columns": new_columns,
+        "woe_maps": woe_maps,
+        "nan_labels_dropped": nan_labels_dropped,
+        "fit_rows": int(len(fit_frame)),
+        "fit_split": fit_split,
+    }
 
 
 def tool_onehot_encode(inputs: dict, ctx) -> dict:

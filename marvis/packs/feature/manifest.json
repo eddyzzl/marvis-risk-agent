@@ -102,6 +102,7 @@
           "unusable": {"type": "array", "items": {"type": "array"}},
           "scores": {"type": "object"},
           "n_screened": {"type": "integer", "minimum": 0},
+          "excluded_categorical": {"type": "array", "items": {"type": "object", "properties": {"column": {"type": "string"}, "cardinality": {"type": "integer", "minimum": 0}}, "required": ["column", "cardinality"], "additionalProperties": false}},
           "note": {"type": "string"}
         },
         "required": ["selected", "ranked", "leakage", "suspected", "unusable", "scores"],
@@ -267,6 +268,45 @@
       "timeout_seconds": 120,
       "failure_policy": "fail",
       "entrypoint": "tool_woe_encode",
+      "side_effects": ["read:dataset", "write:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "woe_encode_categorical",
+      "summary": "Category-to-WOE encode string/categorical columns with Laplace smoothing, rare-category pooling, and an unseen-category/NaN fallback to the global-prior WOE.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "features": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "target_col": {"type": "string", "minLength": 1},
+          "min_count": {"type": "integer", "minimum": 1},
+          "smoothing": {"type": "number"},
+          "split_col": {"type": "string", "minLength": 1},
+          "holdout_values": {"type": "array", "items": {"type": "string"}},
+          "allow_full_fit": {"type": "boolean"},
+          "drop_nan_labels": {"type": "boolean"}
+        },
+        "required": ["dataset_id", "features", "target_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {"type": "string"},
+          "new_columns": {"type": "array", "items": {"type": "string"}},
+          "woe_maps": {"type": "object"},
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "fit_rows": {"type": "integer", "minimum": 0},
+          "fit_split": {"type": "string", "enum": ["train", "full"]}
+        },
+        "required": ["result_dataset_id", "new_columns", "woe_maps"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_woe_encode_categorical",
       "side_effects": ["read:dataset", "write:dataset"],
       "memory_limit_mb": 4096
     },
