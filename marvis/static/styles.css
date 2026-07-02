@@ -351,6 +351,92 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ====== VD-3: loading skeleton system ======
+   Site-wide primitive: a shimmering block/row/table stand-in for content that
+   has not arrived yet, used on first load / genuine state transitions only —
+   never re-triggered on in-place polling diffs (see skeleton.js template
+   helpers + call sites in app.js / plan_rail_controller.js). Degrades to a
+   static tint under prefers-reduced-motion. */
+.skeleton {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--surface-muted);
+  border-radius: var(--radius-control);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 8%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+    background: none;
+  }
+}
+
+.skeleton-block {
+  width: 100%;
+}
+
+.skeleton-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skeleton-row {
+  width: 100%;
+}
+
+.skeleton-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.skeleton-table-header,
+.skeleton-table-row {
+  display: flex;
+  gap: 10px;
+}
+.skeleton-table-cell {
+  flex: 1;
+  height: 14px;
+  border-radius: 4px;
+}
+.skeleton-table-cell-head {
+  height: 11px;
+  opacity: 0.7;
+}
+
+body[data-theme="dark"] .skeleton {
+  background: var(--surface-muted);
+}
+body[data-theme="dark"] .skeleton::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 12%, transparent),
+    transparent
+  );
+  background-size: 200% 100%;
+}
+
 button,
 input,
 textarea,
@@ -385,6 +471,53 @@ body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .work
   opacity: 0;
   pointer-events: none;
   transition: none;
+}
+
+/* VD-3: task switch — the workspace body fades to 0 opacity above while new
+   content loads (beginTaskContentLoad/finishTaskContentLoad in app.js). A
+   CSS-only shimmer overlay fills that blank moment so switching tasks reads
+   as "loading" rather than "did my click register" (co-exists with the
+   .task-pill "busy" pill — different DOM regions, no visual fight).
+   .result-workspace already declares position: relative in its own rule
+   below, so only the pseudo-elements are added here. */
+.validation-workspace.is-task-content-loading .result-workspace::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: var(--radius);
+  background:
+    linear-gradient(var(--surface-muted) 0 22px, transparent 22px 34px,
+      var(--surface-muted) 34px 56px, transparent 56px 68px,
+      var(--surface-muted) 68px 90px, transparent 90px 102px,
+      var(--surface-muted) 102px 124px) top / 100% 124px no-repeat;
+  overflow: hidden;
+  animation: task-content-skeleton-fade 160ms ease both;
+}
+.validation-workspace.is-task-content-loading .result-workspace::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 6%, transparent), transparent);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes task-content-skeleton-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+body[data-theme="dark"] .validation-workspace.is-task-content-loading .result-workspace::after {
+  background:
+    linear-gradient(var(--surface-muted) 0 22px, transparent 22px 34px,
+      var(--surface-muted) 34px 56px, transparent 56px 68px,
+      var(--surface-muted) 68px 90px, transparent 90px 102px,
+      var(--surface-muted) 102px 124px) top / 100% 124px no-repeat;
+}
+@media (prefers-reduced-motion: reduce) {
+  .validation-workspace.is-task-content-loading .result-workspace::before {
+    animation: none;
+  }
 }
 
 .validation-workspace.is-task-content-settling :is(.task-hero) {

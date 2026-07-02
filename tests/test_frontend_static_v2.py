@@ -9203,3 +9203,102 @@ def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence()
     # No red flags in the message/tables -> review tone, no redflags section.
     assert 'data-gate-tone="review"' in clean_html
     assert "gate-card-redflags" not in clean_html
+
+
+
+def test_skeleton_templates_render_block_rows_and_table_shapes():
+    """VD-3: the shared skeleton.js template helpers must emit the three
+    documented shapes (block / rows / table), each using the generic
+    `.skeleton` shimmer primitive so a single CSS rule drives all of them.
+    """
+    module_url = (STATIC_DIR / "js" / "skeleton.js").as_uri()
+    script = "\n".join(
+        [
+            "import {"
+            " skeletonBlockHtml, skeletonRowsHtml, skeletonTableHtml,"
+            f" }} from {json.dumps(module_url)};",
+            "process.stdout.write(JSON.stringify({",
+            "  block: skeletonBlockHtml(),",
+            "  rows: skeletonRowsHtml({ rows: 3 }),",
+            "  table: skeletonTableHtml({ rows: 2, columns: 3 }),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'class="skeleton skeleton-block"' in payload["block"]
+    assert payload["rows"].count('class="skeleton skeleton-row"') == 3
+    assert payload["table"].count("skeleton-table-cell-head") == 3  # header row, 3 columns
+    assert payload["table"].count('class="skeleton-table-row"') == 2  # 2 data rows
+    assert payload["table"].count('class="skeleton skeleton-table-cell"') == 3 * 2  # 2 rows x 3 cols
+
+
+def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
+    """VD-3: the plan rail's first fetch for a task (nothing cached yet) must
+    render a table/row skeleton instead of the old blank-then-"计划生成中…"
+    text, matching the busy-pill coexistence requirement (different DOM
+    region, no visual fight). Once a response has landed at least once, later
+    still-empty renders fall back to the plain text — the skeleton must not
+    re-flash on every poll tick.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "const renderSignatures = {};",
+            "controller.render({ force: true, renderSignatures });",
+            "const firstHtml = elements.workflowStepper.innerHTML;",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures });",
+            "const secondHtml = elements.workflowStepper.innerHTML;",
+            "process.stdout.write(JSON.stringify({ firstHtml, secondHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'data-skeleton="plan-rail"' in payload["firstHtml"]
+    assert "skeleton-row" in payload["firstHtml"]
+    assert "计划生成中" not in payload["firstHtml"]
+
+    assert 'data-skeleton="plan-rail"' not in payload["secondHtml"]
+    assert "计划生成中" in payload["secondHtml"]
+
+
+def test_artifact_panel_loading_state_uses_table_skeleton():
+    """VD-3: the gate-table artifact preview's loading placeholder (shown
+    while a JOIN diagnostics / feature metrics / model compare table fetches)
+    must be a table skeleton, not the old plain-text "正在加载输出..." string.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "正在加载输出..." not in plan_js
+    assert "skeletonTableHtml" in plan_js
+    assert 'data-skeleton="artifact"' in plan_js

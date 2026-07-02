@@ -1074,6 +1074,11 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   color: var(--text-muted);
   font-size: 13px;
 }
+/* VD-3: plan rail's genuine first load (no cached response yet) — see
+   planRailSkeletonHtml() in plan_rail_controller.js. */
+.plan-rail-skeleton {
+  padding: 4px 6px;
+}
 .plan-rail-fetch-error {
   display: flex;
   align-items: center;
