@@ -100,3 +100,44 @@ def test_ingest_sheet_wraps_missing_sheet_errors(tmp_path):
 
     with pytest.raises(DataIngestError):
         ingest_sheet(Path(workbook_path), "Missing", tmp_path / "out")
+
+
+# --- GAP-1: flag long numeric-id columns Excel already stored as Number ----
+
+
+def test_ingest_sheet_flags_suspected_truncated_long_id_column(tmp_path):
+    workbook_path = tmp_path / "ids.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sample"
+    sheet.append(["id_card", "bad_flag"])
+    # Written as a numeric cell (not text) -- Excel stores this as an IEEE754
+    # double at the file-format level, so precision is already lost before
+    # openpyxl/pandas ever reads it.
+    sheet.append([110101199001011234, 0])
+    sheet.append([110101199001015678, 1])
+    workbook.save(workbook_path)
+
+    out_path, report = ingest_sheet(workbook_path, "Sample", tmp_path / "out")
+
+    assert report.suspected_truncated_id_columns == ("id_card",)
+    assert out_path.exists()
+
+
+def test_ingest_sheet_does_not_flag_text_stored_ids(tmp_path):
+    workbook_path = tmp_path / "text_ids.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sample"
+    sheet.append(["id_card", "bad_flag"])
+    sheet["A2"] = "110101199001011234"
+    sheet["A2"].number_format = "@"
+    sheet["B2"] = 0
+    sheet["A3"] = "110101199001015678"
+    sheet["A3"].number_format = "@"
+    sheet["B3"] = 1
+    workbook.save(workbook_path)
+
+    _out_path, report = ingest_sheet(workbook_path, "Sample", tmp_path / "out")
+
+    assert report.suspected_truncated_id_columns == ()

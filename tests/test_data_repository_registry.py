@@ -693,3 +693,89 @@ def test_dataset_registry_register_existing_with_audit_failure_removes_copied_da
 
     assert [dataset.id for dataset in registry.list_for_task("task-1")] == [sample.id]
     assert not list((datasets_root / "task-1").glob("derived_*.parquet"))
+
+
+# --- GAP-1: CSV encoding fallback + long numeric id dtype defenses ----------
+
+
+def test_dataset_registry_ingests_gbk_encoded_csv_with_long_id_column(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+
+    csv_path = tmp_path / "gbk_sample.csv"
+    # 18-digit national id with a missing value in the same column -- this is
+    # exactly the shape that promotes a column to float64 under pandas' default
+    # type inference and truncates the trailing digits.
+    raw = (
+        "姓名,id_card,bad_flag\n"
+        "张三,110101199001011234,0\n"
+        "李四,,1\n"
+        "王五,110101199001015678,0\n"
+    )
+    csv_path.write_bytes(raw.encode("gbk"))
+
+    dataset = registry.register_from_upload("task-1", csv_path, role="sample")
+
+    assert dataset.format == "parquet"
+    report = registry.last_csv_ingest_report
+    assert report is not None
+    assert report.encoding_used == "gb18030"
+    assert "id_card" in report.long_id_columns
+
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    assert pd.api.types.is_string_dtype(frame["id_card"]) or frame["id_card"].dtype == object
+    assert set(frame["id_card"].dropna()) == {
+        "110101199001011234",
+        "110101199001015678",
+    }
+    assert frame["姓名"].tolist() == ["张三", "李四", "王五"]
+
+
+def test_dataset_registry_keeps_utf8_csv_encoding_and_skips_short_ids(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+
+    csv_path = tmp_path / "utf8_sample.csv"
+    pd.DataFrame({
+        "mobile": ["13800138000", "13900139000"],
+        "bad_flag": [0, 1],
+    }).to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    registry.register_from_upload("task-1", csv_path, role="sample")
+
+    report = registry.last_csv_ingest_report
+    assert report is not None
+    assert report.encoding_used == "utf-8-sig"
+    assert report.long_id_columns == ()
+
+
+def test_dataset_registry_reads_scientific_notation_ids_as_strings(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    datasets_root = tmp_path / "datasets"
+    init_db(db_path)
+    repo = DatasetRepository(db_path)
+    backend = DataBackend(datasets_root)
+    registry = DatasetRegistry(repo, backend, datasets_root)
+
+    csv_path = tmp_path / "sci_notation.csv"
+    # A card number that pandas' default sniffing would otherwise read as a
+    # plain long integer column and later promote to float64 on a missing value.
+    raw = "card_no,bad_flag\n6222021234567890123,0\n,1\n6222021234567890456,0\n"
+    csv_path.write_text(raw, encoding="utf-8")
+
+    dataset = registry.register_from_upload("task-1", csv_path, role="sample")
+
+    frame = pd.read_parquet(registry.resolve_path(dataset.id))
+    assert pd.api.types.is_string_dtype(frame["card_no"]) or frame["card_no"].dtype == object
+    assert set(frame["card_no"].dropna()) == {
+        "6222021234567890123",
+        "6222021234567890456",
+    }

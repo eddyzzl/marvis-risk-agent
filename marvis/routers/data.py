@@ -165,12 +165,18 @@ def upload_task_dataset(
                         artifact = uow.stage_file(out_dir, parquet_path.name)
                         shutil.move(parquet_path, artifact.path)
                         staged_sheets.append((artifact.final_path, report))
+                        excel_warnings = []
+                        if report.suspected_truncated_id_columns:
+                            excel_warnings.append(
+                                "疑似长数字 ID 列已被 Excel 存为数值并截断精度，建议改为文本格式重新导入："
+                                + ", ".join(report.suspected_truncated_id_columns)
+                            )
                         reports.append({
                             "sheet": report.sheet,
                             "header_rows": report.header_rows,
                             "data_start_row": report.data_start_row,
                             "flattened_columns": report.flattened_columns,
-                            "warnings": [],
+                            "warnings": excel_warnings,
                         })
                 datasets = uow.finalize_with_connection(
                     registry.transaction,
@@ -190,6 +196,21 @@ def upload_task_dataset(
         else:
             datasets = [registry.register_from_upload(task_id, upload_path, role=role)]
             reports = []
+            csv_report = registry.last_csv_ingest_report
+            if csv_report is not None:
+                csv_warnings = []
+                if csv_report.encoding_used != "utf-8-sig":
+                    csv_warnings.append(f"文件按 {csv_report.encoding_used} 编码解析（非 UTF-8）。")
+                if csv_report.long_id_columns:
+                    csv_warnings.append(
+                        "以下长数字 ID 列已按文本读取，避免精度截断："
+                        + ", ".join(csv_report.long_id_columns)
+                    )
+                reports.append({
+                    "encoding_used": csv_report.encoding_used,
+                    "long_id_columns": list(csv_report.long_id_columns),
+                    "warnings": csv_warnings,
+                })
     except HTTPException:
         upload_uow.rollback()
         raise

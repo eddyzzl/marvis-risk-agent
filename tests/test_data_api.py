@@ -153,6 +153,31 @@ def test_dataset_upload_list_and_preview_api(tmp_path):
     assert invalid_preview.status_code == 422
 
 
+def test_dataset_upload_csv_surfaces_encoding_and_long_id_warnings(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+    raw = (
+        "姓名,id_card,bad_flag\n"
+        "张三,110101199001011234,0\n"
+        "李四,,1\n"
+        "王五,110101199001015678,0\n"
+    ).encode("gbk")
+
+    upload = client.post(
+        f"/api/tasks/{task.id}/datasets/upload",
+        data={"role": "sample"},
+        files={"file": ("gbk_ids.csv", raw, "text/csv")},
+    )
+
+    assert upload.status_code == 201
+    body = upload.json()
+    assert body["reports"], "CSV upload should surface an ingest report"
+    report = body["reports"][0]
+    assert report["encoding_used"] == "gb18030"
+    assert "id_card" in report["long_id_columns"]
+    assert any("id_card" in warning for warning in report["warnings"])
+
+
 def test_dataset_preview_returns_column_profiles_and_masked_samples(tmp_path):
     client, settings = _client(tmp_path)
     task = _create_task(settings)
