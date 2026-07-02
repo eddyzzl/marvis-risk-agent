@@ -983,8 +983,8 @@ def test_configure_tuning_preserves_manual_controls_and_disables_non_lgb():
 
 def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     """G2 multi-algorithm: train_models trains every requested recipe and returns
-    all experiments + the best by OOT KS. lgb consumes the tuned params; lr trains
-    with its defaults."""
+    all experiments + the best by overfit-penalized test KS (OOT reported only,
+    DOM-9). lgb consumes the tuned params; lr trains with its defaults."""
     runner, _pr, registry, _backend, _settings, task = _runtime(tmp_path)
     dataset = _register_modeling_sample(registry, tmp_path, task.id)
     prepared = runner.invoke(
@@ -1016,7 +1016,7 @@ def test_train_models_trains_each_recipe_and_picks_best(tmp_path):
     assert out["best_experiment_id"] in out["experiment_ids"]
     assert out["best_recipe"] in {"lgb", "lr"}
     assert out["target_type"] == "binary"
-    assert out["selection_metric"] == "oot_ks"
+    assert out["selection_metric"] == "test_ks(overfit-penalized)"
 
 
 def test_train_models_supports_catboost_and_sample_weight_col(tmp_path):
@@ -1301,6 +1301,33 @@ def test_pick_best_experiment_is_target_type_aware():
     assert metric == "oot_macro_auc"
 
 
+def test_pick_best_experiment_binary_selects_by_test_ks_not_oot_ks():
+    """DOM-9: champion selection must not peek at OOT — a candidate with a higher OOT KS
+    but a lower (overfit-penalized) test KS must lose, mirroring tune_hyperparameters'
+    explicit "OOT reports only" policy."""
+    from marvis.packs.modeling.tools import _pick_best_experiment
+
+    experiments = [
+        {
+            "experiment_id": "high-oot-low-test",
+            "recipe": "lgb",
+            # Highest OOT KS of the two, but weaker test KS — must NOT be picked.
+            "metrics": {"train_ks": 0.50, "test_ks": 0.40, "oot_ks": 0.60},
+        },
+        {
+            "experiment_id": "high-test-low-oot",
+            "recipe": "lr",
+            # Lower OOT KS, but the better (overfit-penalized) test KS — must win.
+            "metrics": {"train_ks": 0.46, "test_ks": 0.45, "oot_ks": 0.30},
+        },
+    ]
+
+    best, metric = _pick_best_experiment(experiments, target_type="binary")
+
+    assert best["experiment_id"] == "high-test-low-oot"
+    assert metric == "test_ks(overfit-penalized)"
+
+
 def test_pick_best_comparison_row_prefers_delivery_ready_candidate():
     from marvis.packs.modeling.tools import _pick_best_comparison_row
 
@@ -1308,21 +1335,27 @@ def test_pick_best_comparison_row_prefers_delivery_ready_candidate():
         {
             "id": "catboost-best",
             "recipe": "catboost",
-            "oot_ks": 0.52,
+            "train_ks": 0.55,
+            "test_ks": 0.52,
+            "oot_ks": 0.60,
             "capabilities": {"pmml_supported": False, "handoff_supported": False},
         },
         {
             "id": "lgb-deliverable",
             "recipe": "lgb",
-            "oot_ks": 0.48,
+            "train_ks": 0.50,
+            "test_ks": 0.48,
+            "oot_ks": 0.10,
             "capabilities": {"pmml_supported": True, "handoff_supported": True},
         },
     ]
 
     best, metric = _pick_best_comparison_row(rows, target_type="binary")
 
+    # Only lgb-deliverable is delivery-ready, so it wins regardless of KS ranking;
+    # its (higher) OOT KS must NOT be why it wins — the metric basis is test KS (DOM-9).
     assert best["id"] == "lgb-deliverable"
-    assert metric == "oot_ks"
+    assert metric == "test_ks(overfit-penalized)"
 
 
 def test_policy_selection_prefers_compliant_scorecard_candidate():
@@ -1332,6 +1365,8 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
         {
             "id": "lgb-higher-ks",
             "recipe": "lgb",
+            "train_ks": 0.58,
+            "test_ks": 0.55,
             "oot_ks": 0.55,
             "psi_oot_vs_train": 0.04,
             "feature_count": 18,
@@ -1341,6 +1376,8 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
         {
             "id": "scorecard-compliant",
             "recipe": "scorecard",
+            "train_ks": 0.51,
+            "test_ks": 0.49,
             "oot_ks": 0.49,
             "psi_oot_vs_train": 0.03,
             "feature_count": 12,
@@ -1350,6 +1387,8 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
         {
             "id": "scorecard-partial-monotonic",
             "recipe": "scorecard",
+            "train_ks": 0.55,
+            "test_ks": 0.53,
             "oot_ks": 0.53,
             "psi_oot_vs_train": 0.03,
             "feature_count": 12,
@@ -1362,6 +1401,8 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
         {
             "id": "scorecard-no-monotonic",
             "recipe": "scorecard",
+            "train_ks": 0.53,
+            "test_ks": 0.51,
             "oot_ks": 0.51,
             "psi_oot_vs_train": 0.03,
             "feature_count": 12,
@@ -1384,7 +1425,7 @@ def test_policy_selection_prefers_compliant_scorecard_candidate():
     )
 
     assert best["id"] == "scorecard-compliant"
-    assert metric == "oot_ks"
+    assert metric == "test_ks(overfit-penalized)"
     assert decision["status"] == "accepted"
     assert decision["policy_candidate_count"] == 2
     assert decision["selected_by_preference"] is True
@@ -1548,7 +1589,7 @@ def test_selection_policy_metric_thresholds_pick_compliant_business_candidate():
     )
 
     assert best["id"] == "business-compliant"
-    assert metric == "oot_ks"
+    assert metric == "test_ks(overfit-penalized)"
     assert decision["status"] == "accepted"
     assert decision["policy"]["metric_thresholds"] == {"oot_ks": {"min": 0.30}}
     assert decision["policy_candidate_count"] == 1

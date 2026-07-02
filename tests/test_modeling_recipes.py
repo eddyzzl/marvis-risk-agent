@@ -29,7 +29,7 @@ from marvis.packs.modeling.recipes.mlp import train_mlp
 from marvis.packs.modeling.recipes.scorecard import train_scorecard
 from marvis.packs.modeling.recipes.xgb import train_xgb
 from marvis.packs.modeling.tools import _ModelArtifactScorer
-from marvis.packs.modeling.tune import _lgb_base_params, _trial_score
+from marvis.packs.modeling.tune import _lgb_base_params, _trial_score, tune_hyperparameters
 from marvis.settings import build_settings
 
 
@@ -424,6 +424,42 @@ def test_train_lgb_blocks_train_test_nan_labels_without_confirmation(tmp_path):
 
     with pytest.raises(NanLabelNotConfirmedError):
         train_lgb(DataBackend(tmp_path), path, config, out_dir=tmp_path / "lgb_nan_unconfirmed")
+
+
+def test_tune_hyperparameters_gates_nan_train_label(tmp_path):
+    """DOM-1: tune_hyperparameters must not silently tune on NaN-polluted labels — the
+    shared NaN-label confirmation gate applies here exactly as it does in train_lgb."""
+    rows = 160
+    labels = [1 if i % 7 in {0, 1, 2} else 0 for i in range(rows)]
+    labels[3] = np.nan
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        "x2": [((i * 17) % 89) / 100 for i in range(rows)],
+        "y": labels,
+        "split": ["train"] * 100 + ["test"] * 40 + ["oot"] * 20,
+    })
+    path = tmp_path / "tune_nan_labels.parquet"
+    frame.to_parquet(path, index=False)
+    backend = DataBackend(tmp_path)
+    tune_kwargs = dict(
+        features=["x1", "x2"],
+        target_col="y",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        n_trials=2,
+        seed=37,
+        early_stopping_rounds=5,
+        max_boost_round=10,
+    )
+
+    with pytest.raises(NanLabelNotConfirmedError):
+        tune_hyperparameters(backend, path, drop_nan_labels=False, **tune_kwargs)
+
+    result = tune_hyperparameters(backend, path, drop_nan_labels=True, **tune_kwargs)
+
+    assert result.nan_labels_dropped == 1
+    assert result.n_trials == 2
+    assert result.best_metrics["test_ks"] is not None
 
 
 def test_train_lgb_all_nan_oot_is_scoring_only(tmp_path):
