@@ -9,6 +9,7 @@ from typing import Any
 
 from marvis.agent_memory.models import normalize_memory_type
 from marvis.agent_memory.policy import classify_distillation_payload
+from marvis.llm_prompts import DISTILL_SYS as _DISTILL_SYS_SPEC
 
 
 logger = logging.getLogger(__name__)
@@ -17,10 +18,9 @@ logger = logging.getLogger(__name__)
 CONFIDENCE_THRESHOLDS = {"high": 4, "medium": 2}
 MAX_DISTILLED_SUMMARY_CHARS = 400
 DISTILLATION_STATUSES = ("active", "rolled_back")
-DISTILL_SYS = (
-    "你在压缩 MARVIS 的历史记忆。只能基于给定的结构化字段和原始记忆措辞，输出一句话经验。"
-    "禁止引入任何未在输入中出现的事实、数字或结论。不要输出任务 ID。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of DISTILL_SYS from here keep working unchanged.
+DISTILL_SYS = _DISTILL_SYS_SPEC.text
 
 
 @dataclass(frozen=True)

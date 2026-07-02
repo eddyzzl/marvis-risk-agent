@@ -15,6 +15,8 @@ from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
 from marvis.agent_memory.prompting import (
     add_memory_to_prompt_payload,
     attach_memory_metadata,
+    memory_context_was_truncated,
+    normalize_memory_context,
 )
 
 
@@ -501,12 +503,16 @@ def summarize_stage(
         evidence=evidence,
         memory_context=memory_context,
     )
+    # LLM-5: memory injection is one of the three named highest-volume prompt
+    # touch points; surface the truncation flag on this call's audit record.
+    truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
     try:
         content = _client(model_profile).complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.2,
             on_delta=on_delta,
+            truncated=truncated,
         )
     except LLMClientError as exc:
         return fallback, {"llm_error": str(exc), "fallback": True}
@@ -598,12 +604,16 @@ def answer_chat_message(
         memory_context=memory_context,
     )
     fallback = _chat_fallback_for_message(user_message)
+    # LLM-5: memory injection is one of the three named highest-volume prompt
+    # touch points; surface the truncation flag on this call's audit record.
+    truncated = memory_context_was_truncated(normalize_memory_context(memory_context))
     try:
         raw_content = _client(model_profile).complete(
             system_prompt=AGENT_SYSTEM_PROMPT,
             user_prompt=prompt,
             temperature=0.2,
             on_delta=on_delta,
+            truncated=truncated,
         )
         content = (raw_content or "").strip()
     except LLMClientError as exc:

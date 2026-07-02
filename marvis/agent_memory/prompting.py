@@ -35,20 +35,35 @@ def normalize_memory_context(memory_context: dict[str, Any] | None) -> dict[str,
     ]
     if not memories:
         return None
-    memories = _fit_memories_to_budget(memories)
-    if not memories:
+    fitted, truncated = _fit_memories_to_budget(memories)
+    if not fitted:
         return None
     return {
         "scope": str(memory_context.get("scope") or "cross_task_agent_memory"),
         "usage_rules": MEMORY_USAGE_RULES,
-        "memories": memories,
+        "memories": fitted,
+        # LLM-5: memory injection is one of the three named highest-volume
+        # prompt touch points — surfaced so callers can set the audit-visible
+        # ``truncated`` flag on their complete() call (see marvis.agent.service
+        # for the two integration points; other callers of this module get the
+        # same detection but may not yet plumb it through to a complete() call).
+        "truncated": truncated,
     }
+
+
+def memory_context_was_truncated(normalized_memory_context: dict[str, Any] | None) -> bool:
+    """Whether ``normalize_memory_context`` had to drop memories to fit budget."""
+    if not isinstance(normalized_memory_context, dict):
+        return False
+    return bool(normalized_memory_context.get("truncated"))
 
 
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 
-def _fit_memories_to_budget(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fit_memories_to_budget(
+    memories: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
     # Final safeguard against an unbounded cross_task_memory section: even
     # after per-packet trimming (_bounded_distillation_payload, source id
     # sampling), enough packets can still add up past a sane prompt budget.
@@ -56,7 +71,7 @@ def _fit_memories_to_budget(memories: list[dict[str, Any]]) -> list[dict[str, An
     # order, dropping lowest-confidence packets once the budget is exceeded.
     total_chars = sum(_packet_char_len(packet) for packet in memories)
     if total_chars <= CROSS_TASK_MEMORY_CHAR_BUDGET:
-        return memories
+        return memories, False
     ordered = sorted(
         enumerate(memories),
         key=lambda item: (-_CONFIDENCE_RANK.get(str(item[1].get("confidence") or ""), 0), item[0]),
@@ -70,7 +85,7 @@ def _fit_memories_to_budget(memories: list[dict[str, Any]]) -> list[dict[str, An
         kept.append((index, packet))
         running_total += packet_len
     kept.sort(key=lambda item: item[0])
-    return [packet for _, packet in kept]
+    return [packet for _, packet in kept], len(kept) < len(memories)
 
 
 def _packet_char_len(packet: dict[str, Any]) -> int:
@@ -132,7 +147,11 @@ def add_memory_to_prompt_payload(
 ) -> dict[str, Any]:
     normalized = normalize_memory_context(memory_context)
     if normalized is not None:
-        payload["cross_task_memory"] = normalized
+        # `truncated` is bookkeeping for the caller (LLM-5 audit trail via
+        # memory_context_was_truncated), not something the model should see in
+        # its own prompt payload.
+        prompt_facing = {key: value for key, value in normalized.items() if key != "truncated"}
+        payload["cross_task_memory"] = prompt_facing
         payload["instructions"] = (
             str(payload.get("instructions") or "")
             + "跨任务记忆只可作为解释和风险提醒依据，不能改变平台确定性指标；"

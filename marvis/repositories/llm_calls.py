@@ -8,7 +8,15 @@ from marvis.db_schema import connect
 from marvis.repositories.audit import _write_audit_row
 
 _ERROR_KINDS = frozenset(
-    {"http_4xx", "http_5xx", "http_error", "timeout", "connection", "stream_interrupted"}
+    {
+        "http_4xx",
+        "http_5xx",
+        "http_error",
+        "timeout",
+        "connection",
+        "stream_interrupted",
+        "context_length_exceeded",
+    }
 )
 
 
@@ -41,6 +49,12 @@ def record_llm_call(db_path: Path, record: dict) -> None:
     error_kind = _coerce_error_kind(record.get("error_kind"))
     retry_count = _as_int(record.get("retry_count")) or 0
     streamed = 1 if record.get("streamed") else 0
+    # LLM-10: which marvis.llm_prompts PromptSpec (name/version) was live for
+    # this call. LLM-5: whether the prompt was truncated to fit context_window.
+    prompt_name = record.get("prompt_name")
+    prompt_name = str(prompt_name) if prompt_name else None
+    prompt_version = _as_int(record.get("prompt_version"))
+    truncated = 1 if record.get("truncated") else 0
     at = _now()
     with connect(db_path) as conn:
         conn.execute(
@@ -48,9 +62,9 @@ def record_llm_call(db_path: Path, record: dict) -> None:
             INSERT INTO llm_calls(
                 id, caller, model_id, prompt_chars, prompt_tokens,
                 completion_tokens, latency_ms, ok, error_kind, retry_count,
-                streamed, at
+                streamed, prompt_name, prompt_version, truncated, at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex,
@@ -64,6 +78,9 @@ def record_llm_call(db_path: Path, record: dict) -> None:
                 error_kind,
                 retry_count,
                 streamed,
+                prompt_name,
+                prompt_version,
+                truncated,
                 at,
             ),
         )
@@ -80,6 +97,9 @@ def record_llm_call(db_path: Path, record: dict) -> None:
                 "retry_count": retry_count,
                 "error_kind": error_kind,
                 "streamed": bool(streamed),
+                "prompt_name": prompt_name,
+                "prompt_version": prompt_version,
+                "truncated": bool(truncated),
             },
         )
 

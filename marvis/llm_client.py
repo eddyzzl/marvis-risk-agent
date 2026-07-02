@@ -32,9 +32,13 @@ class OpenAICompatibleLLMClient:
         temperature: float = 0.2,
         response_format: dict | None = None,
         json_schema: dict | None = None,
+        max_tokens: int | None = None,
         on_delta: Callable[[str], None] | None = None,
         stream: bool = True,
         caller: str = "unknown",
+        prompt_name: str | None = None,
+        prompt_version: int | None = None,
+        truncated: bool = False,
         on_call_recorded: Callable[[dict], None] | None = None,
     ) -> str:
         recorder = on_call_recorded or self._on_call_recorded
@@ -45,6 +49,24 @@ class OpenAICompatibleLLMClient:
             raise LLMClientError("LLM profile is incomplete")
         if not api_base_url.startswith(("http://", "https://")):
             raise LLMClientError("api_base_url must start with http:// or https://")
+        # LLM-5: client-side context-window budget check before any request is sent.
+        # A weak local model's window (default 32768) is easy to punch through as
+        # planner catalogs/gate metadata grow; the previous failure mode was an
+        # opaque "LLM HTTP 400" with the body deliberately discarded (never surface
+        # a rejected prompt — it can echo into agent_messages.metadata). Call sites
+        # that can shrink their own prompt should do so *before* calling complete()
+        # (see marvis.orchestrator.context.budget.fit_to_budget); this is the last
+        # line of defense that turns an inevitable server-side rejection into an
+        # explicit, typed, sizes-included error instead.
+        effective_max_tokens = int(max_tokens) if max_tokens is not None else _default_max_tokens(self.profile)
+        context_window = _context_window(self.profile)
+        estimated_prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt)
+        if estimated_prompt_tokens + effective_max_tokens > context_window:
+            raise LLMClientError(
+                "上下文过长：prompt 约 "
+                f"{estimated_prompt_tokens} tokens + max_tokens {effective_max_tokens} "
+                f"超过模型窗口 {context_window} tokens，请缩短输入或换用更大窗口的模型。"
+            )
         payload = {
             "model": model_name,
             "messages": [
@@ -53,6 +75,7 @@ class OpenAICompatibleLLMClient:
             ],
             "stream": bool(stream),
             "temperature": temperature,
+            "max_tokens": effective_max_tokens,
         }
         if stream:
             payload["stream_options"] = {"include_usage": True}
@@ -106,14 +129,15 @@ class OpenAICompatibleLLMClient:
                         response, on_delta=wrapped_on_delta, usage_out=usage
                     )
             except HTTPError as exc:
-                # Drain the body to free the socket, but never surface it: error
-                # bodies can echo the rejected prompt and would be persisted into
-                # agent_messages.metadata. Only the status code/reason are recorded.
+                # Drain the body to extract a whitelisted error.code/error.type enum
+                # only (never the message — a rejected-prompt body must never be
+                # persisted into agent_messages.metadata), then discard the rest.
+                body_error_kind = None
                 try:
-                    exc.read()
+                    body_error_kind = _classify_http_error_body(exc.read())
                 except Exception:
                     pass
-                error_kind = _http_error_kind(exc.code)
+                error_kind = body_error_kind or _http_error_kind(exc.code)
                 if error_kind == "http_5xx" and retry_count < max_retries:
                     retry_count += 1
                     time.sleep(_RETRY_BACKOFF_SECONDS)
@@ -122,8 +146,14 @@ class OpenAICompatibleLLMClient:
                     recorder, caller=caller, model_name=model_name,
                     prompt_chars=prompt_chars, usage={}, started=started,
                     streamed=bool(stream), ok=False, error_kind=error_kind,
-                    retry_count=retry_count,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
                 )
+                if error_kind == "context_length_exceeded":
+                    raise LLMClientError(
+                        "上下文过长：模型拒绝了该请求(context_length_exceeded)，"
+                        "请缩短输入或换用更大窗口的模型。"
+                    ) from exc
                 raise LLMClientError(f"LLM HTTP {exc.code} {exc.reason}") from exc
             except URLError as exc:
                 if retry_count < max_retries:
@@ -134,7 +164,8 @@ class OpenAICompatibleLLMClient:
                     recorder, caller=caller, model_name=model_name,
                     prompt_chars=prompt_chars, usage={}, started=started,
                     streamed=bool(stream), ok=False, error_kind="connection",
-                    retry_count=retry_count,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
                 )
                 raise LLMClientError(f"LLM request failed: {exc.reason}") from exc
             except TimeoutError as exc:
@@ -146,7 +177,8 @@ class OpenAICompatibleLLMClient:
                     recorder, caller=caller, model_name=model_name,
                     prompt_chars=prompt_chars, usage={}, started=started,
                     streamed=bool(stream), ok=False, error_kind="timeout",
-                    retry_count=retry_count,
+                    retry_count=retry_count, prompt_name=prompt_name,
+                    prompt_version=prompt_version, truncated=truncated,
                 )
                 raise LLMClientError("LLM request timed out") from exc
             except (OSError, HTTPException) as exc:
@@ -162,13 +194,16 @@ class OpenAICompatibleLLMClient:
                     prompt_chars=prompt_chars, usage={}, started=started,
                     streamed=bool(stream), ok=False,
                     error_kind="stream_interrupted", retry_count=retry_count,
+                    prompt_name=prompt_name, prompt_version=prompt_version,
+                    truncated=truncated,
                 )
                 raise LLMClientError(f"LLM stream interrupted: {exc}") from exc
             self._record_call(
                 recorder, caller=caller, model_name=model_name,
                 prompt_chars=prompt_chars, usage=usage, started=started,
                 streamed=bool(stream), ok=True, error_kind=None,
-                retry_count=retry_count,
+                retry_count=retry_count, prompt_name=prompt_name,
+                prompt_version=prompt_version, truncated=truncated,
             )
             return strip_thinking(content).strip()
 
@@ -185,6 +220,9 @@ class OpenAICompatibleLLMClient:
         ok: bool,
         error_kind: str | None,
         retry_count: int = 0,
+        prompt_name: str | None = None,
+        prompt_version: int | None = None,
+        truncated: bool = False,
     ) -> None:
         if on_call_recorded is None:
             return
@@ -201,6 +239,9 @@ class OpenAICompatibleLLMClient:
             "error_kind": error_kind,
             "streamed": streamed,
             "retry_count": retry_count,
+            "prompt_name": prompt_name,
+            "prompt_version": prompt_version,
+            "truncated": bool(truncated),
         }
         try:
             on_call_recorded(record)
@@ -210,6 +251,91 @@ class OpenAICompatibleLLMClient:
 
 
 _RETRY_BACKOFF_SECONDS = 1.0
+
+# LLM-5: defaults used when a profile omits context_window/max_output_tokens.
+# 32768 matches the common local-model window cited in the review (Qwen/Llama
+# class 32K checkpoints); 2048 is a safe default completion budget for JSON
+# decisions/summaries — call sites that need more (e.g. the planner) pass an
+# explicit max_tokens.
+DEFAULT_CONTEXT_WINDOW = 32768
+DEFAULT_MAX_OUTPUT_TOKENS = 2048
+
+# Mixed CJK/ASCII token estimate: CJK glyphs run close to 1.6 chars/token,
+# ASCII/latin text closer to 4 chars/token on common BPE tokenizers. This is a
+# deliberately conservative (over-)estimate, not a tokenizer replacement — it
+# only needs to be good enough to catch a request before the server rejects it.
+_CJK_CHARS_PER_TOKEN = 1.6
+_ASCII_CHARS_PER_TOKEN = 4.0
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative client-side token estimate for a client-window pre-check."""
+    if not text:
+        return 0
+    cjk_chars = sum(1 for ch in text if _is_cjk(ch))
+    ascii_chars = len(text) - cjk_chars
+    return int(cjk_chars / _CJK_CHARS_PER_TOKEN) + int(ascii_chars / _ASCII_CHARS_PER_TOKEN) + 1
+
+
+def _is_cjk(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF  # CJK Unified Ideographs
+        or 0x3400 <= code <= 0x4DBF  # CJK Extension A
+        or 0x3000 <= code <= 0x303F  # CJK punctuation
+        or 0xFF00 <= code <= 0xFFEF  # fullwidth forms
+    )
+
+
+def _context_window(profile: dict) -> int:
+    try:
+        value = int(profile.get("context_window") or DEFAULT_CONTEXT_WINDOW)
+    except (TypeError, ValueError):
+        return DEFAULT_CONTEXT_WINDOW
+    return value if value > 0 else DEFAULT_CONTEXT_WINDOW
+
+
+def _default_max_tokens(profile: dict) -> int:
+    try:
+        value = int(profile.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_OUTPUT_TOKENS
+    return value if value > 0 else DEFAULT_MAX_OUTPUT_TOKENS
+
+
+# Whitelisted OpenAI-compatible error.code / error.type enum values only — never
+# the message, which can echo the rejected prompt back (the exact leak the
+# caller-side "drain and discard" comment above guards against).
+_CONTEXT_LENGTH_ERROR_TOKENS = frozenset({
+    "context_length_exceeded",
+    "context_window_exceeded",
+    "string_above_max_length",
+    "max_tokens_exceeded",
+})
+
+
+def _classify_http_error_body(raw: bytes | None) -> str | None:
+    """Best-effort whitelist parse of an OpenAI-compatible error body.
+
+    Only returns a fixed, non-message enum (`"context_length_exceeded"`) or
+    ``None`` — the raw body/message is never returned or logged.
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    if not isinstance(error, dict):
+        return None
+    for key in ("code", "type"):
+        token = str(error.get(key) or "").strip().lower()
+        if token in _CONTEXT_LENGTH_ERROR_TOKENS:
+            return "context_length_exceeded"
+    return None
 
 
 def _transport_max_retries(profile: dict) -> int:

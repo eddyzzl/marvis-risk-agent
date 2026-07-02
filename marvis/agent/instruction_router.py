@@ -17,20 +17,13 @@ tests (the platform may have no LLM configured yet).
 from __future__ import annotations
 
 from marvis.agent.json_reply import load_json_object
+from marvis.llm_prompts import GATE_INSTRUCTION_ROUTER_SYS as _GATE_INSTRUCTION_ROUTER_SYS_SPEC
 
 _ACTIONS = ("confirm", "adjust", "replan", "clarify")
 
-_SYSTEM = (
-    "你是信贷风控建模 Agent。用户在一个需要确认的节点没有直接确认,而是提了一条指令。"
-    "判断该指令属于哪类并抽取要素:\n"
-    "- confirm:其实是同意继续(如\"可以\"\"没问题\")。\n"
-    "- adjust:调整刚算出这一步的参数后重算(如\"n_trials 调到 20\"\"阈值放宽到 0.1\")。"
-    "把参数抽成 params 字典(键=参数名,值=新值,数字请用数字)。\n"
-    "- replan:结构性改动(加/删步骤、换算法、换流程),把诉求写进 constraint。\n"
-    "- clarify:看不懂或信息不足。\n"
-    '严格只返回 JSON:'
-    '{"action":"confirm|adjust|replan|clarify","params":{},"constraint":"","reason":"一句话中文"}。'
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of _SYSTEM from here keep working unchanged.
+_SYSTEM = _GATE_INSTRUCTION_ROUTER_SYS_SPEC.text
 
 _ROUTE_SCHEMA = {
     "name": "gate_instruction_route",

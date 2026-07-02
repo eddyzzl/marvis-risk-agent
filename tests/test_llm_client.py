@@ -513,3 +513,172 @@ def test_complete_strips_thinking_from_final_content(monkeypatch):
     ).complete(system_prompt="s", user_prompt="u", stream=False)
 
     assert content == "final answer"
+
+
+# --- LLM-5: context-window budget ---------------------------------------------
+def test_complete_sends_default_max_tokens_when_unset(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert captured["payload"]["max_tokens"] == 2048
+
+
+def test_complete_honors_explicit_max_tokens_and_profile_defaults(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "max_output_tokens": 512,
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+    assert captured["payload"]["max_tokens"] == 512
+
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False, max_tokens=99)
+    assert captured["payload"]["max_tokens"] == 99
+
+
+def test_complete_rejects_prompt_that_exceeds_context_window(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise AssertionError("must not send a request once the pre-flight budget check fails")
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="上下文过长"):
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+                "context_window": 100,
+                "max_output_tokens": 50,
+            }
+        ).complete(system_prompt="s" * 500, user_prompt="u" * 500, stream=False)
+
+
+def test_complete_allows_prompt_within_context_window(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    content = OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+            "context_window": 32768,
+            "max_output_tokens": 2048,
+        }
+    ).complete(system_prompt="s", user_prompt="u", stream=False)
+
+    assert content == "plain json"
+
+
+class _ContextLengthExceededError(HTTPError):
+    def __init__(self):
+        super().__init__(
+            url="https://api.example.com/v1/chat/completions",
+            code=400,
+            msg="Bad Request",
+            hdrs=None,
+            fp=None,
+        )
+        self._body = json.dumps(
+            {"error": {"message": "the rejected prompt echoed back", "code": "context_length_exceeded", "type": "invalid_request_error"}}
+        ).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+
+def test_context_length_exceeded_body_is_classified_without_leaking_message(monkeypatch):
+    monkeypatch.setattr("marvis.llm_client.time.sleep", lambda _s: None)
+    records = []
+
+    def fake_urlopen(request, timeout):
+        raise _ContextLengthExceededError()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    with pytest.raises(LLMClientError, match="context_length_exceeded") as exc_info:
+        OpenAICompatibleLLMClient(
+            {
+                "api_base_url": "https://api.example.com/v1",
+                "model_name": "m",
+                "api_key": "secret",
+            }
+        ).complete(
+            system_prompt="s",
+            user_prompt="u",
+            stream=False,
+            on_call_recorded=records.append,
+        )
+
+    assert "rejected prompt echoed back" not in str(exc_info.value)
+    assert records[0]["error_kind"] == "context_length_exceeded"
+
+
+def test_complete_records_prompt_name_version_and_truncated_flag(monkeypatch):
+    def fake_urlopen(request, timeout):
+        return _JsonResponse()
+
+    monkeypatch.setattr("marvis.llm_client.urlopen", fake_urlopen)
+
+    records = []
+    OpenAICompatibleLLMClient(
+        {
+            "api_base_url": "https://api.example.com/v1",
+            "model_name": "m",
+            "api_key": "secret",
+        }
+    ).complete(
+        system_prompt="s",
+        user_prompt="u",
+        stream=False,
+        caller="gate",
+        prompt_name="GATE_SYSTEM_TEMPLATE",
+        prompt_version=1,
+        truncated=True,
+        on_call_recorded=records.append,
+    )
+
+    assert records[0]["prompt_name"] == "GATE_SYSTEM_TEMPLATE"
+    assert records[0]["prompt_version"] == 1
+    assert records[0]["truncated"] is True
+
+
+def test_estimate_tokens_counts_cjk_and_ascii_differently():
+    from marvis.llm_client import estimate_tokens
+
+    ascii_tokens = estimate_tokens("a" * 40)
+    cjk_tokens = estimate_tokens("测" * 40)
+
+    assert cjk_tokens > ascii_tokens

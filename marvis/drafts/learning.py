@@ -4,15 +4,15 @@ from datetime import UTC, datetime
 import uuid
 
 from marvis.drafts.contracts import LearningNote
+from marvis.llm_prompts import LEARN_SYS as _LEARN_SYS_SPEC
 
 
 MAX_CONTENT_CHARS = 5_000
 MAX_JOINED_CHARS = 20_000
 MAX_NOTE_CHARS = 4_000
-LEARN_SYS = (
-    "把资料压成可操作的实现要点，覆盖步骤、公式、库用法和关键 API。"
-    "不要复制大段原文。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of LEARN_SYS from here keep working unchanged.
+LEARN_SYS = _LEARN_SYS_SPEC.text
 
 
 def distill_learning(

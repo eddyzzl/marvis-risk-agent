@@ -32,6 +32,7 @@ from marvis.feature.preprocessing import (
     sidecar_path,
 )
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
+from marvis.llm_prompts import REPORT_NARRATIVE_SYS as _REPORT_NARRATIVE_SYS_SPEC
 from marvis.llm_settings import LLMSettingsError, resolve_llm_model
 from marvis.output.model_report import ModelReportPayload, render_model_report
 from marvis.packs.modeling.artifact import (
@@ -4825,10 +4826,10 @@ def _report_structured_summary(**payload) -> dict:
     return _jsonable(payload)
 
 
-REPORT_NARRATIVE_SYS = (
-    "你为信贷风控建模报告起草章节文字。只能解释用户提供的结构化摘要，"
-    "不得编造任何数字、百分比、阈值、金额或样本量。输出 JSON object。"
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of REPORT_NARRATIVE_SYS from here keep working
+# unchanged.
+REPORT_NARRATIVE_SYS = _REPORT_NARRATIVE_SYS_SPEC.text
 REPORT_NARRATIVE_KEYS = ("sample", "vintage", "model", "stress")
 REPORT_NUMERIC_EVIDENCE_KEYS = (
     "dataset_split",

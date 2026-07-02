@@ -110,3 +110,78 @@ def test_llm_usage_endpoint_returns_aggregate(tmp_path):
     callers = {row["caller"]: row for row in payload["callers"]}
     assert callers["critic"]["calls"] == 1
     assert callers["critic"]["failures"] == 0
+
+
+# --- LLM-10 / LLM-5: prompt_name / prompt_version / truncated persistence ---
+def test_record_llm_call_persists_prompt_version_and_truncated_flag(tmp_path):
+    from marvis.db_schema import connect
+
+    db_path = _db(tmp_path)
+    record_llm_call(
+        db_path,
+        {
+            "caller": "gate",
+            "model_id": "m1",
+            "latency_ms": 10,
+            "ok": True,
+            "retry_count": 0,
+            "streamed": False,
+            "prompt_name": "GATE_SYSTEM_TEMPLATE",
+            "prompt_version": 1,
+            "truncated": True,
+        },
+    )
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT prompt_name, prompt_version, truncated FROM llm_calls"
+        ).fetchone()
+
+    assert row["prompt_name"] == "GATE_SYSTEM_TEMPLATE"
+    assert row["prompt_version"] == 1
+    assert row["truncated"] == 1
+
+
+def test_record_llm_call_defaults_prompt_fields_and_truncated_to_falsy(tmp_path):
+    from marvis.db_schema import connect
+
+    db_path = _db(tmp_path)
+    record_llm_call(
+        db_path,
+        {
+            "caller": "planner",
+            "model_id": "m1",
+            "latency_ms": 10,
+            "ok": True,
+            "retry_count": 0,
+            "streamed": False,
+        },
+    )
+
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT prompt_name, prompt_version, truncated FROM llm_calls"
+        ).fetchone()
+
+    assert row["prompt_name"] is None
+    assert row["prompt_version"] is None
+    assert row["truncated"] == 0
+
+
+def test_context_length_exceeded_is_accepted_as_error_kind(tmp_path):
+    db_path = _db(tmp_path)
+    record_llm_call(
+        db_path,
+        {
+            "caller": "gate",
+            "model_id": "m1",
+            "latency_ms": 10,
+            "ok": False,
+            "error_kind": "context_length_exceeded",
+            "retry_count": 0,
+            "streamed": False,
+        },
+    )
+
+    summary = {row["caller"]: row for row in llm_usage_summary(db_path)}
+    assert summary["gate"]["failures"] == 1

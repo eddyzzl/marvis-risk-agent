@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from marvis.agent.json_reply import load_json_object
+from marvis.llm_prompts import CRITIC_SYS as _CRITIC_SYS_SPEC
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.contracts import (
     Plan,
@@ -21,10 +22,9 @@ from marvis.plugins.errors import SchemaValidationError
 from marvis.plugins.schema_validation import validate_against_schema
 
 
-CRITIC_SYS = (
-    "You are MARVIS plan reviewer. Return JSON with passed and reasons. "
-    "Do not change deterministic metrics."
-)
+# LLM-10: text/version now live in marvis.llm_prompts; kept as a module-level
+# constant so existing imports of CRITIC_SYS from here keep working unchanged.
+CRITIC_SYS = _CRITIC_SYS_SPEC.text
 
 
 @dataclass
