@@ -73,7 +73,7 @@
 | ✅ | PREP-2 | 预处理链已落盘可重放（`30b72ccb`）：`.preprocessing.json` sidecar（impute/cap/normalize/onehot）随派生数据集累计→训练时进 ModelArtifact→scorer/handoff notebook 重放；PMML 不含预处理已在 model card 诚实标注。尾巴已闭环：woe/categorical_woe 入 sidecar 且 scorer/handoff 统一重放（`c2d95fd9`） | High/L | ✅ |
 | ✅ | PREP-3 | 类别链路三层落地（`3ee2146d`/`982ae470`/`ca47fef4`）：excluded_categorical 显性化进 screen 门文案；categorical_woe_encode 工具（train-only+Laplace+rare 归并+未见类别先验 fallback）；CatBoost 原生 cat_features（含调参路径）；setup 提示不改默认 | High/L | ✅ |
 | ✅ | PREP-4 | detect_sentinel_values 落地并打通 impute/cap/normalize/bin/woe（`9fc22a46`），screen 门带 sentinel 提示 | Med/M | — |
-| 🔄 | PREP-6 | （随 W4c 的 SEL-3/TUNE-8 落地中：LR sklearn Pipeline） | Med/S | — |
+| ✅ | PREP-6 | LR Pipeline（impute median+standardize）落地（`56827495`） | Med/S | — |
 | ✅ | PREP-7 | derive_date_features 工具落地（`9f8220d1`）：days_since/month/months_on_book，opt-in | Med/M | — |
 | ✅ | PREP-8 | impute_missing 支持 add_indicators（`1dfffdcb`），指示列入重放链 | Med/S | — |
 | ✅ | PREP-5 | suspected_categorical 启发式落地并进 screen 注记（`b2d266fd`），不改默认行为 | Med/S | — |
@@ -100,20 +100,20 @@
 |---|---|---|---|---|
 | ✅ | TUNE-1 | 两阶段搜索已泛化到全配方家族（`5e30ab4e`）：lgb/xgb/catboost 各 40 trial 带早停，lr/scorecard/mlp 各 12 trial 小空间；per-recipe sha256 确定性 seed；lgb 单配方路径字节级向后兼容 | High/L | ✅ |
 | ✅ | TUNE-2 | 确定性两阶段搜索已落地（`5909edba`）：60/40 粗搜+邻域细搜、lambda log-uniform、lr 0.01–0.3 与轮数反比联动、默认 40 轮、gate 文案改按规模建议；无新依赖；全量 2012 passed | High/M | ✅ |
-| ⬜ | TUNE-3 | 单一 train/test 切分调参：无 CV/重复切分，早停/选参/校准三用同一 test | Med/M | — |
-| ⬜ | TUNE-4 | 超参定型后无'全量在时样本重训'：冠军只见过 ~50-70% 标注样本 | Med/S | — |
-| ⬜ | TUNE-5 | 样本权重链路断裂：加权训练却用未加权 KS 选参/选冠军 | Med/S | — |
-| ⬜ | TUNE-6 | 确定性声明与实现不符：tune 实际 num_threads=0 全核并行，与直训 n_jobs=1 不一致 | Low/S | — |
-| ⬜ | TUNE-7 | 单调约束在调参路径不归一化：dict 形式直接崩溃 | Low/S | — |
-| ⬜ | TUNE-8 | 多算法训练无失败隔离（→ 与 SEL-3/PREP-6 合并执行） | Low/S | — |
+| ✅ | TUNE-3 | 早停改用 train 内切 15% 折（`cf924d49`），test 只做选择；可选 grouped cv_folds+稳健惩罚（`8a009dd7`） | Med/M | — |
+| ✅ | TUNE-4 | refit_on_train_plus_test 默认开启（`4fe808d9`）：冻结参数+轮数缩放、OOT 前后对比进报告 | Med/S | — |
+| ✅ | TUNE-5 | 有权重时 trial/冠军统一按 weighted KS（`aed0f8af`）；顺修 compare/select 从不呈现加权指标的真 bug | Med/S | — |
+| ✅ | TUNE-6 | 线程数收敛到 defaults 常量+force_row_wise+trial 记录 deterministic 标志（`1b724747`） | Low/S | — |
+| ✅ | TUNE-7 | dict/str/list 约束经共享纯函数归一化，tune 与训练路径一致（`014d1bd3`） | Low/S | — |
+| ✅ | TUNE-8 | 单配方失败记为 failed candidate 不连坐（`56827495`） | Low/S | — |
 
 #### 模型选择与评估口径
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
 | ⬜ | SEL-1 | 默认切分不建 OOT，时间外推 OOT（oot_by_time）是全仓从未被调用的死代码 | High/M | ✅ |
 | ✅ | SEL-2 | 公平竞技场已落地（`babd61fe`）：每配方先调参再参赛、树模型统一早停、同切分同特征断言进回归；门文案含"总预算=Σ配方预算"与耗时提示 | High/M | ✅ |
-| ⬜ | SEL-3 | LR 配方零预处理 + 单配方失败连坐终止整批（→ 与 PREP-6/TUNE-8 合并执行） | Med/S | — |
-| ⬜ | SEL-4 | 无独立验证集：test 兼任早停/调参选择/对比口径三重职责 | Med/M | — |
+| ✅ | SEL-3 | LR 重建为 impute→scale→LR Pipeline（`56827495`），随 artifact 可重放 | Med/S | — |
+| ✅ | SEL-4 | 早停折从 train 内切出（`cf924d49`），test 职责单一化 | Med/M | — |
 | ⬜ | SEL-5 | KS 抽样误差零量化：无 bootstrap 置信区间/多 seed，冠军由千分位差决出 | Med/M | — |
 | ⬜ | SEL-6 | 模型融合能力为零：无 seed-bagging/stacking/blending | Med/L | — |
 | ⬜ | SEL-7 | 默认 selection_policy 无稳定性/过拟合/最小 KS 阈值；delivery-ready 预过滤静默排除 catboost/mlp | Med/S | — |
