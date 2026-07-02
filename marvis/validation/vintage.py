@@ -21,6 +21,7 @@ class VintagePoint:
     cum_bad_rate: float
     balance_sum: float | None
     denominator: str
+    data_quality_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,8 @@ def compute_vintage_curve(
 
     points: list[VintagePoint] = []
     for cohort, cohort_frame in frame.groupby("_cohort", sort=True):
+        # First pass: per-(cohort, mob) marginal metrics (unchanged semantics).
+        rows: list[dict] = []
         for mob, group in cohort_frame.groupby("_mob", sort=True):
             target = group["_target"].to_numpy(dtype=int)
             sample_count = int(len(group))
@@ -74,26 +77,62 @@ def compute_vintage_curve(
             if balance_col:
                 balances = group["_balance"].to_numpy(dtype=float)
                 balance_sum = float(np.sum(balances))
-                bad_numerator = float(np.sum(balances[target == 1]))
-                denominator_value = balance_sum if denominator == "balance" else float(sample_count)
+                bad_balance = float(np.sum(balances[target == 1]))
+            else:
+                bad_balance = 0.0
+            if denominator == "balance":
+                bad_numerator = bad_balance
+                denominator_value = balance_sum if balance_sum is not None else 0.0
             else:
                 bad_numerator = float(bad_count)
                 denominator_value = float(sample_count)
-            if denominator == "count":
-                bad_numerator = float(bad_count)
-                denominator_value = float(sample_count)
 
-            bad_rate = _ratio(bad_numerator, denominator_value)
+            rows.append(
+                {
+                    "mob": int(mob),
+                    "sample_count": sample_count,
+                    "bad_count": bad_count,
+                    "bad_rate": _ratio(bad_numerator, denominator_value),
+                    "balance_sum": balance_sum,
+                    "bad_numerator": bad_numerator,
+                }
+            )
+
+        # Fixed cohort-level denominator: max observed base across the cohort's MOBs.
+        if denominator == "balance":
+            cohort_denominator = max(
+                (row["balance_sum"] or 0.0 for row in rows),
+                default=0.0,
+            )
+        else:
+            cohort_denominator = float(max((row["sample_count"] for row in rows), default=0))
+
+        # Second pass: accumulate the bad numerator across MOBs in ascending order.
+        cumulative_bad = 0.0
+        for row in rows:
+            cumulative_bad += row["bad_numerator"]
+            if cohort_denominator == 0:
+                raw_cum_ratio = 0.0
+            else:
+                raw_cum_ratio = cumulative_bad / cohort_denominator
+            cum_bad_rate = min(raw_cum_ratio, 1.0)
+            warnings: tuple[str, ...] = ()
+            if raw_cum_ratio > 1.0 + 1e-9:
+                warnings = (
+                    f"cum_bad_rate clipped for cohort {cohort} at mob {row['mob']}: "
+                    f"raw ratio {raw_cum_ratio:.4f} exceeds cohort denominator",
+                )
             points.append(
                 VintagePoint(
                     cohort=str(cohort),
-                    mob=int(mob),
-                    sample_count=sample_count,
-                    bad_count=bad_count,
-                    bad_rate=bad_rate,
-                    cum_bad_rate=bad_rate,
-                    balance_sum=balance_sum,
+                    mob=row["mob"],
+                    sample_count=row["sample_count"],
+                    bad_count=row["bad_count"],
+                    bad_rate=row["bad_rate"],
+                    cum_bad_rate=cum_bad_rate,
+                    balance_sum=row["balance_sum"],
                     denominator=denominator,
+                    data_quality_warnings=warnings,
                 )
             )
     return points
@@ -164,10 +203,13 @@ def vintage_summary_payload(
     vintage_points: Sequence[VintagePoint],
     roll_rate_points: Sequence[RollRatePoint] | None = None,
 ) -> dict:
+    warnings: list[str] = []
+    for point in vintage_points:
+        warnings.extend(str(warning) for warning in point.data_quality_warnings)
     return {
         "vintage": [_jsonable(asdict(point)) for point in vintage_points],
         "roll_rate": [_jsonable(asdict(point)) for point in (roll_rate_points or [])],
-        "warnings": [],
+        "warnings": warnings,
     }
 
 
@@ -227,6 +269,8 @@ def _jsonable(value):
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
         return [_jsonable(item) for item in value]
     if isinstance(value, float) and not math.isfinite(value):
         return None

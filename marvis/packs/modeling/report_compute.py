@@ -152,7 +152,12 @@ def compute_vintage_report(
         "headers": _vintage_headers(points, mob_observe_cols),
         "counts": counts,
         "amounts": amounts,
-        "curves": vintage_curve_wide(points, metric="cum_bad_rate"),
+        # mob_observe_cols are cumulative-by-construction snapshot flags: each
+        # column already means "bad as of this MOB" and is monotonic per loan, so
+        # the kernel's per-MOB bad_rate IS the true cumulative rate here. Using
+        # cum_bad_rate would re-accumulate and double-count the already-cumulative
+        # bads (e.g. a loan bad at mob1/2/3 counted three times).
+        "curves": vintage_curve_wide(points, metric="bad_rate"),
         "points": [asdict(point) for point in points],
     }
 
