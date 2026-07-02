@@ -16,7 +16,9 @@ from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, PluginRepository, TaskRepository, init_db
 from marvis.domain import TaskCreate
-from marvis.routers.data import router as data_router
+from marvis.job_cancellation import register_job_cancellation, unregister_job_cancellation
+from marvis.routers.data import _run_join_execute_job, router as data_router
+from marvis.routers.stage_controls import router as stage_controls_router
 from marvis.settings import build_settings
 
 
@@ -36,6 +38,7 @@ def _client(tmp_path, *, raise_server_exceptions: bool = True):
     app.state.settings = settings
     app.include_router(router)
     app.include_router(data_router)
+    app.include_router(stage_controls_router)
     return TestClient(app, raise_server_exceptions=raise_server_exceptions), settings
 
 
@@ -560,6 +563,86 @@ def test_join_api_execute_sync_second_concurrent_call_gets_409_without_double_ex
     assert TaskRepository(settings.db_path).get_active_job_kind(task.id) is None
     repeat = client.post(f"/api/joins/{plan['join_plan_id']}/execute")
     assert repeat.status_code == 409
+
+
+def test_join_cancel_endpoint_rejects_when_no_active_join_job(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(settings)
+
+    response = client.post(f"/api/tasks/{task.id}/join/cancel")
+
+    assert response.status_code == 409
+    assert "no active join job" in response.json()["detail"]
+
+
+def test_join_cancel_endpoint_rejects_unknown_task(tmp_path):
+    client, _settings = _client(tmp_path)
+
+    response = client.post("/api/tasks/missing-task/join/cancel")
+
+    assert response.status_code == 404
+
+
+def test_join_cancel_endpoint_signals_the_running_jobs_cancellation_token(tmp_path):
+    # REL-5: the cancel endpoint is cooperative — it flips the in-memory token
+    # for the job actually recorded as active, it doesn't touch the DB status
+    # itself (the join engine's own finish_job(status="cancelled") does that
+    # once it observes the token at its next checkpoint).
+    client, settings = _client(tmp_path)
+    task, _plan = _confirmed_join_plan(client, settings, tmp_path)
+    task_repo = TaskRepository(settings.db_path)
+    job_id = task_repo.start_job(task.id, "join")
+    task_repo.mark_job_running(job_id)
+    token = register_job_cancellation(job_id)
+    try:
+        response = client.post(f"/api/tasks/{task.id}/join/cancel")
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["job_id"] == job_id
+        assert body["status"] == "accepted"
+        assert token.is_cancelled() is True
+    finally:
+        unregister_job_cancellation(job_id, token)
+        task_repo.finish_job(job_id, status="cancelled")
+
+
+def test_join_cancel_endpoint_unlocks_task_after_running_job_is_cancelled(tmp_path):
+    # End-to-end (task requirement c): a job is started, its cancellation token
+    # is armed through the same cancel endpoint the frontend would call, and
+    # once the background runner actually observes it at its checkpoint the
+    # task must come out unlocked (idx_jobs_active_task released) with a
+    # cancelled job status and no dangling "executed" join plan. TestClient's
+    # BackgroundTasks run synchronously inside client.post() (Starlette detail),
+    # so genuine cross-thread concurrency during the HTTP call isn't
+    # observable here — this test instead proves the wiring end to end: cancel
+    # endpoint -> token -> engine checkpoint -> job/task state, by arming the
+    # token via the HTTP endpoint before the runner is invoked, which is
+    # exactly the "cancel requested, then job's next checkpoint sees it" path.
+    client, settings = _client(tmp_path)
+    task, plan = _confirmed_join_plan(client, settings, tmp_path)
+    task_repo = TaskRepository(settings.db_path)
+    job_id = task_repo.start_job(task.id, "join")
+    task_repo.mark_job_running(job_id)
+
+    # Cancel arrives before the runner has registered its own token (the
+    # queued-job window) — this is exactly what the "pending" cancel request
+    # in JobCancellationRegistry exists for: the runner's later
+    # register_job_cancellation(job_id) call picks up the already-requested
+    # cancellation instead of silently starting fresh.
+    cancel = client.post(f"/api/tasks/{task.id}/join/cancel")
+    assert cancel.status_code == 202
+    assert cancel.json()["job_id"] == job_id
+
+    _run_join_execute_job(job_id, settings.db_path, settings.datasets_dir, plan["join_plan_id"])
+
+    final_job = task_repo.get_job(job_id)
+    assert final_job["status"] == "cancelled"
+    assert task_repo.task_has_active_job(task.id) is False
+    assert (
+        DatasetRepository(settings.db_path).load_join_plan(plan["join_plan_id"]).status
+        != "executed"
+    )
 
 
 def test_join_api_marks_aggregate_dedup_as_synthetic(tmp_path):

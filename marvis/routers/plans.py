@@ -17,6 +17,7 @@ from marvis.orchestrator.contracts import PlanStatus, StepStatus, plan_to_dict
 from marvis.orchestrator.errors import IllegalPlanTransition, PlanNotFoundError
 from marvis.orchestrator.planner import PlanningError
 from marvis.orchestrator.templates import get_template
+from marvis.job_heartbeat import heartbeat_job
 from marvis.state_machine import ConflictError
 
 
@@ -228,13 +229,30 @@ def retry_step(
 @router.post("/plans/{plan_id}/cancel")
 def cancel_plan(request: Request, plan_id: str) -> dict:
     repo = request.app.state.plan_repo
+    plan = _load_plan(request, plan_id)
     try:
         repo.set_plan_status(plan_id, PlanStatus.CANCELLED)
     except PlanNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except IllegalPlanTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # Cooperative cancel (REL-5): the plan-status flip above is what the
+    # executor's run() loop checkpoints on (marvis/orchestrator/executor.py),
+    # but a job row already RUNNING for this task would otherwise keep
+    # idx_jobs_active_task locked until that in-flight run() call happens to
+    # notice — release it here too so the task unlocks immediately.
+    task_repo = TaskRepository(_db_path(request))
+    active_job_id = _active_plan_job_id(task_repo, plan.task_id)
+    if active_job_id is not None:
+        task_repo.finish_job(active_job_id, status="cancelled")
     return _load_plan_payload(request, plan_id)
+
+
+def _active_plan_job_id(task_repo: TaskRepository, task_id: str) -> str | None:
+    job = task_repo.get_latest_job(task_id, kind=PLAN_JOB_KIND)
+    if job is None or job.get("status") not in {"queued", "running"}:
+        return None
+    return str(job["id"])
 
 
 def _load_plan_payload(request: Request, plan_id: str) -> dict:
@@ -371,7 +389,8 @@ def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:
     repo = TaskRepository(db_path)
     repo.mark_job_running(job_id)
     try:
-        result = executor.run(plan_id)
+        with heartbeat_job(repo, job_id):
+            result = executor.run(plan_id)
     except Exception as exc:
         repo.finish_job(
             job_id,

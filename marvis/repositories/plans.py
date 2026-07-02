@@ -112,6 +112,18 @@ class PlanRepository:
             ).fetchall()
         return [self.load_plan(row["id"]) for row in rows]
 
+    def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
+        """Plans currently in ``status`` across every task, oldest first. Used
+        by the startup reclaim pass (REL-4) to find RUNNING V2 plans left
+        behind by a crash/restart — the plan layer has no per-task index, so
+        this scans by status directly."""
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id FROM plans WHERE status = ? ORDER BY created_at, id",
+                (status.value,),
+            ).fetchall()
+        return [self.load_plan(row["id"]) for row in rows]
+
     def update_step(self, step) -> None:
         payload = plan_to_dict(
             Plan(

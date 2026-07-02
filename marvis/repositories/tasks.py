@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
@@ -322,16 +322,117 @@ class TaskRepository:
         return job_id
 
     def mark_job_running(self, job_id: str) -> None:
+        now = _now()
         with connect(self.db_path) as conn:
             conn.execute(
                 """
                 UPDATE jobs
                    SET status = 'running',
-                       started_at = COALESCE(started_at, ?)
+                       started_at = COALESCE(started_at, ?),
+                       heartbeat_at = ?
                  WHERE id = ?
+                """,
+                (now, now, job_id),
+            )
+
+    def touch_job_heartbeat(self, job_id: str) -> bool:
+        """Bump ``heartbeat_at`` for a still-running job (REL-5). Long job
+        executors (notebook/metrics/join/plan/driver) call this periodically
+        from a background thread so the watchdog can tell "still working" from
+        "process died mid-job". Only updates rows still queued/running so a
+        heartbeat racing a concurrent finish_job() can't resurrect a terminal
+        job; returns whether the row was actually touched."""
+        with connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                   SET heartbeat_at = ?
+                 WHERE id = ?
+                   AND status IN ('queued', 'running')
                 """,
                 (_now(), job_id),
             )
+        return cursor.rowcount > 0
+
+    def count_heartbeat_stale_running_jobs(self, *, older_than_seconds: int) -> int:
+        """Read-only count of RUNNING jobs whose heartbeat is already stale
+        (would be released by the next watchdog sweep). Exposed on /api/health
+        so "stuck" is at least observable (REL-5) without waiting for the
+        watchdog to actually fire."""
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        ).isoformat()
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS stale_count
+                  FROM jobs
+                 WHERE status = 'running'
+                   AND COALESCE(heartbeat_at, started_at, created_at) <= ?
+                """,
+                (cutoff,),
+            ).fetchone()
+        return int(row["stale_count"]) if row is not None else 0
+
+    def fail_heartbeat_lost_jobs(self, *, older_than_seconds: int) -> list[dict]:
+        """Watchdog sweep (REL-5): fail every RUNNING job whose heartbeat
+        (falling back to started_at/created_at for jobs predating this column,
+        or one that never ticked) is older than the threshold, releasing
+        idx_jobs_active_task so the task isn't wedged behind a 409 forever
+        because a background thread hung. Select-then-update inside one
+        connection/transaction so a job that finishes normally in the same
+        instant it goes stale can't be double-failed; each release is audited.
+        Returns the released job rows (id/task_id/kind)."""
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        ).isoformat()
+        now = _now()
+        released: list[dict] = []
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task_id, kind
+                  FROM jobs
+                 WHERE status = 'running'
+                   AND COALESCE(heartbeat_at, started_at, created_at) <= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                job_id = str(row["id"])
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                       SET status = 'failed',
+                           error_name = 'HeartbeatLost',
+                           error_value = ?,
+                           finished_at = ?
+                     WHERE id = ?
+                       AND status = 'running'
+                    """,
+                    (
+                        f"job heartbeat exceeded {older_than_seconds}s without an update",
+                        now,
+                        job_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    continue
+                released.append(
+                    {"id": job_id, "task_id": str(row["task_id"]), "kind": str(row["kind"])}
+                )
+                _write_audit_row(
+                    conn,
+                    kind="job.heartbeat_lost",
+                    target_ref=job_id,
+                    outcome="failed",
+                    detail={
+                        "task_id": str(row["task_id"]),
+                        "job_kind": str(row["kind"]),
+                        "stale_after_seconds": older_than_seconds,
+                    },
+                )
+        return released
 
     def finish_job(
         self,
@@ -370,6 +471,20 @@ class TaskRepository:
                 (task_id,),
             ).fetchone()
         return row is not None
+
+    def get_job(self, job_id: str) -> dict | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_id, kind, status, progress_message,
+                       error_name, error_value, created_at, started_at,
+                       finished_at, log_path, heartbeat_at
+                  FROM jobs
+                 WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
 
     def get_active_job_kind(self, task_id: str) -> str | None:
         with connect(self.db_path) as conn:

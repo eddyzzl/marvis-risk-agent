@@ -135,19 +135,19 @@
 
 | 状态 | ID | 事项 | 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | PERF-1 | JOIN/上传在 async def 端点内同步执行重活，大表操作期间全服务冻结 | Critical/S | ⚠️ |
-| ⬜ | REL-1 | V2 driver 回合绕过单活跃 job 守卫：双确认/双 tab 并发 executor.run 误标 FAILED | Critical/M | ✅ |
-| ⬜ | UX-1 | 手动模式确认门点击后长任务零反馈：无 busy/轮询/停止 | Critical/M | ✅ |
-| ⬜ | REL-6 | driver 回合零可观测：不建 job、无进度事件（诱发 REL-1） | Med/M | — |
+| ✅ | PERF-1 | 四个重端点（上传/propose/confirm/execute）改线程池执行（`d26c1714`），附事件循环响应性回归（revert 即红）；driver messages 链路核实本就是 def | Critical/S | ⚠️ |
+| ✅ | REL-1 | driver 回合已 job 化（`232d3b35`）：start_job/finish_job 包裹全回合、并发二次确认 409（中文提示）、异常路径 finally 释放；五任务类型全覆盖+竞态回归 | Critical/M | ✅ |
+| ✅ | UX-1 | 五个 submit 路径即时 busy+消息轮询+计划栏 1.5s 刷新（`8babda7f`）；taskServerBusyAction 接 driver job，刷新后忙碌可见；停止能力归 REL-5 的 cancel（docstring 注明） | Critical/M | ✅ |
+| ✅ | REL-6 | job 化+running 步骤 started_at 进 plan payload+前端耗时显示（随 REL-1/UX-1 落地） | Med/M | — |
 | ⬜ | REL-4 | startup 恢复不覆盖 V2 plan 层：RUNNING plan 无人 reclaim | High/M | ✅ |
-| ⬜ | REL-2 | COMPUTING_METRICS 中断被 reclaim 成通用 FAILED→全量重跑；last_completed_step() 是死代码 | High/S | ✅ |
+| ✅ | REL-2 | 重启 reclaim 识别 metrics 可续场景改发 METRICS_STAGE_FAILURE 前缀消息（`bfba3983`），is_metrics_failure 命中→metrics-only 重试；last_completed_step 接通 | High/S | ✅ |
 | ⬜ | REL-5 | 长任务无心跳/看门狗：卡死 job 永久锁死任务；join/plan job 无 cancel 端点 | Med/M | — |
-| ⬜ | REL-3 | 插件/pack 工具子进程内存护栏仅 setrlimit（macOS 无效）；psutil RSS 方案未复用到 ToolRunner | High/M | ✅ |
+| ✅ | REL-3 | ProcessTreeResourceMonitor 已泛化接入 ToolRunner（`a278a0ff`）：默认 4096MB 可配、超限杀进程树、error_kind=resource_limit+peak 审计；真杀路径实测验证 | High/M | ✅ |
 | ⬜ | REL-7 | 文件级 staging `.bak` 崩溃残留：datasets/tasks 根下既不恢复也不清理 | Med/M | — |
-| ⬜ | PERF-5 | 每 tool 步骤 1–2.3 秒子进程冷启动（~1s 纯 import 链） | High/S | ✅ |
-| ⬜ | PERF-3 | 隔离模式 staged pipeline 把用户 notebook 完整执行两遍 | High/M | ✅ |
+| ✅ | PERF-5 | worker 入口依赖链已切断（`c1313514`，ToolContext 抽到无依赖 contracts 模块）：入口 import 实测 1.085s→0.021s，sys.modules 无 pandas/sklearn/marvis.db（回归断言守住） | High/S | ✅ |
+| ✅ | PERF-3 | 隔离模式复现+metrics cells 合并进单次 notebook 子进程（`0e832a99`）：端到端断言执行次数==1；metrics 重试与非隔离路径不受影响 | High/M | ✅ |
 | ⬜ | PERF-4 | JOIN 对齐对每个候选列×方法重复全表扫描零缓存：大表 C2 门分钟级等待 | High/M | ✅ |
-| ⬜ | PERF-8 | DuckDB 全局零配置：不落盘 spill、吃满核与内存，与训练/LLM 争资源 | Med/S | — |
+| ✅ | PERF-8 | DuckDB 统一配置（`3842eb21`）：memory_limit 4GB/threads cpu·½/temp_directory spill，均可 env 覆盖，状态进 /api/health | Med/S | — |
 
 追踪器补充细则（实施本阶段时参照）：统一 job policy（同步/后台/子进程三型，覆盖 join/validation/train/tune/report）→ PERF-1+REL-6+UX-1 的"怎么做"；interrupted step-runs 在 plan rail 呈现 retry/repair 状态 → REL-4 的 UI 侧；主 app workspace 完整接入 V2 join 组件 + join 的 task/job 状态 UX 标准化到其他长任务。
 
@@ -293,7 +293,7 @@
 | ⬜ | LT-12 | row-level 聚合去重策略（仅当业务要求"必须保留真实行"时触发） | 6-28 |
 | ⬜ | LT-13 | 分页扩展：随数据量增长审计剩余高容量列表端点 | 追踪器 |
 | ⬜ | LT-14 | 样本权重 leakage-risk/business-rationale 指南随 fixtures 持续丰富 | 追踪器 |
-| ⬜ | LT-15 | S1a–S6 各批函数级 spec 撰写与逐份评审（S1a 最先） | 策略计划 |
+| 🔄 | LT-15 | S1a spec 已出（docs/plans/specs/v2-s1a-score-direction-spec.md，含 5 处地面真值修正与 5 条开放问题）**待用户审**；S1b-S6 spec 随批次推进 | 策略计划 |
 | ⬜ | LT-16 | modeling-agent-roadmap Phase 3 开放式打磨（健壮性/报告/衔接）——以 §3 EXC 清零 + 真实数据对照实验为具体化载体 | roadmap |
 | ⬜ | LT-17 | 定期复审机制：每完成 2-3 个阶段跑一轮聚焦审查（新代码带来新债；本轮三个"已修未修净"即为证） | 本轮教训 |
 | ⬜ | LT-18 | 下一版本方向蓄水池：V3+（多用户/权限、部署打包、外部决策引擎对接等，超出单机单用户边界的显式不做项） | 产品选择 |

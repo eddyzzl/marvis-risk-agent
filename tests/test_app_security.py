@@ -144,6 +144,7 @@ def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
     # duckdb_health() (PERF-8) contributes its own independent keys, asserted in
     # test_health_check_surfaces_duckdb_runtime_config below.
     assert payload["status"] == "ok"
+    assert payload["stuck_jobs"] == 0
     assert payload["sqlite_journal_mode"] == "delete"
     assert payload["sqlite_wal_degraded"] is True
     assert payload["sqlite_busy_timeout_ms"] == 5000

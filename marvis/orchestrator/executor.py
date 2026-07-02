@@ -15,6 +15,7 @@ from marvis.orchestrator.contracts import (
 )
 from marvis.llm_settings import LLMSettingsError
 from marvis.orchestrator.planner import PlanningError, ReplanError
+from marvis.orchestrator.plan_recovery import PlanStepRecovery
 from marvis.orchestrator.reviewer import FinalReview
 from marvis.orchestrator.safety import is_safety_step
 from marvis.plugins.manifest import manifest_to_dict
@@ -52,6 +53,7 @@ class PlanExecutor:
         self._hooks = hook_dispatcher
         self._state = harness_state
         self._planner = planner
+        self._step_recovery = PlanStepRecovery(plan_repo, reviewer, hook_dispatcher, harness_state)
 
     def run(self, plan_id: str) -> ExecutionResult:
         plan = self._repo.load_plan(plan_id)
@@ -73,10 +75,18 @@ class PlanExecutor:
             return ExecutionResult(plan.id, plan.status, None, None)
         if plan.status in {PlanStatus.CONFIRMED, PlanStatus.AWAITING_CONFIRM}:
             self._set_plan_status(plan, PlanStatus.RUNNING)
-        self._recover_inflight_steps(plan)
+        self._step_recovery.recover_inflight_steps(plan)
 
         while True:
             plan = self._repo.load_plan(plan_id)
+            if plan.status == PlanStatus.CANCELLED:
+                # Cooperative cancel checkpoint (REL-5): a cancel request can
+                # land between two step executions (each _execute_step call is
+                # itself uninterruptible mid-tool-invocation). Recognize the
+                # externally-applied CANCELLED status here instead of trying
+                # another _set_plan_status transition, which would raise
+                # IllegalPlanTransition since CANCELLED has no further moves.
+                return ExecutionResult(plan.id, PlanStatus.CANCELLED, None, None)
             failed = [step for step in plan.steps if step.status == StepStatus.FAILED]
             if failed:
                 no_progress_step = None
@@ -335,97 +345,6 @@ class PlanExecutor:
             task_id=plan.task_id,
         )
         return ExecutionResult(plan.id, final_status, summary_ref, review)
-
-    def _recover_inflight_steps(self, plan: Plan) -> None:
-        running_runs: dict[str, list[dict]] = {}
-        for run in self._repo.list_running_step_runs(plan.id):
-            running_runs.setdefault(str(run["step_id"]), []).append(run)
-        for step in plan.steps:
-            step_runs = running_runs.get(step.id, [])
-            if step.status == StepStatus.RUNNING:
-                latest_output_ref = step.output_ref or (
-                    self._repo.latest_step_output_ref(step.id) if step_runs else None
-                )
-                if latest_output_ref:
-                    step.output_ref = latest_output_ref
-                    self._recover_step_runs(
-                        step_runs,
-                        status="succeeded",
-                        output_ref=latest_output_ref,
-                    )
-                    self._recover_checking_step(plan, step)
-                    continue
-                step.error = (
-                    "interrupted during running before output was persisted; "
-                    "explicit retry required"
-                )
-                self._recover_step_runs(
-                    step_runs,
-                    status="interrupted",
-                    error=step.error,
-                    error_kind="ServerRestart",
-                )
-                self._set_step_status(step, StepStatus.FAILED)
-            elif step.status == StepStatus.CHECKING:
-                latest_output_ref = step.output_ref or (
-                    self._repo.latest_step_output_ref(step.id) if step_runs else None
-                ) or (
-                    self._repo.latest_succeeded_step_run_output_ref(step.id)
-                )
-                if latest_output_ref:
-                    step.output_ref = latest_output_ref
-                    self._recover_step_runs(
-                        step_runs,
-                        status="succeeded",
-                        output_ref=latest_output_ref,
-                    )
-                else:
-                    self._recover_step_runs(
-                        step_runs,
-                        status="interrupted",
-                        error="interrupted during checking before output was persisted",
-                        error_kind="ServerRestart",
-                    )
-                self._recover_checking_step(plan, step)
-
-    def _recover_step_runs(self, runs: list[dict], **kwargs) -> None:
-        for run in runs:
-            run_id = str(run.get("id") or "")
-            if run_id:
-                try:
-                    self._finish_step_run(run_id, **kwargs)
-                except Exception:
-                    continue
-
-    def _recover_checking_step(self, plan: Plan, step: PlanStep) -> None:
-        version = _step_output_version(step)
-        if version is None:
-            step.error = "interrupted during checking before output was persisted"
-            self._set_step_status(step, StepStatus.FAILED)
-            return
-        try:
-            output = self._repo.load_step_output(step.id, version=version)
-        except KeyError:
-            step.error = "interrupted during checking before output was persisted"
-            self._set_step_status(step, StepStatus.FAILED)
-            return
-        deterministic = self._reviewer.deterministic_check(step, output)
-        step.review_verdicts.append(deterministic)
-        if not deterministic.passed:
-            failed = ToolResult(
-                ok=False,
-                output=None,
-                error="; ".join(deterministic.reasons),
-                error_kind="postcheck",
-                duration_ms=0,
-            )
-            self._handle_step_failure(step, failed, apply_policy=False)
-            return
-        critique = self._reviewer.llm_critique(step, output, plan.goal)
-        step.review_verdicts.append(critique)
-        step.status = StepStatus.DONE
-        self._repo.update_step(step)
-        self._dispatch_step_completed(plan, step, output)
 
     def _failure_policy(self, step: PlanStep) -> str:
         tools = getattr(self._runner, "_tools", None)
@@ -884,13 +803,3 @@ def _is_fatal_error(error: str | None) -> bool:
         )
     )
 
-
-def _step_output_version(step: PlanStep) -> int | None:
-    ref = str(step.output_ref or "")
-    prefix = f"metrics:{step.id}:v"
-    if not ref.startswith(prefix):
-        return None
-    version_text = ref[len(prefix):]
-    if not version_text.isdigit():
-        return None
-    return int(version_text)
