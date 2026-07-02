@@ -183,6 +183,9 @@ let sidebarCollapsed = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
 let petPreference = defaultPetPreference;
+// VD-5: real-logo glow overlay, default OFF pending user visual sign-off
+// (backlog note - flip the default once approved).
+let mascotGlowEnabled = false;
 let petDragState = null;
 let petReactionMood = null;
 let petReactionKey = "";
@@ -837,9 +840,32 @@ function handleSidebarBrandKeydown(event) {
   expandSidebarFromBrand(event);
 }
 
+// VD-5: V2 driver (plan-rail) tasks never reach the V1-only "review_required"
+// task status while a gate sits open awaiting confirmation - the task record
+// itself typically stays at "running", so without this the mascot kept
+// spinning its busy mood while the system was actually idle, waiting on the
+// human. This is a pure read of already-polled state (agentMessages / the
+// gate's own red-flag metadata) - no new backend calls, upholding INV-4.
+function latestOpenGateMessage() {
+  for (let index = agentMessages.length - 1; index >= 0; index--) {
+    const message = agentMessages[index];
+    if (message?.role !== "assistant") continue;
+    const meta = message?.metadata || {};
+    if (meta.kind === "gate" || meta.join_c1) return message;
+    return null;
+  }
+  return null;
+}
+
 function basePetMoodFromTask() {
   const status = selectedTask?.status || "";
   if (taskStopped(selectedTask)) return "idle";
+  if (taskUsesPlanRail(selectedTask) && !selectedTaskIsBusy()) {
+    const openGate = latestOpenGateMessage();
+    if (openGate) {
+      return driverGateRedFlags(openGate).length ? "failed" : "review";
+    }
+  }
   if (selectedTaskIsBusy()) return "running";
   if (status === "succeeded") return "success";
   if (status === "failed") return "failed";
@@ -923,6 +949,33 @@ function applyPetPreference(value, options = {}) {
   }
   renderPetState();
   ensurePetWithinViewport({ persist });
+}
+
+function persistMascotGlowPreference(value) {
+  try {
+    localStorage.setItem("marvis_mascot_glow", value ? "on" : "off");
+  } catch (_) {
+    // Mascot glow preference is optional in restricted notebook browsers.
+  }
+}
+
+function applyMascotGlowPreference(value, options = {}) {
+  const { persist = true } = options;
+  mascotGlowEnabled = Boolean(value);
+  if ($("settingsMascotGlowSelect")) {
+    $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
+  }
+  if (persist) persistMascotGlowPreference(mascotGlowEnabled);
+  renderPetState();
+}
+
+function restoreMascotGlowPreference() {
+  try {
+    const stored = localStorage.getItem("marvis_mascot_glow");
+    applyMascotGlowPreference(stored === "on", { persist: false });
+  } catch (_) {
+    applyMascotGlowPreference(false, { persist: false });
+  }
 }
 
 function restorePetPreference() {
@@ -1098,6 +1151,7 @@ function renderPetState() {
   }
   const mood = petMoodFromTask();
   pet.dataset.petMood = mood;
+  pet.dataset.mascotGlow = mascotGlowEnabled ? "on" : "off";
   pet.setAttribute("aria-label", `${definition.name}，${definition.label}，当前状态：${mood}`);
   ensurePetWithinViewport({ persist: false });
 }
@@ -1141,6 +1195,7 @@ function renderSettingsState() {
   if ($("settingsGroupSelect")) $("settingsGroupSelect").value = taskGroupMode;
   if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themeController.preference;
   if ($("settingsPetSelect")) $("settingsPetSelect").value = petPreference;
+  if ($("settingsMascotGlowSelect")) $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
   renderExecutionEnvironmentSummary();
   renderLLMSettingsSummary();
 }
@@ -1196,6 +1251,9 @@ function handleSettingsMenuChange(event) {
   }
   if (target.id === "settingsPetSelect") {
     applyPetPreference(target.value, { explicit: true });
+  }
+  if (target.id === "settingsMascotGlowSelect") {
+    applyMascotGlowPreference(target.value === "on");
   }
 }
 
@@ -6700,6 +6758,7 @@ themeController.restoreTheme();
 themeController.watchSystemTheme();
 restoreTaskListSettings();
 restorePetPreference();
+restoreMascotGlowPreference();
 restorePetPosition();
 restoreLayoutWidths();
 restoreSidebarCollapsed();
