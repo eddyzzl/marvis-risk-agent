@@ -64,7 +64,7 @@ def test_screen_confirm_posts_edited_selection():
     module_js = _read("js/v2/screen_gate_controller.js")
     assert "function submitScreenSelection(button)" in app_js
     assert "submitScreenSelectionController(button, screenGateControllerContext())" in app_js
-    assert "export async function submitScreenSelection(button, context = {})" in module_js
+    assert "export async function submitScreenSelection(button, rawContext = {})" in module_js
     assert "data-screen-confirm" in module_js
     # collects checked, non-disabled features and posts them as `selection`
     # with the rendered gate token so stale tabs cannot confirm a newer gate.
@@ -74,6 +74,13 @@ def test_screen_confirm_posts_edited_selection():
     assert "expected_step_id" in module_js
     # a delegated document click handler drives it (mirrors the C1 form pattern)
     assert "handleScreenConfirmClick" in app_js
+    # UX-1/REL-1: submission now shows immediate busy feedback and keeps the
+    # agent-message stream + plan rail live while the driver turn (job-wrapped)
+    # runs, instead of freezing until the request resolves.
+    assert '"正在执行下一步…", "busy"' in module_js
+    assert "pollAgentMessagesUntilSettled" in module_js
+    assert "resetFetchThrottle" in module_js
+    assert "renderWorkflowStepper" in module_js
 
 
 def test_screen_threshold_adjust_posts_structured_params():
@@ -84,11 +91,17 @@ def test_screen_threshold_adjust_posts_structured_params():
     assert "data-screen-threshold=\"max_missing_rate\"" in module_js
     assert "function submitScreenThresholdAdjust(button)" in app_js
     assert "submitScreenThresholdAdjustController(button, screenGateControllerContext())" in app_js
-    assert "export async function submitScreenThresholdAdjust(button, context = {})" in module_js
+    assert "export async function submitScreenThresholdAdjust(button, rawContext = {})" in module_js
     assert "adjust_params" in module_js
     assert "handleScreenAdjustClick" in app_js
     assert 'class="screen-num"' in module_js
     assert "阈值不能为空" in module_js
+    # UX-1/REL-1: adjust submission shares the same busy-feedback contract as
+    # the confirm path (immediate busy pill + streamed poll + plan rail ticks).
+    assert '"正在执行下一步…", "busy"' in module_js
+    assert "pollAgentMessagesUntilSettled" in module_js
+    assert "resetFetchThrottle" in module_js
+    assert "renderWorkflowStepper" in module_js
 
 
 def test_modeling_setup_weight_picker_renderer_and_branch_are_wired():
@@ -627,13 +640,33 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
             }},
           }};
         }}
-        await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ pickedWeight: "weight" }}) }}, context);
+        // UX-1/REL-1: context supplies minimal, call-counting stubs for the
+        // busy-feedback capabilities (poll/reset/stepper) so the plan-rail
+        // "finally" refresh can be asserted alongside the success payload.
+        let pollCalls = 0;
+        let resetCalls = 0;
+        let stepperCalls = 0;
+        context.pollAgentMessagesUntilSettled = async () => {{ pollCalls += 1; }};
+        context.resetFetchThrottle = () => {{ resetCalls += 1; }};
+        context.renderWorkflowStepper = () => {{ stepperCalls += 1; }};
+
+        const firstButton = {{ disabled: false, closest: () => makeForm({{ pickedWeight: "weight" }}) }};
+        await submitModelingWeightAdjust(firstButton, context);
+        // busy state is pushed synchronously before the request settles
+        assert.deepEqual(statuses[0], ["正在执行下一步…", "busy"]);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1].adjust_params, {{ sample_weight_col: "weight" }});
         assert.equal(calls[0][1].expected_step_id, "gate-modeling");
         assert.equal(calls[0][1].acceptance_mode, "manual");
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
+        // success path: message list + conversation render are updated, and
+        // the plan rail is force-refreshed at least once via the finally path
+        assert.equal(pollCalls, 1);
+        assert.equal(resetCalls >= 1, true);
+        assert.equal(stepperCalls >= 1, true);
+        // success path leaves the button disabled (no re-enable on success)
+        assert.equal(firstButton.disabled, true);
 
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{ currentWeight: "weight", pickedWeight: "weight" }}) }}, context);
         assert.deepEqual(statuses.at(-1), ["建模设置未变化。", "info"]);
@@ -658,6 +691,7 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           reason: "",
         }}) }}, context);
         assert.deepEqual(statuses.at(-1), ["调整目标类型、算法或调参轮数时请填写变更原因。", "error"]);
+        const statusesBeforeStructuralAdjust = statuses.length;
         await submitModelingWeightAdjust({{ disabled: false, closest: () => makeForm({{
           targetType: "continuous",
           selectedRecipes: ["lgb_regressor"],
@@ -671,11 +705,23 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           recipes: ["lgb_regressor"],
         }});
         assert.equal(calls.at(-1)[1].content, "调整建模规格：目标是连续金额预测");
+        // this successful submission pushes the busy status before resolving
+        assert.deepEqual(statuses[statusesBeforeStructuralAdjust], ["正在执行下一步…", "busy"]);
+
         const eventCalls = [];
-        const eventContext = {{ ...context, api: async (url, options) => {{
-          eventCalls.push([url, JSON.parse(options.body)]);
-          return {{ messages: [] }};
-        }} }};
+        let eventPollCalls = 0;
+        let eventResetCalls = 0;
+        let eventStepperCalls = 0;
+        const eventContext = {{
+          ...context,
+          api: async (url, options) => {{
+            eventCalls.push([url, JSON.parse(options.body)]);
+            return {{ messages: [] }};
+          }},
+          pollAgentMessagesUntilSettled: async () => {{ eventPollCalls += 1; }},
+          resetFetchThrottle: () => {{ eventResetCalls += 1; }},
+          renderWorkflowStepper: () => {{ eventStepperCalls += 1; }},
+        }};
         const eventForm = {{
           dataset: {{ modelingGateStepId: "gate-modeling", modelingCurrentWeight: "" }},
           querySelector: (selector) => {{
@@ -690,6 +736,8 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
             return null;
           }},
         }};
+        // handleModelingWeightAdjustClick returns the underlying submit promise,
+        // so awaiting it here lets us observe the full busy -> settle sequence.
         await handleModelingWeightAdjustClick({{
           target: {{
             closest: () => ({{
@@ -699,8 +747,16 @@ def test_modeling_setup_weight_adjust_posts_structured_params():
           }},
           preventDefault: () => statuses.push(["prevented", "event"]),
         }}, eventContext);
-        assert.deepEqual(statuses.at(-1), ["prevented", "event"]);
+        // preventDefault fires synchronously before the busy status is pushed
+        const preventedIndex = statuses.findIndex((entry) => entry[0] === "prevented");
+        const busyIndex = statuses.findIndex((entry, index) => index > preventedIndex && entry[1] === "busy");
+        assert.equal(preventedIndex >= 0, true);
+        assert.equal(busyIndex > preventedIndex, true);
         assert.deepEqual(eventCalls[0][1].adjust_params, {{ sample_weight_col: "sample_weight" }});
+        // finally-path plan-rail refresh fires at least once for the event-driven submit too
+        assert.equal(eventPollCalls, 1);
+        assert.equal(eventResetCalls >= 1, true);
+        assert.equal(eventStepperCalls >= 1, true);
         process.stdout.write("ok");
         """
     )
@@ -848,7 +904,7 @@ def test_dedup_picker_posts_strategies():
     module_js = _read("js/v2/join_gate_controller.js")
     assert "function submitDedupStrategies(button)" in app_js
     assert "submitDedupStrategiesController(button, joinGateControllerContext())" in app_js
-    assert "export async function submitDedupStrategies(button, context = {})" in module_js
+    assert "export async function submitDedupStrategies(button, rawContext = {})" in module_js
     assert "data-dedup-confirm" in module_js
     assert "dedup_strategies" in module_js
     assert "data-dedup-gate-step-id" in module_js
@@ -856,6 +912,13 @@ def test_dedup_picker_posts_strategies():
     assert "handleDedupConfirmClick" in app_js
     css = _read("css/v2-workbench.css")
     assert ".dedup-picker" in css and ".dedup-table" in css
+    # UX-1/REL-1: dedup submission shares the same busy-feedback contract
+    # (immediate busy pill + streamed poll + plan rail ticks) as the other
+    # v2 gate controllers, since it also reruns the driver turn.
+    assert '"正在执行下一步…", "busy"' in module_js
+    assert "pollAgentMessagesUntilSettled" in module_js
+    assert "resetFetchThrottle" in module_js
+    assert "renderWorkflowStepper" in module_js
 
 
 def test_join_c1_form_renderer_and_submit_are_wired():
@@ -870,12 +933,19 @@ def test_join_c1_form_renderer_and_submit_are_wired():
     assert "data-c1-dataset" in module_js
     assert "function submitC1Assignment(button)" in app_js
     assert "submitC1AssignmentController(button, joinGateControllerContext())" in app_js
-    assert "export async function submitC1Assignment(button, context = {})" in module_js
+    assert "export async function submitC1Assignment(button, rawContext = {})" in module_js
     assert '"[C1]"' in module_js
     assert "anchor_id" in module_js
     assert "feature_ids" in module_js
     assert "target_col" in module_js
     assert "handleC1ConfirmClick" in app_js
+    # UX-1/REL-1: C1 submission shares the same busy-feedback contract
+    # (immediate busy pill + streamed poll + plan rail ticks) as the other
+    # v2 gate controllers, since it also reruns the driver turn (execute_join).
+    assert '"正在执行下一步…", "busy"' in module_js
+    assert "pollAgentMessagesUntilSettled" in module_js
+    assert "resetFetchThrottle" in module_js
+    assert "renderWorkflowStepper" in module_js
 
 
 def test_join_gate_controller_posts_c1_and_dedup_payloads():
@@ -1011,6 +1081,13 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
         let rendered = 0;
         const statuses = [];
         const calls = [];
+        // UX-1/REL-1: minimal, call-counting stubs for the busy-feedback
+        // capabilities (poll/reset/stepper) so the immediate-busy-state and
+        // plan-rail "finally" refresh can be asserted alongside the existing
+        // success-path payload assertions.
+        let pollCalls = 0;
+        let resetCalls = 0;
+        let stepperCalls = 0;
         const context = {{
           selectedTaskId: "task-1",
           setActionStatus: (message, kind) => statuses.push([message, kind]),
@@ -1020,17 +1097,48 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
             calls.push([url, JSON.parse(options.body)]);
             return {{ messages: [{{ id: "m2" }}] }};
           }},
+          pollAgentMessagesUntilSettled: async () => {{ pollCalls += 1; }},
+          resetFetchThrottle: () => {{ resetCalls += 1; }},
+          renderWorkflowStepper: () => {{ stepperCalls += 1; }},
         }};
         const button = {{
           disabled: false,
           getAttribute: (name) => name === "data-expected-step-id" ? "gate-1" : null,
         }};
         await submitDriverConfirm(button, context);
+        // busy state is pushed synchronously before the request settles
+        assert.deepEqual(statuses[0], ["正在执行下一步…", "busy"]);
+        // success path leaves the button disabled (no re-enable on success)
         assert.equal(button.disabled, true);
         assert.equal(calls[0][0], "/api/tasks/task-1/agent/messages");
         assert.deepEqual(calls[0][1], {{ content: "确认", expected_step_id: "gate-1" }});
         assert.deepEqual(agentMessages, [{{ id: "m2" }}]);
         assert.equal(rendered, 1);
+        // finally-path plan-rail refresh fires at least once on the success path
+        assert.equal(pollCalls, 1);
+        assert.equal(resetCalls >= 1, true);
+        assert.equal(stepperCalls >= 1, true);
+
+        // failure path: api rejects, button is re-enabled, and an error status
+        // (not just the transient busy status) is surfaced to the user.
+        let failResetCalls = 0;
+        let failStepperCalls = 0;
+        const failContext = {{
+          ...context,
+          api: async () => {{ throw new Error("网络错误"); }},
+          resetFetchThrottle: () => {{ failResetCalls += 1; }},
+          renderWorkflowStepper: () => {{ failStepperCalls += 1; }},
+        }};
+        const failButton = {{
+          disabled: false,
+          getAttribute: (name) => name === "data-expected-step-id" ? "gate-1" : null,
+        }};
+        await submitDriverConfirm(failButton, failContext);
+        assert.equal(failButton.disabled, false);
+        assert.deepEqual(statuses.at(-1), ["网络错误", "error"]);
+        // the plan rail is still force-refreshed via the finally path on failure
+        assert.equal(failResetCalls >= 1, true);
+        assert.equal(failStepperCalls >= 1, true);
 
         const eventButton = {{ disabled: false }};
         const event = {{
@@ -1038,8 +1146,12 @@ def test_driver_gate_confirm_controller_renders_and_posts_confirm():
           preventDefault: () => statuses.push(["prevented", "event"]),
         }};
         assert.equal(handleDriverConfirmClick(event, context), true);
+        // preventDefault fires synchronously (before the async submit's busy push)
+        const preventedIndex = statuses.findIndex((entry) => entry[0] === "prevented");
+        assert.equal(preventedIndex >= 0, true);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        assert.deepEqual(statuses.at(-1), ["prevented", "event"]);
+        const busyIndexAfterEvent = statuses.findIndex((entry, index) => index > preventedIndex && entry[1] === "busy");
+        assert.equal(busyIndexAfterEvent > preventedIndex, true);
         assert.equal(calls.length, 2);
         process.stdout.write("ok");
         """
