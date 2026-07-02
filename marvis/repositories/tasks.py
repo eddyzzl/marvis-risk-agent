@@ -14,6 +14,7 @@ from marvis.domain import (
 )
 from marvis.model_algorithms import normalize_algorithm
 from marvis.report_texts import COMPUTED_REPORT_TEXT_KEYS
+from marvis.redaction import redact_text
 from marvis.repositories.audit import _write_audit_row
 from marvis.repositories.modeling import _set_experiment_status_row
 from marvis.state_machine import (
@@ -680,6 +681,16 @@ class TaskRepository:
     ) -> dict:
         message_id = uuid.uuid4().hex
         now = _now()
+        # TST-6: agent_messages is the densest PII surface (users routinely
+        # paste sample rows containing national IDs / phone numbers into
+        # chat), yet it was the one place redaction was never wired in --
+        # every derivative (memory distillation, plan evidence) was redacted
+        # while the source transcript stayed raw. Redact content at write
+        # time so persisted conversation history carries no live PII. Only
+        # `content` (free-text chat) is redacted -- `metadata` carries
+        # structured control-flow state (e.g. join_c1 gate state) consumed
+        # by key/shape, and redacting it could silently break gate detection.
+        safe_content = redact_text(content)
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
         with connect(self.db_path) as conn:
             task_row = conn.execute(
@@ -694,14 +705,14 @@ class TaskRepository:
                 (id, task_id, role, stage, content, created_at, metadata_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, task_id, role, stage, content, now, metadata_json),
+                (message_id, task_id, role, stage, safe_content, now, metadata_json),
             )
         return {
             "id": message_id,
             "task_id": task_id,
             "role": role,
             "stage": stage,
-            "content": content,
+            "content": safe_content,
             "created_at": now,
             "metadata": metadata or {},
         }
@@ -811,6 +822,11 @@ class TaskRepository:
         content: str,
         metadata: dict | None = None,
     ) -> dict:
+        # TST-6: same write-time redaction as add_agent_message (content only,
+        # see the comment there). update_agent_message is also the streaming
+        # flush path (LLM-9 throttles it to at most every ~512 chars / 500ms),
+        # so this stays cheap -- it never runs per-token.
+        safe_content = redact_text(content)
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False, separators=(",", ":"))
         with connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -820,7 +836,7 @@ class TaskRepository:
                        metadata_json = ?
                  WHERE id = ?
                 """,
-                (content, metadata_json, message_id),
+                (safe_content, metadata_json, message_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(f"Agent message not found: {message_id}")
