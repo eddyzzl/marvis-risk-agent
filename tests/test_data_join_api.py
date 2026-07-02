@@ -245,3 +245,177 @@ def test_data_join_single_file_confirms_then_skips(client: TestClient, tmp_path:
     client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
     skip = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
     assert "无需拼接" in skip["content"]
+
+
+def test_data_join_double_confirm_second_request_gets_409_without_second_turn(
+    client: TestClient, tmp_path: Path, monkeypatch,
+):
+    """REL-1: a double-sent confirm (dual tab / retried request) while the first
+    driver turn is still executing must be rejected with 409 by the
+    idx_jobs_active_task guard *before* it reaches dispatch_plan_driver_turn a
+    second time — not raced into a second PlanExecutor.run that could mis-flag
+    the in-flight step as a restart orphan (REL-1) and clobber it with a 500."""
+    from marvis import api as marvis_api
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "并发确认", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    turn_calls: list[str] = []
+    real_dispatch = marvis_api.dispatch_plan_driver_turn
+
+    def racing_dispatch(runtime, repo, task, **kwargs):
+        turn_calls.append(task.id)
+        # Simulate Tab B re-sending the confirmation while Tab A's turn (this
+        # call) is still executing: it must be rejected before ever reaching
+        # dispatch_plan_driver_turn again.
+        second = client.post(
+            f"/api/tasks/{task_id}/agent/messages",
+            json={"content": "确认"},
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"] == "该任务正在执行上一步，请等待完成"
+        return real_dispatch(runtime, repo, task, **kwargs)
+
+    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", racing_dispatch)
+
+    first = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+
+    assert first.status_code == 202, first.text
+    # dispatch_plan_driver_turn (the real turn / PlanExecutor.run path) ran
+    # exactly once for this confirm — the racing second request never got in.
+    assert turn_calls == [task_id]
+    done = _last_assistant(client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"])
+    assert "拼接执行完成" in done["content"]
+    assert "1:1 保持" in done["content"]
+
+
+def test_data_join_active_driver_job_reports_kind_driver_on_task_payload(
+    client: TestClient, tmp_path: Path, monkeypatch,
+):
+    """REL-6: GET /api/tasks (and the single-task endpoint) must surface
+    active_job_kind == "driver" while a driver turn is executing, so the
+    frontend's busy state / 1s polling can pick it up after a refresh or from
+    any other entry point (UX-1)."""
+    from marvis import api as marvis_api
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "任务忙碌态", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    observed: dict[str, str | None] = {}
+    real_dispatch = marvis_api.dispatch_plan_driver_turn
+
+    def observing_dispatch(runtime, repo, task, **kwargs):
+        mid_turn = client.get(f"/api/tasks/{task_id}")
+        assert mid_turn.status_code == 200, mid_turn.text
+        observed["single"] = mid_turn.json()["active_job_kind"]
+        listed = client.get("/api/tasks")
+        listed_task = next(t for t in listed.json() if t["id"] == task_id)
+        observed["listed"] = listed_task["active_job_kind"]
+        return real_dispatch(runtime, repo, task, **kwargs)
+
+    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", observing_dispatch)
+
+    resp = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 202, resp.text
+
+    assert observed["single"] == "driver"
+    assert observed["listed"] == "driver"
+    # The job is finished (synchronous turn) once the HTTP response returns.
+    after = client.get(f"/api/tasks/{task_id}")
+    assert after.json()["active_job_kind"] is None
+
+
+def test_data_join_driver_turn_job_finishes_on_exception(
+    client: TestClient, tmp_path: Path, monkeypatch,
+):
+    """REL-1: the job must be released (finish_job in the finally-equivalent
+    except branch) even when the turn function raises an unexpected exception,
+    so a single failed turn doesn't permanently lock the task behind the
+    idx_jobs_active_task unique index."""
+    from marvis import api as marvis_api
+    from marvis.app import create_app
+    from marvis.db import TaskRepository
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "异常清理", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    def boom(runtime, repo, task, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(marvis_api, "dispatch_plan_driver_turn", boom)
+
+    # A fresh client sharing the same tmp_path-backed app/db, configured not to
+    # re-raise the server exception, so the 500 can be asserted on the response
+    # instead of propagating through TestClient.
+    error_client = TestClient(create_app(tmp_path), raise_server_exceptions=False)
+    resp = error_client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resp.status_code == 500
+
+    repo = TaskRepository(tmp_path / "marvis.sqlite")
+    assert repo.get_active_job_kind(task_id) is None
+
+    # The task is not stuck: a fresh confirm (now unpatched) can still claim
+    # the job and complete the turn.
+    monkeypatch.undo()
+    resumed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})
+    assert resumed.status_code == 202, resumed.text
+
+
+def test_data_join_plan_payload_carries_started_at_for_running_step(
+    client: TestClient, tmp_path: Path,
+):
+    """UX-1/REL-6: a step's plan payload gets a started_at field once it is
+    RUNNING (sourced from plan_step_runs, already recorded per attempt), so the
+    plan rail can show elapsed time via the same formatStepElapsed() range the
+    validation stepper already uses, instead of a plain spinner."""
+    from marvis.db import PlanRepository
+    from marvis.orchestrator.contracts import StepStatus
+
+    src = _join_dir(tmp_path)
+    task_id = client.post("/api/tasks", json={
+        "model_name": "耗时展示", "validator": "qa", "source_dir": str(src),
+        "task_type": "data_join", "run_mode": "manual",
+    }).json()["id"]
+    client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "确认"})  # C1 roles
+    client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})  # run to C2 gate
+
+    plans = client.get(f"/api/tasks/{task_id}/plans").json()["plans"]
+    plan = plans[-1]
+    execute_step = next(step for step in plan["steps"] if step["tool_ref"]["tool"] == "execute_join")
+    assert execute_step.get("started_at") in (None, "")  # not running yet
+
+    repo = PlanRepository(tmp_path / "marvis.sqlite")
+    loaded = repo.load_plan(plan["id"])
+    running_step = next(step for step in loaded.steps if step.id == execute_step["id"])
+    running_step.status = StepStatus.RUNNING
+    repo.update_step(running_step)
+    repo.start_step_run(
+        plan_id=plan["id"],
+        step_id=execute_step["id"],
+        tool_ref="data_ops.execute_join",
+        inputs={},
+    )
+
+    refreshed = client.get(f"/api/tasks/{task_id}/plans").json()["plans"][-1]
+    refreshed_step = next(step for step in refreshed["steps"] if step["id"] == execute_step["id"])
+    assert refreshed_step["status"] == "running"
+    assert refreshed_step["started_at"]
