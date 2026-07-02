@@ -409,11 +409,17 @@ class TaskRepository:
                     (job_id, task_id, kind, now),
                 )
         except sqlite3.IntegrityError as exc:
-            if self.task_has_active_job(task_id):
-                raise ConflictError(
-                    f"task {task_id} already has an active job"
-                ) from exc
-            raise
+            # A UNIQUE violation on idx_jobs_active_task means another job for
+            # this task was queued/running at INSERT time -- that is the race
+            # this constraint exists to catch, so surface it as a 409 directly.
+            # Do NOT re-query task_has_active_job to "confirm": if the competing
+            # job finished in the interim the re-check returns False and the raw
+            # IntegrityError escapes as an unhandled 500 (TST-9b TOCTOU). The
+            # constraint already decided there was contention at this instant;
+            # {202, 409} are the only outcomes.
+            raise ConflictError(
+                f"task {task_id} already has an active job"
+            ) from exc
         return job_id
 
     def mark_job_running(self, job_id: str) -> None:

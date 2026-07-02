@@ -25,7 +25,7 @@ from marvis.branding import (
     render_branded_index_html,
     resolve_branding_asset,
 )
-from marvis.data.backend import DataBackend, duckdb_health
+from marvis.data.backend import DUCKDB_TEMP_DIR_NAME, DataBackend, duckdb_health
 from marvis.db import (
     DraftRepository,
     record_llm_call,
@@ -358,9 +358,11 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        # Constructing DataBackend applies the DuckDB memory_limit / threads /
-        # temp_directory PRAGMAs (PERF-8) if this process has not touched a
-        # dataset yet, so health always reports the actually-effective config.
+        # Constructing DataBackend ensures the workspace-scoped DuckDB temp
+        # directory exists (PERF-8); duckdb_health() then opens a connection the
+        # same way every DataBackend operation does (TST-9c: per-operation, not a
+        # shared default connection) and reports its actually-effective config.
+        duckdb_temp_directory = settings.datasets_dir.parent / DUCKDB_TEMP_DIR_NAME
         DataBackend(settings.datasets_dir)
         stuck_jobs = task_repo.count_heartbeat_stale_running_jobs(
             older_than_seconds=heartbeat_timeout_seconds()
@@ -375,7 +377,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
             "stuck_jobs": stuck_jobs,
             "llm_configured": _has_configured_llm(settings.workspace),
             **sqlite_health(settings.db_path),
-            **duckdb_health(),
+            **duckdb_health(duckdb_temp_directory),
         }
 
     @app.get("/branding/assets/{asset_path:path}")

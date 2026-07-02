@@ -194,22 +194,32 @@ class PlanRepository:
 
     def confirm_step(self, step_id: str) -> None:
         with connect(self.db_path) as conn:
+            # Atomic one-shot transition: only an AWAITING_CONFIRM step that has
+            # NOT already been confirmed flips confirmed 0 -> 1. confirm_step
+            # never changes status (the executor advances the step later), so
+            # guarding on status alone let every repeat call in the
+            # AWAITING_CONFIRM window "succeed" -- a no-op double-confirm guard
+            # (TST-9b). Adding ``AND confirmed = 0`` makes this a real
+            # compare-and-swap: the second confirm matches zero rows and raises.
             cursor = conn.execute(
                 """
                 UPDATE plan_steps
                    SET confirmed = 1
                  WHERE id = ?
                    AND status = ?
+                   AND confirmed = 0
                 """,
                 (step_id, StepStatus.AWAITING_CONFIRM.value),
             )
             if cursor.rowcount == 0:
                 row = conn.execute(
-                    "SELECT status FROM plan_steps WHERE id = ?",
+                    "SELECT status, confirmed FROM plan_steps WHERE id = ?",
                     (step_id,),
                 ).fetchone()
                 if row is None:
                     raise KeyError(step_id)
+                if int(row["confirmed"] or 0):
+                    raise ConflictError("step is already confirmed")
                 raise ConflictError(
                     f"step is not awaiting confirmation: {row['status']}"
                 )
