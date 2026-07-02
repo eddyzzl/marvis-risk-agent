@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from marvis.agent.data_dictionary import resolve_data_dictionary_id
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
 
@@ -71,6 +72,11 @@ def build_join_proposal(registry, task_id: str, source_dir) -> JoinProposal:
             if artifact.role == FileRole.SAMPLE:
                 _register_once(registry, task_id, Path(artifact.path))
         datasets = _data_datasets(registry, task_id)
+    # GAP-4: register a data-dictionary material as a dataset (if present) the
+    # same way the modeling setup flow does, so a dictionary uploaded for a
+    # data_join task is available to downstream consumers too. Best-effort —
+    # never blocks the C1 proposal when no dictionary file exists.
+    resolve_data_dictionary_id(registry, task_id, source_dir)
     ranked = propose_roles(datasets)
     files = [
         JoinFileInfo(

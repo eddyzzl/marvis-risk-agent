@@ -60,7 +60,14 @@ def build_dedup_payload(confirm_o: dict | None, propose_o: dict | None) -> dict 
         }
         for fid in needs
     ]
-    return {"needs_dedup": needs, "features": features, "strategies": ["first", "last"]}
+    payload = {"needs_dedup": needs, "features": features, "strategies": ["first", "last"]}
+    # GAP-4: pass through the same {column: business_name} map propose_join already
+    # resolved, so the dedup picker's "冲突列" list can show a meaning tooltip next to
+    # raw column codes. {} (omitted) when the task has no registered data dictionary.
+    dictionary = propose.get("dictionary") if isinstance(propose.get("dictionary"), dict) else {}
+    if dictionary:
+        payload["dictionary"] = dictionary
+    return payload
 
 
 def screen_known_features(output: dict) -> set:
@@ -127,6 +134,11 @@ def build_screen_payload(output: dict, dep) -> dict:
         "sentinel_columns": o.get("sentinel_columns") if isinstance(o.get("sentinel_columns"), dict) else {},
         "excluded_categorical": o.get("excluded_categorical") or [],
         "suspected_categorical": o.get("suspected_categorical") or [],
+        # GAP-4: {column: business_name} map, present only when the task has a
+        # registered data dictionary — the frontend adds a "业务含义" column when
+        # this is non-empty and otherwise renders unchanged (no dictionary = zero
+        # visible change).
+        "dictionary": o.get("dictionary") if isinstance(o.get("dictionary"), dict) else {},
     }
 
 

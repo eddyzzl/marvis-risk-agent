@@ -15,6 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
 from marvis.data.direction import normalize_score_direction
@@ -934,7 +935,20 @@ def tool_screen_features(inputs: dict, ctx) -> dict:
     if result.sentinel_columns:
         payload["sentinel_columns"] = _jsonable(result.sentinel_columns)
         payload["sentinel_notice"] = sentinel_screen_notice(result.sentinel_columns)
+    dictionary = _screen_dictionary(runtime, ctx)
+    if dictionary:
+        payload["dictionary"] = dictionary
     return payload
+
+
+def _screen_dictionary(runtime: "_Runtime", ctx) -> dict:
+    """GAP-4: compact {column: business_name} map for the screen gate's "业务含义"
+    column + LLM gate context, when the task has a registered data dictionary.
+    Best-effort — {} when no dictionary is registered or it can't be parsed."""
+    dictionary_id = first_data_dictionary_id(runtime.registry.list_for_task(ctx.task_id))
+    if not dictionary_id:
+        return {}
+    return load_business_names(runtime.backend, runtime.registry, dictionary_id)
 
 
 def _excluded_categorical_for_screen(
@@ -1009,7 +1023,7 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         max_missing_rate=float(inputs.get("max_missing_rate", 0.95)),
         top_k=_optional_int(inputs.get("top_k")),
     )
-    return {
+    payload = {
         "selected": list(result.selected),
         "ranked": [[feature, ks] for feature, ks in result.ranked],
         "leakage": [],
@@ -1019,6 +1033,10 @@ def _screen_features_non_binary(inputs: dict, ctx) -> dict:
         "n_screened": result.n_screened,
         "note": "非二分类目标：跳过泄漏KS筛选，已剔除常量/高缺失列",
     }
+    dictionary = _screen_dictionary(runtime, ctx)
+    if dictionary:
+        payload["dictionary"] = dictionary
+    return payload
 
 
 def tool_choose_modeling_spec(inputs: dict, ctx) -> dict:

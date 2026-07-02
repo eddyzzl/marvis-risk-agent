@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import DataBackend
@@ -123,7 +124,30 @@ def tool_propose_join(inputs: dict, ctx) -> dict:
     payload = _join_plan_payload(plan)
     for join in payload.get("joins", []):
         join["feature_name"] = _friendly_name(runtime.registry, join.get("feature_id"))
+    # GAP-4: {column: business_name} map for every key column in this proposal, so
+    # the C1/dedup gate can show a meaning tooltip next to raw column-name codes.
+    # Best-effort — {} when the task has no registered data dictionary.
+    dictionary = _join_dictionary(runtime, ctx, payload)
+    if dictionary:
+        payload["dictionary"] = dictionary
     return payload
+
+
+def _join_dictionary(runtime: "_Runtime", ctx, payload: dict) -> dict:
+    dictionary_id = first_data_dictionary_id(runtime.registry.list_for_task(ctx.task_id))
+    if not dictionary_id:
+        return {}
+    names = load_business_names(runtime.backend, runtime.registry, dictionary_id)
+    if not names:
+        return {}
+    columns: set[str] = set()
+    for join in payload.get("joins", []):
+        for pair in join.get("key_pairs") or []:
+            if pair.get("anchor_col"):
+                columns.add(str(pair["anchor_col"]))
+            if pair.get("feature_col"):
+                columns.add(str(pair["feature_col"]))
+    return {column: names[column] for column in columns if column in names}
 
 
 def tool_confirm_join(inputs: dict, ctx) -> dict:

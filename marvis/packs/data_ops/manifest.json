@@ -213,6 +213,9 @@
             "items": {
               "type": "object"
             }
+          },
+          "dictionary": {
+            "type": "object"
           }
         },
         "required": [

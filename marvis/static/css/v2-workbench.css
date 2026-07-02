@@ -2075,10 +2075,22 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   border-bottom: 1px solid var(--border-color);
   white-space: nowrap;
 }
-.screen-table th:nth-child(n+3):nth-child(-n+8),
+.screen-table th.screen-num-header,
 .screen-table td.screen-num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+/* GAP-4: optional "业务含义" column, present only when the task has a
+   registered data dictionary — zero layout impact when absent. */
+.screen-table .screen-meaning {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.screen-table .screen-meaning-empty {
+  color: var(--text-muted);
 }
 .screen-table thead th {
   position: sticky;
@@ -2302,6 +2314,14 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   font-weight: 400;
   color: var(--text-muted);
   white-space: normal;
+}
+/* GAP-4: a conflicting column with a data-dictionary business-name entry gets a
+   dotted underline so the title tooltip reads as hoverable; no dictionary = plain
+   text, unchanged from before. */
+.dedup-conflict-column {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: help;
 }
 .dedup-picker .dedup-strategy-note {
   margin: 0;

@@ -254,6 +254,11 @@ def _format_gate(gate: dict) -> str:
                 f"{column} {status}, missing_rate={item.get('missing_rate')}, "
                 f"min={item.get('min')}, max={item.get('max')}, reason={item.get('reason') or ''}"
             )
+    dictionary_lines = _dictionary_context_lines(meta)
+    if dictionary_lines:
+        lines.append("")
+        lines.append("【数据字典(列=业务含义,只读参照)】")
+        lines.extend(dictionary_lines)
     for table in meta.get("tables") or []:
         lines.append("")
         lines.append(f"表:{table.get('title', '')}")
@@ -263,6 +268,38 @@ def _format_gate(gate: dict) -> str:
         for row in (table.get("rows") or [])[:20]:
             lines.append(" | ".join(str(c) for c in row))
     return "\n".join(lines)
+
+
+# GAP-4: cap how many column=meaning pairs enter the gate prompt directly (on top of
+# the overall _truncate_gate_prompt token budget below) — a bureau-data dictionary can
+# carry hundreds/thousands of entries and only the ones relevant to this gate's own
+# columns are useful context.
+_MAX_DICTIONARY_PROMPT_ENTRIES = 30
+
+
+def _dictionary_context_lines(meta: dict) -> list[str]:
+    """Compact "code=business name" context for the LLM gate decision (GAP-4d): reads
+    whichever structured payload this gate carries a resolved dictionary map on — the
+    screen gate's ``screen.dictionary`` or the JOIN gate's ``dedup.dictionary`` (other
+    gate kinds carry neither, so this is a no-op for them). Empty when the task has no
+    registered data dictionary — zero prompt change in that case."""
+    dictionary: dict = {}
+    screen = meta.get("screen") if isinstance(meta.get("screen"), dict) else {}
+    if isinstance(screen.get("dictionary"), dict):
+        dictionary = screen["dictionary"]
+    if not dictionary:
+        dedup = meta.get("dedup") if isinstance(meta.get("dedup"), dict) else {}
+        if isinstance(dedup.get("dictionary"), dict):
+            dictionary = dedup["dictionary"]
+    if not dictionary:
+        return []
+    lines = []
+    for column, meaning in list(dictionary.items())[:_MAX_DICTIONARY_PROMPT_ENTRIES]:
+        lines.append(f"- {column}={meaning}")
+    remaining = len(dictionary) - len(lines)
+    if remaining > 0:
+        lines.append(f"- …等另外 {remaining} 项已省略")
+    return lines
 
 
 def _extract_red_flags(gate: dict) -> list[str]:

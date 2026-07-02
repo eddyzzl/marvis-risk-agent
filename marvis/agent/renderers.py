@@ -55,6 +55,14 @@ def _triple(item):
     return str(item), None, ""
 
 
+def _key_label(column, dictionary: dict) -> str:
+    """A raw key-column code, appended with "（含义: ...）" when the task's data
+    dictionary has a business-name entry for it (GAP-4); the bare code otherwise."""
+    name = str(column) if column is not None else "?"
+    meaning = dictionary.get(name) if dictionary else None
+    return f"{name}（含义:{meaning}）" if meaning else name
+
+
 def _render_screen(o: dict):
     selected = o.get("selected") or []
     leak = o.get("leakage") or []
@@ -664,6 +672,10 @@ def _render_vintage_curve(o: dict):
 
 def _render_propose_join(o: dict):
     joins = o.get("joins") or []
+    # GAP-4: business-meaning lookup for raw key-column codes (e.g. als_m3_id_nbank_orgnum),
+    # present only when the task has a registered data dictionary; {} otherwise, in which
+    # case _key_label below degrades to the plain column name (no visible change).
+    dictionary = o.get("dictionary") if isinstance(o.get("dictionary"), dict) else {}
     rows = []
     relax_rows = []
     any_conflict = False
@@ -676,7 +688,10 @@ def _render_propose_join(o: dict):
         # Prefer the friendly file name (features.parquet) over the raw ds_<hash> id.
         fname = str(j.get("feature_name") or j.get("feature_id", "?"))
         key_pairs = j.get("key_pairs") or []
-        keys = ", ".join(f"{p.get('anchor_col')}={p.get('feature_col')}" for p in key_pairs) or "?"
+        keys = ", ".join(
+            f"{_key_label(p.get('anchor_col'), dictionary)}={_key_label(p.get('feature_col'), dictionary)}"
+            for p in key_pairs
+        ) or "?"
         # Dynamic key relaxation proposals (spec §4/§5): low-match keys may match better with
         # one element dropped — surface as suggestions (the user confirms; never auto-applied).
         for alt in (diag.get("key_alternatives") or []):
