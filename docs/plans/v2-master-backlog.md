@@ -28,12 +28,18 @@
 
 | 状态 | ID | 事项 | 来源 |
 |---|---|---|---|
-| ⬜ | PR-1 | 决定未跟踪文件去留：`marvis/static/js/task-search.js`、`scripts/assets/`、`scripts/generate_marvis_glow_animation.py`、本轮新增的 docs/reviews + docs/plans 文档；topic commits 收口至 `git status` 干净 | 追踪器 L499-502 |
-| ⬜ | PR-2 | 从**最终已提交树**跑 `scripts/check` + 全量 pytest + 前端 smoke（当前全绿证据均来自 dirty worktree） | 追踪器 L497/1015 |
+| ✅ | PR-1 | 未跟踪文件已收口（2026-07-02）：task-search.js 已随早前提交入库；glow 脚本/assets 已被用户从磁盘移除（VD-5 实施时需重新生成素材）；审查报告已入 `30877a4c`；master backlog + 策略计划 + 指针改动已入 `5f6bb17c`；`git status` 干净 | 追踪器 L499-502 |
+| ✅ | PR-2 | 已提交树 `5f6bb17c` 全量门禁通过（2026-07-02）：diff/ruff/node 全过，pytest **1988 passed, 4 skipped**（8m37s，py_313） | 追踪器 L497/1015 |
 | ⬜ | PR-3 | 人工 smoke 六项：建 JOIN 任务 / 特征分析 / 建模 G2–G5 / 导出 PMML+PKL / 交接验证 / 强制一次可重试失败并恢复 | 追踪器 Phase H |
 | ⬜ | PR-4 | PR 描述：已完成项、剩余风险（引用本清单）、全量测试结果 | 用户清单 |
-| ⬜ | PR-5 | Open Decisions 4 项拍板并记录：AUTO 自治级别、沙箱机制（subprocess 已做，containerization 是否评估）、PMML 承诺口径（.pkl 为源）、视觉重设计深度 | 追踪器 L1002-1007 |
-| ⬜ | PR-6 | 把"raw typed 手动回复无浏览器侧 stale-token"限制按 DoD-7 写进最终 review（或随 AGT-1 一并修） | 追踪器 L851 |
+| ✅ | PR-5 | Open Decisions 4 项已拍板记录（见下方"PR-5 拍板记录"） | 追踪器 L1002-1007 |
+| ✅ | PR-6 | 决议：选"随 AGT-1 一并修"（阶段一第 1 项将同时收紧手动文本确认面）；PR 描述中列为已知限制待修 | 追踪器 L851 |
+
+**PR-5 拍板记录（2026-07-02，依据既有代码行为与用户既往决策）**：
+1. **AUTO 自治级别**：v1 正式定为"仅有界低风险调整"（现有实现即此行为）；更高自治待阶段六 AGT-7/AGT-9（门预算+建模门红旗）与 AGT-4（成功标准）落地后再评估。
+2. **沙箱机制**：subprocess + env allowlist + 路径后置校验 + RSS 软监控为 v1 终态；OS 级 containerization 归长线 LT-9 评估，不阻塞完全体 v1。
+3. **PMML 承诺口径**：`.pkl` 为源、`.pmml` 为兼容交付件（代码现状一致：native Booster 明确拒绝 PMML；校准层不入 PMML 已在模型卡标注）。
+4. **视觉重设计深度**：走 token 收口（VD-11）而非全面重设计；radius/间距等口味项按用户既往约束**先出对比稿拍板再实施**。
 
 ## 2. 阶段一：审查 Batch 1 —— 复发债与小正确性（约 3–5 天）
 
