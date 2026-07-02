@@ -22,6 +22,19 @@ export function latestInteractiveScreenMessageId(messages = []) {
   return "";
 }
 
+// VD-2: only the LAST assistant message can still be an actionable pending
+// gate (the step-rail confirm button only ever targets the latest step) —
+// earlier "kind: gate" messages are resolved history. Manual mode keeps its
+// "tool, not conversation" section styling (no bubble/card shell) but still
+// needs to mark the one section that is genuinely awaiting confirmation, so
+// it gets the same tone bar language as the agent-mode gate card.
+function lastAssistantMessageId(messages = []) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === "assistant") return String(messages[index].id || "");
+  }
+  return "";
+}
+
 // Manual mode for driver tasks (data_join / feature / modeling): render each
 // step's output as a plain analysis section. The plan overview is omitted because
 // the step rail already shows the plan, and gate-specific renderers are injected
@@ -37,10 +50,13 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
 
   const sections = [];
   const latestScreenMessageId = latestInteractiveScreenMessageId(messages);
+  const lastMessageId = lastAssistantMessageId(messages);
   for (const message of messages || []) {
     if (message?.role !== "assistant") continue;
     const meta = message.metadata || {};
     if (meta.kind === "overview" || meta.kind === "plan_overview") continue;
+    const isPendingGate = meta.kind === "gate" && String(message.id || "") === lastMessageId;
+    const sectionClass = isPendingGate ? "driver-analysis-section is-gate-pending" : "driver-analysis-section";
     if (meta.error) {
       sections.push(
         `<section class="driver-analysis-section is-error">${renderMarkdown(message.content || "")}</section>`,
@@ -49,33 +65,33 @@ export function driverManualAnalysisHtml(messages, renderers = {}) {
     }
     const intro = renderMarkdown(stripChatInstructions(message.content || ""));
     if (meta.join_c1) {
-      sections.push(`<section class="driver-analysis-section">${intro}${renderC1Form(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${renderC1Form(message)}</section>`);
       continue;
     }
     if (meta.screen) {
       const interactive = String(message.id || "") === latestScreenMessageId;
       sections.push(
-        `<section class="driver-analysis-section">${intro}${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}</section>`,
+        `<section class="${sectionClass}">${intro}${renderModelingSetup(message, { interactive })}${renderScreenTable(message, { interactive })}</section>`,
       );
       continue;
     }
     if (meta.modeling_setup) {
       const interactive = meta.kind === "gate";
-      sections.push(`<section class="driver-analysis-section">${intro}${renderModelingSetup(message, { interactive })}${renderTables(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${renderModelingSetup(message, { interactive })}${renderTables(message)}</section>`);
       continue;
     }
     if (meta.dedup) {
       const diagTables = renderTables(message);
-      sections.push(`<section class="driver-analysis-section">${intro}${diagTables}${renderDedupPicker(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${diagTables}${renderDedupPicker(message)}</section>`);
       continue;
     }
     if (meta.model_delivery) {
-      sections.push(`<section class="driver-analysis-section">${intro}${renderModelDelivery(message)}${renderTables(message)}</section>`);
+      sections.push(`<section class="${sectionClass}">${intro}${renderModelDelivery(message)}${renderTables(message)}</section>`);
       continue;
     }
     const tables = renderTables(message);
     if (!String(message.content || "").trim() && !tables) continue;
-    sections.push(`<section class="driver-analysis-section">${intro}${tables}</section>`);
+    sections.push(`<section class="${sectionClass}">${intro}${tables}</section>`);
   }
   return sections.join("") || '<div class="plan-rail-empty">尚无分析结果，请在右侧步骤栏操作。</div>';
 }

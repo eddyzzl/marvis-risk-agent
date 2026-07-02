@@ -5183,26 +5183,110 @@ function agentMemoryReferencesHtml(references = []) {
   ].join("");
 }
 
+// VD-1: infer a rich-cell kind from a driver table's header text, mirroring the
+// column_specs mechanism the validation metric preview uses (app.js:3502+),
+// since generic driver tables (JOIN diagnostics / feature metrics / model
+// compare) carry no explicit specs — only a {title, columns, rows} shape.
+function driverColumnKindFromHeader(headerLabel) {
+  const label = String(headerLabel || "").trim();
+  if (!label) return "text";
+  if (/^PSI$/i.test(label)) return "psi";
+  if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率)/i.test(label)) return "databar-percent";
+  if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|lift)/i.test(label)) return "databar";
+  return "text";
+}
+
+// Champion / winning candidate rows in comparison tables (候选模型对比 etc.) are
+// marked by the backend appending " ★" to the first cell (marvis/agent/
+// renderers.py:350); render that as a highlighted row instead of a literal star.
+function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fractionsForColumn) {
+  const raw = value ?? "";
+  if (columnIndex === 0 && typeof value === "string" && /\s★$/.test(value)) {
+    const label = String(raw).replace(/\s★$/, "");
+    return {
+      cls: "cell-text cell-champion",
+      html: `<span class="champion-badge" data-tip="表现最优,当前推荐候选">${escapeHtml(label)}</span>`,
+    };
+  }
+  if (kind === "psi") {
+    const numeric = parseNumeric(raw);
+    const thresholds = [0.02, 0.10];
+    const tier = psiTier(numeric, thresholds);
+    const tip = psiTooltipText(numeric, thresholds);
+    const stripMarker = numeric === null
+      ? ""
+      : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`;
+    return {
+      cls: "cell-psi",
+      html: `<span class="psi-cell" data-tip="${escapeHtml(tip)}">`
+        + `<span class="psi-value" data-tier="${tier}">${escapeHtml(String(raw))}</span>`
+        + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
+        + `</span>`,
+    };
+  }
+  if (kind === "databar" || kind === "databar-percent") {
+    const fraction = fractionsForColumn.get(rowIndex);
+    if (fraction !== undefined && parseNumeric(raw) !== null) {
+      const tip = `${headerLabel} ${raw}`;
+      return {
+        cls: "cell-databar",
+        html: `<span class="databar" data-color="primary" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)}">`
+          + `<span class="databar-fill"></span>`
+          + `<span class="databar-label">${escapeHtml(String(raw))}</span>`
+          + `</span>`,
+      };
+    }
+    if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+      return { cls: "cell-number", html: escapeHtml(String(raw)) };
+    }
+    return { cls: "cell-text", html: escapeHtml(String(raw)) };
+  }
+  if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+    return { cls: "cell-number", html: escapeHtml(String(raw)) };
+  }
+  return { cls: "cell-text", html: escapeHtml(String(raw)) };
+}
+
 // Inline rich tables carried by the generic plan driver (data_join / future
 // feature / modeling). Format is the driver's simple {title, columns, rows};
-// validation metric tables use a different path (metadata.sections) and are
-// untouched. Each driver message is appended whole, so this renders once on the
-// full timeline rebuild — no streaming fast-path interaction.
+// validation metric tables use a different path (metadata.sections). VD-1:
+// column kind is inferred from the header text (no column_specs on this path)
+// and rendered with the same databar / PSI-band / tabular-nums primitives the
+// validation metric preview already uses (render-metrics.js). Each driver
+// message is appended whole, so this renders once on the full timeline
+// rebuild — no streaming fast-path interaction.
 function agentMessageTablesHtml(message) {
   const tables = message?.metadata?.tables;
   if (!Array.isArray(tables) || !tables.length) return "";
   const blocks = tables
     .map((table) => {
       const columns = Array.isArray(table?.columns) ? table.columns : [];
-      const rows = Array.isArray(table?.rows) ? table.rows : [];
+      const rows = Array.isArray(table?.rows) ? table.rows.map((row) => (Array.isArray(row) ? row : [row])) : [];
       if (!columns.length && !rows.length) return "";
+      const kinds = columns.map((col) => driverColumnKindFromHeader(col));
+      const fractionsByColumn = new Map();
+      kinds.forEach((kind, columnIndex) => {
+        if (kind === "databar" || kind === "databar-percent") {
+          fractionsByColumn.set(columnIndex, columnFractions(rows, columnIndex));
+        }
+      });
       const head = columns.length
         ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(String(col))}</th>`).join("")}</tr></thead>`
         : "";
       const body = `<tbody>${rows
-        .map((row) => {
-          const cells = Array.isArray(row) ? row : [row];
-          return `<tr>${cells.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`;
+        .map((cells, rowIndex) => {
+          const tds = cells.map((cell, columnIndex) => {
+            const rendered = driverTableCellHtml(
+              cell,
+              rowIndex,
+              columnIndex,
+              columns[columnIndex] ?? "",
+              kinds[columnIndex] || "text",
+              fractionsByColumn.get(columnIndex) || new Map(),
+            );
+            return `<td class="${rendered.cls}">${rendered.html}</td>`;
+          });
+          return `<tr>${tds.join("")}</tr>`;
         })
         .join("")}</tbody>`;
       const caption = table?.title
@@ -5396,9 +5480,107 @@ if (typeof document !== "undefined") {
   planRailController.installArtifactHandlers(document);
 }
 
+// VD-2: needs_confirmation gate messages get a distinct "gate card" shell
+// (left tone bar + glass tint + header pill + red-flag checklist + consequence
+// line) instead of looking like an ordinary chat bubble with one extra button.
+// Red flags are read from the backend's already-emitted "⚠️" markers (message
+// text lines + inline-table cells) — a pure presentation read, no new backend
+// data (INV-1).
+function shieldGateIconHtml() {
+  return '<svg class="gate-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/>'
+    + '<path d="M9.5 12l1.8 1.8L15 10"/>'
+    + '</svg>';
+}
+
+function driverGateRedFlags(message) {
+  const flags = [];
+  const content = String(message?.content || "");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("⚠️")) {
+      flags.push(trimmed.replace(/^⚠️\s*/, "").replace(/\*\*/g, ""));
+    }
+  }
+  const tables = Array.isArray(message?.metadata?.tables) ? message.metadata.tables : [];
+  for (const table of tables) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    const rows = Array.isArray(table?.rows) ? table.rows : [];
+    rows.forEach((row) => {
+      const cells = Array.isArray(row) ? row : [row];
+      cells.forEach((cell, columnIndex) => {
+        if (typeof cell !== "string" || !cell.includes("⚠️")) return;
+        const label = columns[columnIndex] ?? "";
+        const rowLabel = cells[0] ?? "";
+        flags.push(`${escapeHtml(String(rowLabel))} · ${escapeHtml(String(label))}：${escapeHtml(cell.replace(/⚠️/g, "").trim())}`.replace(/^ · /, ""));
+      });
+    });
+  }
+  return flags;
+}
+
+function driverGateRedFlagsHtml(flags) {
+  if (!flags.length) return "";
+  return [
+    '<div class="gate-card-redflags" data-tone="warn">',
+    '<div class="gate-card-redflags-title">⚠️ 需要留意</div>',
+    '<ul class="gate-card-redflags-list">',
+    ...flags.map((flag) => `<li>${flag.includes("<") ? flag : escapeHtml(flag)}</li>`),
+    "</ul>",
+    "</div>",
+  ].join("");
+}
+
+function driverGateConsequenceHtml(message) {
+  const next = typeof planRailController?.nextStepAfter === "function"
+    ? planRailController.nextStepAfter(message?.metadata || {})
+    : null;
+  if (!next?.title) return "";
+  return `<div class="gate-card-consequence">确认后将执行：${escapeHtml(String(next.title))}</div>`;
+}
+
+function driverGateCardHeaderHtml(message) {
+  const step = agentMessagePlanStep(message?.metadata || {});
+  const stepTitle = step?.title || message?.metadata?.step_title || "";
+  return [
+    '<div class="gate-card-header">',
+    shieldGateIconHtml(),
+    '<span class="gate-card-pill">⏸ 等待确认</span>',
+    stepTitle ? `<span class="gate-card-title">待确认：${escapeHtml(String(stepTitle))}</span>` : "",
+    "</div>",
+  ].join("");
+}
+
+// Wraps an already-rendered gate message body in the gate-card shell. Shared by
+// both agent-mode chat bubbles (agentMessageHtml) and manual-mode analysis
+// sections (driverManualAnalysisHtml), so the card form is identical in both
+// modes — only the confirm control differs (chat button vs. step-rail button).
+function driverGateCardHtml(message, innerHtml) {
+  const redFlags = driverGateRedFlags(message);
+  return [
+    '<div class="gate-card" data-gate-tone="' + (redFlags.length ? "warn" : "review") + '">',
+    driverGateCardHeaderHtml(message),
+    '<div class="gate-card-body">',
+    innerHtml,
+    "</div>",
+    driverGateRedFlagsHtml(redFlags),
+    driverGateConsequenceHtml(message),
+    "</div>",
+  ].join("");
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
-  const className = role === "user" ? "agent-message user" : "agent-message assistant";
+  // join_c1 turns carry no explicit metadata.kind (backend groups them with
+  // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
+  // same needs_confirmation moment — the C1 role-assignment form — so they
+  // get the same card treatment.
+  const isGate = role === "assistant"
+    && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
+  const className = role === "user"
+    ? "agent-message user"
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
   const contentHtml = thinking
@@ -5409,14 +5591,17 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
-  return [
-    `<article class="${className}"${idAttr}>`,
-    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+  const bodyHtml = [
     `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
     role === "assistant"
       ? (message?.metadata?.join_c1 ? agentMessageC1FormHtml(message) : `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}`)
       : "",
     role === "assistant" ? agentMessageGateButtonHtml(message) : "",
+  ].join("");
+  return [
+    `<article class="${className}"${idAttr}>`,
+    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+    isGate ? driverGateCardHtml(message, bodyHtml) : bodyHtml,
     memoryReferencesHtml,
     "</article>",
   ].join("");

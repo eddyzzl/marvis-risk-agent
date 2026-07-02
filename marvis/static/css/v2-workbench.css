@@ -917,6 +917,39 @@
   border-bottom: none;
 }
 
+/* VD-1: sink the validation metric-preview's rich-cell language (databar / PSI
+   band / champion highlight) into the driver gate's generic {title, columns,
+   rows} tables. .databar / .psi-cell / .psi-strip primitives are shared with
+   styles.css (metric overview); only the driver-table-specific cells live here. */
+.agent-inline-table td.cell-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.agent-inline-table td.cell-databar,
+.agent-inline-table td.cell-psi {
+  min-width: 110px;
+}
+.agent-inline-table td.cell-databar > .databar,
+.agent-inline-table td.cell-psi > .psi-cell {
+  margin: 0 auto;
+}
+.agent-inline-table td.cell-psi .psi-cell {
+  align-items: center;
+}
+.agent-inline-table tbody tr:has(.champion-badge) {
+  background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+.champion-badge {
+  font-weight: 700;
+  color: var(--success-strong);
+}
+.champion-badge::after {
+  content: " \2605";
+}
+body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+
 /* --- plan rail (non-validation tasks) follows the validation right rail: phases
    are big `.step` rows, tool calls are nested `.notebook-step` subtasks. --- */
 .plan-rail-step {
@@ -1040,6 +1073,11 @@
   padding: 16px 6px;
   color: var(--text-muted);
   font-size: 13px;
+}
+/* VD-3: plan rail's genuine first load (no cached response yet) — see
+   planRailSkeletonHtml() in plan_rail_controller.js. */
+.plan-rail-skeleton {
+  padding: 4px 6px;
 }
 .plan-rail-fetch-error {
   display: flex;

@@ -1,5 +1,6 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
+import { skeletonRowsHtml, skeletonTableHtml } from "../skeleton.js";
 import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";
 
 // Wired driver task types drive the plan rail / analysis flow.
@@ -285,10 +286,14 @@ export function createPlanRailController({
     return $("artifactPanelBody") || $("artifactPanel");
   }
 
+  // VD-3: a gate's evidence table (JOIN diagnostics / feature metrics / model
+  // compare) is exactly what the artifact panel loads here, so this is the
+  // "门表格数据加载中" wait — swap the old plain-text placeholder for a table
+  // skeleton so a slow fetch doesn't read as a stalled/hung panel.
   async function renderRightRailArtifact(container, artifactRef) {
     const target = artifactPreviewContainer() || container;
     if (target) {
-      target.innerHTML = '<div class="artifact-loading">正在加载输出...</div>';
+      target.innerHTML = `<div class="artifact-loading" data-skeleton="artifact">${skeletonTableHtml({ rows: 4, columns: 4 })}</div>`;
     }
     return artifactRenderer(target, artifactRef);
   }
@@ -451,7 +456,18 @@ export function createPlanRailController({
     }
   }
 
-  function planRailHtml(plan, { blocked = false, fetchError = "" } = {}) {
+  // VD-3: three stand-in phase rows (checker + title-bar shimmer), matching the
+  // shape of the real plan-rail phase rows below so the skeleton-to-content
+  // swap doesn't jump in height.
+  function planRailSkeletonHtml() {
+    return [
+      '<div class="plan-rail-skeleton" aria-hidden="true" data-skeleton="plan-rail">',
+      skeletonRowsHtml({ rows: 3, height: 34 }),
+      "</div>",
+    ].join("");
+  }
+
+  function planRailHtml(plan, { blocked = false, fetchError = "", firstLoad = false } = {}) {
     const fetchErrorBanner = fetchError
       ? '<div class="plan-rail-fetch-error" role="status">'
         + '<span>计划读取失败，当前显示的是上次缓存的计划。</span>'
@@ -468,9 +484,15 @@ export function createPlanRailController({
           + '<button type="button" class="button compact secondary" data-plan-rail-retry="1">重试</button>'
           + "</div>";
       }
-      return blocked
-        ? '<div class="plan-rail-empty">尚未生成计划。请按对话中的提示处理后重新发起。</div>'
-        : '<div class="plan-rail-empty">计划生成中…</div>';
+      if (blocked) {
+        return '<div class="plan-rail-empty">尚未生成计划。请按对话中的提示处理后重新发起。</div>';
+      }
+      // VD-3: the genuine first fetch (no cached response yet, successful or
+      // not) shows a skeleton instead of blank-then-text, so a slow first
+      // plan build doesn't read as a hang. Once a response has landed at
+      // least once, fall back to the plain "计划生成中…" text for any later
+      // still-empty state (this should be rare after the first response).
+      return firstLoad ? planRailSkeletonHtml() : '<div class="plan-rail-empty">计划生成中…</div>';
     }
     const steps = [...plan.steps].sort(
       (left, right) => (Number(left.index) || 0) - (Number(right.index) || 0),
@@ -525,15 +547,19 @@ export function createPlanRailController({
     const railTitle = document.querySelector("#progressRail .step-rail-head h3");
     progressRail?.setAttribute("aria-label", "计划步骤");
     if (railTitle) railTitle.textContent = "计划步骤";
+    // VD-3: "no response has landed for this task yet" — captured before
+    // maybeFetchPlan's async .then can populate v2PlanCache — is the genuine
+    // first-load moment that gets the skeleton treatment below.
+    const firstLoad = !v2PlanCache.has(taskId);
     maybeFetchPlan(taskId);
     const plan = v2PlanCache.get(taskId);
     const blocked = driverHasBlockingError();
     const fetchError = v2PlanFetchErrors.get(taskId) || "";
-    const planSignature = JSON.stringify({ task: taskId, plan, blocked, fetchError });
+    const planSignature = JSON.stringify({ task: taskId, plan, blocked, fetchError, firstLoad });
     if (force || renderSignatures.workflowStepper !== planSignature) {
       renderSignatures.workflowStepper = planSignature;
       const planStepper = $("workflowStepper");
-      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked, fetchError });
+      if (planStepper) planStepper.innerHTML = planRailHtml(plan, { blocked, fetchError, firstLoad });
     }
     return true;
   }
@@ -564,12 +590,28 @@ export function createPlanRailController({
     return steps.find((step) => String(step?.id || "") === stepId) || null;
   }
 
+  // VD-2: the gate card's consequence line ("确认后将执行:<下一步>") reads the
+  // step that depends on the gate step, so it can name what happens next
+  // without the caller re-deriving plan topology.
+  function nextStepAfter(metadata = {}, taskId = selectedTaskId()) {
+    const gate = planStep(metadata, taskId);
+    if (!gate) return null;
+    const plan = v2PlanCache.get(taskId);
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    const downstream = steps.filter((step) => (step?.depends_on || []).includes(gate.id));
+    if (!downstream.length) return null;
+    return downstream.reduce((earliest, step) => (
+      earliest === null || (step?.index ?? Infinity) < (earliest?.index ?? Infinity) ? step : earliest
+    ), null);
+  }
+
   return {
     artifactPreviewContainer,
     clearArtifactPanel,
     handleClick,
     installArtifactHandlers,
     maybeFetchPlan,
+    nextStepAfter,
     planStep,
     render,
     resetFetchThrottle,

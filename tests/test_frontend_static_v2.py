@@ -9032,3 +9032,276 @@ def test_base_pet_mood_writing_artifacts_idle_is_complete():
         "writing_artifacts without an active job must fall into the same "
         "complete bucket as scanned and executed."
     )
+
+
+
+def test_driver_gate_tables_render_databar_psi_and_champion_row():
+    """VD-1: agentMessageTablesHtml (the generic plan-driver inline table
+    renderer used by JOIN diagnostics / feature metrics / model comparison
+    gate tables) must sink the same rich-cell language the validation metric
+    preview already has — databar for match/hit-rate columns, PSI three-band
+    cells, tabular-nums right-aligned numeric columns, and a highlighted
+    champion row for backend-flagged (" \u2605" suffixed) winning candidates —
+    instead of leaving every cell as bare escaped text.
+    """
+    app_js = _read_static("app.js")
+    kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
+    cell_body = _slice_function(app_js, "function driverTableCellHtml")
+    align_body = _slice_function(app_js, "function metricHeaderShouldRightAlign")
+    tables_body = _slice_function(app_js, "function agentMessageTablesHtml")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "import {"
+            " columnFractions, parseNumeric, psiTier, psiTooltipText,"
+            f" }} from {json.dumps(render_metrics_url)};",
+            kind_body,
+            cell_body,
+            align_body,
+            tables_body,
+            "const message = {",
+            "  metadata: {",
+            "    tables: [",
+            "      {",
+            "        title: '拼接诊断(逐特征表)',",
+            "        columns: ['特征表', '匹配键', '命中率', '键唯一'],",
+            "        rows: [",
+            "          ['features.parquet', 'id=id', '92.30%', '是'],",
+            "          ['bureau.parquet', 'id=id', '41.10%', '否'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '特征指标',",
+            "        columns: ['特征', 'IV', 'KS', 'PSI', '样本量'],",
+            "        rows: [",
+            "          ['age', '0.31', '0.42', '0.015', '12000'],",
+            "          ['income', '0.12', '0.20', '0.25', '12000'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '候选模型对比',",
+            "        columns: ['算法', 'train_ks', 'test_ks', 'oot_ks'],",
+            "        rows: [",
+            "          ['lightgbm ★', '0.55', '0.50', '0.48'],",
+            "          ['xgboost', '0.50', '0.45', '0.40'],",
+            "        ],",
+            "      },",
+            "    ],",
+            "  },",
+            "};",
+            "const html = agentMessageTablesHtml(message);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = json.loads(result.stdout)["html"]
+
+    # 命中率 (match/hit-rate) gets a databar, not a bare cell.
+    assert 'class="databar"' in html
+    assert 'data-tip="命中率 92.30%"' in html
+    # PSI gets the three-band tiered cell, not a bare 4-decimal string.
+    assert 'class="psi-cell"' in html
+    assert 'data-tier=' in html
+    # 样本量 (row count) is tabular-nums right-aligned, not left-aligned text.
+    assert '<td class="cell-number">12000</td>' in html
+    # The backend's " ★"-flagged champion candidate renders as a highlighted
+    # badge, not a literal star character glued onto plain text.
+    assert 'class="champion-badge"' in html
+    assert "lightgbm ★" not in html
+    assert ">lightgbm<" in html
+
+
+
+def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence():
+    """VD-2: needs_confirmation gate messages must render as a distinct "gate
+    card" (tone bar + header pill + red-flag checklist + consequence line)
+    rather than an ordinary chat bubble with one extra button. Red flags are
+    read from the backend's already-emitted "\u26a0\ufe0f" markers in both the
+    message text and inline-table cells (no new backend data — INV-1).
+    """
+    app_js = _read_static("app.js")
+
+    def slice_fn(signature: str) -> str:
+        start = app_js.index(signature)
+        end = app_js.index("\n}", start)
+        return app_js[start : end + 2]
+
+    src = "\n\n".join(
+        [
+            slice_fn("function shieldGateIconHtml"),
+            slice_fn("function driverGateRedFlags(message)"),
+            slice_fn("function driverGateRedFlagsHtml"),
+            slice_fn("function driverGateConsequenceHtml"),
+            slice_fn("function driverGateCardHeaderHtml"),
+            slice_fn("function driverGateCardHtml"),
+            slice_fn("function agentMessagePlanStep"),
+        ]
+    )
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "const planRailController = {",
+            "  planStep: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's2', title: '拼接执行' } : null),",
+            "  nextStepAfter: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's3', title: '训练模型' } : null),",
+            "};",
+            "const selectedTaskId = 'task-A';",
+            src,
+            "const withFlags = {",
+            "  content: '**拼接诊断完成**。\\n\\n⚠️ 检测到**同键值冲突**,请先确认去重策略。',",
+            "  metadata: {",
+            "    kind: 'gate',",
+            "    step_id: 's2',",
+            "    tables: [{ title: '拼接诊断', columns: ['特征表', '膨胀'],"
+            " rows: [['bureau.parquet', '⚠️是']] }],",
+            "  },",
+            "};",
+            "const bodyHtml = '<div class=\"agent-message-content\">body</div>';",
+            "const withFlagsHtml = driverGateCardHtml(withFlags, bodyHtml);",
+            "const cleanHtml = driverGateCardHtml("
+            " { content: '上一步已完成。', metadata: { kind: 'gate', step_id: 's2' } },"
+            " bodyHtml,",
+            ");",
+            "process.stdout.write(JSON.stringify({ withFlagsHtml, cleanHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    with_flags_html = payload["withFlagsHtml"]
+    clean_html = payload["cleanHtml"]
+
+    # Distinct card shell, not a plain chat bubble.
+    assert 'class="gate-card"' in with_flags_html
+    assert 'data-gate-tone="warn"' in with_flags_html
+    # Header pill + step title, so the gate is locatable at a glance.
+    assert "⏸ 等待确认" in with_flags_html
+    assert "待确认：拼接执行" in with_flags_html
+    # Red-flag checklist section rendered from the "⚠️" markers already in the
+    # message text and table cells.
+    assert "gate-card-redflags" in with_flags_html
+    assert "gate-card-redflags-list" in with_flags_html
+    # Consequence line names the next plan step from plan-rail topology.
+    assert "确认后将执行：训练模型" in with_flags_html
+    # The original message content still renders nested inside the card.
+    assert "agent-message-content" in with_flags_html
+
+    # No red flags in the message/tables -> review tone, no redflags section.
+    assert 'data-gate-tone="review"' in clean_html
+    assert "gate-card-redflags" not in clean_html
+
+
+
+def test_skeleton_templates_render_block_rows_and_table_shapes():
+    """VD-3: the shared skeleton.js template helpers must emit the three
+    documented shapes (block / rows / table), each using the generic
+    `.skeleton` shimmer primitive so a single CSS rule drives all of them.
+    """
+    module_url = (STATIC_DIR / "js" / "skeleton.js").as_uri()
+    script = "\n".join(
+        [
+            "import {"
+            " skeletonBlockHtml, skeletonRowsHtml, skeletonTableHtml,"
+            f" }} from {json.dumps(module_url)};",
+            "process.stdout.write(JSON.stringify({",
+            "  block: skeletonBlockHtml(),",
+            "  rows: skeletonRowsHtml({ rows: 3 }),",
+            "  table: skeletonTableHtml({ rows: 2, columns: 3 }),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'class="skeleton skeleton-block"' in payload["block"]
+    assert payload["rows"].count('class="skeleton skeleton-row"') == 3
+    assert payload["table"].count("skeleton-table-cell-head") == 3  # header row, 3 columns
+    assert payload["table"].count('class="skeleton-table-row"') == 2  # 2 data rows
+    assert payload["table"].count('class="skeleton skeleton-table-cell"') == 3 * 2  # 2 rows x 3 cols
+
+
+def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
+    """VD-3: the plan rail's first fetch for a task (nothing cached yet) must
+    render a table/row skeleton instead of the old blank-then-"计划生成中…"
+    text, matching the busy-pill coexistence requirement (different DOM
+    region, no visual fight). Once a response has landed at least once, later
+    still-empty renders fall back to the plain text — the skeleton must not
+    re-flash on every poll tick.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "const renderSignatures = {};",
+            "controller.render({ force: true, renderSignatures });",
+            "const firstHtml = elements.workflowStepper.innerHTML;",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures });",
+            "const secondHtml = elements.workflowStepper.innerHTML;",
+            "process.stdout.write(JSON.stringify({ firstHtml, secondHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'data-skeleton="plan-rail"' in payload["firstHtml"]
+    assert "skeleton-row" in payload["firstHtml"]
+    assert "计划生成中" not in payload["firstHtml"]
+
+    assert 'data-skeleton="plan-rail"' not in payload["secondHtml"]
+    assert "计划生成中" in payload["secondHtml"]
+
+
+def test_artifact_panel_loading_state_uses_table_skeleton():
+    """VD-3: the gate-table artifact preview's loading placeholder (shown
+    while a JOIN diagnostics / feature metrics / model compare table fetches)
+    must be a table skeleton, not the old plain-text "正在加载输出..." string.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "正在加载输出..." not in plan_js
+    assert "skeletonTableHtml" in plan_js
+    assert 'data-skeleton="artifact"' in plan_js
