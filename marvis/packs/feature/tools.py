@@ -708,7 +708,7 @@ def _stat_fit_mask(frame: pd.DataFrame, inputs: dict, tool: str, dataset_id: str
 def tool_cross_features(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     dataset, frame = _read_frame(runtime, str(inputs["dataset_id"]))
-    derived, new_columns = derive_batch(frame, list(inputs["recipe"]))
+    derived, new_columns = derive_batch(frame, list(inputs["recipe"]), dataset_id=dataset.id)
     result = _register_frame(runtime, derived, dataset, ctx, "cross")
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 

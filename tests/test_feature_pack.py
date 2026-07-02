@@ -186,7 +186,14 @@ def test_feature_pack_tools_round_trip_via_runner(tmp_path):
             "dataset_id": dataset.id,
             "recipe": [
                 {"kind": "ratio", "num": "x1", "den": "x2"},
-                {"kind": "agg", "group": "cat", "value": "amount", "aggs": ["mean"]},
+                {
+                    "kind": "agg",
+                    "group": "cat",
+                    "value": "amount",
+                    "aggs": ["mean"],
+                    "allow_full_fit": True,
+                    "min_group_size": 1,
+                },
             ],
         },
         task_id="task-feature",

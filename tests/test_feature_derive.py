@@ -35,12 +35,56 @@ def test_aggregate_feature_left_join_does_not_expand_rows():
         "amount": [10.0, 30.0, 5.0],
     })
 
-    derived, cols = aggregate_feature(frame, "user_id", "amount", ["mean", "count"])
+    # min_group_size=1 -> every group (however small) keeps its own statistic,
+    # same as the platform's pre-PREP-10 behavior.
+    derived, cols = aggregate_feature(frame, "user_id", "amount", ["mean", "count"], min_group_size=1)
 
     assert cols == ["amount_by_user_id_mean", "amount_by_user_id_count"]
     assert len(derived) == len(frame)
     assert derived["amount_by_user_id_mean"].tolist() == [20.0, 20.0, 5.0]
     assert derived["amount_by_user_id_count"].tolist() == [2, 2, 1]
+
+
+def test_aggregate_feature_small_groups_fall_back_to_global_stat(tmp_path=None):
+    """PREP-10: a group below min_group_size gets the *global* fit-frame statistic
+    instead of its own noisy small-sample value."""
+    frame = pd.DataFrame({
+        "user_id": ["u1"] * 2 + ["u2"] * 1,
+        "amount": [10.0, 30.0, 5.0],
+    })
+
+    derived, _cols = aggregate_feature(frame, "user_id", "amount", ["mean"], min_group_size=30)
+
+    # Both groups have fewer than 30 rows -> both fall back to the global mean.
+    assert derived["amount_by_user_id_mean"].tolist() == [15.0, 15.0, 15.0]
+
+
+def test_aggregate_feature_rejects_target_as_value_col():
+    frame = pd.DataFrame({"user_id": ["u1", "u2"], "y": [0, 1]})
+
+    with pytest.raises(FeatureError, match="target column"):
+        aggregate_feature(frame, "user_id", "y", ["mean"], target_col="y", min_group_size=1)
+
+
+def test_aggregate_feature_fits_only_on_non_holdout_rows_and_falls_back_for_unseen_groups():
+    """PREP-10: fit_mask restricts which rows compute the group statistic (train-only
+    discipline); a group present only outside fit_mask falls back to the global
+    fit-frame statistic instead of leaking its own out-of-fit value."""
+    frame = pd.DataFrame({
+        "city": ["A", "A", "A", "B", "B", "B", "C"],
+        "income": [10.0, 20.0, 30.0, 100.0, 200.0, 300.0, 999.0],
+    })
+    fit_mask = np.array([True, True, True, True, True, True, False])  # "C" row excluded from fit
+
+    derived, _cols = aggregate_feature(
+        frame, "city", "income", ["mean"], fit_mask=fit_mask, min_group_size=1
+    )
+
+    assert derived.loc[derived["city"] == "A", "income_by_city_mean"].tolist() == [20.0] * 3
+    assert derived.loc[derived["city"] == "B", "income_by_city_mean"].tolist() == [200.0] * 3
+    # "C" never appears in the fit frame -> falls back to the global fit-frame mean.
+    global_mean = frame.loc[fit_mask, "income"].mean()
+    assert derived.loc[derived["city"] == "C", "income_by_city_mean"].tolist() == [global_mean]
 
 
 def test_derive_batch_applies_cross_agg_and_ratio_recipes():
@@ -51,7 +95,7 @@ def test_derive_batch_applies_cross_agg_and_ratio_recipes():
     })
     recipe = [
         {"kind": "cross", "a": "a", "b": "b", "ops": ["mul"]},
-        {"kind": "agg", "group": "user_id", "value": "a", "aggs": ["sum"]},
+        {"kind": "agg", "group": "user_id", "value": "a", "aggs": ["sum"], "allow_full_fit": True, "min_group_size": 1},
         {"kind": "ratio", "num": "a", "den": "b"},
     ]
 

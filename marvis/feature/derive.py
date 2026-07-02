@@ -68,24 +68,67 @@ def aggregate_feature(
     group_col: str,
     value_col: str,
     aggs: list[str],
+    *,
+    target_col: str | None = None,
+    fit_mask: np.ndarray | None = None,
+    min_group_size: int = 30,
 ) -> tuple[pd.DataFrame, list[str]]:
+    """Group-level aggregate features (e.g. mean income by city) (PREP-10).
+
+    ``target_col`` is a hard leakage-channel reject: aggregating the label itself
+    (``value_col == target_col``) would encode a per-group historical bad-rate
+    straight into a "feature" -- half of FS-11's target-encoding leakage, blocked
+    here regardless of ``fit_mask`` (this is a full-pool poison, not something
+    train-only fitting fixes).
+
+    ``fit_mask`` restricts *which rows* the group statistic is computed from
+    (train-only, PREP-10/PREP-1-style discipline) -- the mapping is then applied
+    to every row via a left join, same as before. ``fit_mask=None`` fits on the
+    full frame (the pre-PREP-10 pooled behavior); passing it is the caller's
+    (``tools.py``) job, mirroring ``_stat_fit_mask``'s ``FitRequiresSplitError``
+    contract for impute/cap/normalize.
+
+    Groups with fewer than ``min_group_size`` fit rows fall back to the *global*
+    fit-frame statistic instead of their own (noisy, small-sample) group value --
+    the same overfitting guard ``tree_edges``'s ``min_samples_leaf`` and WOE's
+    rare-category pooling already apply elsewhere in the feature pack.
+    """
     _assert_columns(df, [group_col, value_col])
     if not aggs:
         raise FeatureError("aggregate functions must not be empty")
     invalid = [agg for agg in aggs if agg not in ALLOWED_AGGS]
     if invalid:
         raise FeatureError(f"unsupported aggregate functions: {', '.join(invalid)}")
-    grouped = (
-        df.groupby(group_col, dropna=False)[value_col]
-        .agg(aggs)
-        .rename(columns={agg: f"{value_col}_by_{group_col}_{agg}" for agg in aggs})
-        .reset_index()
-    )
+    if target_col is not None and value_col == target_col:
+        raise FeatureError(
+            f"aggregate_feature cannot use the target column ({target_col!r}) as value_col "
+            "-- this leaks a per-group bad-rate into a feature"
+        )
+
+    fit_frame = df if fit_mask is None else df.loc[fit_mask]
+    if fit_frame.empty:
+        raise FeatureError("aggregate_feature fit frame is empty after excluding holdout rows")
+    by_group = fit_frame.groupby(group_col, dropna=False)[value_col]
+    grouped = by_group.agg(aggs)
+    group_size = by_group.size()  # separate from grouped -- "count" may itself be a requested agg
+    global_stats = fit_frame[value_col].agg(aggs)
+    small_groups = group_size < int(min_group_size)
+    for agg in aggs:
+        grouped.loc[small_groups, agg] = global_stats[agg]
+    grouped = grouped.rename(
+        columns={agg: f"{value_col}_by_{group_col}_{agg}" for agg in aggs}
+    ).reset_index()
+
     new_cols = [f"{value_col}_by_{group_col}_{agg}" for agg in aggs]
     _assert_no_conflicts(df, {col: None for col in new_cols})
     merged = df.merge(grouped, on=group_col, how="left", sort=False)
     if len(merged) != len(df):
         raise FeatureError("aggregate join expanded row count")
+    # Unseen groups (present in df but not in the fit frame, e.g. an OOT-only
+    # region code) fall back to the global fit-frame statistic too.
+    for agg in aggs:
+        column = f"{value_col}_by_{group_col}_{agg}"
+        merged[column] = merged[column].fillna(global_stats[agg])
     return merged, new_cols
 
 
@@ -177,7 +220,19 @@ def _duplicates(values: list[str]) -> set[str]:
     return dupes
 
 
-def derive_batch(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, list[str]]:
+def derive_batch(
+    df: pd.DataFrame, recipe: list[dict], *, dataset_id: str = ""
+) -> tuple[pd.DataFrame, list[str]]:
+    """Apply a batch of derive recipe items in order.
+
+    An ``agg`` item may carry the same train-only fitting knobs as
+    :func:`aggregate_feature` (PREP-10): ``target_col`` (leakage reject),
+    ``split_col``/``holdout_values``/``allow_full_fit`` (train-only fit rows,
+    resolved the same way ``tools.py``'s ``_stat_fit_mask`` does for
+    impute/cap/normalize -- no ``split_col`` raises :class:`FitRequiresSplitError`
+    unless ``allow_full_fit`` is explicitly set), and ``min_group_size``. The
+    optional ``dataset_id`` is only used for that error's diagnostics.
+    """
     out = df.copy()
     new_cols = []
     for item in recipe:
@@ -185,11 +240,15 @@ def derive_batch(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, li
         if kind == "cross":
             out, cols = cross_arithmetic(out, str(item["a"]), str(item["b"]), list(item["ops"]))
         elif kind == "agg":
+            fit_mask, _fit_split = _agg_fit_mask(out, item, dataset_id=dataset_id)
             out, cols = aggregate_feature(
                 out,
                 str(item["group"]),
                 str(item["value"]),
                 list(item["aggs"]),
+                target_col=str(item["target_col"]) if item.get("target_col") else None,
+                fit_mask=fit_mask,
+                min_group_size=int(item.get("min_group_size", 30)),
             )
         elif kind == "ratio":
             out, cols = cross_arithmetic(out, str(item["num"]), str(item["den"]), ["ratio"])
@@ -200,6 +259,24 @@ def derive_batch(df: pd.DataFrame, recipe: list[dict]) -> tuple[pd.DataFrame, li
             raise FeatureError(f"duplicate derived columns: {', '.join(sorted(repeated))}")
         new_cols.extend(cols)
     return out, new_cols
+
+
+def _agg_fit_mask(df: pd.DataFrame, item: dict, *, dataset_id: str) -> tuple[np.ndarray | None, str]:
+    """Rows used to fit an ``agg`` recipe item's group statistic (PREP-10) --
+    excludes holdout (default test+OOT) so the group mapping never absorbs
+    evaluation-set distribution. No ``split_col`` means the caller cannot express
+    train-only fitting; that's a typed-error stop unless ``allow_full_fit=true``."""
+    from marvis.feature.errors import FitRequiresSplitError
+
+    split_col = item.get("split_col")
+    if not split_col:
+        if bool(item.get("allow_full_fit")):
+            return None, "full"
+        raise FitRequiresSplitError(tool="aggregate_feature", dataset_id=dataset_id)
+    _assert_columns(df, [str(split_col)])
+    holdout_values = tuple(str(value) for value in (item.get("holdout_values") or ("test", "oot")))
+    mask = (~df[str(split_col)].astype(str).isin(holdout_values)).to_numpy()
+    return mask, "train"
 
 
 def recommend_feature_crosses(
