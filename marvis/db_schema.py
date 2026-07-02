@@ -1,6 +1,7 @@
 import logging
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -652,6 +653,7 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at ON audit(kind, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_kind_at_id ON audit(kind, at, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_at_id ON audit(at, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_target_ref_at ON audit(target_ref, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_caller_at ON llm_calls(caller, at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_plan ON plan_steps(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_task ON datasets(task_id)")
@@ -718,14 +720,40 @@ def _sql_identifier(identifier: str) -> str:
 
 
 
-def _configure_connection(conn: sqlite3.Connection) -> None:
-    mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
-    # WAL is requested for concurrent readers/writers. It silently degrades on
-    # read-only or networked filesystems; surface that instead of assuming the
-    # concurrency guarantees hold. In-memory databases legitimately report
-    # "memory" and are exempt.
-    if mode_row is not None and str(mode_row[0]).lower() not in ("wal", "memory"):
-        logger.warning("Failed to enable WAL journal mode; got %r", mode_row[0])
+# PERF-6: journal_mode is persisted *in the database file* by SQLite -- once a
+# connection has set (or confirmed) WAL for a given db_path, every later
+# connection to that same file already opens in WAL mode without re-issuing the
+# pragma (verified: a fresh connection reports journal_mode=wal with no pragma
+# call at all). The other four pragmas below (synchronous/busy_timeout/
+# foreign_keys/temp_store) are connection-scoped, not file-persisted -- SQLite
+# resets each to its default on every new connection, so those must keep running
+# unconditionally on every connect() or correctness silently regresses (foreign
+# keys stop being enforced, busy_timeout drops to 0, etc). This cache only ever
+# removes the one redundant "PRAGMA journal_mode=WAL" round-trip per db file,
+# never the correctness-critical pragmas.
+_WAL_CONFIRMED_LOCK = threading.Lock()
+_WAL_CONFIRMED_PATHS: set[str] = set()
+
+
+def _configure_connection(conn: sqlite3.Connection, *, db_key: str | None = None) -> None:
+    already_confirmed = False
+    if db_key is not None:
+        with _WAL_CONFIRMED_LOCK:
+            already_confirmed = db_key in _WAL_CONFIRMED_PATHS
+    if already_confirmed:
+        mode_row = None
+    else:
+        mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+        # WAL is requested for concurrent readers/writers. It silently degrades on
+        # read-only or networked filesystems; surface that instead of assuming the
+        # concurrency guarantees hold. In-memory databases legitimately report
+        # "memory" and are exempt.
+        mode = str(mode_row[0]).lower() if mode_row is not None else None
+        if mode is not None and mode not in ("wal", "memory"):
+            logger.warning("Failed to enable WAL journal mode; got %r", mode_row[0])
+        elif db_key is not None and mode == "wal":
+            with _WAL_CONFIRMED_LOCK:
+                _WAL_CONFIRMED_PATHS.add(db_key)
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -750,7 +778,7 @@ def connect(db_path: Path):
     conn = sqlite3.connect(db_path, timeout=5.0, isolation_level="DEFERRED")
     conn.row_factory = sqlite3.Row
     try:
-        _configure_connection(conn)
+        _configure_connection(conn, db_key=str(db_path))
         yield conn
         conn.commit()
     except Exception:

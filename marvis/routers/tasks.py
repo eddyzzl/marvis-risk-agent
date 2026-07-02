@@ -14,7 +14,7 @@ from marvis.api_task_helpers import (
     task_hook_payload,
     validate_model_identifier,
 )
-from marvis.api_task_payloads import task_payload
+from marvis.api_task_payloads import list_task_payloads, task_payload
 from marvis.db import TaskRepository
 from marvis.domain import TaskCreate
 from marvis.model_algorithms import normalize_algorithm
@@ -69,10 +69,7 @@ def list_tasks(
         response.headers["X-Result-Limit"] = "" if bounded_limit is None else str(bounded_limit)
         response.headers["X-Result-Offset"] = str(bounded_offset)
         response.headers["X-Result-Has-More"] = "true" if has_more else "false"
-    return [
-        task_payload(repo, task, request.app.state.settings.tasks_dir)
-        for task in tasks
-    ]
+    return list_task_payloads(repo, tasks, request.app.state.settings.tasks_dir)
 
 
 @router.post("/tasks")
