@@ -601,16 +601,17 @@ def _render_backtest_strategy(o: dict):
 def _render_tradeoff_view(o: dict):
     points = [point for point in (o.get("points") or []) if isinstance(point, dict)]
     recommended = o.get("recommended") if isinstance(o.get("recommended"), dict) else None
+    direction_label = "分数越高风险越低" if o.get("score_direction") == "higher_is_better" else "分数越高风险越高"
     if recommended:
         text = (
-            "**策略权衡视图完成**:"
+            f"**策略权衡视图完成**（{direction_label}）:"
             f"推荐 cutoff `{_fmt(recommended.get('cutoff'))}`,"
             f"审批率 {_pct(recommended.get('approval_rate'))},"
             f"坏率 {_pct(recommended.get('bad_rate'))},"
             f"预期利润 {_num(recommended.get('expected_profit'))}。"
         )
     else:
-        text = "**策略权衡视图完成**。"
+        text = f"**策略权衡视图完成**（{direction_label}）。"
     tables = []
     if points:
         tables.append({

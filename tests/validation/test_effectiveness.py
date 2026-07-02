@@ -12,6 +12,7 @@ from marvis.validation.effectiveness import (
     build_effectiveness_result,
     compute_auc,
     compute_bin_tables,
+    compute_head_tail_lift,
     compute_monthly_ks,
     compute_monthly_psi,
     compute_overall_ks,
@@ -133,8 +134,14 @@ def test_overall_auc_keeps_declared_positive_score_direction():
     train = {row.split: row for row in result.overall}["train"]
 
     assert train.auc == pytest.approx(0.0)
-    assert train.head_lift_5pct == pytest.approx(0.0)
-    assert train.tail_lift_5pct == pytest.approx(5.0)
+    # NEW-2 (S1a): head_lift is direction-aware (risk_sign from corr(score, target)),
+    # not a hard-coded "highest score = head" -- this sample is negatively correlated
+    # (low index/score = high risk, since y = index < 20), so head (high-risk end) is
+    # the LOW-score slice, and lift_head/lift_tail flip relative to a naive descending
+    # sort. See test_head_tail_lift_flips_for_higher_is_better_score for the isolated
+    # regression case.
+    assert train.head_lift_5pct == pytest.approx(5.0)
+    assert train.tail_lift_5pct == pytest.approx(0.0)
 
 
 def test_compute_auc_returns_neutral_for_degenerate_labels():
@@ -323,3 +330,38 @@ def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
 
     combined = run_effectiveness(sample=sample, config=config)
     assert separate == combined
+
+
+def test_head_tail_lift_flips_for_higher_is_better_score():
+    """NEW-2 (S1a) core regression: compute_head_tail_lift must be direction-aware,
+    like feature/metrics.py::head_tail_lift, not hard-coded to "highest score = head".
+    Construct a higher_is_better sample (score negatively correlated with bad) and
+    assert the high-risk end (head) lands on the LOW-score slice."""
+    n = 100
+    scores = np.arange(n, dtype=float) / (n - 1)
+    labels = (np.arange(n) < 20).astype(int)  # low score/index -> bad -> higher_is_better
+
+    head_lift, tail_lift = compute_head_tail_lift(scores, labels, fraction=0.05)
+
+    assert head_lift == pytest.approx(5.0)
+    assert tail_lift == pytest.approx(0.0)
+
+
+def test_head_tail_lift_matches_naive_descending_sort_for_higher_is_riskier_score():
+    """Sanity check the non-flipped case is unaffected: score positively correlated
+    with bad (higher_is_riskier) keeps head = highest score, matching the pre-NEW-2
+    behavior for this direction."""
+    n = 100
+    scores = np.arange(n, dtype=float) / (n - 1)
+    labels = (np.arange(n) >= 80).astype(int)  # high score/index -> bad -> higher_is_riskier
+
+    head_lift, tail_lift = compute_head_tail_lift(scores, labels, fraction=0.05)
+
+    assert head_lift == pytest.approx(5.0)
+    assert tail_lift == pytest.approx(0.0)
+
+
+def test_head_tail_lift_returns_none_for_empty_scores():
+    head_lift, tail_lift = compute_head_tail_lift(np.array([]), np.array([]))
+    assert head_lift is None
+    assert tail_lift is None

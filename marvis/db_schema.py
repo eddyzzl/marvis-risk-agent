@@ -667,6 +667,9 @@ def init_db(db_path: Path) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_draft_runs_draft ON draft_runs(draft_id)")
         _ensure_column(conn, "model_artifacts", "feature_importance_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "model_artifacts", "scorecard_table_json", "TEXT NOT NULL DEFAULT '[]'")
+        # S1a: direction metadata (nullable -- old rows stay NULL, no backfill).
+        _ensure_column(conn, "model_artifacts", "score_direction", "TEXT")
+        _ensure_column(conn, "model_artifacts", "points_direction", "TEXT")
         from marvis.agent_memory.store import ensure_agent_memory_schema
 
         ensure_agent_memory_schema(conn)

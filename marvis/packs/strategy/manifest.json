@@ -154,7 +154,8 @@
               "required": ["condition", "decision"],
               "additionalProperties": false
             }
-          }
+          },
+          "inferred_score_direction": {"type": ["string", "null"]}
         },
         "required": ["strategy_id", "strategy_type", "score_col", "default_decision", "description", "rules"],
         "additionalProperties": false
@@ -226,7 +227,9 @@
           "pd_col": {"type": "string", "minLength": 1},
           "objective": {"type": "string", "enum": ["max_profit", "max_approval"]},
           "max_bad_rate": {"type": "number"},
-          "drop_nan_labels": {"type": "boolean"}
+          "drop_nan_labels": {"type": "boolean"},
+          "score_direction": {"type": "string", "enum": ["higher_is_riskier", "higher_is_better"]},
+          "confirm_direction_conflict": {"type": "boolean"}
         },
         "required": ["dataset_id", "score_col", "target_col"],
         "additionalProperties": false
@@ -236,7 +239,9 @@
         "properties": {
           "points": {"type": "array", "items": {"type": "object"}},
           "recommended": {"type": ["object", "null"]},
-          "nan_labels_dropped": {"type": "integer", "minimum": 0}
+          "nan_labels_dropped": {"type": "integer", "minimum": 0},
+          "score_direction": {"type": "string"},
+          "direction_diagnostics": {"type": "object"}
         },
         "required": ["points", "recommended"],
         "additionalProperties": false

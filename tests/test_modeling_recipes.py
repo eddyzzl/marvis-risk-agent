@@ -253,6 +253,8 @@ def test_train_lr_writes_artifact_and_is_seed_reproducible(tmp_path):
     assert meta["split_values"] == {"train": "train", "test": "test", "oot": "oot"}
     assert meta["feature_list"] == ["x1", "x2"]
     assert first.artifact.algorithm == "lr"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction is None
     assert first.artifact.params["C"] == 0.7
     assert first.artifact.feature_list == ("x1", "x2")
     assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)
@@ -330,6 +332,8 @@ def test_train_mlp_writes_artifact_and_is_seed_reproducible(tmp_path):
 
     assert (tmp_path / "mlp_a" / first.artifact.model_path).exists()
     assert first.artifact.algorithm == "mlp"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction is None
     assert first.artifact.feature_list == ("x1", "x2")
     assert first.metrics.test_auc == pytest.approx(second.metrics.test_auc)  # seed-reproducible
     assert first.feature_importance == ()  # MLP exposes no native per-feature importance
@@ -379,6 +383,10 @@ def test_train_lgb_and_xgb_write_artifacts_and_are_seed_reproducible(tmp_path):
     assert not (tmp_path / "xgb_a" / ".staging").exists()
     assert first_lgb.artifact.algorithm == "lgb"
     assert first_xgb.artifact.algorithm == "xgb"
+    assert first_lgb.artifact.score_direction == "higher_is_riskier"
+    assert first_lgb.artifact.points_direction is None
+    assert first_xgb.artifact.score_direction == "higher_is_riskier"
+    assert first_xgb.artifact.points_direction is None
     assert first_lgb.metrics.test_auc == pytest.approx(second_lgb.metrics.test_auc)
     assert first_xgb.metrics.test_auc == pytest.approx(second_xgb.metrics.test_auc)
     assert [item[0] for item in first_lgb.feature_importance] == ["x1", "x2"]
@@ -429,6 +437,8 @@ def test_train_ensemble_seed_bagging_writes_member_artifacts_and_is_deterministi
     second = train_ensemble(backend, path, config, out_dir=tmp_path / "ensemble_b")
 
     assert first.artifact.algorithm == "ensemble"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction is None
     assert (tmp_path / "ensemble_a" / first.artifact.model_path).exists()
     assert first.artifact.params["ensemble_member_count"] == 3
     assert first.artifact.params["ensemble_base_recipe"] == "lgb"
@@ -561,6 +571,9 @@ def test_train_catboost_uses_native_categorical_features_without_float_coercion(
     result = train_catboost(backend, path, config, out_dir=tmp_path / "catboost_native")
 
     assert (tmp_path / "catboost_native" / result.artifact.model_path).exists()
+    assert result.artifact.algorithm == "catboost"
+    assert result.artifact.score_direction == "higher_is_riskier"
+    assert result.artifact.points_direction is None
     assert result.artifact.params["cat_features"] == ["chan"]
     assert [name for name, _ in result.feature_importance] == ["chan", "x1"]
     assert 0.0 <= result.metrics.test_ks <= 1.0
@@ -1189,6 +1202,8 @@ def test_train_scorecard_writes_woe_artifact_and_is_seed_reproducible(tmp_path):
     assert (tmp_path / "scorecard_a" / first.artifact.model_path).exists()
     assert not (tmp_path / "scorecard_a" / ".staging").exists()
     assert first.artifact.algorithm == "scorecard"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction == "higher_is_better"
     assert set(first.artifact.woe_maps or {}) == {"x1", "x2"}
     assert first.artifact.params["base_score"] == 600
     assert first.artifact.params["scorecard_base_points"] == pytest.approx(
@@ -1278,6 +1293,8 @@ def test_train_lgb_regressor_writes_artifact_and_computes_regression_metrics(tmp
 
     assert (tmp_path / "income_a" / first.artifact.model_path).exists()
     assert first.artifact.algorithm == "lgb_regressor"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction is None
     assert first.metrics.train_ks is None
     assert first.metrics.test_auc is None
     assert first.metrics.test_rmse is not None
@@ -1318,6 +1335,8 @@ def test_train_lgb_multiclass_writes_artifact_and_computes_multiclass_metrics(tm
 
     assert (tmp_path / "grade_a" / first.artifact.model_path).exists()
     assert first.artifact.algorithm == "lgb_multiclass"
+    assert first.artifact.score_direction == "higher_is_riskier"
+    assert first.artifact.points_direction is None
     assert first.artifact.params["classes"] == [0, 1, 2]
     # multiclass metrics are populated; binary / regression fields stay None
     assert first.metrics.test_macro_auc is not None

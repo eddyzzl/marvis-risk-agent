@@ -12,7 +12,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from marvis.data.labels import resolve_modeling_splits
-from marvis.packs.modeling.artifact import persist_model_meta, write_artifact_file
+from marvis.packs.modeling.artifact import (
+    persist_model_meta,
+    points_direction_for_algorithm,
+    score_direction_for_algorithm,
+    write_artifact_file,
+)
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
@@ -93,6 +98,8 @@ def _save_lr_model(
         params=dict(params),
         woe_maps=None,
         created_at=datetime.now(UTC).isoformat(),
+        score_direction=score_direction_for_algorithm("lr"),
+        points_direction=points_direction_for_algorithm("lr"),
     )
     persist_model_meta(out_dir, artifact, config=config)
     return artifact

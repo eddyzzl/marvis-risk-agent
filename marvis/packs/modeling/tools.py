@@ -16,6 +16,7 @@ import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.data.backend import DataBackend
+from marvis.data.direction import normalize_score_direction
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, ModelingRepository
 from marvis.feature.binning import equal_frequency_edges
@@ -255,6 +256,8 @@ def tool_reject_inference(inputs: dict, ctx) -> dict:
         score_col=_optional_str(inputs.get("score_col")),
         reject_bad_rate=_optional_float(inputs.get("reject_bad_rate")),
         reject_weight=float(inputs.get("reject_weight") or 1.0),
+        score_direction=normalize_score_direction(_optional_str(inputs.get("score_direction"))),
+        confirm_direction_conflict=bool(inputs.get("confirm_direction_conflict")),
     )
     out_dir = runtime.datasets_root / str(ctx.task_id) / "modeling"
     uow = ArtifactUnitOfWork()
