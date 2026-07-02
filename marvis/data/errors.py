@@ -66,6 +66,66 @@ class NanLabelNotConfirmedError(DataLayerError):
         }
 
 
+class ScoreDirectionConflictError(DataLayerError):
+    """Raised when a declared/default score_direction contradicts the empirical
+    corr(score, target) sign beyond the configured threshold (S1a determinism gate).
+
+    Mirrors NanLabelNotConfirmedError's pattern: typed error + to_detail() payload,
+    default is to stop and hand structured diagnostics to the user, who confirms
+    (confirm_direction_conflict=True) to proceed with the declared direction anyway,
+    or fixes score_direction and retries. Also covers the rule-based build_strategy
+    case, where there is no single "declared" direction to confirm past -- see
+    ``reason``/``conflicting_rules`` for that variant.
+    """
+
+    def __init__(
+        self,
+        *,
+        tool: str,
+        score_col: str,
+        target_col: str | None = None,
+        declared_direction: str | None = None,
+        implied_direction: str | None = None,
+        corr: float | None = None,
+        n_labeled: int = 0,
+        conflicting_rules: list[str] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        self.tool = str(tool)
+        self.score_col = str(score_col)
+        self.target_col = str(target_col) if target_col else None
+        self.declared_direction = declared_direction
+        self.implied_direction = implied_direction
+        self.corr = float(corr) if corr is not None else None
+        self.n_labeled = int(n_labeled)
+        self.conflicting_rules = list(conflicting_rules or [])
+        self.reason = reason
+        super().__init__(
+            f"{tool}: score_direction conflict on {score_col!r}"
+            + (
+                f" (declared={declared_direction}, data implies={implied_direction}, "
+                f"corr={corr:.3f}, n={n_labeled})"
+                if declared_direction
+                else f" ({reason or 'rules disagree on direction'})"
+            )
+            + "; pass confirm_direction_conflict=true to proceed anyway, or fix score_direction/rules and retry"
+        )
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": "score_direction_conflict",
+            "tool": self.tool,
+            "score_col": self.score_col,
+            "target_col": self.target_col,
+            "declared_direction": self.declared_direction,
+            "implied_direction": self.implied_direction,
+            "corr": self.corr,
+            "n_labeled": self.n_labeled,
+            "conflicting_rules": self.conflicting_rules,
+            "reason": self.reason,
+        }
+
+
 class DataSecurityError(DataLayerError):
     """Raised when untrusted input would enter a backend query."""
 
@@ -79,4 +139,5 @@ __all__ = [
     "FanOutError",
     "JoinNotConfirmedError",
     "NanLabelNotConfirmedError",
+    "ScoreDirectionConflictError",
 ]
