@@ -243,15 +243,15 @@
 | ✅ | TST-4 | 真进程验证落地（`677064bb`）：真 OOM 进程树杀+审计 peak、含孙进程的进程组杀、子进程 env 白名单真回显、notebook kernel 真杀；检测力经"故意弄坏"自证；无生产 bug | High/M | ✅ |
 | ✅ | ARCH-1 | legacy shim 拆除（`e3a7d6f5`/`4f6b845e`）：36 处私有 seam 迁入新 agent/validation_app_service.py 公有面，routers 直连、_agent_api()/legacy_api 服务定位器删除、api.py 955→184 行、DriverTurnRuntime 全类型化；routers/ 内 legacy_api 引用归零 | High/M | ✅ |
 | ✅ | ARCH-2 | modeling tools 拆 13 子模块（`5103dede`：prepare/feature/train/select/calibrate/delivery/monitor/report_tools+_common/_runtime/scoring 等），tools.py 保留聚合门面、对外 import 面不变；B6h 字典代码已随合并迁至 feature_tools | High/M | ✅ |
-| ⬜ | GAP-5 | 共享主机 loopback 全信任（装插件=任意代码执行） | Med/S | — |
+| ✅ | GAP-5 | 可选 MARVIS_LOCAL_TOKEN 写操作令牌（`668ddb73`）：非安全方法须带 X-Marvis-Token（恒时比较），token 只注入本地 index 页由 api.js 回带、远端读永不下发；未配置=行为不变 | Med/S | ✅ |
 | ✅ | GAP-6 | 只读注册表 API（跨任务列表/详情/分页，`fc4e737f`）；前端面板按预授权降级（进 UX 后续） | Med/M | — |
 | ✅ | GAP-7 | content_hash 指纹复用（同内容跨任务共享 parquet+profile，dedup 审计，`da47ae0e`），删除引用计数联动 | Med/M | — |
 | ✅ | GAP-8 | 测试连接端点+设置按钮+health.llm_configured（`efbc8880`） | Med/S | — |
 | ✅ | GAP-9 | marvis backup/restore 命令（SQLite backup API 一致性快照+tar，`4522a628`） | Med/S | — |
 | ✅ | GAP-10 | logging_setup+RotatingFileHandler 落 workspace/logs+关键模块事件（`96ecdf4c`） | Med/S | — |
 | ✅ | TST-5 | slow/e2e/llm markers+strict+scripts/check --fast（`8bcbd6d3`）：39 慢测打标（真 durations 数据），fast 层 2374 用例 6m14s（全量 14m，2.25×——审查的 3 分钟目标经实测不改测试逻辑达不到，如实记录） | Med/S | — |
-| ⬜ | TST-6 | redaction 过度/漏 masking；会话转录整体不脱敏 | Med/M | — |
-| ⬜ | TST-7 | 交互式建模 kernel 继承完整宿主 env（与已加固路径不对称） | Med/M | — |
+| ✅ | TST-6 | redaction 缺口修复+会话转录脱敏（`f1fc7f71`，B6d） | Med/M | ✅ |
+| ✅ | TST-7 | 交互式 kernel 接入同一 env allowlist（`b8b43bae`，B6d），与 worker 路径对称 | Med/M | ✅ |
 | ✅ | TST-8 | CI security job（pip-audit+bandit -ll，continue-on-error 观察期，`22299d71`）；首扫：pip-audit 零漏洞、bandit 42 中危（40×B608 f-string SQL 等）**留待 FIN-2 审查裁决** | Med/S | — |
 | ✅ | TST-9 | 并发测试落地（`ecb2506e`）挖出 3 个真 bug 并已全修（`cabe409c` confirm_step 单发 CAS、`0b849f6e` start_job UNIQUE→ConflictError 只剩 202/409、`91ffc3da` DuckDB 每操作独立连接×12 调用点+PERF-8 配置保持）；xfail 全部转正为回归守卫，HTTP 双确认五连跑稳定 | Med/M | ✅ |
 | ✅ | ARCH-4 | 五 handler 收敛为 _TurnHandlerSpec 参数化核心（`ca0c156c`），差异轴显式表格化，共享尾部 diff 字节等价验证；**发现真缺口：feature/strategy/vintage 从不传 settings/task→MEM-1 捕获只对 join/modeling 生效，修复归入 S2 记忆接线 commit** | Med/M | ✅ |
