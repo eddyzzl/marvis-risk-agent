@@ -3,47 +3,10 @@ from __future__ import annotations
 import csv
 import io
 
-
-# Monitoring plan mirrors the modeling MONITOR_RUN_THRESHOLDS shape
-# (label/metric/direction/warn/fail) so S5 can consume strategy monitoring the
-# same way it consumes model monitoring, but is scoped to the metrics a strategy
-# adoption commits to and defined locally to avoid coupling the strategy pack to
-# the heavy modeling.tools module.
-def build_monitoring_plan(
-    *,
-    strategy_id: str,
-    version: int,
-    approved_bad_rate: float,
-    approval_rate: float,
-    bad_rate_warn_delta: float = 0.02,
-    bad_rate_fail_delta: float = 0.05,
-    approval_warn_delta: float = 0.05,
-    approval_fail_delta: float = 0.10,
-) -> dict:
-    return {
-        "strategy_id": strategy_id,
-        "version": int(version),
-        "baseline": {
-            "approved_bad_rate": float(approved_bad_rate),
-            "approval_rate": float(approval_rate),
-        },
-        "thresholds": {
-            "approved_bad_rate": {
-                "label": "通过客群坏率漂移",
-                "metric": "approved_bad_rate",
-                "direction": "max",
-                "warn": float(approved_bad_rate + bad_rate_warn_delta),
-                "fail": float(approved_bad_rate + bad_rate_fail_delta),
-            },
-            "approval_rate": {
-                "label": "审批率下滑",
-                "metric": "approval_rate",
-                "direction": "min",
-                "warn": float(approval_rate - approval_warn_delta),
-                "fail": float(approval_rate - approval_fail_delta),
-            },
-        },
-    }
+# S5: the monitoring plan builder moved to monitoring_plan.py (single source of
+# truth for the plan read/write path). Re-exported here so existing importers of
+# ``deliverables.build_monitoring_plan`` keep working unchanged.
+from marvis.packs.strategy.monitoring_plan import build_monitoring_plan
 
 
 _DECISION_TABLE_HEADER = [

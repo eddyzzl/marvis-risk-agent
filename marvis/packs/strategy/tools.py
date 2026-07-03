@@ -17,11 +17,15 @@ from marvis.packs.strategy.backtest import backtest_strategy
 from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
 from marvis.packs.strategy.contracts import BacktestResult, Strategy
-from marvis.packs.strategy.deliverables import (
-    build_monitoring_plan,
-    decision_table_csv,
-)
+from marvis.packs.strategy.deliverables import decision_table_csv
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
+from marvis.packs.strategy.monitor_tools import (  # noqa: F401
+    tool_run_strategy_monitoring,
+)
+from marvis.packs.strategy.monitoring_plan import (
+    build_monitoring_plan,
+    save_monitoring_plan,
+)
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
@@ -404,12 +408,11 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         version=version,
         approved_bad_rate=backtest.approved_bad_rate,
         approval_rate=backtest.approval_rate,
+        experiment_id=_optional_str(inputs.get("experiment_id")),
+        source_backtest_id=backtest_id,
     )
     json_path = strategy_dir / f"monitoring_plan_{stem}.json"
-    json_path.write_text(
-        json.dumps(monitoring_plan, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    save_monitoring_plan(json_path, monitoring_plan)
 
     artifacts = []
     for kind, path in (
