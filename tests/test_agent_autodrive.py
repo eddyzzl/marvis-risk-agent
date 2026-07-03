@@ -943,7 +943,12 @@ def test_decide_gate_retries_once_after_unparseable_reply():
 
     decision = decide_gate(fake, gate=gate)
 
-    assert decision == {"action": "confirm", "reason": "重试后可解析"}
+    # LT-11 (B.3): a surviving AUTO confirm now also carries a safety_rationale
+    # (_apply_safety_policy attaches the "why safe" explanation), so assert the core
+    # decision plus the rationale rather than exact dict equality.
+    assert decision["action"] == "confirm"
+    assert decision["reason"] == "重试后可解析"
+    assert "可自动确认" in decision["safety_rationale"]
     assert len(fake.calls) == 2
     assert "上一次返回无法解析" in fake.calls[1]["user_prompt"]
 
@@ -1202,3 +1207,52 @@ def test_decide_gate_blocks_undeclared_adjust_params_even_with_dictionary_contex
     prompt = fake.calls[0]["user_prompt"]
     assert "数据字典" in prompt
     assert "als_m3_id_nbank_orgnum=近3个月非银机构数" in prompt
+
+
+# -- LT-11 (B.3): AUTO decisions are explainable ------------------------------
+def test_auto_confirm_decision_carries_safety_rationale():
+    """A surviving AUTO confirm on a low-risk gate carries a safety_rationale
+    explaining WHY it was safe to auto-confirm (no risk flag + gate kind), and the
+    rendered decision message surfaces it."""
+    from marvis.agent.turn_handlers import _auto_decision_content
+
+    fake = _FakeLLM(action="confirm", reason="结果正常")
+    gate = {"content": "特征筛选完成", "metadata": {"kind": "screen"}}
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "confirm"
+    assert "可自动确认" in decision["safety_rationale"]
+    assert "gate 类型 screen" in decision["safety_rationale"]
+    content = _auto_decision_content(decision)
+    assert "为何可自动确认" in content
+    assert "无风险标记" in content
+
+
+def test_auto_halt_decision_content_cites_specific_risk_flag_code():
+    """A halt forced by a declared risk flag names the specific risk_flag code in
+    its reason (B.3: halt引用具体 risk_flag code), and the rendered message keeps it."""
+    from marvis.agent.turn_handlers import _auto_decision_content
+
+    fake = _FakeLLM(action="confirm", reason="上线发布可以继续")
+    gate = {
+        "content": "请选择最终 champion 模型并发布",
+        "metadata": {
+            "gate_envelope": {
+                "kind": "post_training_action",
+                "target_step_id": "select-final-model",
+                "allowed_actions": ["confirm", "halt"],
+                "risk_flags": ["production_deploy_champion_model"],
+            }
+        },
+    }
+
+    decision = decide_gate(fake, gate=gate)
+
+    assert decision["action"] == "halt"
+    assert "production_deploy_champion_model" in decision["reason"]
+    # a halt carries no safety_rationale (only a surviving confirm does).
+    assert "safety_rationale" not in decision
+    content = _auto_decision_content(decision)
+    assert "production_deploy_champion_model" in content
+    assert "为何可自动确认" not in content

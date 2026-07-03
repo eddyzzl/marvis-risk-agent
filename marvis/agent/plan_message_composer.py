@@ -13,6 +13,7 @@ from marvis.agent.driver_turn import DriverMessage
 from marvis.agent.gate_adapters import render_gate_dependencies
 from marvis.agent.gate_payloads import build_model_delivery_payload
 from marvis.agent.gates import build_failure_envelope, extract_gate_envelope
+from marvis.agent.gates.adapters import gate_editable_input_schema
 from marvis.agent.plan_utils import downstream_step_ids, find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStep, StepStatus
@@ -89,6 +90,15 @@ class PlanMessageComposer:
             # screen/dedup metadata so auto_drive._extract_red_flags can surface
             # them in the 【平台红旗 checklist】 without re-parsing table strings.
             meta["red_flags"] = rendered.red_flags
+        # LT-3 (A.3): the gate's reply adapter declares its adjustable parameters as
+        # a JSON schema; surface it on the gate payload under editable_input_schema
+        # (the SAME key the LT-4 retry form already consumes from failure_envelope)
+        # so the frontend gets a real schema (enum/bounds/title) for the gate's
+        # controls instead of only the type-inferred gate_envelope controls. Absent
+        # (adapter-less gate or nothing adjustable) -> key omitted, zero change.
+        editable_schema = gate_editable_input_schema(plan, gate, self._safe_output)
+        if editable_schema:
+            meta["editable_input_schema"] = editable_schema
         meta["gate_envelope"] = extract_gate_envelope({"metadata": meta}).to_dict()
         return DriverMessage("gate", "\n\n".join(parts), meta)
 

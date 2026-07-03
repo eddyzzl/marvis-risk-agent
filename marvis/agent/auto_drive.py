@@ -483,7 +483,24 @@ def _apply_safety_policy(decision: dict, envelope) -> dict:
             )
     if action == "replan" and not str(decision.get("replan_goal") or "").strip():
         return _policy_halt("AUTO 请求重规划但没有提供明确 replan_goal。")
+    if action == "confirm":
+        # LT-11 (B.3): a surviving AUTO confirm reached here precisely because the
+        # gate declared NO human-review risk flag and no wide downstream reset --
+        # surface that as an explicit "why safe" rationale on the decision so the
+        # auto-confirm message can explain itself instead of only saying "继续".
+        # Reads the same envelope fields _gate_risk_reason already checked; adds no
+        # new judgement.
+        decision = {**decision, "safety_rationale": _auto_confirm_rationale(envelope)}
     return decision
+
+
+def _auto_confirm_rationale(envelope) -> str:
+    """The one-line "why safe" explanation for an AUTO auto-confirm (LT-11 B.3): the
+    gate carries no human-review risk flag and no wide downstream reset, so it is a
+    low-risk gate AUTO may confirm. Names the gate kind for context. Purely a
+    restatement of the envelope fields _gate_risk_reason inspected -- no new logic."""
+    kind = str(getattr(envelope, "kind", "") or "gate")
+    return f"无风险标记且无大范围下游重置，属低风险节点（gate 类型 {kind}），可自动确认。"
 
 
 def _gate_risk_reason(envelope) -> str:
