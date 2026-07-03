@@ -80,6 +80,32 @@ def test_mine_rules_is_deterministic_dict_equal():
     assert a  # non-empty
 
 
+def test_mine_rules_is_invariant_to_feature_cols_ordering():
+    """FIN-3 #5 (INV-1): the tree channel maps split indices back to feature names
+    through the feature_cols column order, so an unstable caller ordering (a set, a
+    dict, a shuffled column list) must NOT change the mined rules. mine_rules sorts
+    feature_cols internally, so the same underlying feature set yields byte-identical
+    output regardless of the order it is passed in."""
+    frame = pd.DataFrame({
+        "f1":  [10, 20, 30, 40, 50, 60, 70, 80],
+        "f2":  [1,  1,  0,  0,  1,  0,  0,  0],
+        "f3":  [80, 70, 60, 50, 40, 30, 20, 10],
+        "bad": [1,  1,  1,  0,  0,  0,  0,  0],
+    })
+    kwargs = dict(target_col="bad", max_depth=3, min_support=0.1, min_lift=1.2, top_k=10)
+
+    sorted_order = [r.as_dict() for r in mine_rules(frame, feature_cols=["f1", "f2", "f3"], **kwargs)]
+    shuffled_order = [r.as_dict() for r in mine_rules(frame, feature_cols=["f3", "f1", "f2"], **kwargs)]
+    reversed_order = [r.as_dict() for r in mine_rules(frame, feature_cols=["f3", "f2", "f1"], **kwargs)]
+    # A set has no defined iteration order -- the exact case INV-1 must survive.
+    set_order = [r.as_dict() for r in mine_rules(frame, feature_cols=list({"f1", "f2", "f3"}), **kwargs)]
+
+    assert sorted_order  # non-empty
+    assert shuffled_order == sorted_order
+    assert reversed_order == sorted_order
+    assert set_order == sorted_order
+
+
 def test_mine_rules_condition_round_trips_through_build_strategy():
     frame = _hand_frame()
     for rule in _mine():

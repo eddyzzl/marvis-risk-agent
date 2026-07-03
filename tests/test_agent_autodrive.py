@@ -183,14 +183,18 @@ def test_agent_mode_autodrives_join_to_completion(client: TestClient, tmp_path: 
     }).json()["id"]
 
     # A single start request in AUTO(自动审查) mode: the LLM confirms the C1 file-role
-    # gate AND the C2 join gate, so the executed-join result is the final message.
+    # gate and the C2 join-proposal gate, but the final 执行拼接/execute_join step is a
+    # forced human-review gate (FIN-3 #1: irreversible dedup/merge WRITE). A bare AUTO
+    # confirm on it is downgraded to halt by _apply_safety_policy, so the last message
+    # is the risk-flag hand-off, not the executed-join result -- the safety layer
+    # working as intended, not a regression.
     resp = client.post(f"/api/tasks/{task_id}/agent/start", json={"acceptance_mode": "auto_accept"})
     assert resp.status_code == 202, resp.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     done = _last_assistant(msgs)
-    assert "拼接执行完成" in done["content"]
-    assert "1:1 保持" in done["content"]
-    # The LLM was consulted at each gate, and its rationale is visible in the transcript.
+    assert "irreversible_dedup_merge" in done["content"]
+    assert "已转人工确认" in done["content"]
+    # The LLM was still consulted at each gate before AUTO halted on the forced gate.
     assert len(fake.calls) >= 2
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
@@ -385,7 +389,12 @@ def test_agent_mode_autodrives_strategy_to_completion(client: TestClient, tmp_pa
     assert resp.status_code == 202, resp.text
     msgs = client.get(f"/api/tasks/{task_id}/agent/messages").json()["messages"]
     done = _last_assistant(msgs)
-    assert "策略权衡视图完成" in done["content"]
+    # FIN-3 #1: 回测策略/backtest_strategy is a forced decision gate (approval_rate /
+    # bad_rate review before the strategy proceeds). A bare AUTO confirm halts, so the
+    # last message is the strategy_direction_approval hand-off rather than the
+    # downstream tradeoff view.
+    assert "strategy_direction_approval" in done["content"]
+    assert "已转人工确认" in done["content"]
     assert len(fake.calls) >= 2
     assert any(m["metadata"].get("intent") == "agent_decision" for m in msgs if m["role"] == "assistant")
 
@@ -1039,6 +1048,53 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
         },
         id="vintage-vintage_curve-confirm",
     ),
+    # FIN-3 #1: seven forced-confirmation gates whose gate_source_tool (set by
+    # plan_message_composer.gate_message from gate.tool_ref.tool in production) now
+    # maps to a high-risk flag. Each carries ONLY the production gate_source_tool key
+    # with an opaque "{plan}-step-N" step_id, proving the fix works on the real
+    # composer-shaped metadata (not a test-only semantic step_id token).
+    pytest.param(
+        "portfolio-portfolio_gate_summary-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-6", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "portfolio_gate_summary"},
+        id="portfolio-portfolio_gate_summary-confirm",
+    ),
+    pytest.param(
+        "feature_join-execute_join-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-3", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "execute_join"},
+        id="feature_join-execute_join-confirm",
+    ),
+    pytest.param(
+        "validation-render_reports-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-4", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "render_reports"},
+        id="validation-render_reports-confirm",
+    ),
+    pytest.param(
+        "monitoring-monitor_run-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "monitor_run"},
+        id="monitoring-monitor_run-confirm",
+    ),
+    pytest.param(
+        "modeling-generate_model_report-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-8", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "generate_model_report"},
+        id="modeling-generate_model_report-confirm",
+    ),
+    pytest.param(
+        "strategy-backtest_strategy-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "backtest_strategy"},
+        id="strategy-backtest_strategy-confirm",
+    ),
+    pytest.param(
+        "strategy-select_rule_set-confirm",
+        {"plan_id": "p1", "step_id": "plan-step-2", "run_seq": 1, "kind": "gate",
+         "gate_source_tool": "select_rule_set"},
+        id="strategy-select_rule_set-confirm",
+    ),
 ]
 
 
@@ -1052,6 +1108,38 @@ def test_auto_safety_policy_blocks_bare_confirm_on_real_forced_gates(_label, met
     assert result["action"] == "halt", (
         f"{_label}: AUTO silently confirmed a forced-confirmation gate with no "
         f"risk_flags / control declared -- envelope={envelope!r}"
+    )
+
+
+# FIN-3 #1: the four modeling-funnel gates are DELIBERATELY not flagged (INV: pure /
+# reversible gate -> no flag). This locks the no-over-block invariant: a bare confirm
+# on each funnel gate must SURVIVE as confirm even when its own gate_source_tool is
+# carried, so the systematic flag sweep never turned the modeling auto-drive into a
+# halt-at-everything mode. (The expensive / algorithm-swap adjust controls on these
+# gates are guarded separately by _apply_safety_policy, exercised elsewhere.)
+@pytest.mark.parametrize(
+    "source_tool",
+    ["screen_features", "select_features", "configure_tuning", "tune_hyperparameters"],
+)
+def test_auto_safety_policy_keeps_modeling_funnel_gates_auto_confirmable(source_tool):
+    meta = {
+        "plan_id": "p1",
+        "step_id": "plan-step-3",
+        "run_seq": 1,
+        "kind": "gate",
+        "gate_source_tool": source_tool,
+    }
+    envelope = extract_gate_envelope({"metadata": meta})
+    assert envelope.risk_flags == (), (
+        f"{source_tool}: funnel gate wrongly carries a risk flag {envelope.risk_flags!r} "
+        f"-- would over-block the modeling auto-drive"
+    )
+    decision = {"action": "confirm", "reason": "结果正常，继续。", "confidence": 0.9}
+
+    result = _apply_safety_policy(decision, envelope)
+
+    assert result["action"] == "confirm", (
+        f"{source_tool}: AUTO over-blocked a low-risk reversible funnel gate"
     )
 
 

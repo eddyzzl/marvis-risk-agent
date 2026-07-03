@@ -93,6 +93,14 @@ def mine_rules(
     ranked by lift desc (ties broken by support desc then condition text) -- a
     stable sort, so two identical calls return identical lists (INV-1).
     """
+    # INV-1 determinism (FIN-3 #5): the tree channel builds its feature matrix from
+    # the column order of ``feature_cols`` (numeric[tree.feature[node]] maps a split
+    # index back to a name), so a caller passing feature_cols from a set / dict /
+    # unstable DataFrame column order would yield a different tree -> different rules
+    # for the same underlying feature set. Sort once here so mining is invariant to
+    # the caller's ordering; the final ranking sorts by (lift, support, condition) and
+    # is itself order-independent, so this only pins the intermediate feature order.
+    feature_cols = sorted(dict.fromkeys(str(col) for col in feature_cols))
     frame, target = _prepare(df, feature_cols, target_col)
     n = int(len(frame))
     if n == 0:

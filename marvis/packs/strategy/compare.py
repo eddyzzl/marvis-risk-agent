@@ -59,10 +59,20 @@ def compare_strategies(
         df, baseline, target_col=target_col,
         profit_params=profit_params, ead_col=ead_col, pd_col=pd_col,
     )
+    # FIN-3 #4: expected_profit is None when a profit backtest was requested but the
+    # pd_col/ead_col EL-chain inputs were missing (backtest_strategy degrades gracefully
+    # rather than raising). The profit delta is then undefined -> None, not a fake 0.0.
+    profit_available = (
+        new_result.expected_profit is not None and base_result.expected_profit is not None
+    )
     deltas = {
         "approval_rate": float(new_result.approval_rate - base_result.approval_rate),
         "approved_bad_rate": float(new_result.approved_bad_rate - base_result.approved_bad_rate),
-        "expected_profit": float(new_result.expected_profit - base_result.expected_profit),
+        "expected_profit": (
+            float(new_result.expected_profit - base_result.expected_profit)
+            if profit_available
+            else None
+        ),
     }
 
     red_flags: list[dict] = []
@@ -85,7 +95,7 @@ def compare_strategies(
                 ),
             }
         )
-    if deltas["expected_profit"] < 0:
+    if deltas["expected_profit"] is not None and deltas["expected_profit"] < 0:
         red_flags.append(
             {
                 "code": "profit_negative_delta",
@@ -96,12 +106,19 @@ def compare_strategies(
             }
         )
 
+    profit_delta = deltas["expected_profit"]
+    profit_text = (
+        # FIN-3 #4: profit delta is None when the EL chain lacked pd_col/ead_col.
+        "预期利润不可用（缺少 pd_col/ead_col，未用 0 冒充）。"
+        if profit_delta is None
+        else f"预期利润{_delta_word(profit_delta)}{abs(profit_delta):.2f}。"
+    )
     summary_text = (
         f"新策略审批率较基线{_delta_word(deltas['approval_rate'])}"
         f"{abs(deltas['approval_rate']) * 100:.1f}pp，"
         f"通过客群坏率{_delta_word(deltas['approved_bad_rate'])}"
         f"{abs(deltas['approved_bad_rate']) * 100:.2f}pp，"
-        f"预期利润{_delta_word(deltas['expected_profit'])}{abs(deltas['expected_profit']):.2f}。"
+        f"{profit_text}"
     )
     return CompareResult(
         matrix_2x2=matrix,

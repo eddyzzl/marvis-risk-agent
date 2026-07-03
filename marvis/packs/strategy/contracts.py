@@ -61,12 +61,17 @@ class BacktestResult:
     approved_count: int
     approved_bad_rate: float
     rejected_bad_rate: float
-    expected_profit: float
+    # FIN-3 #4: None (not a fake 0.0) when a profit backtest was requested but the
+    # pd_col / ead_col needed for the expected-loss chain was not supplied. profit_note
+    # then carries the human-readable reason; 0.0 still means "no profit backtest
+    # requested" (profit_params is None), and a float means a real computed profit.
+    expected_profit: float | None
     swap_in_count: int
     swap_out_count: int
     swap_in_bad_rate: float | None
     swap_out_bad_rate: float | None
     by_segment: tuple[dict[str, Any], ...]
+    profit_note: str | None = None
 
 
 @dataclass(frozen=True)

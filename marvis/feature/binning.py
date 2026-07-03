@@ -31,6 +31,41 @@ def equal_frequency_edges(
     return edges
 
 
+def degraded_bin_diagnostic(
+    edges: np.ndarray,
+    requested_bin_count: int,
+    *,
+    feature: str | None = None,
+) -> dict | None:
+    """FIN-3 #3: opt-in diagnostic for silent bin degradation.
+
+    :func:`equal_frequency_edges` (and the other edge builders) silently return
+    fewer bins than requested when a single/near-constant column or repeated values
+    collapse the quantile edges -- the return-value behaviour many callers depend on
+    is intentionally unchanged. This companion lets a screening / CSI caller detect
+    that degradation and surface it through its own data_quality / warnings channel:
+    returns a warning dict when the actual bin count (``len(edges) - 1``) is below
+    ``requested_bin_count``, else ``None`` (no degradation -> nothing to report).
+    """
+    edge_arr = np.asarray(edges, dtype=float)
+    actual_bins = max(0, edge_arr.size - 1)
+    requested = int(requested_bin_count)
+    if actual_bins >= requested:
+        return None
+    warning = {
+        "kind": "degraded_binning",
+        "requested_bin_count": requested,
+        "actual_bin_count": actual_bins,
+        "message": (
+            f"分箱降级:请求 {requested} 个箱,实际只得到 {actual_bins} 个"
+            "(单一取值或重复值折叠了分位边界)。"
+        ),
+    }
+    if feature is not None:
+        warning["feature"] = str(feature)
+    return warning
+
+
 def equal_width_edges(values: np.ndarray, bin_count: int) -> np.ndarray:
     _validate_bin_count(bin_count)
     arr = _finite_values(values)
@@ -419,6 +454,7 @@ def _validate_bin_count(bin_count: int) -> None:
 __all__ = [
     "assign_bins",
     "chimerge_edges",
+    "degraded_bin_diagnostic",
     "equal_frequency_edges",
     "equal_width_edges",
     "manual_edges",

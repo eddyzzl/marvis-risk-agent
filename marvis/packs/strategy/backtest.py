@@ -33,23 +33,25 @@ def backtest_strategy(
     approved = decision != "reject"
     target = _target_series(df, target_col)
     swap = _swap_analysis(df, approved, baseline, target_col) if baseline else _zero_swap()
+    profit_value, profit_note = _strategy_profit(
+        df.loc[approved],
+        profit_params=profit_params,
+        ead_col=ead_col,
+        pd_col=pd_col,
+    )
     return BacktestResult(
         strategy_id=strategy.id,
         approval_rate=_ratio(float(approved.sum()), float(len(df))),
         approved_count=int(approved.sum()),
         approved_bad_rate=_bad_rate(target.loc[approved]),
         rejected_bad_rate=_bad_rate(target.loc[~approved]),
-        expected_profit=_strategy_profit(
-            df.loc[approved],
-            profit_params=profit_params,
-            ead_col=ead_col,
-            pd_col=pd_col,
-        ),
+        expected_profit=profit_value,
         swap_in_count=swap.in_count,
         swap_out_count=swap.out_count,
         swap_in_bad_rate=swap.in_bad_rate,
         swap_out_bad_rate=swap.out_bad_rate,
         by_segment=_segment_breakdown(decision, target),
+        profit_note=profit_note,
     )
 
 
@@ -95,18 +97,31 @@ def _strategy_profit(
     profit_params: ProfitParams | None,
     ead_col: str | None,
     pd_col: str | None,
-) -> float:
+) -> tuple[float | None, str | None]:
+    """Return ``(expected_profit, note)`` for the approved rows.
+
+    * No profit backtest requested (``profit_params is None``) -> ``(0.0, None)``.
+    * Profit requested but the expected-loss chain inputs are missing (``pd_col`` /
+      ``ead_col``) -> FIN-3 #4: degrade gracefully to ``(None, note)`` instead of
+      raising or fabricating a misleading 0.0, so the EL chain never silently
+      produces a fake profit and the caller can surface the reason as a red flag.
+    * Otherwise -> ``(net_profit, None)``.
+    """
     if profit_params is None:
-        return 0.0
+        return 0.0, None
     if not ead_col or not pd_col:
-        raise StrategyError("ead_col and pd_col are required for profit backtest")
-    return profit_calc(
+        return None, (
+            "已请求利润回测，但缺少 pd_col/ead_col，无法计算预期损失链，"
+            "expected_profit 记为不可用（未用 0 冒充）。"
+        )
+    net_profit = profit_calc(
         approved,
         segment_col=None,
         ead_col=ead_col,
         pd_col=pd_col,
         params=profit_params,
     )[0].net_profit
+    return net_profit, None
 
 
 def _target_series(df: pd.DataFrame, target_col: str) -> pd.Series:
