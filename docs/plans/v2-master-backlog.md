@@ -293,15 +293,15 @@
 | ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
 | ⬜ | LT-4 | 失败/重试 UX 的 per-tool schema 表单 adapters（JSON fallback 已有）；smoke 发现：retry inputs 是整体替换非合并——表单实现前先在前端 JSON 编辑器旁明示该语义 | 追踪器+6-28 |
 | ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
-| ⬜ | LT-6 | TrainingDataset adapter 扩到剩余辅助读路径（按 profiling 证据） | 追踪器 |
-| ⬜ | LT-7 | 特征筛选/大摘要加 DuckDB query-backed helpers 替代全帧 pandas | 追踪器 |
+| ✅ | LT-6 | 证据驱动列投影（`cf36f01a`）：9 recipe 训练读 82MB→18MB（-78%）、monitor scored 分支 -93%、champion 重训同改；全帧回写类路径（score/reject/report）复核后不改（会丢输出列）；442 测试+LT-8 计数守卫全绿 | 追踪器 |
+| ✅ | LT-7 | 证据裁决（`c5ad8499`，文档 commit）：盘点后无路径在不冒精度漂移/输出保真风险下过 30% 收益线（筛选已列批读、profile 已采样有界、dedup 已有 SQL 路径），不硬改 | 追踪器 |
 | ✅ | LT-8 | 三件套落地（`435bb86c`）：筛选列批读计数（20万行×80列，7 次调用严格匹配批算术）、多配方端到端单次加载守卫（真实 backend 非 mock）、join 连接数与行数无关+双实例确定性；六连跑零 flake，未发现回归点 | 追踪器 |
 | ✅ | LT-9 | 已裁决：subprocess+护栏为 V2 终态（威胁模型=单机单用户；TST-4 真进程证据链）；OS 沙箱升级条件=V3 多用户，见 v2-longtail-adjudications.md | 6-28+roadmap |
 | ✅ | LT-10 | 已裁决：triple-opt-in legacy-only 为终态（settings 双开关+env var 三重门槛既有）；不做 RPC 化，只收安全修复，见 v2-longtail-adjudications.md | 追踪器 |
 | ⬜ | LT-11 | agent 推荐产品化：引用 evidence refs、给 tradeoff、AUTO 解释 bounded action 为何安全 | 追踪器 |
 | ✅ | LT-12 | 已裁决：触发条件不存在，关闭；未来出现行级保真要求时按 join 引擎设计重开新 spec，见 v2-longtail-adjudications.md | 6-28 |
-| ⬜ | LT-13 | 分页扩展：随数据量增长审计剩余高容量列表端点 | 追踪器 |
-| ⬜ | LT-14 | 样本权重 leakage-risk/business-rationale 指南随 fixtures 持续丰富 | 追踪器 |
+| ✅ | LT-13 | 分页审计（`a4accccb`）：全端点盘点表，任务内 experiments/plans 两个线性增长端点补 opt-in limit/offset/total（默认全量兼容），datasets/plugins/skills 复核判不需要 | 追踪器 |
+| ✅ | LT-14 | 指南+真诊断（`0f26b4e4`）：docs/sample_weight_guide.md；**发现 leakage_risk 一直硬编码 low 从未计算**，改为真算权重×目标相关（|corr|≥0.3→high+target_correlation 字段），门提示升级 warning 点名泄漏 | 追踪器 |
 | ✅ | LT-15 | 全部批次 spec 已出：S1a（已实现）、S2-S6（docs/plans/specs/v2-s2..s6-*.md，函数级）；S5 范围校准注明趋势/EL/报告项由 S3 吸收 | 策略计划 |
 | ✅ | LT-16 | 已裁决：EXC 清零=仓内载体完成；真实数据对照转显式外部输入门（用户提供脱敏样本即跑，承接件就绪），见 v2-longtail-adjudications.md | roadmap |
 | ✅ | LT-17 | 已裁决：机制定型（每 2-3 阶段一轮聚焦审查），已执行三轮+收官 FIN 循环为第四轮，见 v2-longtail-adjudications.md | 本轮教训 |
