@@ -261,7 +261,7 @@
 | ⬜ | ARCH-8 | 四个 pack 的 _Runtime 复制粘贴，pack SDK 公共层缺位 | Med/S | — |
 | ✅ | ARCH-9 | 模板按域拆八模块（`aa064cce`：_shared/sample_echo/validation/modeling/join/feature/strategy/monitoring），sample.py 缩为 36 行注册门面；拆分前后 WorkflowTemplate 输出 SHA256 字节等价验证 | Med/S | ✅ |
 | ✅ | ARCH-10 | schema_version 落 PRAGMA user_version（`51a3130`）：编号迁移清单、旧库无损升级测试、重复 init 幂等 | Low/S | ✅ |
-| ⬜ | ARCH-11 | app.js 6416 行前端 god file：状态所有权未定界（追踪器"TaskWorkspace 抽取"同一件事） | Med/L | — |
+| ✅ | ARCH-11 | 纯函数簇抽出（`ea96e8b5`：metric-tables 609 行/precision-consistency 86/step-checker 38，app.js 6970→6254）+ 状态所有权地图交付（40 全局态归属定界）；深拆的硬边界=Node harness 内联整文件直呼顶层符号（编排函数被测试架构钉住），继续拆需 harness 重构——记录为显式架构决策非欠账；真浏览器 smoke 3 通过 | Med/L | ✅ |
 | ✅ | PERF-6 | 轮询热路径收敛（`fe5180c4`）：GET /api/tasks 11 连接→2（与任务数无关）、evidence mtime/size 缓存、journal_mode PRAGMA 每库一次；查询计数断言守护 | Med/M | — |
 | ✅ | PERF-9 | 全量静态版本化（`a752660d`）：_static_asset_version rglob 全部 js/css、importmap 把裸相对导入重写为 ?v= URL、/static Cache-Control 分层（?v= immutable / 否则 no-cache）；真 Chromium smoke 验证 | Med/S | — |
 | ✅ | PERF-10 | read_frame 深拷贝改 CoW 视图（`d3336acf`）：内存峰值随配方数从线性变常量；六配方训练字节等价验证 | Med/S | ✅ |
