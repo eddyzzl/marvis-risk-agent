@@ -125,6 +125,10 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "balance_col": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -156,6 +160,12 @@
           },
           "base_counts": {
             "type": "object"
+          },
+          "data_quality_warnings": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [
@@ -442,10 +452,10 @@
             "type": "integer"
           },
           "swap_in_bad_rate": {
-            "type": "number"
+            "type": ["number", "null"]
           },
           "swap_out_bad_rate": {
-            "type": "number"
+            "type": ["number", "null"]
           },
           "by_segment": {
             "type": "array",
@@ -456,6 +466,11 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "label_coverage": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           }
         },
         "required": [
@@ -797,6 +812,11 @@
           "nan_labels_dropped": {
             "type": "integer",
             "minimum": 0
+          },
+          "label_coverage": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           }
         },
         "required": [

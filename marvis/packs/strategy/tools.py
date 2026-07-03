@@ -79,22 +79,22 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
 
 def tool_roll_rate(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    frame = _dataset_frame(
-        runtime,
-        str(inputs["dataset_id"]),
-        columns=[str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"])],
-    )
+    balance_col = _optional_str(inputs.get("balance_col"))
+    columns = _unique([str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"]), balance_col])
+    frame = _dataset_frame(runtime, str(inputs["dataset_id"]), columns=columns)
     matrix = roll_rate_matrix(
         frame,
         id_col=str(inputs["id_col"]),
         time_col=str(inputs["time_col"]),
         status_col=str(inputs["status_col"]),
         states=[str(item) for item in inputs["states"]],
+        balance_col=balance_col,
     )
     return {
         "states": list(matrix.states),
         "matrix": [list(row) for row in matrix.matrix],
         "base_counts": dict(matrix.base_counts),
+        "data_quality_warnings": [dict(warning) for warning in matrix.data_quality_warnings],
     }
 
 
@@ -189,6 +189,7 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     payload = _jsonable(result)
     payload["backtest_id"] = backtest_id
     payload["nan_labels_dropped"] = nan_labels_dropped
+    payload["label_coverage"] = _label_coverage(len(frame) + nan_labels_dropped, nan_labels_dropped)
     return payload
 
 
@@ -341,13 +342,14 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
         # instead of failing the plan -- the step is informational, not gating.
         return {
             "matrix_2x2": {
-                cell: {"count": 0, "bad_rate": 0.0}
+                cell: {"count": 0, "bad_rate": None}
                 for cell in ("both_approve", "only_new", "only_baseline", "both_decline")
             },
             "deltas": {"approval_rate": 0.0, "approved_bad_rate": 0.0, "expected_profit": 0.0},
             "summary_text": "未提供基线策略，跳过对比。",
             "red_flags": [],
             "nan_labels_dropped": 0,
+            "label_coverage": 1.0,
         }
     strategy = _strategy(runtime, str(inputs["strategy_id"]))
     baseline = _strategy(runtime, baseline_id)
@@ -366,6 +368,7 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     )
     payload = _jsonable(result)
     payload["nan_labels_dropped"] = nan_labels_dropped
+    payload["label_coverage"] = _label_coverage(len(frame) + nan_labels_dropped, nan_labels_dropped)
     return payload
 
 
@@ -1022,6 +1025,14 @@ def _profit_params(payload: dict) -> ProfitParams:
 
 def _optional_profit_params(payload) -> ProfitParams | None:
     return None if payload in (None, "") else _profit_params(dict(payload))
+
+
+def _label_coverage(total_rows: int, n_dropped: int) -> float:
+    # drop_nan_labels semantics: coverage = labeled rows / total rows (DOM-11), so
+    # callers see how much of the sample actually carried supervision signal.
+    if total_rows <= 0:
+        return 0.0
+    return float((total_rows - n_dropped) / total_rows)
 
 
 def _backtest_id(dataset_id: str, result: BacktestResult) -> str:

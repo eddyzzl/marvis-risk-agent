@@ -55,7 +55,9 @@ def test_backtest_strategy_calculates_rates_swap_and_profit():
     assert result.swap_in_count == 1
     assert result.swap_out_count == 0
     assert result.swap_in_bad_rate == 0.0
-    assert result.swap_out_bad_rate == 0.0
+    # swap-out set is empty (baseline never approves anyone the new strategy rejects
+    # here) -- an empty set has no defined bad rate, so it is None, not 0.0 (DOM-11).
+    assert result.swap_out_bad_rate is None
     assert result.by_segment == (
         {"decision": "approve", "count": 3, "bad_count": 1, "bad_rate": pytest.approx(1 / 3)},
         {"decision": "reject", "count": 2, "bad_count": 1, "bad_rate": pytest.approx(1 / 2)},
@@ -80,8 +82,10 @@ def test_backtest_strategy_defaults_swap_and_profit_when_optional_inputs_missing
     assert result.expected_profit == 0.0
     assert result.swap_in_count == 0
     assert result.swap_out_count == 0
-    assert result.swap_in_bad_rate == 0.0
-    assert result.swap_out_bad_rate == 0.0
+    # No baseline supplied -> zero-swap path; both swap sets are empty, so their
+    # bad rates are undefined (None), not the misleading 0.0 (DOM-11).
+    assert result.swap_in_bad_rate is None
+    assert result.swap_out_bad_rate is None
 
 
 def test_strategy_conditions_coerce_numeric_literals_for_string_columns():

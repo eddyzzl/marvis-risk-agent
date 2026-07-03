@@ -14,7 +14,7 @@ from marvis.packs.strategy.strategy import apply_strategy
 @dataclass(frozen=True)
 class CompareCell:
     count: int
-    bad_rate: float
+    bad_rate: float | None
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,13 @@ def compare_strategies(
     red_flags: list[dict] = []
     swap_in = matrix["only_new"]
     swap_out = matrix["only_baseline"]
-    if swap_in.count and swap_out.count and swap_in.bad_rate > swap_out.bad_rate:
+    if (
+        swap_in.count
+        and swap_out.count
+        and swap_in.bad_rate is not None
+        and swap_out.bad_rate is not None
+        and swap_in.bad_rate > swap_out.bad_rate
+    ):
         red_flags.append(
             {
                 "code": "swap_in_worse",
@@ -107,7 +113,7 @@ def compare_strategies(
 
 def _cell(target: pd.Series, mask: pd.Series) -> CompareCell:
     count = int(mask.sum())
-    bad_rate = float((target.loc[mask] == 1).mean()) if count else 0.0
+    bad_rate = float((target.loc[mask] == 1).mean()) if count else None
     return CompareCell(count=count, bad_rate=bad_rate)
 
 

@@ -19,7 +19,10 @@ class RollRateMatrix:
     states: tuple[str, ...]
     matrix: tuple[tuple[float, ...], ...]
     period: str
-    base_counts: dict[str, int]
+    base_counts: dict[str, float]
+    #: DOM-8: id-level adjacent-observation month gaps (e.g. 202601 -> 202603), one
+    #: dict per id with a gap, informational only -- never mutates the matrix itself.
+    data_quality_warnings: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,8 +64,8 @@ class BacktestResult:
     expected_profit: float
     swap_in_count: int
     swap_out_count: int
-    swap_in_bad_rate: float
-    swap_out_bad_rate: float
+    swap_in_bad_rate: float | None
+    swap_out_bad_rate: float | None
     by_segment: tuple[dict[str, Any], ...]
 
 

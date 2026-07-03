@@ -217,6 +217,39 @@ def test_strategy_pack_tools_round_trip_via_runner(tmp_path):
     assert tradeoff.output["recommended"]["cutoff"] in {600.0, 700.0}
 
 
+def test_roll_rate_matrix_tool_surfaces_balance_weighting_and_warnings(tmp_path):
+    # DOM-8: balance_col weights transitions; a missing-month gap for one id
+    # surfaces as a data_quality_warnings entry through the tool boundary.
+    runner, _plugin_registry, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "customer_id": ["A", "A", "B", "B"],
+        "month": ["202601", "202603", "202601", "202602"],
+        "status": ["C", "M1", "C", "C"],
+        "balance": [100.0, 100.0, 300.0, 300.0],
+    })
+    path = tmp_path / "roll_rate_balance_sample.parquet"
+    frame.to_parquet(path, index=False)
+    dataset = registry.register_existing(path, task_id=task.id, role="strategy_sample")
+
+    result = runner.invoke(
+        ToolRef("strategy", "roll_rate_matrix"),
+        {
+            "dataset_id": dataset.id,
+            "id_col": "customer_id",
+            "time_col": "month",
+            "status_col": "status",
+            "states": ["C", "M1"],
+            "balance_col": "balance",
+        },
+        task_id=task.id,
+    )
+
+    assert result.ok is True, result.error
+    assert result.output["base_counts"] == {"C": 400.0, "M1": 0.0}
+    assert len(result.output["data_quality_warnings"]) == 1
+    assert result.output["data_quality_warnings"][0]["id"] == "A"
+
+
 def _register_strategy_sample_with_nan_label(registry, tmp_path, task_id: str):
     frame = pd.DataFrame({
         "bad": [1.0, 0.0, float("nan"), 0.0, 1.0, 0.0],

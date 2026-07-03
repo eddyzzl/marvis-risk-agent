@@ -14,8 +14,8 @@ from marvis.packs.strategy.strategy import apply_strategy
 class _SwapStats:
     in_count: int
     out_count: int
-    in_bad_rate: float
-    out_bad_rate: float
+    in_bad_rate: float | None
+    out_bad_rate: float | None
 
 
 def backtest_strategy(
@@ -68,8 +68,8 @@ def _swap_analysis(
     return _SwapStats(
         in_count=int(swap_in.sum()),
         out_count=int(swap_out.sum()),
-        in_bad_rate=_bad_rate(target.loc[swap_in]),
-        out_bad_rate=_bad_rate(target.loc[swap_out]),
+        in_bad_rate=_bad_rate_optional(target.loc[swap_in]),
+        out_bad_rate=_bad_rate_optional(target.loc[swap_out]),
     )
 
 
@@ -120,12 +120,20 @@ def _bad_rate(target: pd.Series) -> float:
     return float((target == 1).mean())
 
 
+def _bad_rate_optional(target: pd.Series) -> float | None:
+    # Swap sets (swap-in/swap-out) can be legitimately empty -- an empty set has no
+    # defined bad rate, so this returns None instead of the misleading 0.0 (DOM-11).
+    if target.empty:
+        return None
+    return float((target == 1).mean())
+
+
 def _zero_swap() -> _SwapStats:
     return _SwapStats(
         in_count=0,
         out_count=0,
-        in_bad_rate=0.0,
-        out_bad_rate=0.0,
+        in_bad_rate=None,
+        out_bad_rate=None,
     )
 
 
