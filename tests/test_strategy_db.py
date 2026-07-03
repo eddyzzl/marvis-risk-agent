@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import pytest
 
 import marvis.db as db_module
@@ -276,6 +278,84 @@ def test_adopting_new_strategy_retires_prior_adopted_sibling(tmp_path):
     retire_audit = db_module.PluginRepository(db_path).list_audit(kind="strategy.retire")[0]
     assert retire_audit["target_ref"] == strategy_a.id
     assert retire_audit["detail"]["superseded_by"] == strategy_b.id
+
+
+def test_sibling_retire_conflict_rolls_back_atomically(tmp_path, monkeypatch):
+    """TOCTOU: a sibling that is 'adopted' at the sibling-SELECT gets flipped out
+    from under the transaction before the retire UPDATE runs. The rowcount==0
+    guard must raise ConflictError AND the whole adopt transaction must roll back
+    -- strategy_b stays draft (never adopted), preserving atomicity so we never
+    end up with zero adopted strategies where there should be exactly one."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = StrategyRepository(db_path)
+    strategy_a = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="A",
+    )
+    strategy_b = build_strategy(
+        "approval",
+        [{"condition": "score < 650", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="B",
+    )
+    repo.create_strategy("task-1", strategy_a, created_at="2026-06-19T00:00:00Z")
+    repo.create_strategy("task-1", strategy_b, created_at="2026-06-19T00:00:10Z")
+    repo.adopt_strategy_with_audit(strategy_a.id, reason="A first", audit=_adopt_audit(strategy_a.id))
+
+    real_connect = strategy_repo_module.connect
+
+    class _RacingConn:
+        # sqlite3.Connection.execute is read-only, so intercept via a proxy that
+        # delegates everything except execute to the real connection.
+        def __init__(self, conn):
+            self._conn = conn
+            self._state = {"injected": False, "reentrant": False}
+
+        def execute(self, sql, *args, **kwargs):
+            # Just before the retire UPDATE fires, flip strategy_a out of
+            # 'adopted' on the same connection, simulating a concurrent
+            # retirement landing in the SELECT->UPDATE window.
+            if (
+                sql.strip().startswith("UPDATE strategies SET status = 'retired'")
+                and not self._state["injected"]
+                and not self._state["reentrant"]
+            ):
+                self._state["injected"] = True
+                self._state["reentrant"] = True
+                try:
+                    self._conn.execute(
+                        "UPDATE strategies SET status = 'retired' WHERE id = ?",
+                        (strategy_a.id,),
+                    )
+                finally:
+                    self._state["reentrant"] = False
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    @contextmanager
+    def racing_connect(path):
+        with real_connect(path) as conn:
+            yield _RacingConn(conn)
+
+    monkeypatch.setattr(strategy_repo_module, "connect", racing_connect)
+
+    with pytest.raises(ConflictError, match="并发修改，请重试"):
+        repo.adopt_strategy_with_audit(
+            strategy_b.id, reason="B replaces A", audit=_adopt_audit(strategy_b.id)
+        )
+
+    monkeypatch.undo()
+    # Atomicity: the main adopt UPDATE never took effect -> B is still draft.
+    assert repo.get_strategy_meta(strategy_b.id)["status"] == "draft"
+    # No stray retire audit row was committed for A (the whole txn rolled back).
+    assert db_module.PluginRepository(db_path).list_audit(kind="strategy.retire") == []
 
 
 def test_new_version_from_clones_lineage_and_bumps_version(tmp_path):

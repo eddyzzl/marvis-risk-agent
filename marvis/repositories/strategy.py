@@ -143,10 +143,22 @@ class StrategyRepository:
             ).fetchall()
             retired_ids = [str(r["id"]) for r in retired_rows]
             for retired_id in retired_ids:
-                conn.execute(
+                # rowcount guard: the sibling was 'adopted' at the SELECT above,
+                # but a concurrent adopt/retire can flip it in the window between
+                # that SELECT and this UPDATE. Without the guard a rowcount==0
+                # here silently no-ops yet still writes a retire audit row for a
+                # retirement that never happened, breaking the "at most one
+                # adopted per (task, type)" invariant. On rowcount==0 we abort
+                # the whole transaction (the main adopt UPDATE below is never
+                # reached, connect() rolls back), so adoption stays atomic:
+                # either every sibling retires and this strategy adopts, or
+                # nothing changes.
+                retire_cursor = conn.execute(
                     "UPDATE strategies SET status = 'retired' WHERE id = ? AND status = 'adopted'",
                     (retired_id,),
                 )
+                if retire_cursor.rowcount == 0:
+                    raise ConflictError("并发修改，请重试")
                 _write_audit_row(
                     conn,
                     kind="strategy.retire",
