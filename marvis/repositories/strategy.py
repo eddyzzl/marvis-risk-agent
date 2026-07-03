@@ -581,8 +581,8 @@ def _backtest_result_from_dict(payload: dict) -> BacktestResult:
         expected_profit=float(payload["expected_profit"]),
         swap_in_count=int(payload["swap_in_count"]),
         swap_out_count=int(payload["swap_out_count"]),
-        swap_in_bad_rate=float(payload["swap_in_bad_rate"]),
-        swap_out_bad_rate=float(payload["swap_out_bad_rate"]),
+        swap_in_bad_rate=_optional_float_field(payload["swap_in_bad_rate"]),
+        swap_out_bad_rate=_optional_float_field(payload["swap_out_bad_rate"]),
         by_segment=tuple(dict(item) for item in payload.get("by_segment") or ()),
     )
 
@@ -592,6 +592,10 @@ def _optional_str(value) -> str | None:
         return None
     normalized = str(value)
     return normalized or None
+
+
+def _optional_float_field(value) -> float | None:
+    return None if value is None else float(value)
 
 
 def _parse_iso(value) -> datetime | None:

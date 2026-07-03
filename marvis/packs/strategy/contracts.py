@@ -61,8 +61,8 @@ class BacktestResult:
     expected_profit: float
     swap_in_count: int
     swap_out_count: int
-    swap_in_bad_rate: float
-    swap_out_bad_rate: float
+    swap_in_bad_rate: float | None
+    swap_out_bad_rate: float | None
     by_segment: tuple[dict[str, Any], ...]
 
 

@@ -680,6 +680,8 @@ def _render_backtest_strategy(o: dict):
         f"拒绝客群坏率 {_pct(o.get('rejected_bad_rate'))}，"
         f"预期利润 {_num(o.get('expected_profit'))}。"
     )
+    if o.get("label_coverage") is not None:
+        text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
     rows = [
         ["审批率", _pct(o.get("approval_rate"))],
         ["通过人数", _fmt(o.get("approved_count"))],
@@ -688,6 +690,7 @@ def _render_backtest_strategy(o: dict):
         ["预期利润", _num(o.get("expected_profit"))],
         ["swap-in", _fmt(o.get("swap_in_count"))],
         ["swap-out", _fmt(o.get("swap_out_count"))],
+        ["标签覆盖率", _pct(o.get("label_coverage"))],
     ]
     tables = [{"title": "策略回测摘要", "columns": ["指标", "值"], "rows": rows}]
     by_segment = [row for row in (o.get("by_segment") or []) if isinstance(row, dict)]
@@ -806,6 +809,8 @@ def _render_compare_strategies(o: dict):
     deltas = o.get("deltas") if isinstance(o.get("deltas"), dict) else {}
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
     text = f"**策略对比完成**：{o.get('summary_text') or ''}"
+    if o.get("label_coverage") is not None:
+        text += f" 标签覆盖率 {_pct(o.get('label_coverage'))}。"
     conclusion = _compare_conclusion_line(deltas)
     if conclusion:
         text += f"\n\n{conclusion}"

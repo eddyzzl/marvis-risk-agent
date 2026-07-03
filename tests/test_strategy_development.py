@@ -221,6 +221,28 @@ def test_compare_strategies_swap_in_worse_triggers_when_swapin_riskier():
     assert "swap_in_worse" in {f["code"] for f in res.red_flags}
 
 
+def test_compare_strategies_empty_swap_cell_is_none_not_zero():
+    # DOM-11: an empty swap cell (no rows fall in it) has no defined bad rate --
+    # it must be None, not the misleading 0.0, and must not crash swap_in_worse.
+    frame = pd.DataFrame({
+        "score": [100, 200, 300, 400],
+        "bad":   [0,   1,   0,   0],
+    })
+    # new and baseline agree on every row -> only_new/only_baseline are both empty.
+    same = build_strategy(
+        "approval", [{"condition": "score < 250", "decision": "reject"}],
+        score_col="score", default_decision="approve", description="same",
+    )
+    res = compare_strategies(frame, same, same, target_col="bad")
+    m = res.matrix_2x2
+    assert m["only_new"].count == 0
+    assert m["only_new"].bad_rate is None
+    assert m["only_baseline"].count == 0
+    assert m["only_baseline"].bad_rate is None
+    # empty cells must not spuriously trigger swap_in_worse (no > comparison on None).
+    assert "swap_in_worse" not in {f["code"] for f in res.red_flags}
+
+
 # ---------------------------------------------------------------------------
 # Tool boundary: nan gate + direction conflict via the runner.
 # ---------------------------------------------------------------------------
@@ -347,7 +369,57 @@ def test_tool_compare_strategies_round_trip(tmp_path):
     assert cmp.output["matrix_2x2"]["both_approve"]["count"] == 2
     assert "summary_text" in cmp.output
     assert isinstance(cmp.output["red_flags"], list)
+    # No NaN labels in this frame -> full coverage (DOM-11).
+    assert cmp.output["label_coverage"] == 1.0
     _ = PluginRepository  # keep import used across slow/fast paths
+
+
+@pytest.mark.slow
+def test_tool_backtest_and_compare_strategies_label_coverage_hand_computed(tmp_path):
+    # DOM-11: label_coverage = labeled rows / total rows under drop_nan_labels
+    # semantics. 6 rows, 2 NaN labels -> coverage = 4/6.
+    runner, registry, task = _runtime(tmp_path)
+    frame = pd.DataFrame({
+        "score": [100, 200, 300, 400, 500, 600],
+        "bad":   [1.0, 0.0, float("nan"), 0.0, 0.0, float("nan")],
+    })
+    dataset = _register(registry, tmp_path, frame, "coverage", task.id)
+    new = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_type": "approval",
+         "rules": [{"condition": "score < 250", "decision": "reject"}],
+         "score_col": "score", "default_decision": "approve"},
+        task_id=task.id,
+    )
+    base = runner.invoke(
+        ToolRef("strategy", "build_strategy"),
+        {"strategy_type": "approval",
+         "rules": [{"condition": "score < 450", "decision": "reject"}],
+         "score_col": "score", "default_decision": "approve"},
+        task_id=task.id,
+    )
+
+    backtest = runner.invoke(
+        ToolRef("strategy", "backtest_strategy"),
+        {"dataset_id": dataset.id, "strategy_id": new.output["strategy_id"],
+         "target_col": "bad", "drop_nan_labels": True},
+        task_id=task.id,
+    )
+    assert backtest.ok is True, backtest.error
+    assert backtest.output["nan_labels_dropped"] == 2
+    assert round(backtest.output["label_coverage"], 4) == round(4 / 6, 4)
+
+    cmp = runner.invoke(
+        ToolRef("strategy", "compare_strategies"),
+        {"dataset_id": dataset.id, "target_col": "bad",
+         "strategy_id": new.output["strategy_id"],
+         "baseline_strategy_id": base.output["strategy_id"],
+         "drop_nan_labels": True},
+        task_id=task.id,
+    )
+    assert cmp.ok is True, cmp.error
+    assert cmp.output["nan_labels_dropped"] == 2
+    assert round(cmp.output["label_coverage"], 4) == round(4 / 6, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +536,48 @@ def test_render_compare_strategies_matrix_table():
     assert tables[0]["rows"][0][1] == 0.0   # both_approve bad_rate as heat value
     assert tables[0]["rows"][0][2] == 0.5   # only_new bad_rate as heat value
     assert tables[1]["title"] == "关键指标并排（挑战者 vs 基线）"
+
+
+def test_render_compare_strategies_empty_swap_cell_renders_na():
+    # DOM-11: an empty swap cell's bad_rate is None from the core; the heat chip
+    # falls back to 0.0 heat (no color signal) without raising, per _heat_cell.
+    from marvis.agent.renderers import _render_compare_strategies
+
+    text, tables = _render_compare_strategies({
+        "matrix_2x2": {
+            "both_approve": {"count": 2, "bad_rate": 0.0},
+            "only_new": {"count": 0, "bad_rate": None},
+            "only_baseline": {"count": 0, "bad_rate": None},
+            "both_decline": {"count": 2, "bad_rate": 1.0},
+        },
+        "deltas": {"approval_rate": 0.0, "approved_bad_rate": 0.0, "expected_profit": 0.0},
+        "summary_text": "示例摘要",
+        "label_coverage": 0.8,
+        "red_flags": [],
+    })
+    assert tables[0]["rows"][0][2] == 0.0  # only_new None -> heat falls back to 0.0
+    assert "标签覆盖率 80.0%" in text
+
+
+def test_render_backtest_strategy_label_coverage_and_na_swap():
+    from marvis.agent.renderers import _render_backtest_strategy
+
+    text, tables = _render_backtest_strategy({
+        "approval_rate": 1.0,
+        "approved_count": 2,
+        "approved_bad_rate": 0.5,
+        "rejected_bad_rate": 0.0,
+        "expected_profit": 0.0,
+        "swap_in_count": 0,
+        "swap_out_count": 0,
+        "swap_in_bad_rate": None,
+        "swap_out_bad_rate": None,
+        "label_coverage": 0.9,
+        "by_segment": [],
+    })
+    assert "标签覆盖率 90.0%" in text
+    rows = {row[0]: row[1] for row in tables[0]["rows"]}
+    assert rows["标签覆盖率"] == "90.0%"
 
 
 def test_render_adopt_strategy_table():
