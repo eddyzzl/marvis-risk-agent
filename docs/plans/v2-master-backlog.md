@@ -303,8 +303,8 @@
 | ⬜ | LT-13 | 分页扩展：随数据量增长审计剩余高容量列表端点 | 追踪器 |
 | ⬜ | LT-14 | 样本权重 leakage-risk/business-rationale 指南随 fixtures 持续丰富 | 追踪器 |
 | ✅ | LT-15 | 全部批次 spec 已出：S1a（已实现）、S2-S6（docs/plans/specs/v2-s2..s6-*.md，函数级）；S5 范围校准注明趋势/EL/报告项由 S3 吸收 | 策略计划 |
-| ⬜ | LT-16 | modeling-agent-roadmap Phase 3 开放式打磨（健壮性/报告/衔接）——以 §3 EXC 清零 + 真实数据对照实验为具体化载体 | roadmap |
-| ⬜ | LT-17 | 定期复审机制：每完成 2-3 个阶段跑一轮聚焦审查（新代码带来新债；本轮三个"已修未修净"即为证） | 本轮教训 |
+| ✅ | LT-16 | 已裁决：EXC 清零=仓内载体完成；真实数据对照转显式外部输入门（用户提供脱敏样本即跑，承接件就绪），见 v2-longtail-adjudications.md | roadmap |
+| ✅ | LT-17 | 已裁决：机制定型（每 2-3 阶段一轮聚焦审查），已执行三轮+收官 FIN 循环为第四轮，见 v2-longtail-adjudications.md | 本轮教训 |
 | ✅ | LT-18 | 蓄水池已建：五类 V3+ 显式不做项与准入门槛记录于 v2-longtail-adjudications.md | 产品选择 |
 | ⬜ | LT-19 | 每阶段完成后同步更新本清单与记忆索引 | 流程 |
 
