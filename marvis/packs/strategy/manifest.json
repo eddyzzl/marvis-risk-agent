@@ -1361,6 +1361,228 @@
         "write:strategy"
       ],
       "memory_limit_mb": 2048
+    },
+    {
+      "name": "limit_pricing_matrix",
+      "summary": "Deterministic band x limit x rate expected-profit grid with an EL simulation; writes a limit_pricing_csv deliverable only after the matrix confirmation gate.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_edges": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2
+          },
+          "n_bands": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "limit_grid": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 1
+          },
+          "rate_grid": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 1
+          },
+          "lgd": {
+            "type": "number"
+          },
+          "funding_rate": {
+            "type": "number"
+          },
+          "term_months": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cost_per_loan": {
+            "type": "number"
+          },
+          "el_ead_max": {
+            "type": "number"
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "score_col",
+          "limit_grid",
+          "rate_grid",
+          "funding_rate",
+          "term_months",
+          "cost_per_loan"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "matrix": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "recommended": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "band_edges": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "assumptions": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "matrix",
+          "recommended",
+          "band_edges",
+          "assumptions",
+          "red_flags",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_limit_pricing_matrix",
+      "side_effects": [
+        "read:dataset",
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "render_challenger_report",
+      "summary": "Assemble a challenger-vs-champion Markdown report from a compare output + both backtests + adoption status; registers challenger_report_md. No-op (no artifact) when no champion is supplied.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "champion_strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "compare": {
+            "type": "object"
+          },
+          "challenger_backtest": {
+            "type": "object"
+          },
+          "champion_backtest": {
+            "type": "object"
+          },
+          "adopted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "report_md": {
+            "type": "string"
+          },
+          "report_path": {
+            "type": "string"
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "report_md",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_challenger_report",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
     }
   ],
   "hooks": [],

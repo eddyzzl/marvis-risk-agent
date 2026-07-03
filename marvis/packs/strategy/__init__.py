@@ -20,6 +20,12 @@ from marvis.packs.strategy.contracts import (
     VintageCurve,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.pricing import (
+    LimitPricingResult,
+    PricingCell,
+    PricingParams,
+    limit_pricing_matrix,
+)
 from marvis.packs.strategy.profit import ProfitParams, profit_calc, vintage_profit
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.rules import CandidateRule, evaluate_rule_set, mine_rules
@@ -50,6 +56,10 @@ __all__ = [
     "backtest_strategy",
     "build_strategy",
     "compare_strategies",
+    "limit_pricing_matrix",
+    "LimitPricingResult",
+    "PricingCell",
+    "PricingParams",
     "design_cutoff_bands",
     "profit_calc",
     "recommend_operating_point",

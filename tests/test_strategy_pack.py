@@ -90,6 +90,8 @@ def test_strategy_manifest_registers_expected_tools(tmp_path):
         "mine_rules",
         "evaluate_rule_set",
         "select_rule_set",
+        "limit_pricing_matrix",
+        "render_challenger_report",
     }
     assert build_tool.determinism == "deterministic"
     assert "write:strategy" in build_tool.side_effects

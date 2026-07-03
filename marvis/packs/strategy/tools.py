@@ -28,6 +28,11 @@ from marvis.packs.strategy.monitoring_plan import (
     save_monitoring_plan,
 )
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.pricing import (
+    LimitPricingResult,
+    PricingParams,
+    limit_pricing_matrix,
+)
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.rules import (
@@ -366,6 +371,133 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     return payload
 
 
+def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
+    """S6 (A3): a band x limit x rate expected-profit grid with an EL simulation.
+
+    Always computes and returns the full matrix + per-band recommended feasible cell.
+    The strategy_artifacts(kind='limit_pricing_csv') deliverable is written ONLY when
+    ``confirm`` is true -- the driver flips it after the matrix confirmation gate
+    (矩阵确认门后才落 artifact), mirroring adopt_strategy's forced-gate precedent. The
+    CSV is attached to ``strategy_id`` so it rides the same per-strategy artifact list.
+    """
+    runtime = _runtime(ctx)
+    dataset_id = str(inputs["dataset_id"])
+    score_col = str(inputs["score_col"])
+    target_col = _optional_str(inputs.get("target_col"))
+    pd_col = _optional_str(inputs.get("pd_col"))
+    columns = _unique([score_col, target_col, pd_col])
+    frame = _dataset_frame(runtime, dataset_id, columns=columns)
+    if target_col:
+        frame, nan_labels_dropped = resolve_labeled_frame(
+            frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        )
+    else:
+        nan_labels_dropped = 0
+
+    params = PricingParams(
+        lgd=float(inputs.get("lgd", 0.6)),
+        funding_rate=float(inputs["funding_rate"]),
+        term_months=int(inputs["term_months"]),
+        cost_per_loan=float(inputs["cost_per_loan"]),
+        el_ead_max=float(inputs.get("el_ead_max", 0.20)),
+    )
+    result = limit_pricing_matrix(
+        frame,
+        score_col=score_col,
+        limit_grid=[float(item) for item in inputs["limit_grid"]],
+        rate_grid=[float(item) for item in inputs["rate_grid"]],
+        params=params,
+        target_col=target_col,
+        pd_col=pd_col,
+        band_edges=[float(edge) for edge in inputs["band_edges"]]
+        if inputs.get("band_edges") is not None
+        else None,
+        n_bands=int(inputs.get("n_bands", 5)),
+    )
+    red_flags = [dict(flag) for flag in result.red_flags]
+    if nan_labels_dropped:
+        red_flags.append({
+            "code": "nan_labels_dropped",
+            "level": "amber",
+            "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+        })
+
+    assumptions = {
+        "dataset_id": dataset_id,
+        "score_col": score_col,
+        "target_col": target_col,
+        "pd_col": pd_col,
+        "lgd": params.lgd,
+        "funding_rate": params.funding_rate,
+        "term_months": params.term_months,
+        "cost_per_loan": params.cost_per_loan,
+        "el_ead_max": params.el_ead_max,
+        "limit_grid": [float(item) for item in inputs["limit_grid"]],
+        "rate_grid": [float(item) for item in inputs["rate_grid"]],
+        "band_edges": [float(edge) for edge in result.band_edges],
+        "n_bands": int(inputs.get("n_bands", 5)),
+    }
+
+    payload = {
+        "matrix": [_jsonable(cell) for cell in result.matrix],
+        "recommended": [dict(item) for item in result.recommended],
+        "band_edges": [float(edge) for edge in result.band_edges],
+        "assumptions": assumptions,
+        "red_flags": red_flags,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
+
+    strategy_id = _optional_str(inputs.get("strategy_id"))
+    artifacts: list[dict] = []
+    # 矩阵确认门后才落 artifact: only after the user confirms the matrix does the CSV
+    # deliverable get written and registered (adopt_strategy forced-gate precedent).
+    if bool(inputs.get("confirm")) and strategy_id:
+        strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = strategy_dir / f"limit_pricing_{strategy_id}.csv"
+        csv_path.write_text(_limit_pricing_csv(result), encoding="utf-8")
+        runtime.strategies.save_strategy_artifact(
+            strategy_id, kind="limit_pricing_csv", path=str(csv_path)
+        )
+        _write_strategy_artifact_audit(runtime, ctx, strategy_id, "limit_pricing_csv", csv_path)
+        artifacts.append({"kind": "limit_pricing_csv", "path": str(csv_path)})
+    payload["artifacts"] = artifacts
+    return payload
+
+
+def _limit_pricing_csv(result: LimitPricingResult) -> str:
+    header = "band,limit,rate,count,pd,el,ead,expected_profit,roa,feasible,recommended"
+    recommended = {
+        (item["band"], float(item["limit"]), float(item["rate"])) for item in result.recommended
+    }
+    lines = [header]
+    for cell in result.matrix:
+        is_reco = (cell.band, float(cell.limit), float(cell.rate)) in recommended
+        lines.append(
+            ",".join([
+                cell.band,
+                _csv_num(cell.limit),
+                _csv_num(cell.rate),
+                str(cell.count),
+                _csv_num(cell.pd),
+                _csv_num(cell.el),
+                _csv_num(cell.ead),
+                _csv_num(cell.expected_profit),
+                _csv_num(cell.roa),
+                "1" if cell.feasible else "0",
+                "1" if is_reco else "0",
+            ])
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _csv_num(value) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.6f}"
+
+
 def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     strategy_id = str(inputs["strategy_id"])
@@ -431,6 +563,122 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
         "retired_strategy_ids": list(adopt_result["retired_strategy_ids"]),
         "artifacts": artifacts,
     }
+
+
+def tool_render_challenger_report(inputs: dict, ctx) -> dict:
+    """S6 Commit 3: assemble a challenger-vs-champion Markdown report from the compare
+    output + both backtests + the adoption status, register it as
+    strategy_artifacts(kind='challenger_report_md'), and audit it.
+
+    Graceful degradation (compare_strategies precedent): with no champion/baseline the
+    report is a no-op — it returns status='no_baseline' + a 「未提供基线」 markdown and
+    writes NO artifact, so an optional template step that ran without a champion slot
+    does not fail the plan. Every number in the report comes straight from the passed-in
+    compare/backtest tool outputs (INV-1: presentation only, report follows tool output).
+    """
+    runtime = _runtime(ctx)
+    strategy_id = str(inputs["strategy_id"])
+    champion_id = _optional_str(inputs.get("champion_strategy_id"))
+    compare = _as_dict(inputs.get("compare"))
+    # A compare that itself degraded to the no-baseline no-op carries this text; treat it
+    # as "no champion" too so the report degrades in lockstep with compare_strategies.
+    compare_degraded = str(compare.get("summary_text") or "").startswith("未提供基线")
+
+    if not champion_id or compare_degraded:
+        markdown = "# 挑战者对比报告\n\n未提供基线（champion）策略，跳过对比报告。\n"
+        return {
+            "status": "no_baseline",
+            "report_md": markdown,
+            "artifacts": [],
+        }
+
+    challenger_backtest = _as_dict(inputs.get("challenger_backtest"))
+    champion_backtest = _as_dict(inputs.get("champion_backtest"))
+    adopted = bool(inputs.get("adopted"))
+    markdown = _challenger_report_markdown(
+        strategy_id=strategy_id,
+        champion_id=champion_id,
+        compare=compare,
+        challenger_backtest=challenger_backtest,
+        champion_backtest=champion_backtest,
+        adopted=adopted,
+    )
+
+    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    report_path = strategy_dir / f"challenger_report_{strategy_id}.md"
+    report_path.write_text(markdown, encoding="utf-8")
+    runtime.strategies.save_strategy_artifact(
+        strategy_id, kind="challenger_report_md", path=str(report_path)
+    )
+    _write_strategy_artifact_audit(runtime, ctx, strategy_id, "challenger_report_md", report_path)
+    return {
+        "status": "rendered",
+        "report_md": markdown,
+        "report_path": str(report_path),
+        "artifacts": [{"kind": "challenger_report_md", "path": str(report_path)}],
+    }
+
+
+def _challenger_report_markdown(
+    *,
+    strategy_id: str,
+    champion_id: str,
+    compare: dict,
+    challenger_backtest: dict,
+    champion_backtest: dict,
+    adopted: bool,
+) -> str:
+    deltas = _as_dict(compare.get("deltas"))
+    lines = [
+        "# 挑战者对比报告",
+        "",
+        f"- 挑战者策略：`{strategy_id}`",
+        f"- 基线（champion）策略：`{champion_id}`",
+        f"- 采纳状态：{'已采纳挑战者' if adopted else '未采纳（仍以基线为准）'}",
+        "",
+        "## 关键指标并排",
+        "",
+        "| 指标 | 挑战者 | 基线 | 挑战者−基线 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for label, key in (
+        ("审批率", "approval_rate"),
+        ("通过客群坏率", "approved_bad_rate"),
+        ("预期利润", "expected_profit"),
+    ):
+        lines.append(
+            f"| {label} | {_report_num(challenger_backtest.get(key))} | "
+            f"{_report_num(champion_backtest.get(key))} | {_report_num(deltas.get(key))} |"
+        )
+    lines.extend([
+        "",
+        "## 结论",
+        "",
+        str(compare.get("summary_text") or ""),
+        "",
+    ])
+    red_flags = [flag for flag in (compare.get("red_flags") or []) if isinstance(flag, dict)]
+    if red_flags:
+        lines.append("## 红旗")
+        lines.append("")
+        for flag in red_flags:
+            lines.append(f"- [{flag.get('level', '')}] {flag.get('code', '')}: {flag.get('message', '')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _report_num(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _as_dict(value) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def tool_render_strategy_doc(inputs: dict, ctx) -> dict:

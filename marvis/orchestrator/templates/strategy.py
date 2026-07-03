@@ -224,6 +224,25 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
             decision_point=True,
         ),
         StepTemplate(
+            # S6: optional challenger report step, sits right after the compare step.
+            # planner has no step-pruning, so degradation is at the TOOL level: with no
+            # champion (baseline_strategy_id slot omitted) render_challenger_report
+            # returns status='no_baseline' + a 「未提供基线」 markdown and writes NO
+            # artifact -- exactly the compare_strategies no-op precedent, so the step
+            # never fails the plan. The report numbers all come from the compare +
+            # backtest outputs referenced here (report follows tool output).
+            title="挑战者报告",
+            tool_ref=ToolRef("strategy", "render_challenger_report"),
+            inputs_template={
+                "strategy_id": "$ref:构造策略.output.strategy_id",
+                "champion_strategy_id": "{slot:baseline_strategy_id}",
+                "compare": "$ref:对比基线.output",
+                "challenger_backtest": "$ref:回测策略.output",
+            },
+            depends_on_titles=("构造策略", "对比基线", "回测策略"),
+            post_checks=(PostCheck("nonempty", {"field": "status"}),),
+        ),
+        StepTemplate(
             title="采纳策略",
             tool_ref=ToolRef("strategy", "adopt_strategy"),
             inputs_template={

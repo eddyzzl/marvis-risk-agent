@@ -224,6 +224,25 @@ REPORT_NARRATIVE_SYS = PromptSpec(
 )
 
 
+# --- marvis.agent.adhoc_analysis (S6 ad-hoc natural-language slice/aggregate) ---
+SLICE_SPEC_SYS = PromptSpec(
+    name="SLICE_SPEC_SYS",
+    version=1,
+    text=(
+        "你是 MARVIS 的即席问数解析器。用户用自然语言问一个关于已注册数据集的统计"
+        "问题（如「按渠道看 5 月坏率」）。你的唯一职责是把它解析成一个结构化查询规格，"
+        "你绝不计算任何数字——数字由平台的确定性算子产出。\n"
+        "只能使用给定列白名单里的列名；不要编造列名。算子只能取："
+        "count/sum/mean/min/max/bad_rate/approval_rate/distinct。\n"
+        "严格只返回 JSON 对象，字段："
+        "{\"group_by\":[列名…],\"metrics\":[{\"op\":算子,\"col\":列名?}…],"
+        "\"filters\":[{\"col\":列名,\"op\":比较符,\"value\":值}…],"
+        "\"month_col\":列名?,\"months\":[月份…]?,\"sort_by\":列名或指标标签?}。\n"
+        "无法确定列或意图时，返回 {\"clarify\":\"一句中文澄清问题\"}，不要猜。"
+    ),
+)
+
+
 ALL_PROMPTS: tuple[PromptSpec, ...] = (
     PLAN_SYS,
     REPLAN_SYS,
@@ -239,6 +258,7 @@ ALL_PROMPTS: tuple[PromptSpec, ...] = (
     LEARN_SYS,
     CROSS_SYS,
     REPORT_NARRATIVE_SYS,
+    SLICE_SPEC_SYS,
 )
 
 
@@ -270,4 +290,5 @@ __all__ = [
     "LEARN_SYS",
     "CROSS_SYS",
     "REPORT_NARRATIVE_SYS",
+    "SLICE_SPEC_SYS",
 ]

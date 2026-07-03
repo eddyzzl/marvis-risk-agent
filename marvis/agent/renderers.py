@@ -704,38 +704,155 @@ def _render_compare_strategies(o: dict):
     deltas = o.get("deltas") if isinstance(o.get("deltas"), dict) else {}
     red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
     text = f"**策略对比完成**：{o.get('summary_text') or ''}"
+    conclusion = _compare_conclusion_line(deltas)
+    if conclusion:
+        text += f"\n\n{conclusion}"
     red_items = [flag for flag in red_flags if flag.get("level") == "red"]
     if red_items:
         names = "、".join(str(flag.get("code")) for flag in red_items)
         text += f" 红旗：{names}。"
 
-    def _cell(key: str) -> tuple[str, str]:
-        cell = matrix.get(key) if isinstance(matrix.get(key), dict) else {}
-        return _fmt(cell.get("count")), _pct(cell.get("bad_rate"))
+    def _cell(key: str) -> dict:
+        return matrix.get(key) if isinstance(matrix.get(key), dict) else {}
 
-    ba_c, ba_b = _cell("both_approve")
-    on_c, on_b = _cell("only_new")
-    ob_c, ob_b = _cell("only_baseline")
-    bd_c, bd_b = _cell("both_decline")
+    ba, on, ob, bd = (_cell("both_approve"), _cell("only_new"),
+                      _cell("only_baseline"), _cell("both_decline"))
+    # S6: the swap 2×2 is a matrix-heat card — each cell's own approved bad rate (0..1)
+    # colors the heat chip (S3 matrix-heat kind reused); the count rides along as text.
+    heat_columns = ["", "基线通过", "基线拒绝"]
+    heat_rows = [
+        ["新策略通过", _heat_cell(ba), _heat_cell(on)],
+        ["新策略拒绝", _heat_cell(ob), _heat_cell(bd)],
+    ]
     tables = [
         {
-            "title": "2×2 决策一致性矩阵",
-            "columns": ["", "基线通过", "基线拒绝"],
-            "rows": [
-                ["新策略通过", f"{ba_c}（坏率{ba_b}）", f"{on_c}（坏率{on_b}）"],
-                ["新策略拒绝", f"{ob_c}（坏率{ob_b}）", f"{bd_c}（坏率{bd_b}）"],
-            ],
+            "title": "swap 2×2 坏率热力（含样本数）",
+            "columns": heat_columns,
+            "rows": heat_rows,
+            "column_specs": [{"kind": "text"}, {"kind": "matrix-heat"}, {"kind": "matrix-heat"}],
         },
         {
-            "title": "关键差异",
-            "columns": ["指标", "delta"],
+            "title": "关键指标并排（挑战者 vs 基线）",
+            "columns": ["指标", "挑战者−基线", "方向"],
             "rows": [
-                ["审批率", _pct(deltas.get("approval_rate"))],
-                ["通过坏率", _pct(deltas.get("approved_bad_rate"))],
-                ["预期利润", _num(deltas.get("expected_profit"))],
+                ["审批率", _pct(deltas.get("approval_rate")), _delta_arrow(deltas.get("approval_rate"))],
+                ["通过坏率", _pct(deltas.get("approved_bad_rate")), _delta_arrow(deltas.get("approved_bad_rate"), lower_is_better=True)],
+                ["预期利润", _num(deltas.get("expected_profit")), _delta_arrow(deltas.get("expected_profit"))],
             ],
         },
     ]
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _heat_cell(cell: dict) -> float:
+    """matrix-heat value for a swap cell: its approved bad rate (0..1). The count is
+    kept in the label the frontend renders alongside the heat chip."""
+    try:
+        return float(cell.get("bad_rate") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _delta_word(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "持平"
+    if number > 0:
+        return "上升"
+    if number < 0:
+        return "下降"
+    return "持平"
+
+
+def _delta_arrow(value, *, lower_is_better: bool = False) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "持平"
+    if number == 0:
+        return "持平"
+    improved = (number < 0) if lower_is_better else (number > 0)
+    direction = "↑" if number > 0 else "↓"
+    return f"{direction} {'更优' if improved else '更差'}"
+
+
+def _compare_conclusion_line(deltas: dict) -> str:
+    """Templated Chinese conclusion — every number comes straight from the tool's
+    deltas (INV-1: presentation only). Empty when there is no delta to talk about."""
+    if not deltas:
+        return ""
+    approval = deltas.get("approval_rate")
+    bad = deltas.get("approved_bad_rate")
+    profit = deltas.get("expected_profit")
+    if approval is None and bad is None and profit is None:
+        return ""
+    approval_word = _delta_word(approval)
+    bad_word = _delta_word(bad)
+    return (
+        f"结论：挑战者在通过率{approval_word} {abs(float(approval or 0)) * 100:.1f}pp 下，"
+        f"通过客群坏率{bad_word} {abs(float(bad or 0)) * 100:.2f}pp，"
+        f"预期利润变动 {float(profit or 0):.2f}。"
+    )
+
+
+def _render_limit_pricing_matrix(o: dict):
+    matrix = [cell for cell in (o.get("matrix") or []) if isinstance(cell, dict)]
+    recommended = [item for item in (o.get("recommended") or []) if isinstance(item, dict)]
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    reco_keys = {
+        (str(item.get("band")), _num(item.get("limit")), _num(item.get("rate")))
+        for item in recommended
+    }
+    text = (
+        f"**额度×定价矩阵完成**：{len(matrix)} 个 band×额度×定价单元，"
+        f"推荐 {len(recommended)} 档（每带利润最大可行档）。"
+    )
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红旗：{names}。"
+
+    def _cell_row(cell: dict) -> list:
+        key = (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate")))
+        recommended_mark = "★" if key in reco_keys else ""
+        profit = cell.get("expected_profit")
+        # Negative-profit cells are red-染 by prefixing a marker the frontend maps to
+        # the warning skin; recommended cells carry a ★ and are hoisted to the top.
+        profit_text = _num(profit)
+        try:
+            if profit is not None and float(profit) < 0:
+                profit_text = f"⚠{profit_text}"
+        except (TypeError, ValueError):
+            pass
+        return [
+            f"{recommended_mark}{cell.get('band', '')}",
+            _num(cell.get("limit")),
+            _pct(cell.get("rate")),
+            _fmt(cell.get("count")),
+            _pct(cell.get("pd")),
+            _num(cell.get("el")),
+            profit_text,
+            _pct(cell.get("roa")),
+            "是" if cell.get("feasible") else "否",
+        ]
+
+    # Recommended cells first (置顶), then the rest in stable order.
+    reco_cells = [
+        cell for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) in reco_keys
+    ]
+    other_cells = [
+        cell for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) not in reco_keys
+    ]
+    tables = [{
+        "title": "额度×定价矩阵（★为推荐档，⚠为负利润）",
+        "columns": ["band", "额度", "年化", "样本数", "PD", "EL", "预期利润", "ROA", "可行"],
+        "rows": [_cell_row(cell) for cell in [*reco_cells, *other_cells]],
+    }]
     if red_flags:
         tables.append(_red_flag_table(red_flags))
     return text, tables
@@ -760,6 +877,23 @@ def _render_adopt_strategy(o: dict):
             "columns": ["策略 id"],
             "rows": [[item] for item in retired],
         })
+    return text, tables
+
+
+def _render_challenger_report(o: dict):
+    status = str(o.get("status") or "")
+    artifacts = [a for a in (o.get("artifacts") or []) if isinstance(a, dict)]
+    if status == "no_baseline":
+        return "**挑战者对比报告**：未提供基线（champion）策略，已跳过报告。", []
+    text = (
+        f"**挑战者对比报告已生成**：`{o.get('report_path', '')}`，"
+        f"登记 {len(artifacts)} 份交付物。"
+    )
+    tables = [{
+        "title": "交付物",
+        "columns": ["类型", "路径"],
+        "rows": [[str(a.get("kind", "")), str(a.get("path", ""))] for a in artifacts],
+    }]
     return text, tables
 
 
@@ -1449,8 +1583,10 @@ _RENDERERS = {
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
     "compare_strategies": _render_compare_strategies,
+    "limit_pricing_matrix": _render_limit_pricing_matrix,
     "adopt_strategy": _render_adopt_strategy,
     "render_strategy_doc": _render_strategy_doc,
+    "render_challenger_report": _render_challenger_report,
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
