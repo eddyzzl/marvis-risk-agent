@@ -158,7 +158,7 @@
 |---|---|---|---|
 | ✅ | S2 | 按 spec 四 commit 落地（Commit2=`24578b3f`/Commit3=`cf7f47de`/Commit4=`1dbf91b1`+版本化持久化 commit）：strategies 版本/状态/谱系列+strategy_artifacts 表（原子采纳 CAS+自动退役）、design_cutoff_bands 五类红旗、tradeoff 可行域、compare 2×2、adopt 强制门+决策表 CSV+监控计划 JSON、STRATEGY_DEVELOPMENT 七步四门模板、strategy_experience 记忆 kind+ARCH-4 发现的 MEM-1 kwargs 缺口修复；133 验证于合并树 | 5–8天 |
 | ⬜ | DOM-12 | （并入 S2）运营点约束不可行时静默回退；fuzzy 拒绝推断忽略逐件分数 | Low/S |
-| ⬜ | S3 | 组合分析套件：**前置 NEW-1 cum_bad_rate**；新建 packs/analysis（已拍板）；vintage/roll-rate 升级 + flow/migration + segment_profile + PORTFOLIO_ANALYSIS + 表现期契约（含 balance/EAD）+ 合成表现数据生成脚本（兼解 UX-9） | 5–8天 |
+| ✅ | S3 | 四 commit 落地（`f5715373`/`6d82bdb2`/`d269d512`/`2d852674`）：表现期契约+马尔可夫合成快照、packs/analysis 新包（flow_rate/bucket_migration/segment_profile/expected_loss_estimate 吸收链手算断言）、PSI/CSI 趋势与 monitor_run 同内核、PORTFOLIO_ANALYSIS 并行模板+states 人工确认门+组合报告 xlsx | 5–8天 |
 | ⬜ | DOM-8 | （并入 S3）Roll-rate 缺月盲视、无余额口径、period 硬编码 | Med/M |
 | ⬜ | DOM-11 | （并入 S2/S3）swap/bad rate 空集显示 0.0%、缺标签覆盖率口径 | Low/S |
 | ✅ | UX-9 | 一键示例数据首跑（`bd274e71`）：sample_data.py + POST /api/sample-data + 欢迎页入口；S3 的合成表现数据脚本仍随 S3 批次补充 | Med/M |
@@ -195,7 +195,7 @@
 
 | 状态 | ID | 事项 | 工作量 |
 |---|---|---|---|
-| ⬜ | S4 | 规则策略：mine_rules + evaluate_rule_set（瀑布）+ RULE_STRATEGY + 规则控件（口径钉子先拍板：排序键/最小支持度/去重） | 4–6天 |
+| ✅ | S4 | 两 commit 落地（`8a6a5ed6`/`a4ce4162`）：双通道挖掘（树路径+单变量，确定性）、瀑布评估+重叠矩阵、三方共享条件求值（往返锁）、RULE_STRATEGY 模板+「选 1,3,5」规则集门+采纳面复用 S2；e2e 含门覆盖重跑 | 4–6天 |
 | ⬜ | S5 | 监控闭环与定期报告：MONITORING_RUN + 稳定性趋势 + expected_loss_estimate（EL≈EAD×PD_chain×LGD）+ portfolio_report + 告警门 | 3–5天 |
 | ⬜ | S6 | 即席分析（对话 turn 先行，slice_aggregate 白名单）+ limit_pricing_matrix（已拍板本期做）+ compare_strategies 呈现 | 5–8天 |
 
@@ -288,8 +288,8 @@
 
 | 状态 | ID | 事项 | 来源 |
 |---|---|---|---|
-| ✅ | LT-1 | fixtures 扩面（`7222b2d8`）：三步预处理链导出一致性、单特征 PMML、policy 部分满足端到端、SEL-7 模型卡呈现；**挖出 2 真 bug**（_apply_cap 只读数组崩溃、模型卡吞 warnings）已 xfail 钉住转修复分支 | 追踪器 |
-| ✅ | LT-2 | AUTO 安全矩阵（`26f3d01d`）：五门 bare-confirm 阻断矩阵、stale token AUTO 路径、GAP-4 字典注入×阻断组合；**挖出严重 bug：risk_flags 结构性死代码**（envelope 从不设旗、composer 从不写 meta，真实交付门裸 confirm 放行）已 xfail 钉住转修复分支；另确认 stale-control 唯一机制=expected_step_id 比对（无独立 nonce） | 追踪器 |
+| ✅ | LT-1 | fixtures 扩面（`7222b2d8`）：三步预处理链导出一致性、单特征 PMML、policy 部分满足端到端、SEL-7 模型卡呈现；**挖出 2 真 bug**（_apply_cap 只读数组崩溃、模型卡吞 warnings）已修复（`99e6ca8b`/`f9f15378`）xfail 转正 | 追踪器 |
+| ✅ | LT-2 | AUTO 安全矩阵（`26f3d01d`）：五门 bare-confirm 阻断矩阵、stale token AUTO 路径、GAP-4 字典注入×阻断组合；**挖出严重 bug：risk_flags 结构性死代码**（envelope 从不设旗、composer 从不写 meta，真实交付门裸 confirm 放行）已修复（`7541db3d`：信封四路推导 risk_flags+composer 落 meta，纯信息门不设旗防过阻断）xfail 转正；另确认 stale-control 唯一机制=expected_step_id 比对 | 追踪器 |
 | ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
 | ⬜ | LT-4 | 失败/重试 UX 的 per-tool schema 表单 adapters（JSON fallback 已有）；smoke 发现：retry inputs 是整体替换非合并——表单实现前先在前端 JSON 编辑器旁明示该语义 | 追踪器+6-28 |
 | ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
