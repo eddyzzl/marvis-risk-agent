@@ -1202,7 +1202,7 @@ def _render_flow_rate(o: dict):
             "rows": [[str(r.get("month") or ""), _fmt(r.get("into_bad")), _fmt(r.get("out_of_bad"))] for r in net_flows],
         })
     if red_flags:
-        tables.append(_red_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags))
     return text, tables
 
 
@@ -1227,7 +1227,7 @@ def _render_bucket_migration(o: dict):
             "column_specs": column_specs,
         })
     if red_flags:
-        tables.append(_red_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags))
     return text, tables
 
 
@@ -1257,7 +1257,7 @@ def _render_segment_profile(o: dict):
             ],
         })
     if red_flags:
-        tables.append(_red_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags))
     return text, tables
 
 
@@ -1280,7 +1280,7 @@ def _render_el_estimate(o: dict):
             "rows": [[str(r.get("month") or ""), _fmt(r.get("balance")), _fmt(r.get("expected_loss"))] for r in el_by_month],
         })
     if red_flags:
-        tables.append(_red_flag_table(red_flags))
+        tables.append(_data_quality_flag_table(red_flags))
     return text, tables
 
 
@@ -1313,7 +1313,7 @@ def _render_portfolio_gate_summary(o: dict):
     return text, tables
 
 
-def _red_flag_table(red_flags: list[dict]) -> dict:
+def _data_quality_flag_table(red_flags: list[dict]) -> dict:
     return {
         "title": "数据质量红旗",
         "columns": ["类型", "说明"],
