@@ -3675,6 +3675,23 @@ function renderCellByKind(spec, value, context) {
         html: `<span class="heat-chip" data-tip="${escapeHtml(tip)}" style="--heat:${heat}">${escapeHtml(String(value ?? ""))}</span>`,
       };
     }
+    case "matrix-heat": {
+      // S3: NxN migration/flow matrix cell. Colors from the cell's own 0..1
+      // value (a transition/migration rate), reusing the percent-heat chip skin
+      // and color scale. Self-contained -- no precomputed per-row heatColors,
+      // since a matrix column's heat is the cell value itself.
+      const numeric = parseNumeric(value);
+      if (numeric === null) {
+        return { cls: "cell-text", html: escapeHtml(String(value ?? "")) };
+      }
+      const heat = Math.max(0, Math.min(1, numeric));
+      const display = (numeric >= 0 && numeric <= 1) ? `${(numeric * 100).toFixed(1)}%` : String(value);
+      const tip = `${headerLabel} ${display}`;
+      return {
+        cls: "cell-heat",
+        html: `<span class="heat-chip" data-tip="${escapeHtml(tip)}" style="--heat:${heat}">${escapeHtml(display)}</span>`,
+      };
+    }
     case "psi": {
       const numeric = parseNumeric(value);
       const thresholds = (spec && spec.thresholds) || [0.02, 0.10];

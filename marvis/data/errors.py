@@ -171,6 +171,45 @@ class InvalidDatasetPathError(DataSecurityError):
     unsupported extension, or escapes the expected location)."""
 
 
+class PerformanceFrameError(DataLayerError):
+    """S3: raised when a performance (表现期快照) frame violates its minimum
+    column contract (missing column, unparseable snapshot month, bucket value
+    outside the declared ``states``, or unparseable balance).
+
+    Mirrors NanLabelNotConfirmedError's typed-error + ``to_detail()`` pattern so
+    the structured diagnostics (中文 reason + 截断样例值) cross the subprocess
+    boundary as data instead of free text. ``problem`` is the machine-readable
+    sub-kind; ``missing_columns`` / ``column`` / ``samples`` are populated per
+    problem so a caller (or a gate) never has to parse the message.
+    """
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        problem: str,
+        missing_columns: list[str] | None = None,
+        column: str | None = None,
+        samples: list | None = None,
+    ) -> None:
+        self.reason = str(reason)
+        self.problem = str(problem)
+        self.missing_columns = list(missing_columns or [])
+        self.column = str(column) if column else None
+        self.samples = list(samples or [])
+        super().__init__(self.reason)
+
+    def to_detail(self) -> dict:
+        return {
+            "kind": "performance_frame_invalid",
+            "problem": self.problem,
+            "reason": self.reason,
+            "missing_columns": self.missing_columns,
+            "column": self.column,
+            "samples": [str(sample) for sample in self.samples],
+        }
+
+
 __all__ = [
     "DataBackendError",
     "DataIngestError",
@@ -182,5 +221,6 @@ __all__ = [
     "InvalidDatasetPathError",
     "JoinNotConfirmedError",
     "NanLabelNotConfirmedError",
+    "PerformanceFrameError",
     "ScoreDirectionConflictError",
 ]

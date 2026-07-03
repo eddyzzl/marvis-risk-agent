@@ -26,6 +26,7 @@ TASK_TYPE_DATA_JOIN = "data_join"
 TASK_TYPE_MODELING = "modeling"
 TASK_TYPE_STRATEGY = "strategy"
 TASK_TYPE_VINTAGE = "vintage"
+TASK_TYPE_PORTFOLIO = "portfolio"
 # Known task types. New capabilities (modeling/strategy/...) must register here
 # so _normalize_task_type can keep arbitrary strings out of the database.
 VALID_TASK_TYPES = frozenset({
@@ -35,6 +36,7 @@ VALID_TASK_TYPES = frozenset({
     TASK_TYPE_MODELING,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VINTAGE,
+    TASK_TYPE_PORTFOLIO,
 })
 
 

@@ -42,7 +42,7 @@ from marvis.db import DatasetRepository, TaskRepository
 
 
 router = APIRouter(prefix="/api", tags=["data"])
-DATASET_ROLES = {"sample", "feature", "derived", "unknown"}
+DATASET_ROLES = {"sample", "feature", "derived", "performance", "unknown"}
 DATASET_PREVIEW_MAX_ROWS = 500
 DEDUP_STRATEGIES = {None, "first", "last", "agg_mean", "agg_max"}
 # TST-2: chunk size for streaming an upload to disk instead of reading the
