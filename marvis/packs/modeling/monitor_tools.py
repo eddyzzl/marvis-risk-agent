@@ -327,6 +327,28 @@ def _monitor_run_score_psi_check(scores: np.ndarray, baseline: dict, spec: dict)
     }
 
 
+def _feature_csi_expected(feature_baseline: dict, bin_count: int) -> np.ndarray:
+    """FIN-3 #2: the CSI expected (train-time) distribution for one feature.
+
+    Prefer the actual per-bin train proportions stored at training time
+    (``bin_proportions``); equal-frequency edges are only uniform when values are
+    distinct, so a feature with many repeated values collapses np.unique edges and
+    its surviving bins are NOT equal-sized -- uniform(1/bin) would then be wrong.
+    Falls back to uniform for older baselines that predate the stored key or whose
+    stored length no longer matches the (possibly re-derived) edge count, so old
+    experiments read back byte-for-byte unchanged.
+    """
+    uniform = np.full(bin_count, 1.0 / bin_count, dtype=float)
+    stored = feature_baseline.get("bin_proportions")
+    if not isinstance(stored, (list, tuple)) or len(stored) != bin_count:
+        return uniform
+    expected = np.asarray(stored, dtype=float)
+    total = float(expected.sum())
+    if not np.isfinite(total) or total <= 0:
+        return uniform
+    return expected / total
+
+
 def _monitor_run_feature_csi_checks(
     frame: pd.DataFrame, feature_list: tuple[str, ...], baseline: dict, spec: dict
 ) -> tuple[list[dict], list[dict]]:
@@ -345,7 +367,7 @@ def _monitor_run_feature_csi_checks(
             continue
         actual_dist = bin_distribution(finite_values, edges)
         bin_count = edges.size - 1
-        expected_dist = np.full(bin_count, 1.0 / bin_count, dtype=float)
+        expected_dist = _feature_csi_expected(feature_baseline, bin_count)
         csi = compute_psi(expected_dist, actual_dist)
         rows.append({"feature": str(feature), "csi": float(csi), "sample_count": int(finite_values.size)})
     rows.sort(key=lambda item: (-item["csi"], item["feature"]))

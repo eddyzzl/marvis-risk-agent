@@ -267,3 +267,61 @@ def test_monitor_run_requires_dataset_id_or_scored_dataset_id(tmp_path):
     )
     assert result.ok is False
     assert "dataset_id" in result.error
+
+
+# -- FIN-3 #2: feature CSI expectation uses stored train bin proportions ---------
+def test_feature_csi_uses_stored_bin_proportions_for_degenerate_feature():
+    """A feature whose equal-frequency edges collapse (many repeated values) has a
+    NON-uniform train-time bin occupancy. The stored bin_proportions must drive the
+    CSI expectation, and it must differ from the uniform(1/bin) result -- proving the
+    fix changes the number, not just the plumbing. Hand-computed below."""
+    import numpy as np
+
+    from marvis.packs.modeling.monitor_tools import (
+        _feature_csi_expected,
+        _monitor_run_feature_csi_checks,
+    )
+    from marvis.validation.binning import bin_distribution, compute_psi
+
+    # 3 surviving bins after edge collapse; train occupancy heavily skewed to bin 0.
+    edges = np.array([-np.inf, 0.5, 1.5, np.inf], dtype=float)
+    bin_count = edges.size - 1
+    baseline_feature = {
+        "quantile_edges": [float(v) for v in edges],
+        "bin_proportions": [0.7, 0.2, 0.1],
+    }
+
+    expected = _feature_csi_expected(baseline_feature, bin_count)
+    assert list(expected) == pytest.approx([0.7, 0.2, 0.1])
+
+    # New sample: mostly bin 1 -- big shift away from the (0.7,0.2,0.1) train baseline.
+    sample = np.array([1.0, 1.0, 1.0, 1.0, 0.0, 2.0], dtype=float)
+    actual = bin_distribution(sample, edges)
+    csi_stored = compute_psi(expected, actual)
+    csi_uniform = compute_psi(np.full(bin_count, 1.0 / bin_count), actual)
+    # The stored-proportion CSI is the correct number and differs materially from the
+    # old uniform-expectation CSI on this degenerate feature.
+    assert csi_stored != pytest.approx(csi_uniform)
+    assert csi_stored > 0.0
+
+    # End-to-end through the check builder: it must pick up the stored proportions.
+    frame = pd.DataFrame({"feat": sample})
+    baseline = {"feature_distributions": {"feat": baseline_feature}}
+    spec = {"label": "特征 CSI", "direction": "max", "warn": 0.1, "fail": 0.25}
+    summary, rows = _monitor_run_feature_csi_checks(frame, ("feat",), baseline, spec)
+    assert rows and rows[0]["feature"] == "feat"
+    assert rows[0]["csi"] == pytest.approx(csi_stored)
+
+
+def test_feature_csi_falls_back_to_uniform_for_old_baseline_without_bin_proportions():
+    """Older baselines predate the stored bin_proportions key. The CSI expectation
+    must fall back to uniform(1/bin) for them, so old experiments monitor unchanged."""
+    from marvis.packs.modeling.monitor_tools import _feature_csi_expected
+
+    legacy_feature = {"quantile_edges": [float("-inf"), 0.5, 1.5, float("inf")]}
+    expected = _feature_csi_expected(legacy_feature, 3)
+    assert list(expected) == pytest.approx([1.0 / 3, 1.0 / 3, 1.0 / 3])
+
+    # A stored length that no longer matches the edge count also falls back to uniform.
+    mismatched = {"bin_proportions": [0.5, 0.5]}
+    assert list(_feature_csi_expected(mismatched, 3)) == pytest.approx([1.0 / 3] * 3)

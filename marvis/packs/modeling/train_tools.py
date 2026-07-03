@@ -804,6 +804,18 @@ def _compute_baseline_distributions(
             "sample_count": int(finite_values.size),
             "missing_rate": float(1.0 - finite_values.size / values.size) if values.size else 0.0,
             "quantile_edges": [float(value) for value in quantiles],
+            # FIN-3 #2: store the feature's ACTUAL train-time bin proportions under
+            # these quantile edges. Equal-frequency edges make the distribution
+            # uniform only when values are distinct; a feature with many repeated
+            # values collapses np.unique edges so the surviving bins are NOT equal-
+            # sized, and monitor_run's CSI uniform(1/bin) expectation would be wrong.
+            # bin_distribution is computed against the same collapsed edges, so its
+            # length matches quantile_edges (len(edges)-1) and gives the true baseline
+            # occupancy. Older snapshots lack this key; monitor_run falls back to
+            # uniform for them (see _monitor_run_feature_csi_checks).
+            "bin_proportions": [
+                float(value) for value in bin_distribution(finite_values, quantiles)
+            ],
         }
 
     return {
