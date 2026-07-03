@@ -308,6 +308,188 @@ export function renderSparklineSvg(series, currentValue) {
     + `</svg>`;
 }
 
+// VD-4: probability-calibration reliability curve. Reuses the roc-card plot
+// framework (fixed viewBox, PAD-based plot rect, diagonal reference line,
+// hover readout) so the same visual language covers ROC/KS and calibration.
+// Renders only the "raw" reliability points (pre-calibration, the version a
+// reviewer checks against the diagonal) -- points already carry sample_count
+// so bubble size communicates bin weight without a second data pass.
+export function renderCalibrationCard(chart) {
+  const points = (chart && chart.points) || [];
+  const W = 280, H = 240, PAD = 28;
+  const plot = { x: PAD, y: PAD - 4, w: W - PAD - 8, h: H - PAD - 14 };
+  if (points.length === 0) {
+    return `<div class="calibration-card"><div class="result-summary empty">暂无校准数据</div></div>`;
+  }
+  const xOf = (v) => plot.x + Math.max(0, Math.min(1, v)) * plot.w;
+  const yOf = (v) => plot.y + (1 - Math.max(0, Math.min(1, v))) * plot.h;
+  const sorted = [...points].sort((a, b) => a.avg_predicted_pd - b.avg_predicted_pd);
+  const xs = sorted.map((p) => p.avg_predicted_pd);
+  const ys = sorted.map((p) => p.observed_bad_rate);
+  const linePath = xs.map((x, i) => `${i === 0 ? "M" : "L"}${xOf(x).toFixed(2)},${yOf(ys[i]).toFixed(2)}`).join(" ");
+  const diagonalPath = `M${xOf(0)},${yOf(0)} L${xOf(1)},${yOf(1)}`;
+
+  const gridLines = [0.25, 0.5, 0.75].map((t) =>
+    `<line class="roc-grid-line" x1="${xOf(t).toFixed(2)}" y1="${plot.y}" x2="${xOf(t).toFixed(2)}" y2="${plot.y + plot.h}"></line>`
+    + `<line class="roc-grid-line" x1="${plot.x}" y1="${yOf(t).toFixed(2)}" x2="${plot.x + plot.w}" y2="${yOf(t).toFixed(2)}"></line>`
+  ).join("");
+  const xLabels = [0, 0.5, 1].map((t) =>
+    `<text class="roc-axis-label" x="${xOf(t).toFixed(2)}" y="${H - 2}" text-anchor="middle" font-size="9">${t}</text>`
+  ).join("");
+  const yLabels = [0, 0.5, 1].map((t) =>
+    `<text class="roc-axis-label" x="${plot.x - 4}" y="${(yOf(t) + 3).toFixed(2)}" text-anchor="end" font-size="9">${t}</text>`
+  ).join("");
+
+  // Points that deviate from perfect calibration (predicted != actual) are
+  // emphasized with the PSI warn/critical palette instead of the neutral
+  // accent -- a point exactly on the diagonal needs no visual call-out.
+  const markers = sorted.map((p, i) => {
+    const gap = Math.abs(p.avg_predicted_pd - p.observed_bad_rate);
+    const tier = gap >= 0.1 ? "critical" : gap >= 0.05 ? "warn" : "stable";
+    const tip = `预测 ${(p.avg_predicted_pd * 100).toFixed(1)}% · 实际 ${(p.observed_bad_rate * 100).toFixed(1)}% · n=${p.sample_count ?? "-"}`;
+    return `<circle class="calibration-point" data-tier="${tier}" data-index="${i}" cx="${xOf(p.avg_predicted_pd).toFixed(2)}" cy="${yOf(p.observed_bad_rate).toFixed(2)}" r="3.6" data-tip="${escapeHtml(tip)}"></circle>`;
+  }).join("");
+
+  const brierRaw = chart.brier_raw;
+  const eceRaw = chart.ece_raw;
+  const summaryTip = `Brier=${brierRaw === null || brierRaw === undefined ? "-" : Number(brierRaw).toFixed(4)}`
+    + ` · ECE=${eceRaw === null || eceRaw === undefined ? "-" : Number(eceRaw).toFixed(4)}`;
+
+  return [
+    `<div class="calibration-card">`,
+    `  <div class="roc-card-header">`,
+    `    <span class="roc-card-split">可靠性曲线</span>`,
+    `    <span class="roc-card-ks" data-tip="${escapeHtml(summaryTip)}">${escapeHtml(summaryTip)}</span>`,
+    `  </div>`,
+    `  <svg class="roc-svg calibration-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="概率校准可靠性曲线"`,
+    `       data-cal-x="${escapeHtml(JSON.stringify(xs))}" data-cal-y="${escapeHtml(JSON.stringify(ys))}"`,
+    `       data-roc-plot-x="${plot.x}" data-roc-plot-y="${plot.y}" data-roc-plot-w="${plot.w}" data-roc-plot-h="${plot.h}">`,
+    `    ${gridLines}`,
+    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y + plot.h}" x2="${plot.x + plot.w}" y2="${plot.y + plot.h}"></line>`,
+    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y}" x2="${plot.x}" y2="${plot.y + plot.h}"></line>`,
+    `    <path class="roc-curve roc-curve-baseline" data-series="baseline" d="${diagonalPath}"></path>`,
+    `    <path class="roc-curve calibration-curve-line" d="${linePath}"></path>`,
+    markers,
+    `    <line class="roc-crosshair roc-crosshair-x" x1="0" y1="0" x2="0" y2="0" style="display:none"></line>`,
+    `    ${xLabels}`,
+    `    ${yLabels}`,
+    `  </svg>`,
+    `  <div class="roc-readout calibration-readout" data-cal-readout>移动鼠标到图上查看预测概率 / 实际坏率</div>`,
+    `</div>`,
+  ].join("");
+}
+
+// VD-4: score-band distribution -- grouped bars for sample_count (left axis)
+// with a bad-rate line overlaid on a normalized right axis (bad_rate's own
+// max), following the sparkline's simple polyline style rather than the
+// ROC card's crosshair interaction (bars carry their own per-band hover).
+export function renderScoreBandCard(chart) {
+  const bands = (chart && chart.bands) || [];
+  const W = 320, H = 220, PAD_L = 34, PAD_R = 30, PAD_T = 14, PAD_B = 34;
+  const plot = { x: PAD_L, y: PAD_T, w: W - PAD_L - PAD_R, h: H - PAD_T - PAD_B };
+  if (bands.length === 0) {
+    return `<div class="score-band-card"><div class="result-summary empty">暂无分段数据</div></div>`;
+  }
+  const counts = bands.map((b) => Number(b.sample_count) || 0);
+  const rates = bands.map((b) => (b.bad_rate === null || b.bad_rate === undefined ? 0 : Number(b.bad_rate)));
+  const maxCount = Math.max(...counts, 1);
+  const maxRate = Math.max(...rates, 1e-6);
+
+  const bandWidth = plot.w / bands.length;
+  const barGap = Math.min(6, bandWidth * 0.18);
+  const barWidth = Math.max(2, bandWidth - barGap);
+  const yCount = (v) => plot.y + plot.h - (v / maxCount) * plot.h;
+  const yRate = (v) => plot.y + plot.h - (v / maxRate) * plot.h;
+  const xCenter = (i) => plot.x + i * bandWidth + bandWidth / 2;
+
+  const bars = bands.map((b, i) => {
+    const count = counts[i];
+    const barX = xCenter(i) - barWidth / 2;
+    const barY = yCount(count);
+    const barH = Math.max(0, plot.y + plot.h - barY);
+    const tip = `分箱${b.bin ?? i + 1} · 样本量 ${count} · 坏率 ${(rates[i] * 100).toFixed(2)}%`;
+    return `<rect class="score-band-bar" data-index="${i}" x="${barX.toFixed(2)}" y="${barY.toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barH.toFixed(2)}" data-tip="${escapeHtml(tip)}"></rect>`;
+  }).join("");
+
+  const linePath = bands.map((b, i) => `${i === 0 ? "M" : "L"}${xCenter(i).toFixed(2)},${yRate(rates[i]).toFixed(2)}`).join(" ");
+  const linePoints = bands.map((b, i) =>
+    `<circle class="score-band-rate-point" data-index="${i}" cx="${xCenter(i).toFixed(2)}" cy="${yRate(rates[i]).toFixed(2)}" r="2.6" data-tip="坏率 ${(rates[i] * 100).toFixed(2)}%"></circle>`
+  ).join("");
+
+  const xLabels = bands.map((b, i) =>
+    `<text class="roc-axis-label score-band-x-label" x="${xCenter(i).toFixed(2)}" y="${H - PAD_B + 12}" text-anchor="middle" font-size="8">${escapeHtml(String(b.bin ?? i + 1))}</text>`
+  ).join("");
+  const yCountLabels = [0, 0.5, 1].map((t) =>
+    `<text class="roc-axis-label" x="${plot.x - 4}" y="${(yCount(t * maxCount) + 3).toFixed(2)}" text-anchor="end" font-size="8">${Math.round(t * maxCount)}</text>`
+  ).join("");
+  const yRateLabels = [0, 0.5, 1].map((t) =>
+    `<text class="roc-axis-label" x="${plot.x + plot.w + 4}" y="${(yRate(t * maxRate) + 3).toFixed(2)}" text-anchor="start" font-size="8">${(t * maxRate * 100).toFixed(1)}%</text>`
+  ).join("");
+
+  return [
+    `<div class="score-band-card" data-split="${escapeHtml(chart.split || "")}">`,
+    `  <div class="roc-card-header">`,
+    `    <span class="roc-card-split">${escapeHtml(chart.split || "")} 分段分布</span>`,
+    `    <span class="score-band-legend">`,
+    `      <span class="score-band-legend-item"><i class="score-band-legend-bar"></i>样本量</span>`,
+    `      <span class="score-band-legend-item"><i class="score-band-legend-line"></i>坏率</span>`,
+    `    </span>`,
+    `  </div>`,
+    `  <svg class="roc-svg score-band-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="分数分段样本量与坏率">`,
+    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y + plot.h}" x2="${plot.x + plot.w}" y2="${plot.y + plot.h}"></line>`,
+    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y}" x2="${plot.x}" y2="${plot.y + plot.h}"></line>`,
+    bars,
+    `    <path class="score-band-rate-line" d="${linePath}"></path>`,
+    linePoints,
+    xLabels,
+    yCountLabels,
+    yRateLabels,
+    `    <text class="roc-axis-label" x="${plot.x}" y="${PAD_T - 4}" text-anchor="start" font-size="8">样本量</text>`,
+    `    <text class="roc-axis-label" x="${plot.x + plot.w}" y="${PAD_T - 4}" text-anchor="end" font-size="8">坏率</text>`,
+    `  </svg>`,
+    `</div>`,
+  ].join("");
+}
+
+// Shared hover readout for the calibration curve, mirroring attachRocInteractions'
+// crosshair pattern but simplified to a single-series x-axis (predicted PD).
+export function attachCalibrationInteractions(rootEl) {
+  if (!rootEl) return;
+  rootEl.querySelectorAll(".calibration-card").forEach((card) => {
+    const svg = card.querySelector(".calibration-svg");
+    const readout = card.querySelector("[data-cal-readout]");
+    if (!svg) return;
+    const xs = JSON.parse(svg.getAttribute("data-cal-x") || "[]");
+    const ys = JSON.parse(svg.getAttribute("data-cal-y") || "[]");
+    const px = Number(svg.getAttribute("data-roc-plot-x"));
+    const pw = Number(svg.getAttribute("data-roc-plot-w"));
+    const xLine = svg.querySelector(".roc-crosshair-x");
+
+    const hide = () => {
+      if (xLine) xLine.style.display = "none";
+      if (readout) readout.textContent = "移动鼠标到图上查看预测概率 / 实际坏率";
+    };
+
+    svg.addEventListener("mousemove", (event) => {
+      const rect = svg.getBoundingClientRect();
+      const viewBox = svg.viewBox.baseVal;
+      const xViewbox = ((event.clientX - rect.left) / rect.width) * viewBox.width;
+      const predicted = (xViewbox - px) / pw;
+      if (predicted < 0 || predicted > 1 || xs.length === 0) { hide(); return; }
+      let nearestIdx = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < xs.length; i++) {
+        const d = Math.abs(xs[i] - predicted);
+        if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+      }
+      if (readout) {
+        readout.textContent = `预测 ${(xs[nearestIdx] * 100).toFixed(1)}%  ·  实际 ${(ys[nearestIdx] * 100).toFixed(1)}%`;
+      }
+    });
+    svg.addEventListener("mouseleave", hide);
+  });
+}
+
 export function renderRocKsCurve(table = {}) {
   const curves = table.curves || {};
   const splits = ["train", "test", "oot"].filter((split) => curves[split]);

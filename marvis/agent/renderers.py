@@ -464,7 +464,109 @@ def _render_report(o: dict):
                 for section in sections
             ],
         })
+    calibration_table = _calibration_table(o.get("calibration"))
+    if calibration_table:
+        tables.append(calibration_table)
+    score_band_table = _score_band_table(o.get("score_bands"))
+    if score_band_table:
+        tables.append(score_band_table)
     return text, tables
+
+
+# VD-4: calibration/score_bands are already produced by generate_model_report
+# (report_tools.py::_artifact_calibration_rows / _score_band_rows) and land in
+# the Excel workbook, but never reached the agent-conversation payload at all
+# -- these two helpers reshape the same numbers (no new computation, INV-1)
+# into the {title, columns, rows, chart} shape agentMessageTablesHtml expects,
+# where `chart` carries the coordinate-ready series for the frontend SVG.
+def _calibration_table(rows) -> dict | None:
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    summary = next((row for row in rows if row.get("score_type") == "summary"), {})
+    points = [
+        row for row in rows
+        if row.get("score_type") == "raw" and row.get("avg_predicted_pd") is not None
+    ]
+    chart = {
+        "kind": "calibration_curve",
+        "points": [
+            {
+                "avg_predicted_pd": float(row["avg_predicted_pd"]),
+                "observed_bad_rate": float(row["observed_bad_rate"]),
+                "sample_count": int(row.get("sample_count") or 0),
+                "bin": row.get("bin"),
+            }
+            for row in points
+            if row.get("observed_bad_rate") is not None
+        ],
+        "brier_raw": summary.get("brier_raw"),
+        "brier_calibrated": summary.get("brier_calibrated"),
+        "ece_raw": summary.get("ece_raw"),
+        "ece_calibrated": summary.get("ece_calibrated"),
+    }
+    table_rows = [row for row in rows if row.get("score_type") in ("raw", "calibrated")]
+    return {
+        "title": "概率校准（可靠性曲线）",
+        "columns": ["类型", "分箱", "预测概率区间", "样本量", "预测均值", "实际坏率", "偏差"],
+        "rows": [
+            [
+                "原始" if row.get("score_type") == "raw" else "校准后",
+                _num(row.get("bin")),
+                f"{_num(row.get('prob_lower'))} - {_num(row.get('prob_upper'))}",
+                _num(row.get("sample_count")),
+                _num(row.get("avg_predicted_pd")),
+                _num(row.get("observed_bad_rate")),
+                _num(row.get("abs_gap")),
+            ]
+            for row in table_rows
+        ],
+        "chart": chart,
+    }
+
+
+def _score_band_table(rows) -> dict | None:
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    # One split at a time reads clearest as a bar+line combo; oot (or the first
+    # split present) mirrors what a risk reviewer checks first for cutoff work.
+    preferred_order = ["oot", "test", "train"]
+    available_splits = {row.get("split") for row in rows}
+    split = next((s for s in preferred_order if s in available_splits), rows[0].get("split"))
+    split_rows = [row for row in rows if row.get("split") == split]
+    split_rows.sort(key=lambda row: row.get("bin") if row.get("bin") is not None else 0)
+    chart = {
+        "kind": "score_band_bars",
+        "split": split,
+        "bands": [
+            {
+                "bin": row.get("bin"),
+                "score_lower": row.get("score_lower"),
+                "score_upper": row.get("score_upper"),
+                "sample_count": row.get("sample_count"),
+                "bad_rate": row.get("bad_rate"),
+            }
+            for row in split_rows
+        ],
+    }
+    return {
+        "title": f"评分分段（{split}）",
+        "columns": ["分箱", "分数区间", "样本量", "坏率", "累计通过率", "累计坏率", "lift"],
+        "rows": [
+            [
+                _num(row.get("bin")),
+                f"{_num(row.get('score_lower'))} - {_num(row.get('score_upper'))}",
+                _num(row.get("sample_count")),
+                _num(row.get("bad_rate")),
+                _num(row.get("cum_count_pct")),
+                _num(row.get("cum_bad_rate")),
+                _num(row.get("lift")),
+            ]
+            for row in split_rows
+        ],
+        "chart": chart,
+    }
 
 
 def _num(value):
