@@ -7,11 +7,12 @@ from pathlib import Path
 import os
 import sys
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from marvis import __version__
+from marvis.errors import not_found
 from marvis.agent_memory.consolidation import (
     CONSOLIDATION_TRIGGERS,
     ConsolidationScheduler,
@@ -436,7 +437,7 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
     def branding_asset(asset_path: str) -> FileResponse:
         asset = resolve_branding_asset(settings.workspace, asset_path)
         if asset is None:
-            raise HTTPException(status_code=404, detail="branding asset not found")
+            raise not_found("branding asset not found")
         return FileResponse(asset)
 
     @app.get("/")

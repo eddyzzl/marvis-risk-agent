@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import re
 
-from fastapi import HTTPException
+from marvis.errors import conflict, not_found, unprocessable
 
 from marvis.db import TaskRepository
 from marvis.domain import TaskRecord
@@ -21,15 +21,12 @@ def get_task_or_404(repo: TaskRepository, task_id: str) -> TaskRecord:
     try:
         return repo.get_task(task_id)
     except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task not found: {task_id}",
-        ) from exc
+        raise not_found(f"Task not found: {task_id}") from exc
 
 
 def reject_if_task_has_active_job(repo: TaskRepository, task_id: str) -> None:
     if repo.task_has_active_job(task_id):
-        raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL)
+        raise conflict(ACTIVE_JOB_DETAIL)
 
 
 def dispatch_platform_hook(
@@ -64,10 +61,7 @@ def task_hook_payload(task: TaskRecord) -> dict:
 
 def validate_model_identifier(field_name: str, value: str) -> None:
     if not MODEL_ID_RE.match(value):
-        raise HTTPException(
-            status_code=422,
-            detail=f"{field_name} contains illegal characters",
-        )
+        raise unprocessable(f"{field_name} contains illegal characters")
 
 
 def normalize_source_dir(source_dir: str, settings) -> Path:
@@ -75,12 +69,9 @@ def normalize_source_dir(source_dir: str, settings) -> Path:
     allowed_roots = allowed_material_roots(settings)
     if not any(path_is_within(root, resolved) for root in allowed_roots):
         allowed = "、".join(str(root) for root in allowed_roots)
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"source_dir must be under an allowed material root: {allowed}. "
-                "Set RMC_MATERIAL_ROOTS to allow another local material directory."
-            ),
+        raise unprocessable(
+            f"source_dir must be under an allowed material root: {allowed}. "
+            "Set RMC_MATERIAL_ROOTS to allow another local material directory."
         )
     return resolved
 

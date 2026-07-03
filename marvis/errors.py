@@ -99,6 +99,11 @@ def precondition_required(detail: str) -> HTTPException:
     return HTTPException(status_code=428, detail=detail)
 
 
+def not_implemented(detail: str) -> HTTPException:
+    """501 -- the requested capability is not wired up yet. ``detail`` verbatim."""
+    return HTTPException(status_code=501, detail=detail)
+
+
 __all__ = [
     "ErrorKind",
     "not_found",
@@ -110,4 +115,5 @@ __all__ = [
     "bad_gateway",
     "server_error",
     "precondition_required",
+    "not_implemented",
 ]

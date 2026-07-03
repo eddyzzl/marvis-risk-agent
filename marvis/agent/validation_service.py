@@ -1,4 +1,4 @@
-from fastapi import HTTPException
+from marvis.errors import conflict, unprocessable
 
 from marvis.agent.orchestrator import (
     agent_cancellation_requested as _agent_cancellation_requested,
@@ -37,7 +37,7 @@ def reset_agent_task_for_rerun(
         "word_conclusion_draft": TaskStatus.WRITING_ARTIFACTS,
     }.get(stage)
     if target_status is None:
-        raise HTTPException(status_code=422, detail=f"unknown rerun stage: {stage}")
+        raise unprocessable(f"unknown rerun stage: {stage}")
     repo.reset_status_for_agent_rerun(
         task_id,
         target_status,
@@ -54,10 +54,7 @@ def require_agent_rerun_stage_reached(task: TaskRecord, stage: str) -> None:
         return
     if agent_rerun_stage_reached(task, stage):
         return
-    raise HTTPException(
-        status_code=409,
-        detail="尚未执行到该阶段，不能重新执行；请先按顺序完成前置验证步骤。",
-    )
+    raise conflict("尚未执行到该阶段，不能重新执行；请先按顺序完成前置验证步骤。")
 
 
 def agent_rerun_stage_reached(task: TaskRecord, stage: str) -> bool:

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import BackgroundTasks, HTTPException, Request
+from fastapi import BackgroundTasks, Request
+
+from marvis.errors import conflict, not_implemented, unprocessable
 
 from marvis.agent.orchestrator import (
     agent_next_stage,
@@ -142,7 +144,7 @@ def require_agent_task(task: TaskRecord, driver_agent_task_types: frozenset[str]
         return
     if task.run_mode == "manual" and task.task_type in driver_agent_task_types:
         return
-    raise HTTPException(status_code=409, detail="task is not in Agent mode")
+    raise conflict("task is not in Agent mode")
 
 
 # Agent task types that have a wired conversational backend today.
@@ -168,12 +170,9 @@ def require_wired_agent_task_type(
     task: TaskRecord, wired_agent_task_types: frozenset[str] = WIRED_AGENT_TASK_TYPES
 ) -> None:
     if task.task_type not in wired_agent_task_types:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f"任务类型 '{task.task_type}' 的 Agent 流程尚未接入"
-                "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / Vintage风险分析）"
-            ),
+        raise not_implemented(
+            f"任务类型 '{task.task_type}' 的 Agent 流程尚未接入"
+            "（当前仅支持 模型验证 / 模型开发 / 数据拼接 / 特征分析 / 策略分析 / Vintage风险分析）"
         )
 
 
@@ -201,7 +200,7 @@ def resolve_agent_model(
     try:
         profile = resolve_llm_model(request.app.state.settings.workspace, model_id, role=role)
     except LLMSettingsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     # An explicit per-request effort wins; otherwise fall back to the value
     # persisted in the model profile (so the UI-configured effort is honored).
     if effort is not None:
@@ -278,7 +277,7 @@ def dispatch_driver_turn(
     try:
         job_id = repo_.start_job(task.id, _DRIVER_JOB_KIND)
     except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=_DRIVER_JOB_BUSY_DETAIL) from exc
+        raise conflict(_DRIVER_JOB_BUSY_DETAIL) from exc
     repo_.mark_job_running(job_id)
     runtime = DriverTurnRuntime(
         settings=request.app.state.settings,
@@ -298,7 +297,7 @@ def dispatch_driver_turn(
         )
     except DriverError as exc:
         repo_.finish_job(job_id, status="failed", error_name="DriverError", error_value=str(exc))
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     except Exception as exc:
         repo_.finish_job(job_id, status="failed", error_name=exc.__class__.__name__, error_value=str(exc))
         raise
@@ -387,10 +386,7 @@ def confirm_agent_report_conclusions(
 ) -> dict:
     latest_task = get_task_or_404(repo_, task_id)
     if latest_task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate report in status {latest_task.status.value}",
-        )
+        raise conflict(f"cannot generate report in status {latest_task.status.value}")
     if expected_revision is None:
         _, expected_revision = repo_.get_report_values(task_id)
     job_id = start_task_job(repo_, task_id, "report")
@@ -411,10 +407,10 @@ def confirm_agent_report_conclusions(
         )
     except ConflictError as exc:
         fail_queued_job(repo_, job_id, exc)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     except ValueError as exc:
         fail_queued_job(repo_, job_id, exc)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     metadata = {
         "revision": revision,
         "confirmed_keys": sorted(text_values),
