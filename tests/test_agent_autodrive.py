@@ -1037,30 +1037,6 @@ _REAL_GATE_ENVELOPE_FIXTURES = [
 ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LT-2 bug: risk_flags is structurally dead in production. "
-        "GateEnvelope.risk_flags is a real dataclass field, round-tripped by "
-        "to_dict()/from_dict(), and _apply_safety_policy/_gate_risk_reason DOES "
-        "check it -- but nothing in the real gate-producing path ever sets it. "
-        "plan_message_composer.gate_message() builds meta without a risk_flags "
-        "key and calls extract_gate_envelope({'metadata': meta}), which falls "
-        "through to gates/contracts.py's infer_gate_envelope(meta) since no "
-        "explicit gate_envelope key is present yet -- and infer_gate_envelope "
-        "has branches for kind=='plan_overview', meta['screen'], meta['dedup'], "
-        "and meta['modeling_setup'], but NONE for meta['model_delivery'] (the "
-        "post_training_action / select_experiment champion-selection gate) and "
-        "none set risk_flags in any branch. Net effect: a bare {action: "
-        "'confirm'} LLM reply on the real post_training_action delivery gate "
-        "(export_pmml + handoff_to_validation already executed, champion about "
-        "to be adopted) sails through _apply_safety_policy completely "
-        "unmodified in AUTO mode -- the exact 'gates that explicitly declare "
-        "human-review risk cannot be auto-confirmed' backstop the function's "
-        "own docstring promises never actually engages for confirm (only for "
-        "adjust, via the separate AUTO_SAFE_ADJUST_CONTROLS allowlist check)."
-    ),
-)
 @pytest.mark.parametrize(("_label", "meta"), _REAL_GATE_ENVELOPE_FIXTURES)
 def test_auto_safety_policy_blocks_bare_confirm_on_real_forced_gates(_label, meta):
     envelope = extract_gate_envelope({"metadata": meta})

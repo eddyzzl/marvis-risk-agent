@@ -65,6 +65,13 @@ class PlanMessageComposer:
             "tables": rendered.tables,
             "kind": "gate",
         }
+        # LT-2: the gate step's own source tool is the reliable signal for the
+        # AUTO safety layer (production step_ids are opaque "{plan}-step-N"). Carry
+        # it so gates/contracts.infer_gate_envelope can set risk_flags on forced
+        # human-review gates (delivery / champion / dedup / strategy adopt) and
+        # halt a bare AUTO confirm on them.
+        if gate is not None and gate.tool_ref is not None:
+            meta["gate_source_tool"] = gate.tool_ref.tool
         if rendered.output_refs:
             meta["output_refs"] = rendered.output_refs
         if rendered.screen is not None:

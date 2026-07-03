@@ -271,6 +271,70 @@ class EvidenceEnvelope:
         }
 
 
+# LT-2: AUTO safety layer. _apply_safety_policy / _gate_risk_reason halt a bare
+# AUTO confirm whenever the gate carries a risk flag matching an
+# AUTO_HIGH_RISK_FLAG_TOKENS token (irreversible / delivery / handoff / champion
+# / deploy / approval / ...). The flags were never populated in production, so
+# every forced-confirmation gate slipped through AUTO unblocked. This maps the
+# recognizable forced gates to structured risk-flag codes (enum code + Chinese
+# gloss recorded where a human reads it) so a declared-risk gate can no longer be
+# auto-confirmed. Purely informational gates (plan_overview, plain decision_point
+# render gates with an opaque {plan}-step-N id) get no flag and stay AUTO-confirmable.
+
+#: gate source tools whose confirmation is a forced, human-review moment. The
+#: value is the risk-flag code emitted; each code contains an
+#: AUTO_HIGH_RISK_FLAG_TOKENS token so _gate_risk_reason fires on it.
+_HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
+    "post_training_action": ("model_delivery_handoff_champion",),
+    "select_experiment": ("champion_model_selection",),
+    "compare_experiments": ("champion_model_selection",),
+    "confirm_join": ("irreversible_dedup_merge",),
+    "propose_join": ("irreversible_dedup_merge",),
+    "adopt_strategy": ("irreversible_strategy_approval",),
+    "design_cutoff_bands": ("strategy_direction_approval",),
+    "tradeoff_view": ("strategy_direction_approval",),
+    "compare_strategies": ("strategy_direction_approval",),
+    "vintage_curve": ("strategy_direction_approval",),
+}
+
+#: step_id substrings for the same forced gates, used when meta carries only a
+#: (test-shaped) semantic step_id with no model_delivery/dedup/source_tool key.
+#: Production step_ids are opaque "{plan}-step-N" and never match these, so this
+#: only ever fires on gates a caller explicitly named after the forced tool.
+_HIGH_RISK_STEP_ID_TOKENS: dict[str, tuple[str, ...]] = {
+    "tradeoff": ("strategy_direction_approval",),
+    "vintage": ("strategy_direction_approval",),
+    "cutoff": ("strategy_direction_approval",),
+    "adopt": ("irreversible_strategy_approval",),
+    "post-training": ("model_delivery_handoff_champion",),
+    "select-champion": ("champion_model_selection",),
+}
+
+
+def _infer_risk_flags(meta: Mapping[str, Any]) -> tuple[str, ...]:
+    flags: list[str] = []
+
+    def _add(codes: tuple[str, ...]) -> None:
+        for code in codes:
+            if code not in flags:
+                flags.append(code)
+
+    delivery = meta.get("model_delivery")
+    if isinstance(delivery, Mapping):
+        source_tool = _clean_str(delivery.get("source_tool"))
+        _add(_HIGH_RISK_GATE_SOURCE_TOOLS.get(source_tool, ("model_delivery_champion_handoff",)))
+    if isinstance(meta.get("dedup"), Mapping):
+        _add(("irreversible_dedup_merge",))
+    gate_source_tool = _clean_str(meta.get("gate_source_tool"))
+    if gate_source_tool in _HIGH_RISK_GATE_SOURCE_TOOLS:
+        _add(_HIGH_RISK_GATE_SOURCE_TOOLS[gate_source_tool])
+    step_id = _clean_str(meta.get("step_id")).lower()
+    for token, codes in _HIGH_RISK_STEP_ID_TOKENS.items():
+        if token in step_id:
+            _add(codes)
+    return tuple(flags)
+
+
 def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
     kind = _clean_str(meta.get("kind") or "gate")
     target_step_id = _clean_str(meta.get("step_id")) or None
@@ -359,6 +423,7 @@ def infer_gate_envelope(meta: Mapping[str, Any]) -> GateEnvelope:
         source_output_refs=output_refs,
         controls=tuple(controls),
         render_blocks=tuple(render_blocks),
+        risk_flags=_infer_risk_flags(meta),
     )
 
 
