@@ -26,11 +26,14 @@ from marvis.packs.modeling.recipes.common import (
     pop_boost_rounds,
     sample_weight_values,
     split_modeling_frame,
+    training_frame_columns,
 )
 
 
 def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
-    frame = backend.read_frame(dataset_path)
+    frame = backend.read_frame(
+        dataset_path, columns=training_frame_columns(backend, dataset_path, config)
+    )
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,

@@ -25,6 +25,7 @@ from marvis.packs.modeling.recipes.common import (
     model_params,
     sample_weight_values,
     split_modeling_frame,
+    training_frame_columns,
 )
 
 
@@ -32,7 +33,9 @@ def train_mlp(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     """DNN (sklearn MLP) recipe. MLP needs numeric, imputed, scaled inputs, so the model is
     a deterministic impute→scale→MLP pipeline that consumes the same raw frame as the other
     recipes. random_state is pinned to config.seed for reproducibility."""
-    frame = backend.read_frame(dataset_path)
+    frame = backend.read_frame(
+        dataset_path, columns=training_frame_columns(backend, dataset_path, config)
+    )
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,

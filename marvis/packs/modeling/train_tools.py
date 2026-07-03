@@ -11,7 +11,7 @@ from marvis.packs.modeling.artifact import persist_model_meta
 from marvis.packs.modeling.contracts import ModelArtifact, TrainConfig, TrainResult
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.recipes.catboost import train_catboost
-from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY
+from marvis.packs.modeling.recipes.common import REFIT_ON_TRAIN_PLUS_TEST_PARAM_KEY, training_frame_columns
 from marvis.packs.modeling.recipes.ensemble import train_ensemble
 from marvis.packs.modeling.recipes.lgb import train_lgb
 from marvis.packs.modeling.recipes.lgb_multiclass import train_lgb_multiclass
@@ -632,8 +632,26 @@ def _refit_champion_on_train_plus_test(
         dataset_path = runtime.registry.resolve_path(dataset_id)
     except KeyError:
         return None
-    frame = runtime.backend.read_frame(dataset_path)
     split_col = str(config.split_col)
+    # A missing split_col is a graceful "can't refit" (returns None below, caller
+    # keeps the original candidate) rather than an error -- checked against the
+    # dataset's actual columns BEFORE requesting the projection, so this still
+    # degrades the same way it always has instead of read_frame's column
+    # validation raising on a column that was never going to be used anyway.
+    if split_col not in runtime.backend.column_names(dataset_path):
+        return None
+    # LT-6: refit only ever consumes config.features + target_col/split_col (the
+    # frame is copied into a scratch parquet and re-read by _train_recipe below,
+    # which itself now projects to the SAME column set via training_frame_columns) --
+    # never any other column from the source dataset, so project the read instead of
+    # pulling the full modeling frame. A missing config.features/target_col entry
+    # still surfaces as a hard failure either way (previously a KeyError deep inside
+    # the refit recipe's model.fit; now a DataSecurityError from this read) -- both
+    # are caught by select_tools.py's broad `except Exception` around this call, so
+    # the "refit failed, kept original candidate" outcome is unchanged either way.
+    frame = runtime.backend.read_frame(
+        dataset_path, columns=training_frame_columns(runtime.backend, dataset_path, config)
+    )
     if split_col not in frame.columns:
         return None
     train_mask = frame[split_col] == split_values["train"]

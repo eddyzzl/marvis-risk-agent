@@ -332,6 +332,37 @@ def sample_weight_col(config: TrainConfig) -> str:
     return ""
 
 
+def training_frame_columns(backend, dataset_path, config: TrainConfig) -> list[str]:
+    """LT-6: the exact column set every recipe's ``frame = backend.read_frame(dataset_path)``
+    actually touches -- ``config.features``, ``target_col``/``split_col`` (split_modeling_frame),
+    the optional sample-weight column (sample_weight_values), and any ``valid_group_cols`` that
+    are actually present on the source dataset (carve_early_stop_fold_for_config's group-aware
+    carving already silently falls back to per-row carving for a configured-but-absent group
+    column once the frame is loaded -- ``backend.column_names`` filters the same way here, BEFORE
+    the read, so an absent/misconfigured group column is dropped from the projection instead of
+    making read_frame's own column validation raise on a name that was never going to be used
+    anyway). Passed as ``columns=`` so recipes stop pulling the full-width modeling frame when
+    they only ever read this subset.
+    """
+    available = set(backend.column_names(dataset_path))
+    group_cols = [col for col in _resolve_valid_group_cols(config) if col in available]
+    return _column_list([
+        *config.features,
+        config.target_col,
+        config.split_col,
+        sample_weight_col(config),
+        *group_cols,
+    ])
+
+
+def _column_list(values) -> list[str]:
+    columns: list[str] = []
+    for value in values:
+        if value and str(value) not in columns:
+            columns.append(str(value))
+    return columns
+
+
 def artifact_params(params: dict, config: TrainConfig) -> dict:
     out = dict(params)
     column = sample_weight_col(config)

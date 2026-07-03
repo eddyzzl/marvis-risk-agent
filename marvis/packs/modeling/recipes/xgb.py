@@ -22,16 +22,19 @@ from marvis.packs.modeling.recipes.common import (
     carve_early_stop_fold_for_config,
     compute_model_metrics,
     model_params,
-    pop_boost_rounds,
     normalized_monotone_constraints,
+    pop_boost_rounds,
     resolve_auto_scale_pos_weight,
     sample_weight_values,
     split_modeling_frame,
+    training_frame_columns,
 )
 
 
 def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> TrainResult:
-    frame = backend.read_frame(dataset_path)
+    frame = backend.read_frame(
+        dataset_path, columns=training_frame_columns(backend, dataset_path, config)
+    )
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
