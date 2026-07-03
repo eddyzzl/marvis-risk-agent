@@ -123,11 +123,22 @@ def list_experiments_all(
 
 
 @router.get("/tasks/{task_id}/experiments")
-def list_task_experiments(task_id: str, request: Request) -> dict:
+def list_task_experiments(
+    task_id: str,
+    request: Request,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    """LT-13: limit/offset are optional so existing callers that omit them
+    keep getting the full per-task experiment history (bounded by
+    _LIST_MAX_LIMIT when a caller does opt in)."""
     get_task_or_404(_task_repo(request), task_id)
     repo = _modeling_repo(request)
-    experiments = repo.list_experiments(task_id)
-    return {
+    bounded_limit = None if limit is None else max(1, min(int(limit), _LIST_MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+    experiments = repo.list_experiments(task_id, limit=bounded_limit, offset=bounded_offset)
+    total = repo.count_experiments(task_id)
+    payload = {
         "experiments": [
             _experiment_detail_payload(
                 experiment,
@@ -136,6 +147,12 @@ def list_task_experiments(task_id: str, request: Request) -> dict:
             for experiment in experiments
         ]
     }
+    if bounded_limit is not None or bounded_offset:
+        payload["total"] = total
+        payload["limit"] = bounded_limit
+        payload["offset"] = bounded_offset
+        payload["has_more"] = bounded_offset + len(experiments) < total
+    return payload
 
 
 @router.get("/experiments/{experiment_id}")

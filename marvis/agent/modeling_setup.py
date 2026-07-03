@@ -127,6 +127,11 @@ class ModelingProposal:
 _SUPPORTED_RECIPES = ("lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "lgb_regressor", "lgb_multiclass", "ensemble")
 _BINARY_RECIPES = frozenset({"lgb", "xgb", "catboost", "lr", "scorecard", "mlp", "ensemble"})
 _WEIGHT_NAME_HINTS = ("sample_weight", "sampleweight", "weight", "样本权重", "权重")
+# LT-14: a weight column strongly correlated with the target is a leakage red
+# flag (the weight is very likely derived from the outcome itself, e.g. a
+# post-hoc "how wrong we were" adjustment) rather than a legitimate sampling /
+# reject-inference / business weight, which should be independent of the label.
+_SAMPLE_WEIGHT_TARGET_CORR_HIGH_RISK = 0.3
 _BUSINESS_COLUMN_ALIASES = {
     "loan_month_col": ("loan_month", "apply_month", "book_month", "放款月", "贷款月份", "申请月份"),
     "interest_rate_col": ("interest_rate", "rate", "apr", "pricing_rate", "利率", "年利率", "定价利率"),
@@ -436,6 +441,11 @@ def _sample_weight_diagnostics(
         for column in probe.columns
         if any(hint in str(column).lower() or hint in str(column) for hint in _WEIGHT_NAME_HINTS)
     ]
+    target_numeric = (
+        pd.to_numeric(probe[str(target_col)], errors="coerce")
+        if target_col and str(target_col) in probe.columns
+        else None
+    )
     diagnostics: list[dict] = []
     for column in columns:
         name = str(column)
@@ -460,6 +470,7 @@ def _sample_weight_diagnostics(
         elif float(non_missing.sum()) <= 0:
             valid = False
             reason = "总权重不为正"
+        leakage_risk, target_corr = _sample_weight_leakage_risk(numeric, target_numeric)
         diagnostics.append({
             "column": name,
             "valid": valid,
@@ -471,9 +482,36 @@ def _sample_weight_diagnostics(
             "max": _maybe_float(non_missing.max()) if not non_missing.empty else None,
             "mean": _maybe_float(non_missing.mean()) if not non_missing.empty else None,
             "excluded_from_features": True,
-            "leakage_risk": "low",
+            "leakage_risk": leakage_risk,
+            "target_correlation": target_corr,
         })
     return diagnostics
+
+
+def _sample_weight_leakage_risk(
+    weight_numeric: pd.Series, target_numeric: pd.Series | None
+) -> tuple[str, float | None]:
+    """LT-14: flag weight columns whose sample correlation with the target is
+    large in magnitude -- a strong signal the "weight" is actually derived
+    from the label (post-hoc, i.e. leakage) rather than an independent
+    sampling / reject-inference / business weight. Best-effort only: any
+    computation issue (e.g. degenerate variance) falls back to "low" rather
+    than blocking setup, matching the existing warn-don't-block posture of
+    this diagnostics function."""
+    if target_numeric is None:
+        return "low", None
+    try:
+        aligned = pd.concat([weight_numeric, target_numeric], axis=1).dropna()
+        if len(aligned) < 2:
+            return "low", None
+        corr = aligned.iloc[:, 0].corr(aligned.iloc[:, 1])
+    except (TypeError, ValueError):
+        return "low", None
+    if corr is None or pd.isna(corr):
+        return "low", None
+    corr_value = float(corr)
+    risk = "high" if abs(corr_value) >= _SAMPLE_WEIGHT_TARGET_CORR_HIGH_RISK else "low"
+    return risk, corr_value
 
 
 def _merge_weight_diagnostics(primary: list[dict], secondary: list[dict]) -> list[dict]:

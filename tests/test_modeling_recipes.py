@@ -1610,6 +1610,56 @@ def test_build_modeling_proposal_rejects_zero_weight_candidate(tmp_path):
     assert proposal.sample_weight_diagnostics[0]["reason"] == "存在非正权重"
 
 
+def test_build_modeling_proposal_flags_high_leakage_risk_when_weight_correlates_with_target(tmp_path):
+    # LT-14: a "weight" column that is (almost) a direct function of the label is a
+    # classic post-hoc-derived-from-outcome leakage pattern -- e.g. someone assigned
+    # a heavier weight to every bad account. _sample_weight_diagnostics should flag
+    # this via a real correlation check instead of a hardcoded "low" risk.
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        # weight == 1 + y*3: near-perfectly derived from the label itself.
+        "sample_weight": [1.0 + 3.0 * (1 if i % 5 in {0, 1} else 0) for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "leaky_weight_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-leaky-weight", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-leaky-weight", tmp_path, recipes=["lgb"])
+
+    diag = proposal.sample_weight_diagnostics[0]
+    assert diag["column"] == "sample_weight"
+    assert diag["leakage_risk"] == "high"
+    assert diag["target_correlation"] is not None
+    assert abs(diag["target_correlation"]) >= 0.3
+
+
+def test_build_modeling_proposal_leakage_risk_low_when_weight_independent_of_target(tmp_path):
+    # LT-14 counterpart: a weight independent of the label (e.g. a sampling/business
+    # weight applied on a cycle unrelated to the outcome) must NOT be flagged.
+    backend, registry = _proposal_runtime(tmp_path)
+    rows = 120
+    frame = pd.DataFrame({
+        "x1": [((i * 37) % 101) / 100 for i in range(rows)],
+        # weight alternates on a period-4 cycle, independent of the period-5 label.
+        "sample_weight": [2.0 if i % 4 == 0 else 1.0 for i in range(rows)],
+        "y": [1 if i % 5 in {0, 1} else 0 for i in range(rows)],
+        "split": ["train"] * 70 + ["test"] * 30 + ["oot"] * 20,
+    })
+    path = tmp_path / "independent_weight_sample.csv"
+    frame.to_csv(path, index=False)
+    registry.register_from_upload("task-independent-weight", path, role="sample")
+
+    proposal = build_modeling_proposal(registry, backend, "task-independent-weight", tmp_path, recipes=["lgb"])
+
+    diag = proposal.sample_weight_diagnostics[0]
+    assert diag["column"] == "sample_weight"
+    assert diag["leakage_risk"] == "low"
+
+
 def test_build_modeling_proposal_continuous_target_skips_meta_columns(tmp_path):
     backend, registry = _proposal_runtime(tmp_path)
     rows = 120

@@ -102,15 +102,35 @@ class PlanRepository:
             ).fetchall()
         return plan_from_dict(_plan_payload_from_rows(plan_row, step_rows))
 
-    def list_plans_for_task(self, task_id: str) -> list[Plan]:
-        """All plans for a task, oldest first. Used to resume/reload a task's
-        plan in the right rail (create returns the plan_id for first build)."""
+    def list_plans_for_task(
+        self,
+        task_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Plan]:
+        """Plans for a task, oldest first. Used to resume/reload a task's
+        plan in the right rail (create returns the plan_id for first build).
+        ``limit``/``offset`` are optional (LT-13): omitting them returns the
+        full task history, matching prior behavior."""
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        query = "SELECT id FROM plans WHERE task_id = ? ORDER BY created_at, id"
+        params: list[object] = [task_id]
+        if bounded_limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([bounded_limit, bounded_offset])
         with connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT id FROM plans WHERE task_id = ? ORDER BY created_at, id",
-                (task_id,),
-            ).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [self.load_plan(row["id"]) for row in rows]
+
+    def count_plans_for_task(self, task_id: str) -> int:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total FROM plans WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["total"])
 
     def list_plans_by_status(self, status: PlanStatus) -> list[Plan]:
         """Plans currently in ``status`` across every task, oldest first. Used

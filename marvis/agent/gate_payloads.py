@@ -426,14 +426,37 @@ def _modeling_override_guidance(
         if item.get("valid") is False and str(item.get("column") or "")
     ]
     if sample_weight_col:
-        guidance.append({
-            "id": "sample_weight",
-            "label": "样本权重",
-            "level": "review",
-            "message": (
-                f"权重列 {sample_weight_col} 会改变拟合目标且不会入模；请确认它来自抽样、拒绝推断或业务权重，而不是贷后结果泄漏。"
-            ),
-        })
+        selected_diag = next(
+            (item for item in diagnostics if str(item.get("column") or "") == sample_weight_col),
+            None,
+        )
+        # LT-14: _sample_weight_diagnostics (marvis/agent/modeling_setup.py) flags a
+        # weight column whose sample correlation with the target is large in
+        # magnitude as "high" leakage_risk -- sharpen the generic confirmation
+        # message into an explicit review flag when that signal fired, instead of
+        # only ever showing the same generic reminder regardless of evidence.
+        high_leakage_risk = bool(selected_diag) and selected_diag.get("leakage_risk") == "high"
+        if high_leakage_risk:
+            corr = selected_diag.get("target_correlation")
+            corr_note = f"（与目标列相关系数 {corr:.2f}）" if isinstance(corr, (int, float)) else ""
+            guidance.append({
+                "id": "sample_weight",
+                "label": "样本权重",
+                "level": "warning",
+                "message": (
+                    f"权重列 {sample_weight_col} 与目标列高度相关{corr_note}，存在贷后结果泄漏风险；"
+                    "请确认权重确实来自抽样、拒绝推断或业务策略，而不是由标签本身推导得到，否则请更换权重列或改为不使用样本权重。"
+                ),
+            })
+        else:
+            guidance.append({
+                "id": "sample_weight",
+                "label": "样本权重",
+                "level": "review",
+                "message": (
+                    f"权重列 {sample_weight_col} 会改变拟合目标且不会入模；请确认它来自抽样、拒绝推断或业务权重，而不是贷后结果泄漏。"
+                ),
+            })
     elif sample_weight_candidates:
         guidance.append({
             "id": "sample_weight",

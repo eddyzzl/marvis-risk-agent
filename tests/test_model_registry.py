@@ -157,6 +157,49 @@ def test_list_task_experiments_scopes_to_single_task(tmp_path):
     assert [row["id"] for row in body["experiments"]] == ["experiment-a"]
 
 
+def test_list_task_experiments_supports_limit_offset_and_reports_total(tmp_path):
+    # LT-13: limit/offset are opt-in -- the scoping test above (no params)
+    # keeps getting the full per-task experiment history with no pagination
+    # keys in the response.
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    for index in range(3):
+        _seed_experiment(settings, task["id"], f"experiment-{index}", status="trained")
+
+    first_page = client.get(
+        f"/api/tasks/{task['id']}/experiments", params={"limit": 2, "offset": 0}
+    )
+    assert first_page.status_code == 200, first_page.text
+    body = first_page.json()
+    assert [row["id"] for row in body["experiments"]] == ["experiment-0", "experiment-1"]
+    assert body["total"] == 3
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+    assert body["has_more"] is True
+
+    second_page = client.get(
+        f"/api/tasks/{task['id']}/experiments", params={"limit": 2, "offset": 2}
+    )
+    body2 = second_page.json()
+    assert [row["id"] for row in body2["experiments"]] == ["experiment-2"]
+    assert body2["total"] == 3
+    assert body2["has_more"] is False
+
+
+def test_list_task_experiments_limit_is_bounded_at_maximum(tmp_path):
+    client, settings = _client(tmp_path)
+    task = _create_task(client)
+    _seed_experiment(settings, task["id"], "experiment-only", status="trained")
+
+    response = client.get(
+        f"/api/tasks/{task['id']}/experiments", params={"limit": 999999}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["limit"] == 500
+    assert [row["id"] for row in body["experiments"]] == ["experiment-only"]
+
+
 def test_list_task_experiments_returns_404_for_unknown_task(tmp_path):
     client, _settings = _client(tmp_path)
 

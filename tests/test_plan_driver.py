@@ -488,6 +488,63 @@ def test_modeling_screen_gate_carries_sample_weight_setup_payload(tmp_path):
     assert sample_weight_control["schema"]["enum"] == ["", "weight", "sample_weight"]
 
 
+def test_modeling_screen_gate_warns_when_selected_sample_weight_has_high_leakage_risk(tmp_path):
+    # LT-14: when the selected sample_weight_col's diagnostics report leakage_risk
+    # "high" (computed from a strong sample correlation with the target -- see
+    # marvis/agent/modeling_setup.py::_sample_weight_diagnostics), the gate's
+    # override_guidance must escalate from the generic "review" reminder to an
+    # explicit "warning" that names the leakage risk and cites the correlation.
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    plan = _gated_modeling_weight_plan()
+    plan.steps[0].inputs = {"sample_weight_col": "weight", "feature_cols": ["x1", "x2"]}
+    repo.create_plan(plan)
+    runner = FakeRunner([
+        {
+            "target_type": "binary",
+            "recipe": "lgb",
+            "recipes": ["lgb"],
+            "feature_count": 2,
+            "n_trials": 12,
+            "metric_policy": "oot_ks",
+            "eligible_algorithms": ["lgb", "xgb"],
+            "disabled_algorithms": [],
+            "pmml_supported_algorithms": ["lgb", "xgb"],
+            "warnings": [],
+            "reason": "目标类型 `binary`,候选算法 lgb,主调参算法 `lgb`,选择指标 oot_ks。",
+            "sample_weight_col": "weight",
+            "sample_weight_candidates": ["weight"],
+            "sample_weight_diagnostics": [
+                {
+                    "column": "weight",
+                    "valid": True,
+                    "missing_rate": 0.0,
+                    "min": 1.0,
+                    "max": 4.0,
+                    "mean": 2.2,
+                    "reason": "",
+                    "leakage_risk": "high",
+                    "target_correlation": 0.86,
+                }
+            ],
+        },
+        {"selected": ["x1"], "leakage": [], "suspected": [], "n_screened": 2, "ranked": [], "unusable": [], "scores": {}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-1")
+    turn = driver._run_and_handle("plan-1", run_seq=0)
+
+    setup = turn.messages[0].metadata.get("modeling_setup")
+    guidance = setup["override_guidance"]
+    sample_weight_guidance = next(item for item in guidance if item["id"] == "sample_weight")
+    assert sample_weight_guidance["level"] == "warning"
+    assert "泄漏风险" in sample_weight_guidance["message"]
+    assert "0.86" in sample_weight_guidance["message"]
+
+
 def test_modeling_setup_payload_includes_split_summary_and_algorithm_controls(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
