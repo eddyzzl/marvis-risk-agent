@@ -86,11 +86,14 @@ def test_app_entry_is_split_into_frontend_modules():
         "draft-tools-panel.js",
         "focus-ring.js",
         "layout-resize.js",
+        "metric-tables.js",
         "platform-confirm.js",
         "polling.js",
+        "precision-consistency.js",
         "render-agent.js",
         "render-metrics.js",
         "state.js",
+        "step-checker.js",
         "task-search.js",
         "theme.js",
         "toast.js",
@@ -105,11 +108,14 @@ def test_app_entry_is_split_into_frontend_modules():
     assert 'from "./js/draft-tools-panel.js"' in app_js
     assert 'from "./js/focus-ring.js"' in app_js
     assert 'from "./js/layout-resize.js"' in app_js
+    assert 'from "./js/metric-tables.js"' in app_js
     assert 'from "./js/platform-confirm.js"' in app_js
     assert 'from "./js/polling.js"' in app_js
+    assert 'from "./js/precision-consistency.js"' in app_js
     assert 'from "./js/render-agent.js"' in app_js
     assert 'from "./js/render-metrics.js"' in app_js
     assert 'from "./js/state.js"' in app_js
+    assert 'from "./js/step-checker.js"' in app_js
     assert 'from "./js/task-search.js"' in app_js
     assert 'from "./js/theme.js"' in app_js
     assert 'from "./js/toast.js"' in app_js

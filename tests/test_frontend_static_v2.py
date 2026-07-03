@@ -4843,14 +4843,19 @@ def test_reproducibility_panel_renders_precision_consistency_chart():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
+    precision_js = _read_static("js/precision-consistency.js")
+
     renderer_start = app_js.index("function renderReproducibilityEvidence")
     renderer_end = app_js.index("function renderEvidence", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
 
-    assert "function buildPrecisionConsistencyBars" in app_js
-    assert "function renderPrecisionConsistencyChart" in app_js
-    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in app_js
-    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in app_js
+    assert "export function buildPrecisionConsistencyBars" in precision_js
+    assert "export function renderPrecisionConsistencyChart" in precision_js
+    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in precision_js
+    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in precision_js
+    assert 'from "./js/precision-consistency.js"' in app_js
+    assert "function buildPrecisionConsistencyBars" not in app_js
+    assert "function renderPrecisionConsistencyChart" not in app_js
     assert "renderPrecisionConsistencyChart(rows, {" in renderer
     assert ".score-precision-chart" in styles_css
     assert ".score-precision-bars" in styles_css
@@ -4922,23 +4927,23 @@ def test_metric_card_is_hidden_until_metric_validation_success():
 
 
 def test_metric_sparkline_html_requires_local_spec_marker():
-    app_js = _read_static("app.js")
-    renderer_start = app_js.index("function renderCellByKind")
-    renderer_end = app_js.index("function renderMetricTable", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    trend_start = app_js.index("function renderTrendTable")
-    trend_end = app_js.index("function renderSparklineSvg", trend_start)
-    trend_renderer = app_js[trend_start:trend_end]
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_start = metric_tables_js.index("export function renderCellByKind")
+    renderer_end = metric_tables_js.index("export function metricHeaderShouldRightAlign", renderer_start)
+    renderer = metric_tables_js[renderer_start:renderer_end]
+    trend_start = metric_tables_js.index("export function renderTrendTable")
+    trend_end = metric_tables_js.index("export function renderSparklineSvg", trend_start)
+    trend_renderer = metric_tables_js[trend_start:trend_end]
 
     assert 'kind === "trend-spark" && spec && spec.__localHtml === true' in renderer
     assert 'trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });' in trend_renderer
 
 
 def test_metric_tooltip_uses_document_delegation_for_rebuilt_preview():
-    app_js = _read_static("app.js")
-    tooltip_start = app_js.index("function attachMetricTooltip")
-    tooltip_end = app_js.index("function renderEnhancedTable", tooltip_start)
-    tooltip = app_js[tooltip_start:tooltip_end]
+    metric_tables_js = _read_static("js/metric-tables.js")
+    tooltip_start = metric_tables_js.index("export function attachMetricTooltip")
+    tooltip_end = metric_tables_js.index("export function renderEnhancedTable", tooltip_start)
+    tooltip = metric_tables_js[tooltip_start:tooltip_end]
 
     assert 'document.addEventListener("mouseover"' in tooltip
     assert 'event.target.closest("#metricPreview [data-tip]")' in tooltip
@@ -5033,8 +5038,10 @@ def test_metric_overview_uses_semantic_visual_tokens():
         "#6B7280",
     ]:
         assert legacy_color not in metric_section
+    metric_tables_js = _read_static("js/metric-tables.js")
     assert "#0EA5E9" not in app_js
-    assert 'var(--metric-databar-accent)' in app_js
+    assert "#0EA5E9" not in metric_tables_js
+    assert 'var(--metric-databar-accent)' in metric_tables_js
 
 
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
@@ -5090,9 +5097,11 @@ def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
         'body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) '
         "tr:hover :is(.databar-label, .period-text, .psi-value)"
     ) in styles_css
+    metric_tables_js = _read_static("js/metric-tables.js")
     assert 'body[data-theme="dark"] .roc-axis-label' in styles_css
-    assert 'class="roc-axis-label"' in app_js
+    assert 'class="roc-axis-label"' in metric_tables_js
     assert 'fill="#6B7280"' not in app_js
+    assert 'fill="#6B7280"' not in metric_tables_js
 
 
 def test_agent_progress_refreshes_metric_preview_before_streaming_analysis_messages():
@@ -5361,10 +5370,8 @@ def test_stopped_agent_task_does_not_spin_running_substeps():
 
 
 def test_stopped_step_checker_has_no_stop_square_mark():
-    app_js = _read_static("app.js")
-    start = app_js.index("function stepCheckerHtml")
-    end = app_js.index("function notebookStepTone", start)
-    source = app_js[start:end]
+    step_checker_js = _read_static("js/step-checker.js")
+    source = step_checker_js[step_checker_js.index("export function stepCheckerHtml"):]
     stopped_start = source.index('if (state === "stopped")')
     stopped_end = source.index('if (state === "review")', stopped_start)
     stopped_branch = source[stopped_start:stopped_end]
@@ -9090,9 +9097,10 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
     instead of leaving every cell as bare escaped text.
     """
     app_js = _read_static("app.js")
+    metric_tables_js = _read_static("js/metric-tables.js")
     kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
     cell_body = _slice_function(app_js, "function driverTableCellHtml")
-    align_body = _slice_function(app_js, "function metricHeaderShouldRightAlign")
+    align_body = _slice_function(metric_tables_js, "export function metricHeaderShouldRightAlign")
     tables_body = _slice_function(app_js, "function agentMessageTablesHtml")
 
     ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
