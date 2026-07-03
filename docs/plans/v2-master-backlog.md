@@ -290,7 +290,7 @@
 |---|---|---|---|
 | ✅ | LT-1 | fixtures 扩面（`7222b2d8`）：三步预处理链导出一致性、单特征 PMML、policy 部分满足端到端、SEL-7 模型卡呈现；**挖出 2 真 bug**（_apply_cap 只读数组崩溃、模型卡吞 warnings）已修复（`99e6ca8b`/`f9f15378`）xfail 转正 | 追踪器 |
 | ✅ | LT-2 | AUTO 安全矩阵（`26f3d01d`）：五门 bare-confirm 阻断矩阵、stale token AUTO 路径、GAP-4 字典注入×阻断组合；**挖出严重 bug：risk_flags 结构性死代码**（envelope 从不设旗、composer 从不写 meta，真实交付门裸 confirm 放行）已修复（`7541db3d`：信封四路推导 risk_flags+composer 落 meta，纯信息门不设旗防过阻断）xfail 转正；另确认 stale-control 唯一机制=expected_step_id 比对 | 追踪器 |
-| ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
+| ✅ | LT-3 | 门回复 adapter registry（`71457b4a`，gates/adapters.py）：三解析器原样收编（dedup/规则集/监控处置）、plan_driver 任务特定分派清零（grep 证据）、adjust schema 曝光为 editable_input_schema（LT-4 表单直接消费）；顺带修 dedup adapter 键错门 bug；191 测试绿 | 追踪器 |
 | ✅ | LT-4 | 重试 UX 收口（`d6d17ff`）：整体替换语义中文警示常显（后端确证 UPDATE 全列覆盖非合并）、真 schema（required 红星/enum 下拉）经既有 GET /api/plugins/{name}/tools 懒取合并到推断 stub、array/object 与取 schema 失败均回落 JSON 编辑器；364 前端+插件测试绿 | 追踪器 |
 | ✅ | LT-5 | UoW 收尾（`ee020ce`）：全建模多写工具盘点表；两处真修（champion refit attach 失败零清理→快照回滚+重试回归、报告 xlsx 直写终path→stage/promote+审计单事务）；train 路径 file-then-DB 缺口如实文档化（recipe uow 穿线判定过侵入，DB 侧本已原子+既有补偿器）；三类写路径文档进 transactional.py docstring；223 测试绿 | 追踪器 |
 | ✅ | LT-6 | 证据驱动列投影（`cf36f01a`）：9 recipe 训练读 82MB→18MB（-78%）、monitor scored 分支 -93%、champion 重训同改；全帧回写类路径（score/reject/report）复核后不改（会丢输出列）；442 测试+LT-8 计数守卫全绿 | 追踪器 |
@@ -298,7 +298,7 @@
 | ✅ | LT-8 | 三件套落地（`435bb86c`）：筛选列批读计数（20万行×80列，7 次调用严格匹配批算术）、多配方端到端单次加载守卫（真实 backend 非 mock）、join 连接数与行数无关+双实例确定性；六连跑零 flake，未发现回归点 | 追踪器 |
 | ✅ | LT-9 | 已裁决：subprocess+护栏为 V2 终态（威胁模型=单机单用户；TST-4 真进程证据链）；OS 沙箱升级条件=V3 多用户，见 v2-longtail-adjudications.md | 6-28+roadmap |
 | ✅ | LT-10 | 已裁决：triple-opt-in legacy-only 为终态（settings 双开关+env var 三重门槛既有）；不做 RPC 化，只收安全修复，见 v2-longtail-adjudications.md | 追踪器 |
-| ⬜ | LT-11 | agent 推荐产品化：引用 evidence refs、给 tradeoff、AUTO 解释 bounded action 为何安全 | 追踪器 |
+| ✅ | LT-11 | 推荐产品化（`adce1f3a`）：tradeoff 推荐带证据+★标记+次优备选表、分数带推荐引前沿口径、champion 引选择指标与次名差值、AUTO 自动确认带 safety_rationale（halt 引具体 risk_flag code）；全部只渲染既有输出字段（INV-1） | 追踪器 |
 | ✅ | LT-12 | 已裁决：触发条件不存在，关闭；未来出现行级保真要求时按 join 引擎设计重开新 spec，见 v2-longtail-adjudications.md | 6-28 |
 | ✅ | LT-13 | 分页审计（`a4accccb`）：全端点盘点表，任务内 experiments/plans 两个线性增长端点补 opt-in limit/offset/total（默认全量兼容），datasets/plugins/skills 复核判不需要 | 追踪器 |
 | ✅ | LT-14 | 指南+真诊断（`0f26b4e4`）：docs/sample_weight_guide.md；**发现 leakage_risk 一直硬编码 low 从未计算**，改为真算权重×目标相关（|corr|≥0.3→high+target_correlation 字段），门提示升级 warning 点名泄漏 | 追踪器 |
