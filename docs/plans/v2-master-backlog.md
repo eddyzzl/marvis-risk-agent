@@ -257,7 +257,7 @@
 | ✅ | ARCH-4 | 五 handler 收敛为 _TurnHandlerSpec 参数化核心（`ca0c156c`），差异轴显式表格化，共享尾部 diff 字节等价验证；**发现真缺口：feature/strategy/vintage 从不传 settings/task→MEM-1 捕获只对 join/modeling 生效，修复归入 S2 记忆接线 commit** | Med/M | ✅ |
 | ✅ | ARCH-5 | worker 协议 protocol_version 握手（`74fa5c7`）：不匹配→typed error+审计；入口 import 轻量护栏保持绿 | Med/M | — |
 | ✅ | ARCH-6 | pipeline 拆四模块（`6a411a3`：errors/cellgen/io/memory，门面保 monkeypatch 命名空间语义）+ 阶段边界/重试点/异常路径结构化日志；auto_distill 门控（INV-4）原样 | Med/M | ✅ |
-| ⬜ | ARCH-7 | 错误分类学散乱：132 处手写 HTTPException、error_kind 裸字符串 | Med/M | — |
+| ✅ | ARCH-7 | 错误分类学收敛（`0286909a`）：marvis/errors.py 九工厂+ErrorKind 全词表（15 常量）、130/133 处收编（76 组 status/detail 逐字节比对一致）、3 条白名单特例逐条注明、防复发 guard 测试（新增裸 HTTPException 即红）；packs 域内分类学（red_flags/审计 kind）如实判非 error_kind 不越界 | Med/M | ✅ |
 | ✅ | ARCH-8 | PackRuntime 公共基座（`660bfce8`，marvis/plugins/sdk.py）：五 pack _Runtime 全部改子类只留 _extend 域扩展、modeling 门面公有名原样透传、worker 懒加载路径不变（PERF-5 护栏绿）、防再分叉结构断言；275 测试绿 | Med/S | ✅ |
 | ✅ | ARCH-9 | 模板按域拆八模块（`aa064cce`：_shared/sample_echo/validation/modeling/join/feature/strategy/monitoring），sample.py 缩为 36 行注册门面；拆分前后 WorkflowTemplate 输出 SHA256 字节等价验证 | Med/S | ✅ |
 | ✅ | ARCH-10 | schema_version 落 PRAGMA user_version（`51a3130`）：编号迁移清单、旧库无损升级测试、重复 init 幂等 | Low/S | ✅ |
