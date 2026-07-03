@@ -48,10 +48,13 @@ _WORKER_ENV_ALLOWLIST = frozenset({
 
 # Default soft RSS ceiling (MB) for tool worker process trees when the host
 # does not configure execution_environment.rss_memory_limit_mb explicitly.
-# setrlimit (subprocess_worker._apply_resource_limits) remains the first
-# layer of defense in depth; this psutil-based monitor is the second layer,
-# effective on platforms (notably macOS) where the kernel does not enforce
-# RLIMIT_AS/RLIMIT_DATA.
+# This psutil-based RSS monitor is the sole memory enforcement layer:
+# rlimit-based caps (RLIMIT_AS/RLIMIT_DATA) were removed because they bound
+# virtual address space, which the JVM and OpenBLAS legitimately reserve in
+# multi-GB quantities — on Linux that broke PMML export and scipy imports
+# while macOS ignored the limits entirely. RSS measures resident memory,
+# which is what the ceiling is meant to bound; the kill path is real-process
+# verified (TST-4). CPU/file-size rlimits remain in the worker.
 DEFAULT_RSS_MEMORY_LIMIT_MB = 4096
 
 

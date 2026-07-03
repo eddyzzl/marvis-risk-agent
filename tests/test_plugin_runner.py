@@ -213,12 +213,20 @@ def test_worker_resource_limits_apply_memory_cpu_and_file_size(monkeypatch):
         file_size_mb=256,
     )
 
-    assert meta["memory_limit_applied"] is True
+    # Memory is monitor-enforced (RSS polling in the runner), never rlimited:
+    # RLIMIT_AS/RLIMIT_DATA bound virtual address space, which the JVM and
+    # OpenBLAS reserve in multi-GB quantities — setting them broke PMML export
+    # and scipy imports on Linux. The configured ceiling is still reported.
+    assert meta["memory_limit_mb"] == 128
+    assert meta["memory_limit_applied"] is False
     assert meta["cpu_limit_applied"] is True
     assert meta["file_size_limit_applied"] is True
     assert meta["degraded"] is False
     assert (fake.RLIMIT_CPU, (12, 12)) in fake.calls
     assert (fake.RLIMIT_FSIZE, (256 * 1024 * 1024, 256 * 1024 * 1024)) in fake.calls
+    limited_kinds = {kind for kind, _limits in fake.calls}
+    assert fake.RLIMIT_DATA not in limited_kinds
+    assert fake.RLIMIT_AS not in limited_kinds
 
 
 def test_worker_resource_limit_degradation_is_per_limit(monkeypatch):
@@ -235,8 +243,8 @@ def test_worker_resource_limit_degradation_is_per_limit(monkeypatch):
             return (self.RLIM_INFINITY, self.RLIM_INFINITY)
 
         def setrlimit(self, kind, _limits):
-            if kind == self.RLIMIT_AS:
-                raise ValueError("unsupported address limit")
+            if kind == self.RLIMIT_CPU:
+                raise ValueError("unsupported cpu limit")
 
     monkeypatch.setitem(sys.modules, "resource", FakeResource())
 
@@ -246,11 +254,10 @@ def test_worker_resource_limit_degradation_is_per_limit(monkeypatch):
         file_size_mb=256,
     )
 
-    assert meta["memory_limit_applied"] is True  # RLIMIT_DATA still applied.
-    assert meta["cpu_limit_applied"] is True
-    assert meta["file_size_limit_applied"] is True
+    assert meta["cpu_limit_applied"] is False
+    assert meta["file_size_limit_applied"] is True  # FSIZE unaffected by CPU failure.
     assert meta["degraded"] is True
-    assert "memory_as" in meta["error"]
+    assert "cpu" in meta["error"]
 
 
 def test_tool_runner_derives_seed_for_stochastic_tools(tmp_path):

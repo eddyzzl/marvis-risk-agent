@@ -8445,8 +8445,11 @@ def test_reproducibility_animation_replays_only_on_first_render_per_task():
 
 
 def _run_node_capture_json(script: str) -> dict:
+    # These harnesses inline the whole app.js source, which exceeds Linux's
+    # 128KB per-argument limit (MAX_ARG_STRLEN) — feed the program via stdin
+    # instead of `-e` so the script size is unbounded on every platform.
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+        ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
 

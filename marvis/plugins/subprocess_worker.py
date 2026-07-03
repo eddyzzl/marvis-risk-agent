@@ -595,12 +595,16 @@ def _apply_resource_limits(
         meta["error"] = f"{type(exc).__name__}: {exc}"
         return meta
 
-    if memory_mb is not None:
-        memory_limit = int(memory_mb) * 1024 * 1024
-        if _apply_one_limit(resource, "RLIMIT_DATA", memory_limit, meta, "memory_data"):
-            meta["memory_limit_applied"] = True
-        if _apply_one_limit(resource, "RLIMIT_AS", memory_limit, meta, "memory_as"):
-            meta["memory_limit_applied"] = True
+    # Memory is deliberately NOT enforced via rlimits. RLIMIT_AS caps the
+    # *virtual* address space and RLIMIT_DATA the data segment — both are the
+    # wrong measure for real memory use: the JVM (pypmml/sklearn2pmml) and
+    # OpenBLAS (scipy/numpy) reserve multi-GB virtual regions while touching a
+    # fraction of it, so on Linux (macOS ignores these limits) a 4GB cap broke
+    # PMML export and even scipy imports ("failed to map segment"). Actual
+    # memory enforcement is the runner's psutil RSS monitor over the process
+    # tree (REL-3, real-kill verified), which measures resident memory.
+    # meta["memory_limit_mb"] still reports the configured monitor ceiling;
+    # meta["memory_limit_applied"] stays False (no rlimit is set).
     if cpu_seconds is not None:
         if _apply_one_limit(resource, "RLIMIT_CPU", int(cpu_seconds), meta, "cpu"):
             meta["cpu_limit_applied"] = True
