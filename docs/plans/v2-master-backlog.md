@@ -291,7 +291,7 @@
 | ✅ | LT-1 | fixtures 扩面（`7222b2d8`）：三步预处理链导出一致性、单特征 PMML、policy 部分满足端到端、SEL-7 模型卡呈现；**挖出 2 真 bug**（_apply_cap 只读数组崩溃、模型卡吞 warnings）已修复（`99e6ca8b`/`f9f15378`）xfail 转正 | 追踪器 |
 | ✅ | LT-2 | AUTO 安全矩阵（`26f3d01d`）：五门 bare-confirm 阻断矩阵、stale token AUTO 路径、GAP-4 字典注入×阻断组合；**挖出严重 bug：risk_flags 结构性死代码**（envelope 从不设旗、composer 从不写 meta，真实交付门裸 confirm 放行）已修复（`7541db3d`：信封四路推导 risk_flags+composer 落 meta，纯信息门不设旗防过阻断）xfail 转正；另确认 stale-control 唯一机制=expected_step_id 比对 | 追踪器 |
 | ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
-| ⬜ | LT-4 | 失败/重试 UX 的 per-tool schema 表单 adapters（JSON fallback 已有）；smoke 发现：retry inputs 是整体替换非合并——表单实现前先在前端 JSON 编辑器旁明示该语义 | 追踪器+6-28 |
+| ✅ | LT-4 | 重试 UX 收口（`d6d17ff`）：整体替换语义中文警示常显（后端确证 UPDATE 全列覆盖非合并）、真 schema（required 红星/enum 下拉）经既有 GET /api/plugins/{name}/tools 懒取合并到推断 stub、array/object 与取 schema 失败均回落 JSON 编辑器；364 前端+插件测试绿 | 追踪器 |
 | ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
 | ✅ | LT-6 | 证据驱动列投影（`cf36f01a`）：9 recipe 训练读 82MB→18MB（-78%）、monitor scored 分支 -93%、champion 重训同改；全帧回写类路径（score/reject/report）复核后不改（会丢输出列）；442 测试+LT-8 计数守卫全绿 | 追踪器 |
 | ✅ | LT-7 | 证据裁决（`c5ad8499`，文档 commit）：盘点后无路径在不冒精度漂移/输出保真风险下过 30% 收益线（筛选已列批读、profile 已采样有界、dedup 已有 SQL 路径），不硬改 | 追踪器 |
