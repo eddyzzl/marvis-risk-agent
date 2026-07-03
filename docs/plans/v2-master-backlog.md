@@ -292,7 +292,7 @@
 | ✅ | LT-2 | AUTO 安全矩阵（`26f3d01d`）：五门 bare-confirm 阻断矩阵、stale token AUTO 路径、GAP-4 字典注入×阻断组合；**挖出严重 bug：risk_flags 结构性死代码**（envelope 从不设旗、composer 从不写 meta，真实交付门裸 confirm 放行）已修复（`7541db3d`：信封四路推导 risk_flags+composer 落 meta，纯信息门不设旗防过阻断）xfail 转正；另确认 stale-control 唯一机制=expected_step_id 比对 | 追踪器 |
 | ⬜ | LT-3 | PlanDriver 收尾：per-tool gate adapters + schema-driven adjust specs（验收=PlanDriver 不再 import 任务特定渲染细节） | 追踪器 |
 | ✅ | LT-4 | 重试 UX 收口（`d6d17ff`）：整体替换语义中文警示常显（后端确证 UPDATE 全列覆盖非合并）、真 schema（required 红星/enum 下拉）经既有 GET /api/plugins/{name}/tools 懒取合并到推断 stub、array/object 与取 schema 失败均回落 JSON 编辑器；364 前端+插件测试绿 | 追踪器 |
-| ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
+| ✅ | LT-5 | UoW 收尾（`ee020ce`）：全建模多写工具盘点表；两处真修（champion refit attach 失败零清理→快照回滚+重试回归、报告 xlsx 直写终path→stage/promote+审计单事务）；train 路径 file-then-DB 缺口如实文档化（recipe uow 穿线判定过侵入，DB 侧本已原子+既有补偿器）；三类写路径文档进 transactional.py docstring；223 测试绿 | 追踪器 |
 | ✅ | LT-6 | 证据驱动列投影（`cf36f01a`）：9 recipe 训练读 82MB→18MB（-78%）、monitor scored 分支 -93%、champion 重训同改；全帧回写类路径（score/reject/report）复核后不改（会丢输出列）；442 测试+LT-8 计数守卫全绿 | 追踪器 |
 | ✅ | LT-7 | 证据裁决（`c5ad8499`，文档 commit）：盘点后无路径在不冒精度漂移/输出保真风险下过 30% 收益线（筛选已列批读、profile 已采样有界、dedup 已有 SQL 路径），不硬改 | 追踪器 |
 | ✅ | LT-8 | 三件套落地（`435bb86c`）：筛选列批读计数（20万行×80列，7 次调用严格匹配批算术）、多配方端到端单次加载守卫（真实 backend 非 mock）、join 连接数与行数无关+双实例确定性；六连跑零 flake，未发现回归点 | 追踪器 |
