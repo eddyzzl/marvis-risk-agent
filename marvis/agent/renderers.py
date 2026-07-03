@@ -1113,6 +1113,80 @@ def _render_monitor_run(o: dict):
     return text, tables
 
 
+#: S5: red-light disposition checklist injected into the strategy-monitoring
+#: alarm gate copy. The three options map to the driver's disposition keywords
+#: (观察 / 调阈值 / 起新版本); the gate reply parser recognises these keywords.
+_MONITORING_RED_CHECKLIST = (
+    "处置建议(红灯,请三选一并回复关键词):",
+    "1. 维持并观察 —— 回复「观察」保持当前策略,加强下一周期监控;",
+    "2. 调阈值重跑 —— 回复「调阈值」调整监控计划阈值后重新运行监控;",
+    "3. 起新版本策略 —— 回复「起新版本」基于当前策略起一个新版本重走策略开发。",
+)
+
+
+def _render_run_strategy_monitoring(o: dict):
+    overall = str(o.get("overall_level") or "")
+    checks = [c for c in (o.get("checks") or []) if isinstance(c, dict)]
+    red_flags = [c for c in checks if c.get("level") == "red"]
+    amber_flags = [c for c in checks if c.get("level") == "amber"]
+    label = _MONITOR_LEVEL_LABEL.get(overall, overall)
+    text = f"**策略监控完成**:总体判级【{label}】。"
+    if red_flags:
+        names = "、".join(str(c.get("label") or c.get("id")) for c in red_flags)
+        text += f" 红旗:{names}。"
+    if amber_flags:
+        names = "、".join(str(c.get("label") or c.get("id")) for c in amber_flags)
+        text += f" 黄旗:{names}。"
+    if overall == "red":
+        text += "\n\n" + "\n".join(_MONITORING_RED_CHECKLIST)
+    rows = [
+        [
+            str(c.get("label") or c.get("id") or ""),
+            _MONITOR_LEVEL_LABEL.get(str(c.get("level")), str(c.get("level"))),
+            _fmt(c.get("value")) if c.get("value") is not None else "n/a",
+            str(c.get("message") or ""),
+        ]
+        for c in checks
+    ]
+    tables = [{"title": "监控判级明细", "columns": ["检查项", "判级", "值", "说明"], "rows": rows}]
+    drifted = [row for row in (o.get("top_drifted_features") or []) if isinstance(row, dict)]
+    if drifted:
+        tables.append({
+            "title": "特征漂移 Top",
+            "columns": ["特征", "CSI"],
+            "rows": [[str(row.get("feature") or ""), _fmt(row.get("csi"))] for row in drifted[:10]],
+        })
+    return text, tables
+
+
+def _render_monitoring_report(o: dict):
+    timeline = [row for row in (o.get("timeline") or []) if isinstance(row, dict)]
+    overall = str(o.get("overall_level") or "")
+    label = _MONITOR_LEVEL_LABEL.get(overall, overall) if overall else ""
+    head = f"**监控报告已生成**:`{o.get('report_path', '')}`"
+    if label:
+        head += f",最近总体判级【{label}】"
+    head += f",历史监控 {len(timeline)} 次。"
+    next_action = o.get("next_action") if isinstance(o.get("next_action"), dict) else None
+    if next_action and next_action.get("prompt"):
+        head += f"\n\n下一步:{next_action['prompt']}"
+    tables = []
+    if timeline:
+        tables.append({
+            "title": "监控判级时间线",
+            "columns": ["时间", "总体判级", "样本量"],
+            "rows": [
+                [
+                    str(row.get("at") or ""),
+                    _MONITOR_LEVEL_LABEL.get(str(row.get("overall_level")), str(row.get("overall_level") or "")),
+                    _fmt(row.get("row_count")) if row.get("row_count") is not None else "",
+                ]
+                for row in timeline
+            ],
+        })
+    return head, tables
+
+
 def _render_flow_rate(o: dict):
     months = [str(m) for m in (o.get("months") or [])]
     net_flows = [row for row in (o.get("net_flows") or []) if isinstance(row, dict)]
@@ -1380,6 +1454,8 @@ _RENDERERS = {
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
+    "run_strategy_monitoring": _render_run_strategy_monitoring,
+    "render_monitoring_report": _render_monitoring_report,
     "flow_rate": _render_flow_rate,
     "bucket_migration": _render_bucket_migration,
     "segment_profile": _render_segment_profile,

@@ -20,6 +20,7 @@ from marvis.packs.strategy.contracts import BacktestResult, Strategy
 from marvis.packs.strategy.deliverables import decision_table_csv
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.monitor_tools import (  # noqa: F401
+    tool_render_monitoring_report,
     tool_run_strategy_monitoring,
 )
 from marvis.packs.strategy.monitoring_plan import (

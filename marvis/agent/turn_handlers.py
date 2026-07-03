@@ -23,9 +23,11 @@ from marvis.agent.portfolio_setup import (
 )
 from marvis.agent.strategy_setup import (
     StrategySetupError,
+    build_monitoring_setup_proposal,
     build_rule_strategy_proposal,
     build_strategy_proposal,
     is_rule_strategy_goal,
+    is_strategy_monitoring_goal,
 )
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
@@ -423,6 +425,12 @@ def _run_strategy_setup(
     runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
+    # S5 intent branch (checked first, more specific than development/mining): a
+    # monitoring goal -- in the first user message or the task's own name -- routes
+    # to the strategy_monitoring template (run one monitoring pass for the task's
+    # adopted strategy). Same S4 multi-recognize precedent as rule_strategy below.
+    if is_strategy_monitoring_goal(user_text, getattr(task, "model_name", None)):
+        return _run_strategy_monitoring_setup(runtime, repo, task, backend, registry)
     # S4 intent branch (parallel to strategy_development's goal_patterns): a rule
     # mining goal -- in the first user message or the task's own name -- routes to
     # the rule_strategy template instead of the default strategy_analysis.
@@ -472,6 +480,32 @@ def _run_rule_strategy_setup(
         content=(
             f"开始规则策略挖掘:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}。"
             f"将挖掘候选拒绝规则，选定规则集后回测并采纳。{note_text}"
+        ),
+        metadata={"intent": "strategy"},
+    )
+    return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _run_strategy_monitoring_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, backend, registry
+) -> dict | tuple:
+    proposal = build_monitoring_setup_proposal(
+        registry,
+        backend,
+        runtime.settings.db_path,
+        task.id,
+        task.source_dir,
+        target_col=getattr(task, "target_col", "") or None,
+        score_col=getattr(task, "score_col", "") or None,
+    )
+    note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"开始策略监控:对已采纳策略 `{proposal.strategy_id}` 跑一次监控,样本 "
+            f"`{proposal.dataset_name}`。监控完成后会在告警门停下确认。{note_text}"
         ),
         metadata={"intent": "strategy"},
     )

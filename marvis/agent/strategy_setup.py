@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from marvis.agent.sample_setup import detect_setup
+from marvis.db import StrategyRepository
 from marvis.domain import FileRole
 from marvis.files import scan_source_dir
 
@@ -37,10 +38,28 @@ _SCORE_HINTS = (
 # these -- parallel to how strategy_development got its own goal_patterns (S2).
 _RULE_STRATEGY_GOAL_PATTERNS = ("规则挖掘", "拒绝规则", "规则策略", "rule mining", "rule strategy")
 
+# S5: goal phrases that route a strategy task to the strategy_monitoring template
+# (run one monitoring pass for an adopted strategy) instead of a development flow.
+# Kept in sync with STRATEGY_MONITORING.goal_patterns; the strategy_setup intent
+# branch multi-recognizes these -- the same S4 precedent as rule_strategy above.
+_STRATEGY_MONITORING_GOAL_PATTERNS = (
+    "策略监控",
+    "跑监控",
+    "监控运行策略",
+    "monitoring run 策略",
+    "strategy monitoring",
+    "监控策略",
+)
+
 
 def is_rule_strategy_goal(*texts: str | None) -> bool:
     haystack = " ".join(text.lower() for text in texts if text)
     return any(pattern.lower() in haystack for pattern in _RULE_STRATEGY_GOAL_PATTERNS)
+
+
+def is_strategy_monitoring_goal(*texts: str | None) -> bool:
+    haystack = " ".join(text.lower() for text in texts if text)
+    return any(pattern.lower() in haystack for pattern in _STRATEGY_MONITORING_GOAL_PATTERNS)
 
 
 class StrategySetupError(ValueError):
@@ -98,6 +117,70 @@ class RuleStrategyProposal:
         if self.score_col:
             slots["score_col"] = self.score_col
         return slots
+
+
+@dataclass
+class MonitoringSetupProposal:
+    """S5: setup proposal that routes to the strategy_monitoring template. Resolves
+    the task's single adopted strategy plus the fresh monitoring sample; the
+    template's run_strategy_monitoring step reads the plan off the adopted strategy
+    and grades drift against the adoption baseline."""
+
+    strategy_id: str
+    dataset_id: str
+    dataset_name: str
+    score_col: str | None
+    target_col: str | None
+    notes: list[str]
+    template_id: str = "strategy_monitoring"
+
+    def template_slots(self) -> dict:
+        slots: dict = {"strategy_id": self.strategy_id, "dataset_id": self.dataset_id}
+        if self.score_col:
+            slots["score_col"] = self.score_col
+        if self.target_col:
+            slots["target_col"] = self.target_col
+        return slots
+
+
+def build_monitoring_setup_proposal(
+    registry,
+    backend,
+    db_path,
+    task_id: str,
+    source_dir,
+    *,
+    target_col: str | None = None,
+    score_col: str | None = None,
+) -> MonitoringSetupProposal:
+    """Resolve the adopted strategy + fresh monitoring sample for a monitoring task.
+
+    A monitoring task must have exactly one adopted strategy to monitor; if none is
+    adopted yet, that is a setup error (nothing to monitor). The dataset is the new
+    performance/application sample (resolved the same way as a development task's
+    sample). target_col/score_col are optional passthroughs (labels may not have
+    matured; score_col only matters for a model-backed strategy)."""
+    adopted = [
+        meta for meta in StrategyRepository(db_path).list_meta_for_task(task_id)
+        if meta.get("status") == "adopted"
+    ]
+    if not adopted:
+        raise StrategySetupError("当前任务没有已采纳策略,无法执行监控;请先采纳一个策略。")
+    strategy_id = str(adopted[-1]["id"])
+    dataset = _resolve_dataset(registry, task_id, source_dir)
+    path = registry.resolve_path(dataset.id)
+    columns = backend.column_names(path)
+    resolved_target = target_col if (target_col and target_col in columns) else None
+    resolved_score = _optional_score_col(columns, score_col)
+    notes = [f"将对已采纳策略 {strategy_id} 跑一次监控,并与采纳基线对比漂移。"]
+    return MonitoringSetupProposal(
+        strategy_id=strategy_id,
+        dataset_id=dataset.id,
+        dataset_name=_dataset_name(dataset),
+        score_col=resolved_score,
+        target_col=resolved_target,
+        notes=notes,
+    )
 
 
 def build_strategy_proposal(
@@ -271,10 +354,13 @@ def _dataset_name(dataset) -> str:
 
 
 __all__ = [
+    "MonitoringSetupProposal",
     "RuleStrategyProposal",
     "StrategyProposal",
     "StrategySetupError",
+    "build_monitoring_setup_proposal",
     "build_rule_strategy_proposal",
     "build_strategy_proposal",
     "is_rule_strategy_goal",
+    "is_strategy_monitoring_goal",
 ]

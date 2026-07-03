@@ -291,6 +291,8 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "confirm_join": ("irreversible_dedup_merge",),
     "propose_join": ("irreversible_dedup_merge",),
     "adopt_strategy": ("irreversible_strategy_approval",),
+    "run_strategy_monitoring": ("strategy_monitoring_alarm_approval",),
+    "render_monitoring_report": ("strategy_monitoring_alarm_approval",),
     "design_cutoff_bands": ("strategy_direction_approval",),
     "tradeoff_view": ("strategy_direction_approval",),
     "compare_strategies": ("strategy_direction_approval",),
@@ -306,6 +308,7 @@ _HIGH_RISK_STEP_ID_TOKENS: dict[str, tuple[str, ...]] = {
     "vintage": ("strategy_direction_approval",),
     "cutoff": ("strategy_direction_approval",),
     "adopt": ("irreversible_strategy_approval",),
+    "monitor": ("strategy_monitoring_alarm_approval",),
     "post-training": ("model_delivery_handoff_champion",),
     "select-champion": ("champion_model_selection",),
 }

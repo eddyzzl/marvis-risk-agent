@@ -2,7 +2,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from marvis.db_schema import connect
@@ -362,6 +362,55 @@ class StrategyRepository:
             ).fetchall()
         return [_backtest_result_from_row(row) for row in rows]
 
+    def list_monitoring_due(self, now: datetime | None = None) -> list[dict]:
+        """S5: adopted strategies whose next monitoring run is due (overdue).
+
+        Due date = (last_run_at or adopted_at) + cadence_days, read from each
+        adopted strategy's latest monitoring_plan_json artifact. A strategy with
+        no monitoring plan is skipped (nothing to be due against). All the SQL and
+        the plan-JSON parsing lives here so callers get plain dicts. Returns only
+        strategies that are currently overdue, most-overdue first."""
+        reference = now or datetime.now(UTC)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT s.id AS strategy_id, s.adopted_at AS adopted_at,
+                       (SELECT a.path FROM strategy_artifacts a
+                         WHERE a.strategy_id = s.id AND a.kind = 'monitoring_plan_json'
+                         ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS plan_path
+                  FROM strategies s
+                 WHERE s.status = 'adopted'
+                 ORDER BY s.adopted_at, s.id
+                """
+            ).fetchall()
+        due: list[dict] = []
+        for row in rows:
+            plan_path = _optional_str(row["plan_path"])
+            if plan_path is None:
+                continue
+            plan = _read_monitoring_plan_fields(plan_path)
+            if plan is None:
+                continue
+            anchor_ts = _parse_iso(plan.get("last_run_at")) or _parse_iso(row["adopted_at"])
+            if anchor_ts is None:
+                continue
+            cadence_days = int(plan.get("cadence_days") or 30)
+            due_at = anchor_ts + timedelta(days=cadence_days)
+            overdue_seconds = (reference - due_at).total_seconds()
+            if overdue_seconds <= 0:
+                continue
+            due.append(
+                {
+                    "strategy_id": str(row["strategy_id"]),
+                    "due_at": due_at.isoformat(),
+                    "overdue_days": overdue_seconds / 86400.0,
+                    "last_run_at": _optional_str(plan.get("last_run_at")),
+                    "cadence_days": cadence_days,
+                }
+            )
+        due.sort(key=lambda item: (-item["overdue_days"], item["strategy_id"]))
+        return due
+
 
 def _write_audit_row(
     conn: sqlite3.Connection,
@@ -543,6 +592,34 @@ def _optional_str(value) -> str | None:
         return None
     normalized = str(value)
     return normalized or None
+
+
+def _parse_iso(value) -> datetime | None:
+    text = _optional_str(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _read_monitoring_plan_fields(plan_path: str) -> dict | None:
+    """Read cadence_days/last_run_at from a monitoring plan file. Returns None if
+    the file is missing or unparseable -- a broken plan file must not make a due
+    sweep raise (it just drops that strategy from the due list)."""
+    try:
+        raw = Path(plan_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 def _dump_json_any(value) -> str:

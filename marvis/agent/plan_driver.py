@@ -156,6 +156,33 @@ def _looks_like_bare_index_list(text: str) -> bool:
     return bool(stripped) and bool(re.fullmatch(r"\d+", stripped))
 
 
+_MONITORING_NEW_VERSION = re.compile(r"(起新版本|新版本|新起一版|起一版|重起|new\s*version|new\s*strategy)", re.IGNORECASE)
+_MONITORING_ADJUST = re.compile(r"(调阈值|改阈值|调整阈值|调门槛|调参|adjust\s*threshold|retune|re-?run)", re.IGNORECASE)
+_MONITORING_OBSERVE = re.compile(r"(维持|观察|保持|继续观察|再看看|keep\s*watch|observe|hold)", re.IGNORECASE)
+
+
+def _parse_monitoring_disposition(text: str) -> str | None:
+    """Parse a strategy-monitoring alarm-gate reply into a disposition keyword.
+
+    Recognises the three red-light checklist choices (spec S5), most-specific
+    first so 「起新版本」 wins over a co-occurring 「观察」:
+      * 「起新版本」/「新版本」/「new version」        -> "new_version"
+      * 「调阈值」/「调整阈值」/「adjust threshold」    -> "adjust_threshold"
+      * 「维持」/「观察」/「保持」/「observe」          -> "observe"
+
+    Returns None when the reply names no disposition (a plain 「确认」 or an
+    unrelated instruction), so it falls through to the normal confirm/route path.
+    """
+    raw = text or ""
+    if _MONITORING_NEW_VERSION.search(raw):
+        return "new_version"
+    if _MONITORING_ADJUST.search(raw):
+        return "adjust_threshold"
+    if _MONITORING_OBSERVE.search(raw):
+        return "observe"
+    return None
+
+
 class DriverError(Exception):
     pass
 
@@ -295,6 +322,18 @@ class PlanDriver:
             selection = _parse_rule_selection_instruction(user_text, self._rule_candidate_count(gate))
             if selection is not None:
                 return self._gate_execution.apply_adjust(plan, gate, {"selection": selection}, run_seq)
+        # S5 strategy-monitoring alarm gate: the report step is the gate (it renders
+        # its run_strategy_monitoring dependency's verdict + red-light checklist). A
+        # red-light reply naming one of the three dispositions (观察 / 调阈值 /
+        # 起新版本) is recorded onto the report gate's own `disposition` input (so the
+        # report surfaces next_action -- for 起新版本 a STRATEGY_DEVELOPMENT follow-up
+        # prompt, never an auto-created task) before confirming the gate to proceed.
+        if gate is not None and gate.tool_ref.tool == "render_monitoring_report":
+            disposition = _parse_monitoring_disposition(user_text)
+            if disposition is not None:
+                self._apply_monitoring_disposition(gate, disposition)
+                self._repo.confirm_step(gate.id)
+                return self._run_and_handle(plan_id, run_seq=run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
 
     def replan_structured(
@@ -447,6 +486,17 @@ class PlanDriver:
                 return len(output["candidate_rules"])
         candidates = (gate.inputs or {}).get("candidate_rules")
         return len(candidates) if isinstance(candidates, list) else 0
+
+    def _apply_monitoring_disposition(self, gate: PlanStep, disposition: str) -> None:
+        """Record the parsed red-light disposition onto the report gate's own
+        `disposition` input (literal-None default in the template) so its output
+        surfaces the right next_action. Persists the input change via update_step
+        (preserving the step's AWAITING_CONFIRM status -- the apply_screen_selection
+        precedent), so the following confirm_step + run executes the report tool with
+        the chosen disposition. reset_step is deliberately NOT used here: it would
+        clear the confirmation and re-arm the gate to pause a second time."""
+        gate.inputs = {**(gate.inputs or {}), "disposition": disposition}
+        self._repo.update_step(gate)
 
     def _latest_failed_step_run_error_kind(self, step_id: str) -> str | None:
         latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)

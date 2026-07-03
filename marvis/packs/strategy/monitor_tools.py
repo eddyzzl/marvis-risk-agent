@@ -33,6 +33,7 @@ import pandas as pd
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository, StrategyRepository
+from marvis.repositories.audit import _list_audit_rows
 from marvis.packs.strategy.errors import StrategyError, StrategyNotAdoptedError
 from marvis.packs.strategy.monitoring_plan import (
     MonitoringPlan,
@@ -287,6 +288,165 @@ def _latest_plan_path(runtime: "_Runtime", strategy_id: str) -> Path:
     return Path(artifacts[-1]["path"])
 
 
+#: Recent monitoring runs summarised in the report timeline (audit rows). N is
+#: bounded so a long-lived strategy's report shows the recent trend, not its whole
+#: history (the audit table stays the source of record).
+_REPORT_TIMELINE_LIMIT = 20
+
+_LEVEL_LABEL = {"green": "绿", "amber": "黄", "red": "红", "n/a": "n/a"}
+
+
+def tool_render_monitoring_report(inputs: dict, ctx) -> dict:
+    """S5: render a monitoring report (Markdown) for an adopted strategy.
+
+    Aggregates the strategy's recent ``strategy.monitor`` audit rows into an
+    overall-level timeline and renders the latest run's per-check table (passed
+    through from the run step's output when available). Registers the report as a
+    ``monitoring_report_md`` strategy artifact. When a ``disposition`` is supplied
+    (the red-light gate's parsed choice), a ``next_action`` is surfaced for the
+    driver -- for "new_version" it names STRATEGY_DEVELOPMENT as the follow-up, but
+    never creates a task itself (single-machine, human-in-the-loop)."""
+    runtime = _Runtime(ctx)
+    strategy_id = str(inputs["strategy_id"])
+    meta = runtime.strategies.get_strategy_meta(strategy_id)
+    if meta is None:
+        raise StrategyError(f"strategy not found: {strategy_id}")
+
+    checks = [dict(c) for c in (inputs.get("checks") or []) if isinstance(c, dict)]
+    overall_level = _optional_str(inputs.get("overall_level"))
+
+    timeline = _monitoring_timeline(runtime, strategy_id)
+    markdown = _render_report_markdown(
+        strategy_id=strategy_id,
+        version=int(meta.get("version", 1)),
+        overall_level=overall_level,
+        checks=checks,
+        timeline=timeline,
+    )
+
+    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    report_path = strategy_dir / f"monitoring_report_{strategy_id}_v{int(meta.get('version', 1))}.md"
+    report_path.write_text(markdown, encoding="utf-8")
+
+    runtime.strategies.save_strategy_artifact(
+        strategy_id, kind="monitoring_report_md", path=str(report_path)
+    )
+    runtime.strategies_repo_write_audit(
+        kind="strategy.artifact",
+        target_ref=strategy_id,
+        detail={"task_id": str(ctx.task_id), "kind": "monitoring_report_md", "path": str(report_path)},
+    )
+
+    result = {
+        "strategy_id": strategy_id,
+        "report_path": str(report_path),
+        "overall_level": overall_level,
+        "timeline": timeline,
+    }
+    next_action = monitoring_next_action(_optional_str(inputs.get("disposition")), strategy_id=strategy_id)
+    if next_action is not None:
+        result["next_action"] = next_action
+    return result
+
+
+def _monitoring_timeline(runtime: "_Runtime", strategy_id: str) -> list[dict]:
+    rows = _list_audit_rows(
+        runtime.settings.db_path,
+        kind="strategy.monitor",
+        target_ref=strategy_id,
+        limit=_REPORT_TIMELINE_LIMIT,
+    )
+    timeline: list[dict] = []
+    for row in rows:
+        detail = row.get("detail") or {}
+        timeline.append({
+            "at": row.get("at"),
+            "overall_level": detail.get("overall_level"),
+            "dataset_id": detail.get("dataset_id"),
+            "row_count": detail.get("row_count"),
+        })
+    return timeline
+
+
+def _render_report_markdown(
+    *,
+    strategy_id: str,
+    version: int,
+    overall_level: str | None,
+    checks: list[dict],
+    timeline: list[dict],
+) -> str:
+    lines = [
+        f"# 策略监控报告 — {strategy_id} v{version}",
+        "",
+    ]
+    if overall_level:
+        lines.append(f"- 最近一次总体判级：**{_LEVEL_LABEL.get(overall_level, overall_level)}**")
+    lines.append(f"- 历史监控次数：{len(timeline)}")
+    lines.append("")
+    if checks:
+        lines.append("## 最近一次监控明细")
+        lines.append("")
+        lines.append("| 检查项 | 判级 | 值 | 说明 |")
+        lines.append("| --- | --- | --- | --- |")
+        for check in checks:
+            value = check.get("value")
+            value_text = "n/a" if value is None else f"{float(value):+.4f}" if isinstance(value, (int, float)) else str(value)
+            lines.append(
+                f"| {check.get('label') or check.get('id')} "
+                f"| {_LEVEL_LABEL.get(str(check.get('level')), check.get('level'))} "
+                f"| {value_text} | {check.get('message') or ''} |"
+            )
+        lines.append("")
+    if timeline:
+        lines.append("## 监控判级时间线")
+        lines.append("")
+        lines.append("| 时间 | 总体判级 | 样本量 |")
+        lines.append("| --- | --- | --- |")
+        for entry in timeline:
+            lines.append(
+                f"| {entry.get('at') or ''} "
+                f"| {_LEVEL_LABEL.get(str(entry.get('overall_level')), entry.get('overall_level'))} "
+                f"| {entry.get('row_count') if entry.get('row_count') is not None else ''} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+#: Red-light disposition keyword codes and the driver next_action each maps to.
+#: "observe" / "adjust_threshold" stay in-place (no follow-up task); "new_version"
+#: names STRATEGY_DEVELOPMENT as the suggested follow-up (via new_version_from) but
+#: never auto-creates it -- the driver surfaces the prompt for the user to accept.
+DISPOSITION_OBSERVE = "observe"
+DISPOSITION_ADJUST_THRESHOLD = "adjust_threshold"
+DISPOSITION_NEW_VERSION = "new_version"
+
+
+def monitoring_next_action(disposition: str | None, *, strategy_id: str) -> dict | None:
+    if disposition == DISPOSITION_NEW_VERSION:
+        return {
+            "kind": "suggest_template",
+            "template_id": "strategy_development",
+            "parent_strategy_id": strategy_id,
+            "prompt": (
+                f"监控红灯，建议基于策略 {strategy_id} 起一个新版本（new_version_from）"
+                f"并重新走一遍策略开发流程。是否开始？"
+            ),
+        }
+    if disposition == DISPOSITION_ADJUST_THRESHOLD:
+        return {
+            "kind": "note",
+            "prompt": "已选择「调阈值重跑」：请调整监控计划阈值后重新运行策略监控。",
+        }
+    if disposition == DISPOSITION_OBSERVE:
+        return {
+            "kind": "note",
+            "prompt": "已选择「维持并观察」：保持当前策略，加强下一周期监控。",
+        }
+    return None
+
+
 class _Runtime:
     def __init__(self, ctx):
         self.settings = build_settings(ctx.workspace)
@@ -331,7 +491,12 @@ def _optional_float(value) -> float | None:
 
 
 __all__ = [
+    "DISPOSITION_ADJUST_THRESHOLD",
+    "DISPOSITION_NEW_VERSION",
+    "DISPOSITION_OBSERVE",
     "STRATEGY_DRIFT_AMBER_PP",
     "STRATEGY_DRIFT_RED_PP",
+    "monitoring_next_action",
+    "tool_render_monitoring_report",
     "tool_run_strategy_monitoring",
 ]

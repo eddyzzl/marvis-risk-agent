@@ -294,3 +294,159 @@ def test_monitoring_unadopted_strategy_typed_error(tmp_path):
     )
     assert res.ok is False
     assert res.error_kind == "strategy_not_adopted"
+
+
+# ---------------------------------------------------------------------------
+# S5 Commit 2: due derivation, disposition parsing, next_action, renderer.
+# ---------------------------------------------------------------------------
+def _adopt_with_plan(db_path, tmp_path, *, cadence_days, last_run_at, adopted_at="2026-01-01T00:00:00Z"):
+    from marvis.packs.strategy.contracts import Strategy, StrategyRule
+    from marvis.packs.strategy.monitoring_plan import build_monitoring_plan, save_monitoring_plan
+
+    repo = StrategyRepository(db_path)
+    strategy = Strategy(
+        id=f"s-{cadence_days}-{last_run_at or 'none'}",
+        strategy_type="approval",
+        rules=(StrategyRule(condition="score < 500", decision="reject", value=None),),
+        score_col="score",
+        default_decision="approve",
+        description="due-test",
+    )
+    repo.create_strategy("task-1", strategy, created_at=adopted_at)
+    repo.adopt_strategy_with_audit(
+        strategy.id,
+        reason="seed",
+        audit={"kind": "strategy.adopt", "target_ref": strategy.id, "outcome": "succeeded", "detail": {}},
+        adopted_at=adopted_at,
+    )
+    plan = build_monitoring_plan(
+        strategy_id=strategy.id, version=1, approved_bad_rate=0.05, approval_rate=0.8, cadence_days=cadence_days
+    )
+    plan["last_run_at"] = last_run_at
+    plan_path = tmp_path / f"plan_{strategy.id}.json"
+    save_monitoring_plan(plan_path, plan)
+    repo.save_strategy_artifact(strategy.id, kind="monitoring_plan_json", path=str(plan_path))
+    return strategy.id
+
+
+def test_list_monitoring_due_uses_adopted_at_when_no_last_run(tmp_path):
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    # No last_run_at -> due is measured from adopted_at + cadence.
+    sid = _adopt_with_plan(
+        settings.db_path, tmp_path, cadence_days=30, last_run_at=None, adopted_at="2026-01-01T00:00:00Z"
+    )
+    now = datetime(2026, 3, 1, tzinfo=UTC)  # ~59 days after adoption, 30d cadence -> overdue ~29d
+    due = StrategyRepository(settings.db_path).list_monitoring_due(now=now)
+    assert [d["strategy_id"] for d in due] == [sid]
+    assert due[0]["last_run_at"] is None
+    assert round(due[0]["overdue_days"]) == 29
+
+
+def test_list_monitoring_due_boundary_not_yet_due(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    last_run = datetime(2026, 6, 1, tzinfo=UTC)
+    _adopt_with_plan(
+        settings.db_path, tmp_path, cadence_days=30, last_run_at=last_run.isoformat()
+    )
+    # Exactly at due (last_run + 30d): overdue_seconds == 0 -> not returned.
+    at_due = last_run + timedelta(days=30)
+    assert StrategyRepository(settings.db_path).list_monitoring_due(now=at_due) == []
+    # One day past due -> returned.
+    past = at_due + timedelta(days=1)
+    due = StrategyRepository(settings.db_path).list_monitoring_due(now=past)
+    assert len(due) == 1
+    assert round(due[0]["overdue_days"]) == 1
+
+
+def test_list_monitoring_due_skips_non_adopted_and_planless(tmp_path):
+    from datetime import UTC, datetime
+
+    from marvis.packs.strategy.contracts import Strategy, StrategyRule
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = StrategyRepository(settings.db_path)
+    # A draft strategy (never adopted) + an adopted one with no plan artifact.
+    draft = Strategy(id="draft-1", strategy_type="approval",
+                     rules=(StrategyRule(condition="score < 1", decision="reject", value=None),),
+                     score_col="score", default_decision="approve", description="d")
+    repo.create_strategy("task-1", draft, created_at="2026-01-01T00:00:00Z")
+    adopted_noplan = Strategy(id="adopted-noplan", strategy_type="reject",
+                              rules=(StrategyRule(condition="score < 1", decision="reject", value=None),),
+                              score_col="score", default_decision="approve", description="d")
+    repo.create_strategy("task-1", adopted_noplan, created_at="2026-01-01T00:00:00Z")
+    repo.adopt_strategy_with_audit(
+        adopted_noplan.id, reason="x",
+        audit={"kind": "strategy.adopt", "target_ref": adopted_noplan.id, "outcome": "succeeded", "detail": {}},
+        adopted_at="2026-01-01T00:00:00Z",
+    )
+    now = datetime(2027, 1, 1, tzinfo=UTC)
+    assert StrategyRepository(settings.db_path).list_monitoring_due(now=now) == []
+
+
+def test_parse_monitoring_disposition_three_keywords():
+    from marvis.agent.plan_driver import _parse_monitoring_disposition as parse
+
+    assert parse("起新版本") == "new_version"
+    assert parse("基于当前策略新版本重做") == "new_version"
+    assert parse("new version please") == "new_version"
+    assert parse("调阈值重跑") == "adjust_threshold"
+    assert parse("adjust threshold and rerun") == "adjust_threshold"
+    assert parse("维持并观察") == "observe"
+    assert parse("先保持观察") == "observe"
+    # most-specific wins: new_version over a co-occurring 观察.
+    assert parse("先观察，不行就起新版本") == "new_version"
+    # a plain confirm names no disposition.
+    assert parse("确认") is None
+    assert parse("") is None
+
+
+def test_monitoring_next_action_new_version_points_at_development():
+    from marvis.packs.strategy.monitor_tools import monitoring_next_action
+
+    action = monitoring_next_action("new_version", strategy_id="s-1")
+    assert action is not None
+    assert action["template_id"] == "strategy_development"
+    assert action["parent_strategy_id"] == "s-1"
+    assert "s-1" in action["prompt"]
+    # observe / adjust are notes (no follow-up template); None disposition -> no action.
+    assert monitoring_next_action("observe", strategy_id="s-1")["kind"] == "note"
+    assert monitoring_next_action("adjust_threshold", strategy_id="s-1")["kind"] == "note"
+    assert monitoring_next_action(None, strategy_id="s-1") is None
+
+
+def test_render_run_strategy_monitoring_red_injects_checklist():
+    from marvis.agent.renderers import render_tool_output
+
+    text, tables = render_tool_output("run_strategy_monitoring", {
+        "overall_level": "red",
+        "checks": [
+            {"id": "approved_bad_rate_drift", "label": "通过客群坏率漂移", "level": "red", "value": 0.22, "message": "x"},
+            {"id": "approval_rate_drift", "label": "审批率漂移", "level": "green", "value": 0.0, "message": "y"},
+        ],
+    })
+    assert "总体判级【红】" in text
+    assert "起新版本" in text  # red-light checklist injected
+    assert "维持并观察" in text
+    assert "调阈值" in text
+    assert tables[0]["columns"] == ["检查项", "判级", "值", "说明"]
+
+
+def test_render_monitoring_report_surfaces_next_action():
+    from marvis.agent.renderers import render_tool_output
+
+    text, tables = render_tool_output("render_monitoring_report", {
+        "report_path": "/w/tasks/t/strategy/monitoring_report_s1_v1.md",
+        "overall_level": "red",
+        "timeline": [{"at": "2026-07-01T00:00:00Z", "overall_level": "red", "row_count": 100}],
+        "next_action": {"kind": "suggest_template", "prompt": "监控红灯，建议起新版本。"},
+    })
+    assert "监控报告已生成" in text
+    assert "监控红灯，建议起新版本。" in text
+    assert tables[0]["title"] == "监控判级时间线"
