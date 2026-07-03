@@ -74,7 +74,7 @@ from marvis.routers.evidence import router as evidence_router
 from marvis.routers.materials import router as materials_router
 from marvis.routers.modeling import router as modeling_router
 from marvis.routers.plans import router as plans_router
-from marvis.routers.plugins import router as plugins_router
+from marvis.routers.plugins import ensure_plugin_admin_token, router as plugins_router
 from marvis.routers.report_fields import router as report_fields_router
 from marvis.routers.reports import router as reports_router
 from marvis.routers.scans import router as scans_router
@@ -283,6 +283,9 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
 
     app = FastAPI(title="MARVIS-Agent")
     app.state.settings = settings
+    # Per-workspace plugin-admin secret (replaces the old "local-dev" magic
+    # header): minted into the workspace on first startup, stored 0600.
+    app.state.plugin_admin_token = ensure_plugin_admin_token(settings.plugin_admin_token_path)
     app.state.artifact_recovery_report = artifact_recovery_report.to_dict()
     _configure_plugin_runtime(app, settings)
     _configure_orchestrator(app, settings)
@@ -455,6 +458,13 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         local_token = _configured_local_token() if is_local else ""
         index_html = index_html.replace(
             "__MARVIS_LOCAL_TOKEN__", escape(local_token, quote=True)
+        )
+        # Hand the local UI its plugin-admin token so draft-tools-panel.js can
+        # echo it via X-Marvis-Plugin-Admin on plugin/draft governance calls.
+        # Never embedded for a remote client (same reasoning as the local token).
+        plugin_admin_token = app.state.plugin_admin_token if is_local else ""
+        index_html = index_html.replace(
+            "__MARVIS_PLUGIN_ADMIN_TOKEN__", escape(plugin_admin_token, quote=True)
         )
         return HTMLResponse(
             render_branded_index_html(index_html, branding)

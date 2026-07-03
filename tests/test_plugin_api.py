@@ -9,7 +9,8 @@ from marvis.plugins.manifest import ToolRef
 from marvis.routers.plugins import _read_plugin_upload
 
 
-PLUGIN_ADMIN_HEADERS = {"X-MARVIS-Plugin-Admin": "local-dev"}
+def _admin_headers(client) -> dict:
+    return {"X-MARVIS-Plugin-Admin": client.app.state.plugin_admin_token}
 
 
 class FakeUploadRequest:
@@ -88,9 +89,9 @@ def test_plugin_tools_endpoint_exposes_schema_without_entrypoints(tmp_path):
 def test_builtin_plugin_can_be_disabled_and_enabled(tmp_path):
     client = TestClient(create_app(tmp_path))
 
-    disabled = client.post("/api/plugins/_sample/disable", headers=PLUGIN_ADMIN_HEADERS)
+    disabled = client.post("/api/plugins/_sample/disable", headers=_admin_headers(client))
     listed = client.get("/api/plugins?include_disabled=true")
-    enabled = client.post("/api/plugins/_sample/enable", headers=PLUGIN_ADMIN_HEADERS)
+    enabled = client.post("/api/plugins/_sample/enable", headers=_admin_headers(client))
 
     assert disabled.status_code == 200
     assert listed.json()["plugins"][0]["enabled"] is False
@@ -101,7 +102,7 @@ def test_builtin_plugin_can_be_disabled_and_enabled(tmp_path):
 def test_builtin_plugin_delete_is_rejected(tmp_path):
     client = TestClient(create_app(tmp_path))
 
-    response = client.delete("/api/plugins/_sample", headers=PLUGIN_ADMIN_HEADERS)
+    response = client.delete("/api/plugins/_sample", headers=_admin_headers(client))
 
     assert response.status_code == 400
     assert "builtin" in response.json()["detail"]
@@ -114,12 +115,12 @@ def test_upload_plugin_zip_installs_and_rejects_duplicate(tmp_path):
     created = client.post(
         "/api/plugins",
         files={"file": ("uploaded_pack.zip", archive, "application/zip")},
-        headers=PLUGIN_ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
     duplicate = client.post(
         "/api/plugins",
         files={"file": ("uploaded_pack.zip", archive, "application/zip")},
-        headers=PLUGIN_ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
 
     assert created.status_code == 201
@@ -141,7 +142,7 @@ def test_upload_bad_manifest_returns_422(tmp_path):
     response = client.post(
         "/api/plugins",
         files={"file": ("bad.zip", _zip_bytes(_manifest(bad=True)), "application/zip")},
-        headers=PLUGIN_ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
 
     assert response.status_code == 422
@@ -154,7 +155,7 @@ def test_upload_plugin_preserves_zip_trailing_bytes(tmp_path):
     response = client.post(
         "/api/plugins",
         files={"file": ("uploaded_pack.zip", archive, "application/zip")},
-        headers=PLUGIN_ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
 
     assert response.status_code == 201
@@ -190,3 +191,51 @@ def test_plugin_mutations_require_admin_header(tmp_path):
     assert upload.status_code == 403
     assert disable.status_code == 403
     assert delete.status_code == 403
+
+
+def test_plugin_mutation_rejects_wrong_admin_token(tmp_path):
+    client = TestClient(create_app(tmp_path))
+
+    response = client.post(
+        "/api/plugins/_sample/disable",
+        headers={"X-MARVIS-Plugin-Admin": "local-dev"},
+    )
+
+    # The old magic value no longer works; only the per-workspace token does.
+    assert response.status_code == 403
+    assert client.get("/api/plugins").json()["plugins"][0]["enabled"] is True
+
+
+def test_plugin_mutation_accepts_workspace_token(tmp_path):
+    client = TestClient(create_app(tmp_path))
+    token = client.app.state.plugin_admin_token
+    assert token and token != "local-dev"
+
+    response = client.post(
+        "/api/plugins/_sample/disable",
+        headers={"X-MARVIS-Plugin-Admin": token},
+    )
+
+    assert response.status_code == 200
+    assert client.get("/api/plugins?include_disabled=true").json()["plugins"][0]["enabled"] is False
+
+
+def test_plugin_admin_token_file_is_owner_only(tmp_path):
+    import stat
+
+    create_app(tmp_path)
+    token_path = tmp_path / "plugin_admin_token"
+
+    assert token_path.exists()
+    mode = stat.S_IMODE(token_path.stat().st_mode)
+    assert mode == 0o600, oct(mode)
+    # The stored value is a non-trivial random hex secret, not the old magic word.
+    stored = token_path.read_text(encoding="utf-8").strip()
+    assert len(stored) >= 32
+    assert stored != "local-dev"
+
+
+def test_plugin_admin_token_persists_across_app_restart(tmp_path):
+    first = create_app(tmp_path).state.plugin_admin_token
+    second = create_app(tmp_path).state.plugin_admin_token
+    assert first == second

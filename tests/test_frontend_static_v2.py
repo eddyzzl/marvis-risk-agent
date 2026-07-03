@@ -6395,7 +6395,11 @@ def test_system_settings_center_keeps_extensions_without_runtime_workbench():
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in draft_tools_panel_js
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in draft_tools_panel_js
     assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in draft_tools_panel_js
-    assert '"X-MARVIS-Plugin-Admin": "local-dev"' in draft_tools_panel_js
+    assert '"X-MARVIS-Plugin-Admin": pluginAdminToken()' in draft_tools_panel_js
+    # The hardcoded magic-header *value* is gone (a mention in an explanatory
+    # comment is fine); the header is now sourced from the injected token.
+    assert '"X-MARVIS-Plugin-Admin": "local-dev"' not in draft_tools_panel_js
+    assert "document.body?.dataset?.marvisPluginAdminToken" in draft_tools_panel_js
     assert "function governanceExtensionActions" in app_js
     assert "pluginActions:" in app_js
     assert "skillActions:" in app_js

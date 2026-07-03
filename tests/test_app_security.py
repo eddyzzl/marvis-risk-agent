@@ -493,6 +493,33 @@ def test_index_omits_local_token_when_unset(tmp_path):
     assert 'data-marvis-local-token=""' in response.text
 
 
+def test_index_embeds_plugin_admin_token_for_local_client(tmp_path):
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert f'data-marvis-plugin-admin-token="{token}"' in response.text
+    assert "__MARVIS_PLUGIN_ADMIN_TOKEN__" not in response.text
+
+
+def test_index_omits_plugin_admin_token_for_remote_client(tmp_path, monkeypatch):
+    # The plugin-admin token must never reach a remote reader (same reasoning as
+    # the local token): it would hand a remote client the write credential.
+    monkeypatch.setenv("MARVIS_ALLOW_REMOTE_READ", "1")
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    client = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert token not in response.text
+    assert 'data-marvis-plugin-admin-token=""' in response.text
+
+
 def test_health_check_reports_monitoring_overdue_count_zero_by_default(tmp_path):
     # S5: a fresh workspace has no adopted strategies -> monitoring_overdue_count 0.
     app = create_app(tmp_path)
@@ -566,3 +593,23 @@ def test_monitoring_due_endpoint_local_only(tmp_path):
     finally:
         os.environ.pop("MARVIS_ALLOW_REMOTE_READ", None)
     assert remote.status_code == 403
+
+
+def test_remote_plugin_mutation_blocked_even_with_correct_admin_token(tmp_path):
+    # Layered defense: even if a remote client somehow learns the workspace
+    # plugin-admin token, the shared-host access guard rejects the non-safe
+    # request before the plugin-admin check ever runs. The token file's owner-
+    # only permission and this guard are independent barriers.
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    remote = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = remote.post(
+        "/api/plugins/_sample/disable",
+        headers={"X-MARVIS-Plugin-Admin": token},
+    )
+
+    assert response.status_code == 403
+    # The plugin was not mutated (verified via a local read).
+    local = TestClient(app)
+    assert local.get("/api/plugins").json()["plugins"][0]["enabled"] is True

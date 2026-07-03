@@ -1,5 +1,16 @@
 import { escapeHtml } from "./ui-utils.js";
 
+// The plugin-admin token replaces the old fixed "local-dev" magic header. The
+// server embeds the per-workspace token into <body data-marvis-plugin-admin-
+// token> for local clients only (see marvis/app.py index handler); promote /
+// reject echo it back via X-MARVIS-Plugin-Admin. A remote client never receives
+// it and is additionally blocked by the shared-host access guard.
+function pluginAdminToken() {
+  return typeof document !== "undefined"
+    ? document.body?.dataset?.marvisPluginAdminToken || ""
+    : "";
+}
+
 function draftStatusLabel(status) {
   return {
     draft: "草稿",
@@ -216,7 +227,7 @@ export function createDraftToolsPanelController({
     setStatus("正在执行转正闸门...");
     const payload = await api(`/api/drafts/${encodeURIComponent(draftId)}/promote`, {
       method: "POST",
-      headers: { "X-MARVIS-Plugin-Admin": "local-dev" },
+      headers: { "X-MARVIS-Plugin-Admin": pluginAdminToken() },
       body: JSON.stringify({ test_cases: testCases }),
     });
     await load({ preserveSelection: true });
@@ -230,7 +241,7 @@ export function createDraftToolsPanelController({
     setStatus("正在拒绝草稿...");
     await api(`/api/drafts/${encodeURIComponent(draftId)}/reject`, {
       method: "POST",
-      headers: { "X-MARVIS-Plugin-Admin": "local-dev" },
+      headers: { "X-MARVIS-Plugin-Admin": pluginAdminToken() },
       body: JSON.stringify({ reason }),
     });
     await load({ preserveSelection: true });
