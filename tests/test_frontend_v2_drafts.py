@@ -149,4 +149,3 @@ def test_draft_tools_panel_controller_wires_api_and_render_state():
         assert.deepEqual(confirmed, ["转正草稿工具"]);
       """
     )
-

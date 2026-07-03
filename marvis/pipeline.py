@@ -1453,5 +1453,3 @@ def _mark_cancelled(
         )
     except Exception:
         pass
-
-

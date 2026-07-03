@@ -48,10 +48,11 @@ jobs:
   security:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Non-blocking for now: this job surfaces dependency CVEs and high-severity
-    # static-analysis findings without gating merges. Flip continue-on-error to
-    # false once the existing findings have been triaged.
-    continue-on-error: true
+    # Blocking gate: pip-audit has zero known CVEs and every bandit medium
+    # finding was triaged as a false positive in the 2026-07-03 FIN-2 security
+    # review (docs/reviews/2026-07-03-fin2-fin3-closing-review.md) — bandit
+    # below fails on high-severity findings only, matching that adjudication.
+    continue-on-error: false
 
     steps:
       - name: Check out repository
@@ -74,4 +75,4 @@ jobs:
         run: uv tool run pip-audit
 
       - name: bandit (high-severity static security scan)
-        run: uv tool run bandit -r marvis -ll
+        run: uv tool run bandit -r marvis -lll

@@ -571,4 +571,3 @@ def _build_metrics_cell_sources(
 
 def _json_literal(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-

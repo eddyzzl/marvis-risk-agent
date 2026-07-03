@@ -111,5 +111,3 @@ def test_train_model_baseline_score_edges_are_finite_open_ended(tmp_path):
     assert edges[0] == float("-inf")
     assert edges[-1] == float("inf")
     assert len(edges) == 11
-
-

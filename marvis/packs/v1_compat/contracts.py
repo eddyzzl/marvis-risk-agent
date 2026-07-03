@@ -21,4 +21,3 @@ class V1TaskContext:
     execution_dir: Path
     outputs_dir: Path
     images_dir: Path
-

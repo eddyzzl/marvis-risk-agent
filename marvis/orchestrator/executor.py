@@ -841,4 +841,3 @@ def _is_fatal_error(error: str | None) -> bool:
             "interrupted during running",
         )
     )
-

@@ -394,5 +394,3 @@ def _stage_failure_message(prefix: str, message: str) -> str:
 
 def _truthy_env(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
-
-

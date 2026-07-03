@@ -873,4 +873,3 @@
 **证据**：grep -rniE 'segment' marvis/packs/modeling marvis/feature marvis/agent/modeling_setup.py --include='*.py' 零命中（业务语义上仅有渠道/月份列的分布展示 tools.py:364-392 _GROUP_COLUMN_HINTS，用于切分确认表，不用于建模）；split 规则集只能把渠道分到 train/test，不能按渠道各建一模
 
 **改法**：1) 先补诊断：在切分/筛选阶段加"分群价值评估"——按候选分群列分别算基线模型 KS 与合并 KS 差值，量化分群收益后再决定是否投入；2) 若收益显著，扩展 plan 模板支持 segment_col：按 segment 循环 train_models、各段独立调参、报告并排展示分段 KS 与总体加权 KS；3) 合并口径用分段内校准（各段 PD 校准后天然可比）衔接现有 calibrate_model
-

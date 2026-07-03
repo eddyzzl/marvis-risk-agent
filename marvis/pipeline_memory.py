@@ -128,5 +128,3 @@ def _memory_failure_kind(message: str, *, default: str) -> str:
     if "notebook" in text or "kernel" in text or "rmc_" in text:
         return "notebook"
     return default
-
-

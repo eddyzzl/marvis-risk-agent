@@ -12,7 +12,7 @@
 ### 计划契约固化（S2 落盘时的 monitoring_plan_json，本批给正式 schema）
 ```
 {plan_version: 1, strategy_id, experiment_id?,          # 打分模型（可无：纯规则策略只监控通过率面）
- cadence_days: 30, last_run_at?: iso, 
+ cadence_days: 30, last_run_at?: iso,
  thresholds: {…MONITOR_RUN_THRESHOLDS 同构…},           # 采纳时可覆盖默认
  expectation_baseline: {approval_rate, approved_bad_rate,  # 来自采纳时点的回测
                         source_backtest_id}}
