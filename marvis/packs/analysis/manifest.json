@@ -1,0 +1,164 @@
+{
+  "name": "analysis",
+  "version": "0.1.0",
+  "display_name": "Portfolio Analysis Pack",
+  "description": "Deterministic bucket-flow, migration, segment-profile, expected-loss, stability-trend, and portfolio-report tools over a performance snapshot table.",
+  "module": "marvis.packs.analysis.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "flow_rate",
+      "summary": "Adjacent-snapshot bucket flow matrices and into/out-of-bad net flows per month.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "id_col": {"type": "string", "minLength": 1},
+          "snapshot_col": {"type": "string", "minLength": 1},
+          "bucket_col": {"type": "string", "minLength": 1},
+          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "balance_col": {"type": "string"},
+          "bad_states": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "states": {"type": "array", "items": {"type": "string"}},
+          "to_states": {"type": "array", "items": {"type": "string"}},
+          "months": {"type": "array", "items": {"type": "string"}},
+          "matrix_by_month": {"type": "array", "items": {"type": "object"}},
+          "net_flows": {"type": "array", "items": {"type": "object"}},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["states", "to_states", "months", "matrix_by_month", "net_flows", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_flow_rate",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "bucket_migration",
+      "summary": "Average and worst-cell bucket migration matrices over a window, aligned adjacent snapshots.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "id_col": {"type": "string", "minLength": 1},
+          "snapshot_col": {"type": "string", "minLength": 1},
+          "bucket_col": {"type": "string", "minLength": 1},
+          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "balance_col": {"type": "string"},
+          "window": {"type": "array", "items": {"type": "string"}},
+          "bad_states": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "states": {"type": "array", "items": {"type": "string"}},
+          "to_states": {"type": "array", "items": {"type": "string"}},
+          "window_months": {"type": "array", "items": {"type": "string"}},
+          "avg_matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+          "worst_matrix": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+          "heat_table": {"type": "array", "items": {"type": "object"}},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["states", "to_states", "window_months", "avg_matrix", "worst_matrix", "heat_table", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_bucket_migration",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "segment_profile",
+      "summary": "Per-segment count/share/approval/bad-rate/score/net-profit with concentration (top1/top5/HHI).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "segment_col": {"type": "string", "minLength": 1},
+          "target_col": {"type": "string"},
+          "score_col": {"type": "string"},
+          "approved_col": {"type": "string"},
+          "profit_params": {"type": "object"},
+          "ead_col": {"type": "string"},
+          "pd_col": {"type": "string"},
+          "top_k": {"type": "integer", "minimum": 1}
+        },
+        "required": ["dataset_id", "segment_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "segments": {"type": "array", "items": {"type": "object"}},
+          "concentration": {"type": "object"},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["segments", "concentration", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_segment_profile",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "expected_loss_estimate",
+      "summary": "Markov absorbing-chain expected loss: horizon-step P(loss) per state, EL by month and total.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {"type": "string", "minLength": 1},
+          "id_col": {"type": "string", "minLength": 1},
+          "snapshot_col": {"type": "string", "minLength": 1},
+          "bucket_col": {"type": "string", "minLength": 1},
+          "states": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "balance_col": {"type": "string", "minLength": 1},
+          "loss_state": {"type": "string"},
+          "lgd": {"type": "number", "minimum": 0, "maximum": 1},
+          "horizon_months": {"type": "integer", "minimum": 1},
+          "window": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["dataset_id", "id_col", "snapshot_col", "bucket_col", "states", "balance_col"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "loss_state": {"type": "string"},
+          "chain": {"type": "array", "items": {"type": "object"}},
+          "el_by_month": {"type": "array", "items": {"type": "object"}},
+          "total_el": {"type": "number"},
+          "assumptions": {"type": "object"},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["loss_state", "chain", "el_by_month", "total_el", "assumptions", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_expected_loss_estimate",
+      "side_effects": ["read:dataset"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:dataset", "write:dataset", "read:experiment"]
+}
