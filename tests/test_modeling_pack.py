@@ -3337,26 +3337,6 @@ def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LT-1 bug (distinct from the SEL-7 warning-propagation xfail below): "
-        "chaining impute_missing -> cap_outliers on the SAME column and then "
-        "replaying that chain at scoring time (_ModelArtifactScorer / handoff "
-        "notebook path) crashes. tool_impute_missing's _apply_impute uses "
-        "Series.fillna(), whose backing numpy array can come back "
-        "WRITEABLE=False in pandas 2.x; _apply_cap "
-        "(marvis/feature/preprocessing.py's _apply_cap) then does an in-place "
-        "`values[mask] = np.clip(...)` on `pd.to_numeric(out[column], "
-        "errors='coerce').to_numpy(dtype=float)`, which returns that same "
-        "read-only view rather than a fresh writable array, raising "
-        "`ValueError: assignment destination is read-only`. Reproduced in total "
-        "isolation with a 4-row fillna() + to_numeric().to_numpy(dtype=float) "
-        "round trip -- not specific to parquet I/O or this fixture's shape. Any "
-        "real pipeline chaining impute then cap on one column will hit this the "
-        "moment a human (or handoff notebook) tries to score new raw data."
-    ),
-)
 def test_train_model_persists_combined_impute_cap_woe_chain_and_exports_pmml_consistently(tmp_path):
     """LT-1: chains ALL THREE preprocessing kinds (impute -> cap -> woe) before
     train_model, not just one at a time (existing coverage only exercises impute
