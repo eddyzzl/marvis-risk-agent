@@ -103,6 +103,47 @@ VINTAGE_ANALYSIS = WorkflowTemplate(
     source="builtin",
 )
 
+SLICE_AGGREGATE = WorkflowTemplate(
+    # S6 ad-hoc 问数 entry: a single deterministic group-by aggregate over a
+    # ready dataset. The LLM only produced a validated SliceSpec (INV-1); the
+    # 口径确认门 is handled turn-side (turn_handlers) BEFORE this plan is built,
+    # so — like vintage_analysis — the one step just runs to DONE and renders its
+    # table (no needs_confirmation gate). Every slice_aggregate input is an
+    # optional slot; turn_handlers fills exactly SliceSpec.tool_inputs(dataset_id),
+    # and omitted slots drop out via _fill_inputs' _OMIT handling.
+    id="slice_aggregate",
+    title="即席问数",
+    goal_patterns=("问数", "即席分析", "slice aggregate", "ad-hoc query"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Ready dataset id to aggregate"),
+        SlotSpec("metrics", True, "task_context", "Validated aggregate metrics (op/col)"),
+        SlotSpec("group_by", False, "task_context", "Optional group-by columns"),
+        SlotSpec("filters", False, "task_context", "Optional filter conditions"),
+        SlotSpec("month_col", False, "task_context", "Optional month column"),
+        SlotSpec("months", False, "task_context", "Optional month range"),
+        SlotSpec("sort_by", False, "task_context", "Optional sort column/metric label"),
+    ),
+    steps=(
+        StepTemplate(
+            title="计算聚合结果",
+            tool_ref=ToolRef("data_ops", "slice_aggregate"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "metrics": "{slot:metrics}",
+                "group_by": "{slot:group_by}",
+                "filters": "{slot:filters}",
+                "month_col": "{slot:month_col}",
+                "months": "{slot:months}",
+                "sort_by": "{slot:sort_by}",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "columns"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)
+
 
 STRATEGY_DEVELOPMENT = WorkflowTemplate(
     # S2 conversational strategy-development template (new id; the lightweight

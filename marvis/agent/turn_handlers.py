@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Callable
 import json
 
+from marvis.agent.adhoc_analysis import (
+    build_slice_spec_from_utterance,
+    detect_question_intent,
+)
 from marvis.agent.auto_drive import decide_gate
 from marvis.agent.feature_setup import FeatureSetupError, build_feature_proposal
 from marvis.agent.join_setup import JoinSetupError, build_join_proposal
@@ -773,6 +777,16 @@ def dispatch_driver_turn(
     adjust_params: dict | None = None,
     expected_step_id: str | None = None,
 ) -> dict:
+    # S6 ad-hoc 问数 branch (checked BEFORE the normal type dispatch). It is
+    # deliberately defensive: it only ever handles a turn that is either (round B)
+    # confirming/answering an already-pending 口径确认门, or (round A) a clear data
+    # question on a task that has a ready dataset AND no active plan/open gate.
+    # Anything else — including a non-confirm reply to a pending spec — returns
+    # None and falls straight through to the task type's own handler, so this can
+    # never hijack a normal instruction.
+    adhoc = _maybe_handle_adhoc_turn(runtime, repo, task, user_text=user_text)
+    if adhoc is not None:
+        return adhoc
     result = DRIVER_TURN_FUNCS[task.task_type](
         runtime,
         repo,
@@ -787,6 +801,136 @@ def dispatch_driver_turn(
         agent_autodrive_turn(runtime, repo, task, client=agent_client)
         return join_turn_response(repo, task.id)
     return result
+
+
+# S6 ad-hoc "问数" wiring -------------------------------------------------------
+# The 口径确认门 pending state reuses the SAME lightest-weight precedent the join
+# C1 gate (_latest_c1_state) and the portfolio states gate (_latest_portfolio_states)
+# already use: the confirmation-门 message stores the fully-validated tool inputs
+# under its own metadata key (`adhoc_spec`), and the next turn scans the
+# conversation back for it — no new state table, no schema change. The key is
+# deliberately NOT `kind: "gate"`/`join_c1`, so latest_open_gate() (and therefore
+# AUTO auto-drive) never mistakes it for a driver gate it does not know how to run.
+_ADHOC_SPEC_META_KEY = "adhoc_spec"
+_ADHOC_DATA_ROLES = frozenset({"sample", "feature", "strategy_sample", "derived"})
+
+
+def _maybe_handle_adhoc_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+) -> dict | None:
+    """Return a turn response when this turn is an ad-hoc 问数 interaction, else
+    None so the caller falls through to the normal type dispatch."""
+    conversation = repo.list_agent_messages(task.id)
+    pending = _latest_adhoc_pending(conversation)
+    if pending is not None:
+        # Round B: a 口径确认门 is open. Only a confirm runs it; anything else
+        # (deny / rephrase) drops the pending spec and returns to the normal flow.
+        if is_confirm(user_text or ""):
+            repo.add_agent_message(
+                task.id, role="user", stage="chat",
+                content=user_text or "", metadata={"intent": "adhoc_query"},
+            )
+            return _run_adhoc_slice_plan(runtime, repo, task, pending)
+        return None
+    # Round A: no pending spec. Enter only when the guards all hold — conservative
+    # by design (窄不触发优于劫持).
+    if not detect_question_intent(user_text):
+        return None
+    if _active_plan(runtime.plan_repo, task.id) is not None:
+        return None
+    if latest_open_gate(conversation) is not None:
+        return None
+    resolved = _resolve_adhoc_dataset(runtime.settings, task.id)
+    if resolved is None:
+        return None
+    dataset_id, columns = resolved
+    result = build_slice_spec_from_utterance(user_text or "", columns, runtime.llm_client)
+    repo.add_agent_message(
+        task.id, role="user", stage="chat",
+        content=user_text or "", metadata={"intent": "adhoc_query"},
+    )
+    if result.needs_clarification:
+        # A Chinese clarification (never a guess, INV-1). No pending state is
+        # stored — the user simply rephrases and round A runs again.
+        repo.add_agent_message(
+            task.id, role="assistant", stage="chat",
+            content=result.clarify or "没能理解这个问题，请换一种说法。",
+            metadata={"intent": "adhoc_query"},
+        )
+        return join_turn_response(repo, task.id)
+    # A validated spec: show the 口径确认门 and stash the exact tool inputs on it.
+    repo.add_agent_message(
+        task.id, role="assistant", stage="chat",
+        content=result.confirmation_text or "",
+        metadata={_ADHOC_SPEC_META_KEY: result.spec.tool_inputs(dataset_id)},
+    )
+    return join_turn_response(repo, task.id)
+
+
+def _run_adhoc_slice_plan(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, tool_inputs: dict
+) -> dict:
+    """Build + run the single-step slice_aggregate plan for a confirmed 口径.
+
+    vintage's lightweight single-step entry is the precedent: one non-gated step
+    that runs straight to DONE and renders its own table. Because the 口径 was just
+    confirmed turn-side, the plan-overview 开始 gate is auto-confirmed here so the
+    aggregate runs in the same turn instead of pausing again."""
+    driver = _driver(runtime)
+    try:
+        start = driver.start(
+            task_id=task.id,
+            template_id="slice_aggregate",
+            slots=dict(tool_inputs),
+            tier=runtime.tier,
+        )
+        turn = driver.resume(plan_id=start.plan_id, user_text="确认")
+    except DriverError:
+        raise
+    except Exception as exc:
+        return append_join_error(repo, task.id, f"即席问数出错：{exc}")
+    append_driver_messages(repo, task.id, turn)
+    return join_turn_response(repo, task.id)
+
+
+def _latest_adhoc_pending(conversation: list[dict]) -> dict | None:
+    """The pending ad-hoc tool inputs, only when the LAST assistant message is the
+    口径确认门 (mirrors latest_open_gate's last-assistant anchoring). Once the
+    aggregate result/error is appended, this stops matching, so a confirmed spec is
+    never re-run."""
+    last_assistant = next(
+        (m for m in reversed(conversation) if m.get("role") == "assistant"), None
+    )
+    if last_assistant is None:
+        return None
+    spec = (last_assistant.get("metadata") or {}).get(_ADHOC_SPEC_META_KEY)
+    return spec if isinstance(spec, dict) else None
+
+
+def _resolve_adhoc_dataset(settings, task_id: str) -> tuple[str, list[str]] | None:
+    """A task's ready dataset id + its column whitelist, or None when the task has
+    no already-registered dataset (guard (a) — this branch never scans/ingests
+    from source_dir; that is the setup flow's job). Prefers a target-carrying
+    dataset, else the largest — same ranking feature/vintage setup use."""
+    backend, registry = _modeling_data_runtime(settings)
+    datasets = [d for d in registry.list_for_task(task_id) if d.role in _ADHOC_DATA_ROLES]
+    if not datasets:
+        return None
+    dataset = sorted(
+        datasets,
+        key=lambda d: (not bool(getattr(d, "has_target", False)), -int(getattr(d, "row_count", 0) or 0)),
+    )[0]
+    try:
+        columns = list(backend.column_names(registry.resolve_path(dataset.id)))
+    except Exception:
+        return None
+    if not columns:
+        return None
+    return dataset.id, columns
 
 
 def agent_autodrive_turn(
