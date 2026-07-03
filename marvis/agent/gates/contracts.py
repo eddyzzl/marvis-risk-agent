@@ -297,6 +297,24 @@ _HIGH_RISK_GATE_SOURCE_TOOLS: dict[str, tuple[str, ...]] = {
     "tradeoff_view": ("strategy_direction_approval",),
     "compare_strategies": ("strategy_direction_approval",),
     "vintage_curve": ("strategy_direction_approval",),
+    # FIN-3 #1: systematic sweep of every needs_confirmation=True gate step across
+    # orchestrator/templates/ found seven forced-confirmation source tools with a
+    # red-flag checklist or an irreversible/delivery action that were NOT mapped
+    # here, so AUTO silently auto-confirmed them. Each code carries an
+    # AUTO_HIGH_RISK_FLAG_TOKENS token (approval / irreversible) so _gate_risk_reason
+    # fires. The four modeling-funnel gates (screen_features / select_features /
+    # configure_tuning / tune_hyperparameters) are DELIBERATELY not listed: they are
+    # AUTO-operable low-consequence reversible gates whose expensive / algorithm-swap
+    # controls are already blocked by _apply_safety_policy's control-level guards, and
+    # flagging them would over-block the whole modeling auto-drive (INV: pure /
+    # reversible gate -> no flag).
+    "execute_join": ("irreversible_dedup_merge",),
+    "portfolio_gate_summary": ("portfolio_summary_approval",),
+    "render_reports": ("validation_report_approval",),
+    "monitor_run": ("monitoring_run_alarm_approval",),
+    "generate_model_report": ("model_report_approval",),
+    "backtest_strategy": ("strategy_direction_approval",),
+    "select_rule_set": ("irreversible_strategy_approval",),
 }
 
 #: step_id substrings for the same forced gates, used when meta carries only a
