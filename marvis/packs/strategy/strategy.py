@@ -178,6 +178,20 @@ def apply_strategy(df: pd.DataFrame, strategy: Strategy) -> pd.Series:
     return decisions
 
 
+def evaluate_condition_mask(df: pd.DataFrame, condition: str) -> pd.Series:
+    """Boolean hit mask for one strategy condition string against ``df``.
+
+    S4: the single, shared condition-evaluation entry point. build_strategy
+    (via apply_strategy), rule mining (rules.mine_rules) and rule-set evaluation
+    (rules.evaluate_rule_set) all resolve a condition's per-row hits through this
+    one function, so a condition string produced by any of the three lands on the
+    exact same hit set -- there is never a second, drifting evaluator. It is the
+    same validated ``_safe_eval_condition`` apply_strategy already uses; exposed
+    publicly only so mine/evaluate reuse it by import instead of re-implementing.
+    """
+    return _safe_eval_condition(df, condition)
+
+
 def _safe_eval_condition(df: pd.DataFrame, condition: str) -> pd.Series:
     expression = _parse_condition(condition)
     mask = _eval_node(expression.body, df)
@@ -335,4 +349,4 @@ def _strategy_id(
     return f"strategy-{digest[:12]}"
 
 
-__all__ = ["apply_strategy", "build_strategy", "infer_strategy_rule_direction"]
+__all__ = ["apply_strategy", "build_strategy", "evaluate_condition_mask", "infer_strategy_rule_direction"]
