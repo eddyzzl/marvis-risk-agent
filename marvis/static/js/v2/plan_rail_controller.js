@@ -1,6 +1,7 @@
 import { api } from "../api.js";
 import { escapeHtml } from "../ui-utils.js";
 import { skeletonRowsHtml, skeletonTableHtml } from "../skeleton.js";
+import { listPluginTools } from "./api_v2.js";
 import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";
 import { gateConfirmLabel } from "./driver_gate_confirm.js";
 
@@ -179,6 +180,26 @@ function planRetrySchemaProperties(step) {
   return properties && typeof properties === "object" ? properties : {};
 }
 
+// LT-4: the failure_envelope's editable_input_schema (above) is inferred from
+// the current step inputs' Python types (marvis/agent/gates/contracts.py
+// _editable_input_schema) -- it never carries `required`, `enum`, or a real
+// `title`, because those only exist on the tool's authored input_schema in
+// its pack manifest.json. planRetryRealProperties()/planRetryRequiredKeys()
+// read that real schema once maybeFetchToolSchema() (below) has resolved
+// it, so rendered fields can upgrade (enum -> select, required -> marked)
+// without a backend change -- reusing GET /api/plugins/{name}/tools (already
+// exposes input_schema; see marvis/routers/plugins.py) instead of a new
+// endpoint.
+function planRetryRequiredKeys(realSchema) {
+  const required = realSchema && typeof realSchema === "object" ? realSchema.required : null;
+  return Array.isArray(required) ? new Set(required.map((key) => String(key))) : new Set();
+}
+
+function planRetryRealProperties(realSchema) {
+  const properties = realSchema && typeof realSchema === "object" ? realSchema.properties : null;
+  return properties && typeof properties === "object" ? properties : {};
+}
+
 function planRetryFieldValue(value) {
   if (value && typeof value === "object") {
     try {
@@ -195,31 +216,40 @@ function planRetryFieldType(spec) {
   return String(type || "string");
 }
 
-function planRetrySchemaFieldsHtml(step) {
+function planRetrySchemaFieldsHtml(step, realSchema = null) {
   const properties = planRetrySchemaProperties(step);
+  const realProperties = planRetryRealProperties(realSchema);
+  const requiredKeys = planRetryRequiredKeys(realSchema);
   const fields = Object.entries(properties).map(([key, spec]) => {
     const fieldSpec = spec && typeof spec === "object" ? spec : {};
-    const type = planRetryFieldType(fieldSpec);
+    // Merge in the real tool input_schema's property (enum/title/type) when
+    // it has resolved -- the inferred failure_envelope schema never carries
+    // those, only a value-derived `type` and `default` (see the LT-4 note
+    // above planRetryRequiredKeys()).
+    const realSpec = realProperties[key] && typeof realProperties[key] === "object" ? realProperties[key] : {};
+    const mergedSpec = { ...fieldSpec, ...realSpec };
+    const type = planRetryFieldType(mergedSpec);
     const defaultValue = Object.prototype.hasOwnProperty.call(fieldSpec, "default") ? fieldSpec.default : "";
     const encodedKey = escapeHtml(key);
-    const label = escapeHtml(fieldSpec.title || key);
+    const required = requiredKeys.has(key);
+    const label = escapeHtml(mergedSpec.title || key) + (required ? '<span class="plan-retry-required">*</span>' : "");
     const typeLabel = escapeHtml(type);
     const baseAttrs = `data-plan-retry-input-key="${encodedKey}" data-plan-retry-input-type="${typeLabel}"`;
-    if (Array.isArray(fieldSpec.enum) && fieldSpec.enum.length) {
+    if (Array.isArray(mergedSpec.enum) && mergedSpec.enum.length) {
       const current = planRetryFieldValue(defaultValue);
-      const options = fieldSpec.enum.map((item) => {
+      const options = mergedSpec.enum.map((item) => {
         const value = planRetryFieldValue(item);
         const selected = value === current ? " selected" : "";
         return `<option value="${escapeHtml(value)}"${selected}>${escapeHtml(value)}</option>`;
       }).join("");
-      return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}>${options}</select></label>`;
+      return `<label class="plan-retry-schema-field${required ? " required" : ""}"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}>${options}</select></label>`;
     }
     if (type === "boolean") {
       const selected = Boolean(defaultValue);
-      return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}><option value="true"${selected ? " selected" : ""}>true</option><option value="false"${selected ? "" : " selected"}>false</option></select></label>`;
+      return `<label class="plan-retry-schema-field${required ? " required" : ""}"><span>${label}<em>${typeLabel}</em></span><select ${baseAttrs}><option value="true"${selected ? " selected" : ""}>true</option><option value="false"${selected ? "" : " selected"}>false</option></select></label>`;
     }
     const inputType = type === "number" || type === "integer" ? "number" : "text";
-    return `<label class="plan-retry-schema-field"><span>${label}<em>${typeLabel}</em></span><input ${baseAttrs} type="${inputType}" value="${escapeHtml(planRetryFieldValue(defaultValue))}"></label>`;
+    return `<label class="plan-retry-schema-field${required ? " required" : ""}"><span>${label}<em>${typeLabel}</em></span><input ${baseAttrs} type="${inputType}" value="${escapeHtml(planRetryFieldValue(defaultValue))}"></label>`;
   });
   if (!fields.length) return "";
   return `<div class="plan-retry-schema-fields">${fields.join("")}</div>`;
@@ -234,12 +264,28 @@ function planRetryScopeHtml(step) {
   return `<p class="plan-retry-scope">将重置 ${resetSteps.map((item) => `<code>${escapeHtml(item)}</code>`).join("、")}</p>`;
 }
 
-function planRetryControlHtml(step) {
+// LT-4: a smoke pass on the retry flow found the endpoint semantics are a
+// full REPLACE of the step's inputs_json (marvis/repositories/plans.py
+// retry_failed_step UPDATE ... SET inputs_json = ?), not a merge with the
+// step's existing inputs -- any field left out of what gets submitted here
+// is silently dropped for that step. The JSON editor pre-fills current
+// values (planRetryInputsText) so a naive "just tweak one field" edit
+// mostly survives, but a user who clears the textarea and retypes a partial
+// object loses the rest. Spell that out inline so it isn't discovered via a
+// failed rerun.
+function planRetryReplaceWarningHtml() {
+  return '<p class="plan-retry-warning">'
+    + '此处提交将<strong>整体替换</strong>该步骤输入（非合并）——未填字段将丢失，请基于当前值修改。'
+    + "</p>";
+}
+
+function planRetryControlHtml(step, realSchema = null) {
   const stepId = String(step?.id || "");
   return `<details class="plan-step-retry" data-plan-step-retry="${escapeHtml(stepId)}">
     <summary>编辑参数后重试</summary>
     ${planRetryScopeHtml(step)}
-    ${planRetrySchemaFieldsHtml(step)}
+    ${planRetrySchemaFieldsHtml(step, realSchema)}
+    ${planRetryReplaceWarningHtml()}
     <label>
       参数 JSON
       <textarea class="plan-retry-inputs" data-plan-retry-inputs="${escapeHtml(stepId)}" rows="5" spellcheck="false">${escapeHtml(planRetryInputsText(step))}</textarea>
@@ -340,6 +386,12 @@ export function createPlanRailController({
   renderAll,
   apiClient = api,
   artifactRenderer = renderArtifact,
+  // LT-4: defaults to the already-existing GET /api/plugins/{name}/tools
+  // client (marvis/static/js/v2/api_v2.js) so the retry form can progressively
+  // upgrade from the inferred failure_envelope schema to the tool's real
+  // authored input_schema (required/enum/title) -- optional so tests can
+  // stub it without a network dependency.
+  listPluginToolsClient = listPluginTools,
   // UX-5: fills the agent composer so "发消息介入" on a no_progress event can
   // hand the user straight into typing a steering instruction. Optional so
   // callers that don't wire the composer (tests) don't need a stub.
@@ -348,6 +400,15 @@ export function createPlanRailController({
   const v2PlanCache = new Map();
   const v2PlanLastFetch = new Map();
   const v2PlanFetchErrors = new Map();
+  // LT-4: real tool input_schema, keyed by "plugin:tool", fetched lazily the
+  // first time a failed step renders its retry control. Cached for the life
+  // of the controller (schemas are static per pack) and merged into the
+  // schema-form fields once resolved. A failed/absent fetch simply leaves
+  // the entry unset, and planRetrySchemaFieldsHtml() keeps rendering from
+  // the inferred failure_envelope schema -- the defensive fallback the spec
+  // asks for, with no behavior regression.
+  const v2ToolSchemaCache = new Map();
+  const v2ToolSchemaFetching = new Set();
   const renderStepChecker = typeof stepCheckerHtml === "function" ? stepCheckerHtml : () => "";
   let artifactHandlersInstalled = false;
 
@@ -407,6 +468,45 @@ export function createPlanRailController({
     });
   }
 
+  function toolSchemaKey(ref) {
+    const plugin = String(ref?.plugin || "");
+    const tool = String(ref?.tool || "");
+    if (!plugin || !tool) return "";
+    return `${plugin}:${tool}`;
+  }
+
+  // LT-4: lazily fetches the failed step's tool's real input_schema (via the
+  // already-existing plugin tools endpoint) the first time its retry control
+  // renders, then forces a re-render so planRetrySchemaFieldsHtml() can pick
+  // up required/enum/title. Mirrors maybeFetchPlan()'s fetch-then-force-
+  // rerender shape below. Errors (network, tool not found in the plugin's
+  // tool list) are swallowed -- the schema-form stays on the inferred
+  // failure_envelope schema, which is always available.
+  function maybeFetchToolSchema(ref) {
+    const key = toolSchemaKey(ref);
+    if (!key || v2ToolSchemaCache.has(key) || v2ToolSchemaFetching.has(key)) return;
+    if (typeof listPluginToolsClient !== "function") return;
+    v2ToolSchemaFetching.add(key);
+    Promise.resolve(listPluginToolsClient(ref.plugin))
+      .then((data) => {
+        const tools = (data && data.tools) || [];
+        const tool = tools.find((item) => String(item?.name || "") === String(ref.tool));
+        if (tool && tool.input_schema && typeof tool.input_schema === "object") {
+          v2ToolSchemaCache.set(key, tool.input_schema);
+          renderWorkflowStepper?.({ force: true });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        v2ToolSchemaFetching.delete(key);
+      });
+  }
+
+  function toolSchemaFor(ref) {
+    const key = toolSchemaKey(ref);
+    return key ? v2ToolSchemaCache.get(key) || null : null;
+  }
+
   function planSubstepGroupHtml(steps = [], parentNumber = "") {
     if (!steps.length) return "";
     return [
@@ -439,7 +539,8 @@ export function createPlanRailController({
           ? '<button type="button" class="button compact secondary plan-step-download" data-driver-report-download="1">下载报告</button>'
           : "";
         const output = planOutputButtonHtml(step);
-        const retry = status === "failed" ? planRetryControlHtml(step) : "";
+        if (status === "failed") maybeFetchToolSchema(ref);
+        const retry = status === "failed" ? planRetryControlHtml(step, toolSchemaFor(ref)) : "";
         const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";
         return [
           `<div class="notebook-step ${escapeHtml(checkerStatus)}">`,

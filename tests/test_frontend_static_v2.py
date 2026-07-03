@@ -464,7 +464,7 @@ def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
     assert '<span class="plan-substep-copy">' in substeps_renderer
     assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
     assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
-    assert 'const retry = status === "failed" ? planRetryControlHtml(step) : "";' in substeps_renderer
+    assert 'const retry = status === "failed" ? planRetryControlHtml(step, toolSchemaFor(ref)) : "";' in substeps_renderer
     assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
     assert "descriptionHtml" in substeps_renderer
     assert "retry" in substeps_renderer
@@ -635,6 +635,138 @@ def test_plan_rail_retry_step_posts_edited_inputs():
     assert "[data-plan-retry-step]" in click_body
     assert "void retryPlanStep(planRetryButton);" in click_body
     assert "[data-plan-rail-retry]" in click_body
+
+
+def test_plan_retry_replace_semantics_warning_is_always_present():
+    """LT-4: a smoke pass on the retry flow found /api/plans/{id}/steps/{id}/retry
+    fully REPLACES the step's inputs_json (marvis/repositories/plans.py
+    retry_failed_step, UPDATE ... SET inputs_json = ?) rather than merging with
+    the step's existing inputs. Before any schema form existed this was invisible
+    footgun risk on the JSON editor -- assert the warning copy renders next to it
+    unconditionally, and that the JSON editor keeps pre-filling current values
+    (the mitigation for a user who edits only part of the object)."""
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    warning_body = _slice_function(plan_js, "function planRetryReplaceWarningHtml")
+    control_body = _slice_function(plan_js, "function planRetryControlHtml")
+
+    assert "整体替换" in warning_body
+    assert "非合并" in warning_body
+    assert "plan-retry-warning" in warning_body
+    assert "planRetryReplaceWarningHtml()" in control_body
+    assert "planRetryInputsText(step)" in control_body
+    assert "color: var(--warning-strong)" in _css_rule(v2_css, ".plan-retry-warning")
+    assert "background: var(--warning-soft)" in _css_rule(v2_css, ".plan-retry-warning")
+
+
+def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred_schema():
+    """LT-4: the schema form (planRetrySchemaFieldsHtml) previously only ever
+    saw the failure_envelope's *inferred* editable_input_schema (value-typed,
+    no `required`/`enum`/`title` -- see marvis/agent/gates/contracts.py
+    _editable_input_schema). It now accepts an optional real tool input_schema
+    (sourced from the already-existing GET /api/plugins/{name}/tools) and
+    marks required fields with a red `*`. When no real schema resolves, the
+    form must render exactly as before (defensive fallback, no behavior
+    regression)."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "const step = {",
+            "  id: 'step-1',",
+            "  index: 0,",
+            "  title: 'Propose join',",
+            "  status: 'failed',",
+            "  tool_ref: { plugin: 'data_ops', tool: 'propose_join' },",
+            "  depends_on: [],",
+            "  inputs: { dataset_id: 'ds-1', strategy: 'left' },",
+            "  failure_envelope: {",
+            "    editable_input_schema: {",
+            "      type: 'object',",
+            "      properties: {",
+            "        dataset_id: { type: 'string', default: 'ds-1' },",
+            "        strategy: { type: 'string', default: 'left' },",
+            "      },",
+            "    },",
+            "    downstream_reset_steps: [],",
+            "  },",
+            "};",
+            "const plan = { id: 'plan-1', status: 'failed', steps: [step] };",
+            "const toolsResponses = {",
+            "  'data_ops': { tools: [{ name: 'propose_join', input_schema: {",
+            "    type: 'object',",
+            "    properties: {",
+            "      dataset_id: { type: 'string', title: '数据集' },",
+            "      strategy: { type: 'string', enum: ['left', 'inner'], title: '策略' },",
+            "    },",
+            "    required: ['dataset_id', 'strategy'],",
+            "  } }] },",
+            "};",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "let renders = 0;",
+            "function makeController(listPluginToolsClient) {",
+            "  return createPlanRailController({",
+            "    $,",
+            "    getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "    getSelectedTaskId: () => 'task-A',",
+            "    getAgentMessages: () => [],",
+            "    isAgentMode: () => false,",
+            "    renderWorkflowStepper: () => { renders += 1; controller.render({ force: true, renderSignatures: {} }); },",
+            "    setActionStatus: () => {},",
+            "    listPluginToolsClient,",
+            "  });",
+            "}",
+            "let controller = makeController((name) => Promise.resolve(toolsResponses[name] || { tools: [] }));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "const withRealSchema = elements.workflowStepper.innerHTML;",
+            "",
+            "elements.workflowStepper.innerHTML = '';",
+            "controller = makeController((name) => Promise.reject(new Error('network down')));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "const withFailedFetch = elements.workflowStepper.innerHTML;",
+            "process.stdout.write(JSON.stringify({ withRealSchema, withFailedFetch }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    with_real_schema = payload["withRealSchema"]
+    with_failed_fetch = payload["withFailedFetch"]
+
+    # Real schema resolved: both fields are required (red `*`), strategy
+    # renders as a <select> from its real enum, and titles come from the
+    # real schema instead of the raw key.
+    assert with_real_schema.count('<span class="plan-retry-required">*</span>') == 2
+    assert '<option value="left" selected>left</option>' in with_real_schema
+    assert '<option value="inner">inner</option>' in with_real_schema
+    assert "数据集" in with_real_schema
+    assert "策略" in with_real_schema
+    assert 'plan-retry-schema-field required' in with_real_schema
+
+    # Defensive fallback: schema fetch rejected, so the form still renders
+    # from the inferred failure_envelope schema alone -- flat text inputs,
+    # no required marks, no crash (behavior does not regress).
+    assert "plan-retry-required" not in with_failed_fetch
+    assert 'data-plan-retry-input-key="dataset_id"' in with_failed_fetch
+    assert 'data-plan-retry-input-key="strategy"' in with_failed_fetch
+    assert "整体替换" in with_failed_fetch
 
 
 def test_completed_report_actions_render_below_step_copy_with_office_colors():

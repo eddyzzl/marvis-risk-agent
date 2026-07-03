@@ -1043,6 +1043,26 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   width: 100%;
   min-height: 32px;
 }
+.plan-retry-required {
+  margin-left: 2px;
+  color: var(--danger);
+}
+.plan-retry-schema-field.required input,
+.plan-retry-schema-field.required select {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+/* LT-4: replace-not-merge notice next to the retry JSON editor -- retrying a
+   failed step overwrites inputs_json wholesale (marvis/repositories/plans.py
+   retry_failed_step), it does not merge with the step's existing inputs. */
+.plan-retry-warning {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--warning-strong);
+  background: var(--warning-soft);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
 .plan-step-retry label {
   display: grid;
   gap: 6px;
