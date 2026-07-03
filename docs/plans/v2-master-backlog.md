@@ -217,7 +217,7 @@
 | ✅ | VD-1 | 图表语言下沉（`9a9eb2c8`）：数值列 databar、PSI 三段徽、KS/AUC 色阶、match_rate 条形、冠军行高亮+failed 灰化带原因、tabular-nums | High/M | ⚠️ |
 | ✅ | VD-2 | 门卡片形态落地（`5d9e7563`）：强调竖条+盾形图标+玻璃底+红旗警示区+"确认后将执行:<下一步>"后果文案 | High/M | ⚠️ |
 | ✅ | VD-3 | 骨架系统落地（`5e4189f7`）：块/行/表基元+reduced-motion 降级，接入任务切换/门表格/计划栏 | High/M | ⚠️ |
-| ⬜ | VD-4 | 校准可靠性曲线/分数分段数据已产出但前端无图表 | High/M | ✅ |
+| ✅ | VD-4 | 校准可靠性曲线+分数分段图落地（`e1224539`）：**顺带修复数据断链**（calibration/score_bands 此前被 _render_report 丢弃从未进对话面）；SVG 图仿 ROC 卡交互（plot-frame+悬浮），偏差三级色/柱线双图，零新 hex 全用既有 token；图置表格上方不替换；13 文件 334 测试+浏览器 smoke 绿 | High/M | ✅ |
 | ✅ | VD-5 | 发光资产已用真 logo alpha 蒙版重建（`cfed1796`，PIL 高斯 halo 不重绘像素）+吉祥物接 V2 门/红旗/完成事件；**设置项默认关闭，待用户视觉验收后再默认开** | Med/M | — |
 | ✅ | UX-5 | plan rail 渲染 loop_events（replan/no_progress+介入捷径）+重规划计数徽+活跃子 agent 行（`89452d8e`） | Med/M | — |
 | ✅ | UX-6 | 冲突列+真实冲突值样例+first/last 语义说明+"排除该特征表"出口（`9d9cb996`；"按时间列取最新"策略记为后续） | Med/M | — |
