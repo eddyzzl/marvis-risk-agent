@@ -25,6 +25,7 @@ from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
+from marvis.agent.plan_utils import find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
@@ -85,6 +86,74 @@ def _parse_dedup_instruction(text: str) -> str | None:
     if "last" in low or "末" in text or "最后" in text or "最新" in text or "后" in text:
         return "last"
     return None
+
+
+_SELECT_ALL = re.compile(r"(全选|都要|全部|全都|all)", re.IGNORECASE)
+_DROP_PREFIX = re.compile(r"(去掉|去除|删掉|删除|移除|排除|不要|drop|remove|exclude)", re.IGNORECASE)
+_KEEP_PREFIX = re.compile(r"(只?选|保留|选中|选择|要|keep|select|pick|use)", re.IGNORECASE)
+_INDEX_TOKEN = re.compile(r"\d+")
+_RULE_MENTION = re.compile(r"(规则|规则集|rule|条|第)", re.IGNORECASE)
+
+
+def _parse_rule_selection_instruction(text: str, candidate_count: int) -> list[int] | None:
+    """Parse a rule-set gate reply into an ordered list of 1-based indices.
+
+    Recognises three shapes (spec §3, parallel to _parse_dedup_instruction):
+      * 「全选」/「都要」/「all」                → keep every candidate, in order;
+      * 「去掉 2」/「去除 2 4」/「drop 2」        → all candidates except those indices;
+      * 「选 1,3,5」/「保留 1 3 5」/「pick 1 3」  → exactly those indices, in the
+        order the user wrote them (so the user can also reorder).
+
+    Returns None when the reply is not a rule-selection instruction (no keyword
+    and no bare index list, or it looks like a question/negated-confirm) so an
+    unrelated instruction falls through to the LLM router unchanged. Indices out
+    of ``[1, candidate_count]`` are dropped defensively; an empty result returns
+    None (nothing actionable) rather than an empty selection.
+    """
+    raw = text or ""
+    if _QUESTION.search(raw):
+        return None
+    if candidate_count <= 0:
+        return None
+    all_indices = list(range(1, candidate_count + 1))
+    if _SELECT_ALL.search(raw):
+        return all_indices
+    indices = _ordered_unique_indices(_INDEX_TOKEN.findall(raw), candidate_count)
+    is_drop = bool(_DROP_PREFIX.search(raw))
+    is_keep = bool(_KEEP_PREFIX.search(raw))
+    if is_drop and not is_keep:
+        if not indices:
+            return None
+        dropped = set(indices)
+        kept = [index for index in all_indices if index not in dropped]
+        return kept or None
+    if (is_keep or _RULE_MENTION.search(raw)) and indices:
+        return indices
+    # A bare index list with no keyword ("1 3 5") is still a keep instruction.
+    if indices and _looks_like_bare_index_list(raw):
+        return indices
+    return None
+
+
+def _ordered_unique_indices(tokens: list[str], candidate_count: int) -> list[int]:
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for token in tokens:
+        try:
+            index = int(token)
+        except ValueError:
+            continue
+        if 1 <= index <= candidate_count and index not in seen:
+            seen.add(index)
+            ordered.append(index)
+    return ordered
+
+
+def _looks_like_bare_index_list(text: str) -> bool:
+    """True when text is essentially just numbers + separators (1,3,5 / 1 3 5),
+    so a plain index list is treated as a keep-selection without a keyword."""
+    stripped = re.sub(r"[\s,，、和及\-到~]+", "", text or "")
+    return bool(stripped) and bool(re.fullmatch(r"\d+", stripped))
 
 
 class DriverError(Exception):
@@ -217,6 +286,15 @@ class PlanDriver:
                 if pending:
                     self._gate_execution.apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
                     return self._run_and_handle(plan_id, run_seq=run_seq)
+        # Manual-mode TEXT rule-set selection at a select_rule_set gate (no §4
+        # picker): the user replies e.g. 「选 1,3,5」/「去掉 2」/「全选」 → parse into
+        # a 1-based index selection and push it through the SAME generic
+        # apply_adjust override channel band_edges uses (the gate step's own
+        # `selection` input, default None, is overwritten and the gate re-armed).
+        if gate is not None and gate.tool_ref.tool == "select_rule_set":
+            selection = _parse_rule_selection_instruction(user_text, self._rule_candidate_count(gate))
+            if selection is not None:
+                return self._gate_execution.apply_adjust(plan, gate, {"selection": selection}, run_seq)
         return self._handle_instruction(plan, gate, user_text, run_seq)
 
     def replan_structured(
@@ -352,6 +430,23 @@ class PlanDriver:
             return self._repo.load_step_output(step_id)
         except KeyError:
             return None
+
+    def _rule_candidate_count(self, gate: PlanStep) -> int:
+        """How many mined candidate rules the select_rule_set gate is choosing
+        from -- read from its mine_rules dependency's persisted output so the
+        text selection parser can bound/validate 1-based indices. Falls back to
+        the gate's own resolved candidate_rules input, then 0 if neither is
+        available yet."""
+        plan = self._repo.load_plan(gate.plan_id)
+        for dep_id in gate.depends_on or []:
+            dep = find_step(plan, dep_id)
+            if dep is None or dep.tool_ref.tool != "mine_rules":
+                continue
+            output = self._safe_output(dep.id)
+            if isinstance(output, dict) and isinstance(output.get("candidate_rules"), list):
+                return len(output["candidate_rules"])
+        candidates = (gate.inputs or {}).get("candidate_rules")
+        return len(candidates) if isinstance(candidates, list) else 0
 
     def _latest_failed_step_run_error_kind(self, step_id: str) -> str | None:
         latest_error_kind = getattr(self._repo, "latest_failed_step_run_error_kind", None)

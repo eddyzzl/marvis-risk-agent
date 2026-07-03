@@ -252,3 +252,142 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
     default_autonomy=1,
     source="builtin",
 )
+
+
+RULE_STRATEGY = WorkflowTemplate(
+    # S4 conversational rule-mining strategy template (new id; disjoint
+    # goal_patterns from strategy_analysis/strategy_development so keyword routing
+    # never crosses them). Flow: mine candidate reject rules -> [confirm] pick an
+    # ordered subset (rule-set selection gate) -> evaluate the chosen set
+    # (waterfall/overlap) -> build a reject strategy from the selected rules ->
+    # [confirm] backtest -> [mandatory confirm] adopt (S2 forced gate reused) ->
+    # render doc. Adoption/doc/memory all reuse the S2 surface unchanged.
+    id="rule_strategy",
+    title="规则策略开发",
+    goal_patterns=("规则挖掘", "拒绝规则", "规则策略", "rule mining", "rule strategy"),
+    slots=(
+        SlotSpec("dataset_id", True, "task_context", "Registered strategy dataset id"),
+        SlotSpec("target_col", True, "task_context", "Binary target column"),
+        SlotSpec("feature_cols", False, "user", "Candidate feature columns (default: numeric columns)"),
+        SlotSpec("score_col", False, "user", "Score column, if the rules should carry score-band rules"),
+        SlotSpec("max_depth", False, "user", "Decision-tree depth for rule mining"),
+        SlotSpec("min_support", False, "user", "Minimum rule support"),
+        SlotSpec("min_lift", False, "user", "Minimum rule lift"),
+        SlotSpec("top_k", False, "user", "Maximum candidate rules to return"),
+        SlotSpec("adoption_reason", True, "user", "Reason recorded when the strategy is adopted"),
+    ),
+    steps=(
+        StepTemplate(
+            title="挖掘规则",
+            tool_ref=ToolRef("strategy", "mine_rules"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+                "feature_cols": "{slot:feature_cols}",
+                "max_depth": "{slot:max_depth}",
+                "min_support": "{slot:min_support}",
+                "min_lift": "{slot:min_lift}",
+                "top_k": "{slot:top_k}",
+            },
+            depends_on_titles=(),
+            post_checks=(PostCheck("nonempty", {"field": "candidate_rules"}),),
+        ),
+        StepTemplate(
+            title="规则集确认",
+            tool_ref=ToolRef("strategy", "select_rule_set"),
+            inputs_template={
+                "candidate_rules": "$ref:挖掘规则.output.candidate_rules",
+                # Literal None default (not {slot:selection}): SlotSpec has no
+                # default-value mechanism and an omitted slot key gets dropped by
+                # planner._fill_inputs, so the apply_adjust gate-override channel
+                # (which only overwrites keys already present in the step's
+                # instantiated inputs) needs the key baked in. The rule-set gate
+                # reply parser turns 「选 1,3,5」/「全选」/「去掉 2」 into a selection
+                # list that apply_adjust writes here -- exactly the band_edges
+                # precedent (templates/strategy.py STRATEGY_DEVELOPMENT 设计分数带).
+                # None == keep all candidates.
+                "selection": None,
+            },
+            depends_on_titles=("挖掘规则",),
+            post_checks=(PostCheck("nonempty", {"field": "selected_rules"}),),
+            # Rule-set selection gate: pause so the user can pick/reorder/drop
+            # rules before they are evaluated and built into a strategy.
+            needs_confirmation=True,
+        ),
+        StepTemplate(
+            title="评估规则集",
+            tool_ref=ToolRef("strategy", "evaluate_rule_set"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "target_col": "{slot:target_col}",
+                "rules": "$ref:规则集确认.output.selected_rules",
+            },
+            depends_on_titles=("规则集确认",),
+            post_checks=(PostCheck("nonempty", {"field": "waterfall"}),),
+            decision_point=True,
+        ),
+        StepTemplate(
+            title="构造策略",
+            tool_ref=ToolRef("strategy", "build_strategy"),
+            inputs_template={
+                # Pin the literal reject-strategy defaults (SlotSpec has no
+                # default-value mechanism): a rule strategy is an approval-type
+                # strategy whose selected rules reject, defaulting to approve.
+                "strategy_type": "approval",
+                "rules": "$ref:规则集确认.output.selected_rules",
+                # score_col flows only when the optional slot is filled; when a
+                # score column is present build_strategy's rule-direction
+                # self-check (S1a) fires automatically on any score-band rules.
+                "score_col": "{slot:score_col}",
+                "default_decision": "approve",
+                "description": "Rule strategy generated candidate",
+            },
+            depends_on_titles=("规则集确认",),
+            post_checks=(PostCheck("nonempty", {"field": "strategy_id"}),),
+        ),
+        StepTemplate(
+            title="回测策略",
+            tool_ref=ToolRef("strategy", "backtest_strategy"),
+            inputs_template={
+                "dataset_id": "{slot:dataset_id}",
+                "strategy_id": "$ref:构造策略.output.strategy_id",
+                "target_col": "{slot:target_col}",
+            },
+            depends_on_titles=("构造策略",),
+            post_checks=(
+                PostCheck("nonempty", {"field": "backtest_id"}),
+                PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
+                PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
+                PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
+                PostCheck("range", {"field": "expected_profit"}),
+            ),
+            decision_point=True,
+            needs_confirmation=True,
+        ),
+        StepTemplate(
+            title="采纳策略",
+            tool_ref=ToolRef("strategy", "adopt_strategy"),
+            inputs_template={
+                "strategy_id": "$ref:构造策略.output.strategy_id",
+                "backtest_id": "$ref:回测策略.output.backtest_id",
+                "adoption_reason": "{slot:adoption_reason}",
+            },
+            depends_on_titles=("构造策略", "回测策略"),
+            post_checks=(PostCheck("nonempty", {"field": "artifacts"}),),
+            # Mandatory adoption gate (S2 forced-gate precedent): auto-accept must
+            # not pass it through, so the driver always pauses here.
+            needs_confirmation=True,
+        ),
+        StepTemplate(
+            title="策略文档",
+            tool_ref=ToolRef("strategy", "render_strategy_doc"),
+            inputs_template={
+                "strategy_id": "$ref:构造策略.output.strategy_id",
+            },
+            depends_on_titles=("构造策略", "采纳策略"),
+            post_checks=(PostCheck("nonempty", {"field": "doc_path"}),),
+        ),
+    ),
+    default_autonomy=1,
+    source="builtin",
+)

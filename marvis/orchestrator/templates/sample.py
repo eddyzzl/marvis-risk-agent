@@ -15,6 +15,7 @@ from marvis.orchestrator.templates.modeling import (
 from marvis.orchestrator.templates.monitoring import MONITORING_RUN
 from marvis.orchestrator.templates.sample_echo import SAMPLE_ECHO
 from marvis.orchestrator.templates.strategy import (
+    RULE_STRATEGY,
     STRATEGY_ANALYSIS,
     STRATEGY_DEVELOPMENT,
     VINTAGE_ANALYSIS,
@@ -37,5 +38,6 @@ _register_builtin_template(FEATURE_ANALYSIS_WITH_JOIN)
 _register_builtin_template(FEATURE_DERIVATION)
 _register_builtin_template(STRATEGY_ANALYSIS)
 _register_builtin_template(STRATEGY_DEVELOPMENT)
+_register_builtin_template(RULE_STRATEGY)
 _register_builtin_template(VINTAGE_ANALYSIS)
 _register_builtin_template(MONITORING_RUN)

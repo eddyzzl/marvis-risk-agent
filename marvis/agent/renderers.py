@@ -1113,6 +1113,114 @@ def _render_monitor_run(o: dict):
     return text, tables
 
 
+def _render_mine_rules(o: dict):
+    rules = [rule for rule in (o.get("candidate_rules") or []) if isinstance(rule, dict)]
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    n_rows = o.get("n_rows")
+    text = (
+        f"**规则挖掘完成**:在 {_fmt(n_rows)} 行样本上提议 **{len(rules)}** 条候选拒绝规则"
+        "（按 lift 降序；决策树路径 + 单变量切点两通道）。请回复「选 1,3,5」/「去掉 2」/「全选」选定要采纳的规则集。"
+    )
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红旗:{names}。"
+    tables = []
+    if rules:
+        tables.append({
+            "title": "候选规则（按 lift 降序）",
+            "columns": ["#", "规则", "支持度", "命中坏率", "lift", "来源"],
+            "rows": [
+                [
+                    str(index),
+                    str(rule.get("condition", "")),
+                    _pct(rule.get("support")),
+                    _pct(rule.get("hit_bad_rate")),
+                    _num(rule.get("lift")),
+                    str(rule.get("source", "")),
+                ]
+                for index, rule in enumerate(rules, start=1)
+            ],
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_select_rule_set(o: dict):
+    selected = [rule for rule in (o.get("selected_rules") or []) if isinstance(rule, dict)]
+    candidate_count = o.get("candidate_count")
+    text = (
+        f"**规则集已选定**:从 {_fmt(candidate_count)} 条候选中选定 **{len(selected)}** 条规则"
+        "（按选定顺序，首个命中生效）。确认后将评估该规则集并构造策略。"
+    )
+    tables = []
+    if selected:
+        tables.append({
+            "title": "已选规则（按顺序命中）",
+            "columns": ["#", "规则", "命中坏率", "lift", "来源"],
+            "rows": [
+                [
+                    str(index),
+                    str(rule.get("condition", "")),
+                    _pct(rule.get("hit_bad_rate")) if rule.get("hit_bad_rate") is not None else "n/a",
+                    _num(rule.get("lift")) if rule.get("lift") is not None else "n/a",
+                    str(rule.get("source", "")),
+                ]
+                for index, rule in enumerate(selected, start=1)
+            ],
+        })
+    return text, tables
+
+
+def _render_evaluate_rule_set(o: dict):
+    waterfall = [row for row in (o.get("waterfall") or []) if isinstance(row, dict)]
+    residual = o.get("residual") if isinstance(o.get("residual"), dict) else {}
+    combined = o.get("combined") if isinstance(o.get("combined"), dict) else {}
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    text = (
+        "**规则集评估完成**:"
+        f"合计拒绝率 {_pct(combined.get('reject_rate'))}，"
+        f"拒绝客群坏率 {_pct(combined.get('rejected_bad_rate'))}；"
+        f"残余通过率 {_pct(residual.get('approval_rate'))}，"
+        f"通过客群坏率 {_pct(residual.get('bad_rate'))}。"
+    )
+    red_items = [flag for flag in red_flags if flag.get("code") in {"rule_shadowed", "high_overlap"}]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 告警:{names}。"
+    tables = []
+    if waterfall:
+        tables.append({
+            "title": "命中瀑布（按顺序，首个命中生效）",
+            "columns": ["规则", "增量命中", "增量坏率", "累计拒绝率", "累计拒绝坏率"],
+            "rows": [
+                [
+                    str(row.get("rule_id", "")),
+                    _fmt(row.get("incremental_hits")),
+                    _pct(row.get("incremental_bad_rate")),
+                    _pct(row.get("cum_reject_rate")),
+                    _pct(row.get("cum_reject_bad_rate")),
+                ]
+                for row in waterfall
+            ],
+        })
+    overlap = o.get("overlap_matrix")
+    if isinstance(overlap, list) and len(overlap) > 1:
+        header = [f"R{index}" for index in range(1, len(overlap) + 1)]
+        tables.append({
+            "title": "规则重叠矩阵（共同命中占比）",
+            "columns": ["", *header],
+            "rows": [
+                [f"R{i + 1}", *[_pct(overlap[i][j]) for j in range(len(overlap[i]))]]
+                for i in range(len(overlap))
+            ],
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
 _RENDERERS = {
     "make_split": _render_make_split,
     "choose_modeling_spec": _render_choose_modeling_spec,
@@ -1137,6 +1245,9 @@ _RENDERERS = {
     "design_cutoff_bands": _render_design_cutoff_bands,
     "compare_strategies": _render_compare_strategies,
     "adopt_strategy": _render_adopt_strategy,
+    "mine_rules": _render_mine_rules,
+    "select_rule_set": _render_select_rule_set,
+    "evaluate_rule_set": _render_evaluate_rule_set,
     "render_strategy_doc": _render_strategy_doc,
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,

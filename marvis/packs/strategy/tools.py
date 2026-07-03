@@ -540,12 +540,27 @@ def tool_select_rule_set(inputs: dict, ctx) -> dict:
     """
     candidate_rules = [dict(rule) for rule in (inputs.get("candidate_rules") or []) if isinstance(rule, dict)]
     selection = inputs.get("selection")
-    selected = _apply_rule_selection(candidate_rules, selection)
+    decision = str(inputs.get("decision") or "reject")
+    selected = [_build_ready_rule(rule, decision) for rule in _apply_rule_selection(candidate_rules, selection)]
     return {
         "selected_rules": selected,
         "selected_count": len(selected),
         "candidate_count": len(candidate_rules),
     }
+
+
+def _build_ready_rule(rule: dict, decision: str) -> dict:
+    """Shape a mined candidate into a build_strategy-ready rule dict.
+
+    build_strategy needs {condition, decision(, value)}; a mined CandidateRule
+    carries only condition + display stats (lift/support/source/hit_bad_rate).
+    Attach the reject decision and keep the display fields (build_strategy reads
+    only condition/decision/value and ignores the rest, so they ride along for
+    the renderer/waterfall without affecting the strategy)."""
+    ready = dict(rule)
+    ready["condition"] = str(rule.get("condition", ""))
+    ready["decision"] = decision
+    return ready
 
 
 def _apply_rule_selection(candidate_rules: list[dict], selection) -> list[dict]:
