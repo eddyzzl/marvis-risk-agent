@@ -450,3 +450,26 @@ def test_render_monitoring_report_surfaces_next_action():
     assert "监控报告已生成" in text
     assert "监控红灯，建议起新版本。" in text
     assert tables[0]["title"] == "监控判级时间线"
+
+
+def test_monitoring_report_gate_declares_disposition_schema():
+    """LT-3 (A.3): the render_monitoring_report gate adapter declares its `disposition`
+    control as a JSON enum schema (observe/adjust_threshold/new_version), surfaced on
+    the gate payload as editable_input_schema (the LT-4 frontend key)."""
+    from marvis.agent.gates.adapters import gate_editable_input_schema
+    from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    gate = PlanStep(
+        id="rep", plan_id="p", index=0, title="监控报告",
+        tool_ref=ToolRef("strategy", "render_monitoring_report"),
+        inputs={"disposition": None}, depends_on=[], post_checks=[],
+    )
+    plan = Plan(
+        id="p", task_id="t", goal="g", source="template", template_id="strategy_monitoring",
+        autonomy_level=1, steps=[gate], status=PlanStatus.AWAITING_CONFIRM,
+    )
+    schema = gate_editable_input_schema(plan, gate, lambda sid: None)
+    disposition = schema["properties"]["disposition"]
+    assert disposition["type"] == "string"
+    assert disposition["enum"] == ["observe", "adjust_threshold", "new_version"]

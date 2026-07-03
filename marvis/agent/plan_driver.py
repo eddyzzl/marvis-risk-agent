@@ -23,9 +23,15 @@ from marvis.agent.driver_turn import DriverMessage, DriverTurn
 from marvis.agent.gate_execution_adapter import GateExecutionAdapter
 from marvis.agent.gate_param_schema import gate_param_schema
 from marvis.agent.gate_response_adapter import GateControlValidationError, validate_gate_control
+from marvis.agent.gates.adapters import (
+    GateReplyContext,
+    get_gate_adapter,
+    parse_dedup_instruction as _parse_dedup_instruction,
+    parse_monitoring_disposition as _parse_monitoring_disposition,
+    parse_rule_selection_instruction as _parse_rule_selection_instruction,
+)
 from marvis.agent.instruction_router import route_instruction
 from marvis.agent.plan_message_composer import PlanMessageComposer
-from marvis.agent.plan_utils import find_step
 from marvis.agent.renderers import render_tool_output
 from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep, StepStatus
 from marvis.orchestrator.templates import get_template
@@ -68,119 +74,6 @@ def is_confirm(text: str) -> bool:
     if _NEGATED_CONFIRM.search(compact):
         return False
     return bool(_CONFIRM_FULLMATCH.fullmatch(compact))
-
-
-def _parse_dedup_instruction(text: str) -> str | None:
-    """Parse a manual-mode dedup reply at a join gate → "first"/"last"/None.
-
-    Recognised only when the text actually mentions de-duplication (去重/dedup/策略/保留)
-    so an unrelated instruction isn't misread as a strategy. first = keep the first row per
-    key, last = keep the last (spec §6 conflict resolution)."""
-    low = (text or "").lower()
-    if re.search(r"(别|不要|不用|无需|不需要|勿|取消|暂停|停止|do\s*not|don't|dont|not\s+use)", text or "", re.IGNORECASE):
-        return None
-    if not any(token in low for token in ("去重", "dedup", "策略", "保留", "重复")):
-        return None
-    if "first" in low or "首" in text or "第一" in text or "前" in text:
-        return "first"
-    if "last" in low or "末" in text or "最后" in text or "最新" in text or "后" in text:
-        return "last"
-    return None
-
-
-_SELECT_ALL = re.compile(r"(全选|都要|全部|全都|all)", re.IGNORECASE)
-_DROP_PREFIX = re.compile(r"(去掉|去除|删掉|删除|移除|排除|不要|drop|remove|exclude)", re.IGNORECASE)
-_KEEP_PREFIX = re.compile(r"(只?选|保留|选中|选择|要|keep|select|pick|use)", re.IGNORECASE)
-_INDEX_TOKEN = re.compile(r"\d+")
-_RULE_MENTION = re.compile(r"(规则|规则集|rule|条|第)", re.IGNORECASE)
-
-
-def _parse_rule_selection_instruction(text: str, candidate_count: int) -> list[int] | None:
-    """Parse a rule-set gate reply into an ordered list of 1-based indices.
-
-    Recognises three shapes (spec §3, parallel to _parse_dedup_instruction):
-      * 「全选」/「都要」/「all」                → keep every candidate, in order;
-      * 「去掉 2」/「去除 2 4」/「drop 2」        → all candidates except those indices;
-      * 「选 1,3,5」/「保留 1 3 5」/「pick 1 3」  → exactly those indices, in the
-        order the user wrote them (so the user can also reorder).
-
-    Returns None when the reply is not a rule-selection instruction (no keyword
-    and no bare index list, or it looks like a question/negated-confirm) so an
-    unrelated instruction falls through to the LLM router unchanged. Indices out
-    of ``[1, candidate_count]`` are dropped defensively; an empty result returns
-    None (nothing actionable) rather than an empty selection.
-    """
-    raw = text or ""
-    if _QUESTION.search(raw):
-        return None
-    if candidate_count <= 0:
-        return None
-    all_indices = list(range(1, candidate_count + 1))
-    if _SELECT_ALL.search(raw):
-        return all_indices
-    indices = _ordered_unique_indices(_INDEX_TOKEN.findall(raw), candidate_count)
-    is_drop = bool(_DROP_PREFIX.search(raw))
-    is_keep = bool(_KEEP_PREFIX.search(raw))
-    if is_drop and not is_keep:
-        if not indices:
-            return None
-        dropped = set(indices)
-        kept = [index for index in all_indices if index not in dropped]
-        return kept or None
-    if (is_keep or _RULE_MENTION.search(raw)) and indices:
-        return indices
-    # A bare index list with no keyword ("1 3 5") is still a keep instruction.
-    if indices and _looks_like_bare_index_list(raw):
-        return indices
-    return None
-
-
-def _ordered_unique_indices(tokens: list[str], candidate_count: int) -> list[int]:
-    ordered: list[int] = []
-    seen: set[int] = set()
-    for token in tokens:
-        try:
-            index = int(token)
-        except ValueError:
-            continue
-        if 1 <= index <= candidate_count and index not in seen:
-            seen.add(index)
-            ordered.append(index)
-    return ordered
-
-
-def _looks_like_bare_index_list(text: str) -> bool:
-    """True when text is essentially just numbers + separators (1,3,5 / 1 3 5),
-    so a plain index list is treated as a keep-selection without a keyword."""
-    stripped = re.sub(r"[\s,，、和及\-到~]+", "", text or "")
-    return bool(stripped) and bool(re.fullmatch(r"\d+", stripped))
-
-
-_MONITORING_NEW_VERSION = re.compile(r"(起新版本|新版本|新起一版|起一版|重起|new\s*version|new\s*strategy)", re.IGNORECASE)
-_MONITORING_ADJUST = re.compile(r"(调阈值|改阈值|调整阈值|调门槛|调参|adjust\s*threshold|retune|re-?run)", re.IGNORECASE)
-_MONITORING_OBSERVE = re.compile(r"(维持|观察|保持|继续观察|再看看|keep\s*watch|observe|hold)", re.IGNORECASE)
-
-
-def _parse_monitoring_disposition(text: str) -> str | None:
-    """Parse a strategy-monitoring alarm-gate reply into a disposition keyword.
-
-    Recognises the three red-light checklist choices (spec S5), most-specific
-    first so 「起新版本」 wins over a co-occurring 「观察」:
-      * 「起新版本」/「新版本」/「new version」        -> "new_version"
-      * 「调阈值」/「调整阈值」/「adjust threshold」    -> "adjust_threshold"
-      * 「维持」/「观察」/「保持」/「observe」          -> "observe"
-
-    Returns None when the reply names no disposition (a plain 「确认」 or an
-    unrelated instruction), so it falls through to the normal confirm/route path.
-    """
-    raw = text or ""
-    if _MONITORING_NEW_VERSION.search(raw):
-        return "new_version"
-    if _MONITORING_ADJUST.search(raw):
-        return "adjust_threshold"
-    if _MONITORING_OBSERVE.search(raw):
-        return "observe"
-    return None
 
 
 class DriverError(Exception):
@@ -303,37 +196,22 @@ class PlanDriver:
                     self._gate_execution.apply_screen_selection(plan, gate, selection)
                 self._repo.confirm_step(gate.id)
             return self._run_and_handle(plan_id, run_seq=run_seq)
-        # Manual-mode TEXT resolution of a same-key dedup conflict (no §4 picker available):
-        # the user replies e.g. 「去重 first」/「用 last 去重」 → apply that strategy to every
-        # feature confirm_join flagged as needs_dedup, then re-pause at the cleared gate.
-        if gate is not None:
-            strategy = _parse_dedup_instruction(user_text)
-            if strategy:
-                pending = self._gate_execution.needs_dedup_features(plan, gate)
-                if pending:
-                    self._gate_execution.apply_dedup_strategies(plan, gate, {fid: strategy for fid in pending})
-                    return self._run_and_handle(plan_id, run_seq=run_seq)
-        # Manual-mode TEXT rule-set selection at a select_rule_set gate (no §4
-        # picker): the user replies e.g. 「选 1,3,5」/「去掉 2」/「全选」 → parse into
-        # a 1-based index selection and push it through the SAME generic
-        # apply_adjust override channel band_edges uses (the gate step's own
-        # `selection` input, default None, is overwritten and the gate re-armed).
-        if gate is not None and gate.tool_ref.tool == "select_rule_set":
-            selection = _parse_rule_selection_instruction(user_text, self._rule_candidate_count(gate))
-            if selection is not None:
-                return self._gate_execution.apply_adjust(plan, gate, {"selection": selection}, run_seq)
-        # S5 strategy-monitoring alarm gate: the report step is the gate (it renders
-        # its run_strategy_monitoring dependency's verdict + red-light checklist). A
-        # red-light reply naming one of the three dispositions (观察 / 调阈值 /
-        # 起新版本) is recorded onto the report gate's own `disposition` input (so the
-        # report surfaces next_action -- for 起新版本 a STRATEGY_DEVELOPMENT follow-up
-        # prompt, never an auto-created task) before confirming the gate to proceed.
-        if gate is not None and gate.tool_ref.tool == "render_monitoring_report":
-            disposition = _parse_monitoring_disposition(user_text)
-            if disposition is not None:
-                self._apply_monitoring_disposition(gate, disposition)
-                self._repo.confirm_step(gate.id)
-                return self._run_and_handle(plan_id, run_seq=run_seq)
+        # Manual-mode TEXT gate reply, dispatched through the per-tool gate adapter
+        # registry (marvis/agent/gates/adapters.py) instead of an inline per-tool
+        # if-chain. Each adapter parses its own reply shape and applies it:
+        #   * confirm_join      -- 「去重 first」/「用 last 去重」  (§6 same-key conflict)
+        #   * select_rule_set   -- 「选 1,3,5」/「去掉 2」/「全选」 (§3 rule-set selection)
+        #   * render_monitoring_report -- 观察 / 调阈值 / 起新版本 (S5 red-light disposition)
+        # A None from parse_reply (not this adapter's shape) or apply (a no-op, e.g.
+        # a dedup instruction at a gate with no pending conflicts) falls through to
+        # the generic confirm / LLM-router path unchanged.
+        adapter = get_gate_adapter(gate)
+        if adapter is not None:
+            parsed = adapter.parse_reply(user_text, self._gate_reply_context(plan, gate))
+            if parsed is not None:
+                turn = adapter.apply(self, plan, gate, parsed, run_seq=run_seq)
+                if turn is not None:
+                    return turn
         return self._handle_instruction(plan, gate, user_text, run_seq)
 
     def replan_structured(
@@ -470,22 +348,12 @@ class PlanDriver:
         except KeyError:
             return None
 
-    def _rule_candidate_count(self, gate: PlanStep) -> int:
-        """How many mined candidate rules the select_rule_set gate is choosing
-        from -- read from its mine_rules dependency's persisted output so the
-        text selection parser can bound/validate 1-based indices. Falls back to
-        the gate's own resolved candidate_rules input, then 0 if neither is
-        available yet."""
-        plan = self._repo.load_plan(gate.plan_id)
-        for dep_id in gate.depends_on or []:
-            dep = find_step(plan, dep_id)
-            if dep is None or dep.tool_ref.tool != "mine_rules":
-                continue
-            output = self._safe_output(dep.id)
-            if isinstance(output, dict) and isinstance(output.get("candidate_rules"), list):
-                return len(output["candidate_rules"])
-        candidates = (gate.inputs or {}).get("candidate_rules")
-        return len(candidates) if isinstance(candidates, list) else 0
+    def _gate_reply_context(self, plan: Plan, gate: PlanStep) -> GateReplyContext:
+        """The adapter-agnostic context a gate reply parser derives its needs from
+        (the current plan + this driver's output loader). No adapter-specific detail
+        lives here: e.g. the rule-set adapter reads its own mine_rules dependency's
+        candidate count off this context, so the driver stays free of it."""
+        return GateReplyContext(plan=plan, gate=gate, load_output=self._safe_output)
 
     def _apply_monitoring_disposition(self, gate: PlanStep, disposition: str) -> None:
         """Record the parsed red-light disposition onto the report gate's own
@@ -510,4 +378,10 @@ __all__ = [
     "DriverError",
     "is_confirm",
     "render_tool_output",
+    # Backward-compat re-exports: the gate reply parsers moved to
+    # marvis.agent.gates.adapters (LT-3) but tests + any external caller still
+    # import them from here under their historical private names.
+    "_parse_dedup_instruction",
+    "_parse_monitoring_disposition",
+    "_parse_rule_selection_instruction",
 ]

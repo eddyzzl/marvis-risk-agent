@@ -122,3 +122,52 @@ def test_render_evaluate_rule_set_waterfall_and_overlap():
     assert "命中瀑布（按顺序，首个命中生效）" in titles
     assert "规则重叠矩阵（共同命中占比）" in titles
     assert tables[-1]["title"] == "红旗清单"
+
+
+# ---------------------------------------------------------------------------
+# LT-3 (A.3): the rule-set gate adapter declares its adjustable `selection`
+# parameter as a JSON schema, surfaced on the gate payload as
+# editable_input_schema (the LT-4 frontend key).
+# ---------------------------------------------------------------------------
+def _rs_step(sid, tool, deps=None, inputs=None):
+    from marvis.orchestrator.contracts import PlanStep
+    from marvis.plugins.manifest import ToolRef
+
+    return PlanStep(
+        id=sid, plan_id="p", index=0, title=sid, tool_ref=ToolRef("strategy", tool),
+        inputs=inputs or {}, depends_on=deps or [], post_checks=[],
+    )
+
+
+def _rule_gate_plan(candidate_count):
+    from marvis.orchestrator.contracts import Plan, PlanStatus
+
+    mine = _rs_step("mine", "mine_rules")
+    gate = _rs_step("sel", "select_rule_set", deps=["mine"], inputs={"selection": None})
+    plan = Plan(
+        id="p", task_id="t", goal="g", source="template", template_id="rule_strategy",
+        autonomy_level=1, steps=[mine, gate], status=PlanStatus.AWAITING_CONFIRM,
+    )
+
+    def load(sid):
+        return {"candidate_rules": list(range(candidate_count))} if sid == "mine" else None
+
+    return plan, gate, load
+
+
+def test_rule_set_gate_declares_selection_schema_bounded_by_candidate_count():
+    from marvis.agent.gates.adapters import gate_editable_input_schema
+
+    plan, gate, load = _rule_gate_plan(candidate_count=4)
+    schema = gate_editable_input_schema(plan, gate, load)
+    assert schema["type"] == "object"
+    selection = schema["properties"]["selection"]
+    assert selection["type"] == "array"
+    assert selection["items"] == {"type": "integer", "minimum": 1, "maximum": 4}
+
+
+def test_rule_set_gate_schema_empty_without_candidates():
+    from marvis.agent.gates.adapters import gate_editable_input_schema
+
+    plan, gate, _ = _rule_gate_plan(candidate_count=0)
+    assert gate_editable_input_schema(plan, gate, lambda sid: None) == {}

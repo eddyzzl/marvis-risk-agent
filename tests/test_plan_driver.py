@@ -1566,6 +1566,34 @@ def test_resume_dedup_control_rejects_stale_or_missing_gate_token(tmp_path):
     assert runner.calls[-1][1]["dedup_strategies"] == {"feat-1": "first"}
 
 
+def test_join_dedup_gate_message_carries_editable_input_schema(tmp_path):
+    """LT-3 (A.3): an execute_join gate whose confirm_join dependency still needs a
+    dedup strategy carries the adapter-declared editable_input_schema on the gate
+    message metadata (the LT-4 frontend key), listing the pending features and the
+    first/last strategy enum -- a real schema for the gate's controls, not only the
+    type-inferred gate_envelope controls."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_gated_join_dedup_plan())
+    runner = FakeRunner([
+        {"joins": [{"feature_id": "feat-1"}]},
+        {"needs_dedup": ["feat-1"], "needs_dedup_labels": {"feat-1": "features.parquet"}},
+    ])
+    executor = PlanExecutor(repo, runner, Reviewer(lambda: FakeLLM()), None, FakeHooks(), HarnessState(repo))
+    driver = PlanDriver(repo, executor)
+
+    repo.confirm_plan("plan-join")
+    turn = driver._run_and_handle("plan-join", run_seq=0)
+
+    schema = turn.messages[0].metadata.get("editable_input_schema")
+    assert schema is not None, turn.messages[0].metadata
+    dedup = schema["properties"]["dedup_strategies"]
+    assert dedup["type"] == "object"
+    assert dedup["propertyNames"] == {"enum": ["feat-1"]}
+    assert dedup["additionalProperties"] == {"type": "string", "enum": ["first", "last"]}
+
+
 class FakeRouterLLM:
     """Returns a fixed instruction-route JSON (agent-mode gate instruction)."""
 
