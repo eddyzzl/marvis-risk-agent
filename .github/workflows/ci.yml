@@ -5,12 +5,20 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
+  # Manual dispatch runs the FULL suite (slow/e2e included) — see CHECK_MODE.
+  workflow_dispatch:
+
+# One run per branch: a new push supersedes and cancels the previous run, and
+# PR branches no longer double-run via the push trigger.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
     runs-on: ubuntu-latest
-    # The full suite takes ~70 minutes on a single hosted runner core.
+    # Fast tier finishes well under an hour on a hosted runner; the manual
+    # full-suite dispatch needs the headroom (real training/JVM/server tests).
     timeout-minutes: 100
 
     steps:
@@ -42,9 +50,20 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run checks
+        # PR/push gates run the fast tier (slow/e2e/llm excluded): hosted
+        # 2-core runners cannot finish real-training/JVM tests inside sane
+        # limits (the all-recipe tuning test alone exceeds 10 minutes there).
+        # The full suite remains the local release gate and can be run here
+        # on demand via workflow_dispatch.
         env:
           CHECK_DIFF_RANGE: ${{ github.event_name == 'pull_request' && format('{0}...HEAD', github.event.pull_request.base.sha) || 'HEAD~1..HEAD' }}
-        run: uv run scripts/check
+          CHECK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'fast' }}
+        run: |
+          if [ "$CHECK_MODE" = "full" ]; then
+            uv run scripts/check
+          else
+            uv run scripts/check --fast
+          fi
 
   security:
     runs-on: ubuntu-latest
