@@ -12,7 +12,7 @@ from marvis.orchestrator.templates.modeling import (
     MODELING_WITH_JOIN,
     STANDARD_MODELING,
 )
-from marvis.orchestrator.templates.monitoring import MONITORING_RUN
+from marvis.orchestrator.templates.monitoring import MONITORING_RUN, STRATEGY_MONITORING
 from marvis.orchestrator.templates.portfolio import (
     PORTFOLIO_ANALYSIS,
     PORTFOLIO_ANALYSIS_NO_TREND,
@@ -45,5 +45,6 @@ _register_builtin_template(STRATEGY_DEVELOPMENT)
 _register_builtin_template(RULE_STRATEGY)
 _register_builtin_template(VINTAGE_ANALYSIS)
 _register_builtin_template(MONITORING_RUN)
+_register_builtin_template(STRATEGY_MONITORING)
 _register_builtin_template(PORTFOLIO_ANALYSIS)
 _register_builtin_template(PORTFOLIO_ANALYSIS_NO_TREND)

@@ -33,6 +33,7 @@ from marvis.db import (
     record_llm_call,
     PlanRepository,
     PluginRepository,
+    StrategyRepository,
     TaskRepository,
     init_db,
     sqlite_health,
@@ -256,6 +257,7 @@ def _is_local_only_path(path: str) -> bool:
         or path.startswith("/api/settings")
         or path == "/api/skills/reload"
         or path == "/api/skills/validate"
+        or path == "/api/strategies/monitoring-due"
         or path.startswith("/branding/")
     )
 
@@ -400,6 +402,10 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         stuck_jobs = task_repo.count_heartbeat_stale_running_jobs(
             older_than_seconds=heartbeat_timeout_seconds()
         )
+        # S5: adopted strategies past their monitoring cadence. Cheap read of the
+        # DB + each plan file; surfaced so the health/task-workbench UI can show an
+        # overdue badge (the stuck_jobs badge pattern).
+        monitoring_overdue_count = len(StrategyRepository(settings.db_path).list_monitoring_due())
         # GAP-8: llm_configured is a cheap "at least one enabled model with an
         # api_key is saved" check -- it deliberately does NOT make a live LLM
         # call (that belongs to POST /api/settings/llm/test); it only answers
@@ -408,10 +414,20 @@ def create_app(workspace: str | Path | Settings) -> FastAPI:
         return {
             "status": "ok",
             "stuck_jobs": stuck_jobs,
+            "monitoring_overdue_count": monitoring_overdue_count,
             "llm_configured": _has_configured_llm(settings.workspace),
             **sqlite_health(settings.db_path),
             **duckdb_health(duckdb_temp_directory),
         }
+
+    @app.get("/api/strategies/monitoring-due")
+    def strategies_monitoring_due() -> dict[str, object]:
+        # S5: overdue-strategy detail behind the same local-only guard as the rest
+        # of the private surface (_is_local_only_path lists this path; the
+        # _local_access_guard middleware rejects a non-loopback caller before the
+        # handler runs). Returns the same rows list the health count is derived from.
+        due = StrategyRepository(settings.db_path).list_monitoring_due()
+        return {"monitoring_due": due, "count": len(due)}
 
     @app.get("/branding/assets/{asset_path:path}")
     def branding_asset(asset_path: str) -> FileResponse:

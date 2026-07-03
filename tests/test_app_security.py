@@ -491,3 +491,78 @@ def test_index_omits_local_token_when_unset(tmp_path):
 
     assert response.status_code == 200
     assert 'data-marvis-local-token=""' in response.text
+
+
+def test_health_check_reports_monitoring_overdue_count_zero_by_default(tmp_path):
+    # S5: a fresh workspace has no adopted strategies -> monitoring_overdue_count 0.
+    app = create_app(tmp_path)
+    response = TestClient(app).get("/api/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["monitoring_overdue_count"] == 0
+
+
+def _seed_overdue_strategy(db_path):
+    """Adopt a strategy and register a monitoring plan whose cadence is already
+    past (last_run_at long ago) so list_monitoring_due returns it."""
+    from datetime import UTC, datetime, timedelta
+
+    from marvis.packs.strategy.contracts import Strategy, StrategyRule
+    from marvis.packs.strategy.monitoring_plan import build_monitoring_plan, save_monitoring_plan
+    from marvis.repositories.strategy import StrategyRepository
+
+    repo = StrategyRepository(db_path)
+    strategy = Strategy(
+        id="s-overdue",
+        strategy_type="approval",
+        rules=(StrategyRule(condition="score < 500", decision="reject", value=None),),
+        score_col="score",
+        default_decision="approve",
+        description="overdue",
+    )
+    repo.create_strategy("task-1", strategy, created_at="2026-01-01T00:00:00Z")
+    repo.adopt_strategy_with_audit(
+        strategy.id,
+        reason="seed",
+        audit={"kind": "strategy.adopt", "target_ref": strategy.id, "outcome": "succeeded", "detail": {}},
+        adopted_at="2026-01-01T00:00:00Z",
+    )
+    plan = build_monitoring_plan(
+        strategy_id=strategy.id, version=1, approved_bad_rate=0.05, approval_rate=0.8, cadence_days=30
+    )
+    plan["last_run_at"] = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    plan_path = Path(db_path).parent / "monitoring_plan_overdue.json"
+    save_monitoring_plan(plan_path, plan)
+    repo.save_strategy_artifact(strategy.id, kind="monitoring_plan_json", path=str(plan_path))
+    return strategy.id
+
+
+def test_health_check_counts_overdue_strategies(tmp_path):
+    app = create_app(tmp_path)
+    settings = app.state.settings
+    _seed_overdue_strategy(settings.db_path)
+    response = TestClient(app).get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["monitoring_overdue_count"] == 1
+
+
+def test_monitoring_due_endpoint_local_only(tmp_path):
+    app = create_app(tmp_path)
+    settings = app.state.settings
+    strategy_id = _seed_overdue_strategy(settings.db_path)
+
+    # Local client sees the detail.
+    local = TestClient(app).get("/api/strategies/monitoring-due")
+    assert local.status_code == 200
+    body = local.json()
+    assert body["count"] == 1
+    assert body["monitoring_due"][0]["strategy_id"] == strategy_id
+    assert body["monitoring_due"][0]["overdue_days"] > 0
+
+    # Remote client is rejected even with remote read enabled (local-only path).
+    os.environ["MARVIS_ALLOW_REMOTE_READ"] = "1"
+    try:
+        remote = TestClient(app, client=("203.0.113.9", 5555)).get("/api/strategies/monitoring-due")
+    finally:
+        os.environ.pop("MARVIS_ALLOW_REMOTE_READ", None)
+    assert remote.status_code == 403
