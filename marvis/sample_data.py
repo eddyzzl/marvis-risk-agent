@@ -33,6 +33,34 @@ _SEED = 20260701
 _N_ROWS = 1500
 _MONTHS = ["2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06"]
 
+# S3 组合分析套件：表现期快照 (performance snapshot) 合成数据。
+PERFORMANCE_TABLE_NAME = "表现期快照.csv"
+# 逾期桶状态，语义顺序由好到坏（charged_off 为吸收态/损失态）。工具侧要求
+# 调用方显式给 states；这里的顺序即演示数据的规范顺序。
+PERFORMANCE_STATES = ("current", "M1", "M2", "M3+", "charged_off")
+# 好客户 (y=0) 的月度桶间转移矩阵：绝大多数留在 current，少量轻度逾期后自愈。
+# 行=from 状态，列=to 状态，顺序同 PERFORMANCE_STATES；每行和为 1。
+_PERF_MATRIX_GOOD = (
+    (0.94, 0.05, 0.01, 0.00, 0.00),  # current
+    (0.55, 0.30, 0.13, 0.02, 0.00),  # M1
+    (0.20, 0.30, 0.30, 0.18, 0.02),  # M2
+    (0.05, 0.10, 0.25, 0.45, 0.15),  # M3+
+    (0.00, 0.00, 0.00, 0.00, 1.00),  # charged_off (吸收)
+)
+# 坏客户 (y=1) 的高恶化转移矩阵：更快向深逾期/核销迁移。
+_PERF_MATRIX_BAD = (
+    (0.70, 0.22, 0.06, 0.02, 0.00),  # current
+    (0.20, 0.35, 0.30, 0.13, 0.02),  # M1
+    (0.05, 0.15, 0.35, 0.35, 0.10),  # M2
+    (0.00, 0.02, 0.10, 0.53, 0.35),  # M3+
+    (0.00, 0.00, 0.00, 0.00, 1.00),  # charged_off (吸收)
+)
+_PERF_N_MONTHS = 12
+_PERF_ID_COL = "loan_id"
+_PERF_SNAPSHOT_COL = "snapshot_month"
+_PERF_BUCKET_COL = "bucket"
+_PERF_BALANCE_COL = "balance"
+
 # Feature name -> (business meaning, mean, std) for the 6 generated numeric features.
 _FEATURES: dict[str, tuple[str, float, float]] = {
     "credit_score": ("央行征信评分（越高越优质）", 620.0, 80.0),
@@ -103,22 +131,138 @@ def generate_dictionary_frame() -> pd.DataFrame:
     )
 
 
-def write_sample_materials(target_dir: Path, *, seed: int = _SEED) -> Path:
+def generate_performance_frame(
+    sample_df: pd.DataFrame,
+    *,
+    n_months: int = _PERF_N_MONTHS,
+    seed: int = _SEED,
+) -> pd.DataFrame:
+    """Deterministic 表现期快照 long frame derived from ``sample_df`` (S3).
+
+    For every loan (row of the sample), emits ``n_months`` monthly snapshots with:
+
+    - ``loan_id``: stable per-loan id (row index, zero-padded);
+    - ``snapshot_month``: consecutive YYYY-MM months starting from the loan's
+      ``apply_month`` (the origination month), so snapshots are per-loan aligned;
+    - ``bucket``: a delinquency bucket walked by a Markov chain — bad loans
+      (``y==1``) use the high-deterioration matrix, good loans the benign one;
+      ``charged_off`` is an absorbing state (once charged off, stays charged off);
+    - ``balance``: linear amortization of an initial principal plus small
+      deterministic per-loan noise, floored at 0 and forced to 0 once charged off.
+
+    Fully deterministic: a per-loan RNG is seeded from ``seed`` + the loan index,
+    so the same ``seed`` yields byte-identical output regardless of row order.
+    """
+    if n_months < 1:
+        raise ValueError("n_months must be positive")
+    if "y" not in sample_df.columns or "apply_month" not in sample_df.columns:
+        raise ValueError("sample_df must have 'y' and 'apply_month' columns")
+
+    states = PERFORMANCE_STATES
+    charged_off_index = len(states) - 1
+    good_matrix = np.asarray(_PERF_MATRIX_GOOD, dtype=float)
+    bad_matrix = np.asarray(_PERF_MATRIX_BAD, dtype=float)
+
+    # Stable per-loan initial principal (varies by loan_amount when present, else
+    # a fixed base) so amortization curves aren't all identical.
+    if "loan_amount" in sample_df.columns:
+        principals = pd.to_numeric(sample_df["loan_amount"], errors="coerce").fillna(20000.0).to_numpy(dtype=float)
+    else:
+        principals = np.full(len(sample_df), 20000.0, dtype=float)
+
+    labels = pd.to_numeric(sample_df["y"], errors="coerce").fillna(0).astype(int).to_numpy()
+    origination = sample_df["apply_month"].astype(str).tolist()
+
+    records: list[dict] = []
+    for loan_index in range(len(sample_df)):
+        rng = np.random.default_rng(seed + 1 + loan_index)
+        matrix = bad_matrix if labels[loan_index] == 1 else good_matrix
+        principal = max(float(principals[loan_index]), 500.0)
+        start_month = _month_sequence(origination[loan_index], n_months)
+        loan_id = f"L{loan_index:06d}"
+
+        state_index = 0  # every loan starts current
+        for month_pos in range(n_months):
+            # amortization: linear paydown across n_months, + small noise
+            remaining_fraction = max(0.0, 1.0 - month_pos / float(n_months))
+            noise = float(rng.normal(0.0, 0.01))
+            balance = max(0.0, principal * remaining_fraction * (1.0 + noise))
+            if state_index == charged_off_index:
+                balance = 0.0
+            records.append(
+                {
+                    _PERF_ID_COL: loan_id,
+                    _PERF_SNAPSHOT_COL: start_month[month_pos],
+                    _PERF_BUCKET_COL: states[state_index],
+                    _PERF_BALANCE_COL: round(balance, 2),
+                }
+            )
+            # advance to next month's bucket (absorbing charged_off stays put)
+            if state_index != charged_off_index:
+                state_index = int(rng.choice(len(states), p=matrix[state_index]))
+
+    return pd.DataFrame.from_records(
+        records, columns=[_PERF_ID_COL, _PERF_SNAPSHOT_COL, _PERF_BUCKET_COL, _PERF_BALANCE_COL]
+    )
+
+
+def _month_sequence(start_month: str, n_months: int) -> list[str]:
+    """``n_months`` consecutive YYYY-MM labels starting at ``start_month``.
+
+    Falls back to a fixed 2025-01 anchor when ``start_month`` isn't a parseable
+    YYYY-MM (keeps generation total; the sample always supplies YYYY-MM though)."""
+    text = str(start_month).strip()
+    try:
+        if len(text) >= 7 and text[4] == "-":
+            year, month = int(text[:4]), int(text[5:7])
+        elif len(text) == 6 and text.isdigit():
+            year, month = int(text[:4]), int(text[4:])
+        else:
+            year, month = 2025, 1
+    except (ValueError, IndexError):
+        year, month = 2025, 1
+    out: list[str] = []
+    for _ in range(n_months):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return out
+
+
+def write_sample_materials(
+    target_dir: Path, *, seed: int = _SEED, include_performance: bool = False
+) -> Path:
     """Write the sample table + dictionary CSVs into ``target_dir`` (created if
     missing) and return the directory. Deterministic — safe to call repeatedly;
-    each call overwrites with byte-identical content for a fixed seed."""
+    each call overwrites with byte-identical content for a fixed seed.
+
+    S3: when ``include_performance`` is True, also writes the performance
+    (表现期快照) snapshot CSV derived from the same sample, so the portfolio
+    analysis flow has a one-click demo table. Left off by default so the
+    first-run modeling entry keeps emitting exactly the two files it always has.
+    """
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    generate_sample_frame(seed=seed).to_csv(target_dir / SAMPLE_TABLE_NAME, index=False, encoding="utf-8-sig")
+    sample = generate_sample_frame(seed=seed)
+    sample.to_csv(target_dir / SAMPLE_TABLE_NAME, index=False, encoding="utf-8-sig")
     generate_dictionary_frame().to_csv(target_dir / DICTIONARY_TABLE_NAME, index=False, encoding="utf-8-sig")
+    if include_performance:
+        generate_performance_frame(sample, seed=seed).to_csv(
+            target_dir / PERFORMANCE_TABLE_NAME, index=False, encoding="utf-8-sig"
+        )
     return target_dir
 
 
 __all__ = [
     "DEMO_TASK_NAME_PREFIX",
     "DICTIONARY_TABLE_NAME",
+    "PERFORMANCE_STATES",
+    "PERFORMANCE_TABLE_NAME",
     "SAMPLE_TABLE_NAME",
     "generate_dictionary_frame",
+    "generate_performance_frame",
     "generate_sample_frame",
     "write_sample_materials",
 ]
