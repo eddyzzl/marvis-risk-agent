@@ -979,7 +979,7 @@ wheels = [
 [[package]]
 name = "marvis"
 version = "2.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "catboost" },
     { name = "duckdb" },
