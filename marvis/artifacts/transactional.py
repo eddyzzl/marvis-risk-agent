@@ -5,6 +5,46 @@ artifact only after computation succeeds. Callers can roll back both staged and
 promoted files if a later DB/audit write fails. When a repository exposes a
 connection factory, ``ArtifactUnitOfWork`` can also own that DB transaction so
 artifact promotion and DB commit share one boundary.
+
+Three write-path categories cover every tool in this codebase; pick the one
+that matches what a single tool call actually writes:
+
+1. **Pure DB row write(s)** -- no filesystem artifact, one or more related rows
+   that must land together. No ``ArtifactUnitOfWork`` needed: call the repo's
+   own ``*_with_audit`` method directly, since that method already wraps every
+   row in one ``sqlite3`` transaction internally.
+   Example: ``marvis/packs/modeling/experiment.py::ExperimentStore.create``
+   (one ``create_experiment_with_audit`` call).
+
+2. **File + DB registration** -- a file or directory artifact is promoted at
+   the same moment its existence is registered/pointed-to in the DB. Stage via
+   ``ArtifactUnitOfWork.stage_file``/``stage_directory``, then call
+   ``.finalize_with_connection(repo.transaction, callback)`` when the repo
+   exposes a connection-scoped write method, else ``.finalize(callback)``.
+   Example: ``marvis/packs/modeling/prepare.py::prepare_modeling_frame``
+   (lines ~70-139).
+
+3. **Cross-resource / multi-repo write** -- one tool call must atomically
+   touch artifacts AND multiple/different DB repos or tables (e.g. task
+   creation plus a materials directory). Same
+   ``ArtifactUnitOfWork.finalize_with_connection`` as category 2, but the
+   callback itself may issue multiple statements on the shared connection --
+   the callback closure owns sequencing, the connection factory owns the
+   transaction boundary.
+   Example: ``marvis/packs/modeling/handoff.py`` (materials-directory staging
+   plus task-row creation, lines ~61-129).
+
+Not every write can be pulled fully inside one ``ArtifactUnitOfWork``: when a
+file is already promoted/committed by an earlier, independently-transacted
+call (e.g. a trained model file written by ``save_model``/``persist_model_meta``
+before a later, separate DB row is attached to it), the later DB write cannot
+retroactively join the file's own promotion boundary without threading a
+shared ``ArtifactUnitOfWork`` through every writer in between -- see
+``marvis/packs/modeling/train_tools.py::tool_train_model`` for a case where
+that threading was assessed and judged too invasive for the gap it would
+close (the DB write itself is already one atomic transaction; only the
+file-then-DB *ordering* is a known, documented gap, covered by a best-effort
+compensating cleanup instead of a real transaction boundary).
 """
 
 from __future__ import annotations

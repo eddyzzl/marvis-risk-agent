@@ -4,7 +4,7 @@ import re
 from marvis.modeling_policy_signals import has_monotonic_policy, monotonic_policy_profile
 from marvis.packs.modeling.errors import ModelingError
 
-from marvis.packs.modeling._common import _finite_float_or_none, _format_number_token, _is_metric_key, _jsonable, _nonnegative_float_or_none, _positive_int_or_none, _score_first
+from marvis.packs.modeling._common import _cleanup_unattached_artifact, _finite_float_or_none, _format_number_token, _is_metric_key, _jsonable, _nonnegative_float_or_none, _positive_int_or_none, _score_first, _snapshot_latest_model_meta
 from marvis.packs.modeling._runtime import _Runtime, _artifact, _artifact_base_dir, _runtime
 from marvis.packs.modeling.delivery_tools import _artifact_capabilities
 from marvis.packs.modeling.report_tools import _scorecard_table_rows
@@ -236,6 +236,15 @@ def _apply_champion_refit(
     """
     if not requested:
         return {"applied": False, "requested": False, "reason": "未请求全量重训(refit_on_train_plus_test=false)。"}
+    # LT-5: _refit_champion_on_train_plus_test (via _train_recipe -> save_model)
+    # fully promotes the refit's model file/meta on disk -- including overwriting
+    # the base_dir's "latest" model_meta.json pointer -- before this function ever
+    # sees a result. The pre-refit snapshot must be taken BEFORE that call, or it
+    # would capture the refit's own (already-overwritten) meta instead of the
+    # true prior state, defeating the rollback below. Mirrors train_tools.py's
+    # tool_train_model/tool_train_models cleanup.
+    artifact_dir = _artifact_base_dir(runtime.settings, experiment.task_id)
+    meta_snapshot = _snapshot_latest_model_meta(artifact_dir)
     try:
         refit = _refit_champion_on_train_plus_test(
             runtime, task_id=experiment.task_id, experiment=experiment, recipe=recipe,
@@ -245,8 +254,16 @@ def _apply_champion_refit(
     if refit is None:
         return {"applied": False, "requested": True, "reason": "候选实验缺少可全量重训的切分信息,已保留原候选。"}
     refit_config, result = refit
+    # attach_result's DB write is a separate, later transaction from the file
+    # promotion above -- a failure here must not leave an on-disk artifact with
+    # no DB row pointing at it.
     refit_experiment_id = runtime.experiments.create(experiment.task_id, recipe, refit_config)
-    runtime.experiments.attach_result(refit_experiment_id, result)
+    try:
+        runtime.experiments.attach_result(refit_experiment_id, result)
+    except Exception:
+        _cleanup_unattached_artifact(result.artifact, artifact_dir, meta_snapshot)
+        runtime.experiments.set_status(refit_experiment_id, "failed")
+        raise
     refit_experiment = runtime.experiments.get(refit_experiment_id)
     refit_row = next(
         (row for row in runtime.experiments.compare([refit_experiment_id])["experiments"] if row.get("id") == refit_experiment_id),

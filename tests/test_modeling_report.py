@@ -903,6 +903,54 @@ def test_generate_scorecard_report_keeps_pd_and_points_separate(tmp_path):
     assert base_row["points"] > 100
 
 
+def test_generate_model_report_audit_failure_rolls_back_report_file(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """LT-5: report_tools now stages report_path via ArtifactUnitOfWork instead of
+    writing directly to the final path -- a failure in the audit write that follows
+    render_model_report must not leave a torn/partial xlsx at the real path, and a
+    retry must still succeed cleanly."""
+    from types import SimpleNamespace
+
+    import marvis.repositories.datasets as dataset_repo_module
+    from marvis.packs.modeling import tools as modeling_tools
+    from marvis.packs.modeling.experiment import ExperimentStore
+
+    runner, settings, task, dataset = _report_runner(tmp_path)
+    experiment_id = _train_report_experiment(runner, task, dataset, "lr", {"max_iter": 200})
+
+    report_path = settings.tasks_dir / task.id / "outputs" / "model_report.xlsx"
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    report_inputs = {"experiment_id": experiment_id, "dataset_id": dataset.id}
+
+    original_write_audit = dataset_repo_module._write_audit_row
+
+    def fail_report_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.report.generated":
+            raise RuntimeError("report audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", fail_report_audit)
+
+    with pytest.raises(RuntimeError, match="report audit down"):
+        modeling_tools.tool_generate_model_report(report_inputs, ctx)
+
+    assert not report_path.exists()
+    assert not (report_path.parent / ".staging").exists()
+    audit_repo = PluginRepository(settings.db_path)
+    assert audit_repo.list_audit(kind="modeling.report.generated") == []
+
+    monkeypatch.setattr(dataset_repo_module, "_write_audit_row", original_write_audit)
+    retried = modeling_tools.tool_generate_model_report(report_inputs, ctx)
+    assert Path(retried["report_path"]).exists()
+    assert not (report_path.parent / ".staging").exists()
+    experiment = ExperimentStore(settings.db_path).get(experiment_id)
+    assert experiment.artifact_id is not None
+
+
 @pytest.mark.slow
 def test_generate_model_reports_fans_out_one_xlsx_per_experiment(tmp_path):
     runner, settings, task, dataset = _report_runner(tmp_path)

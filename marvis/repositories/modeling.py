@@ -146,15 +146,34 @@ class ModelingRepository:
         audit: dict,
     ) -> None:
         with connect(self.db_path) as conn:
-            _insert_model_artifact_row(conn, artifact)
-            _attach_experiment_result_row(
+            self.attach_experiment_result_with_artifact_and_audit_on_connection(
                 conn,
                 experiment_id,
+                artifact=artifact,
                 metrics=metrics,
-                artifact_id=artifact.id,
                 status=status,
+                audit=audit,
             )
-            _write_audit_row(conn, **audit)
+
+    def attach_experiment_result_with_artifact_and_audit_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        experiment_id: str,
+        *,
+        artifact: ModelArtifact,
+        metrics: ModelMetrics,
+        status: str = "trained",
+        audit: dict,
+    ) -> None:
+        _insert_model_artifact_row(conn, artifact)
+        _attach_experiment_result_row(
+            conn,
+            experiment_id,
+            metrics=metrics,
+            artifact_id=artifact.id,
+            status=status,
+        )
+        _write_audit_row(conn, **audit)
 
     def set_experiment_status(self, experiment_id: str, status: str) -> None:
         with connect(self.db_path) as conn:

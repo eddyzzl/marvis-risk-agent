@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 import re
-from marvis.artifacts import TransactionalArtifactStore
+from marvis.artifacts import ArtifactUnitOfWork, TransactionalArtifactStore
 from marvis.feature.binning import equal_frequency_edges
 from marvis.feature.metrics import DEFAULT_IV_BINS, feature_metrics, feature_psi
 from marvis.llm_client import LLMClientError, OpenAICompatibleLLMClient
@@ -77,16 +77,19 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
             {"section": "汇总", "status": "ok"},
             {"section": "模型指标", "status": "ok"},
         ]
+        uow = ArtifactUnitOfWork()
+        staged_report = uow.stage_file(report_path.parent, report_path.name)
         try:
-            render_minimal_model_report(experiment, report_path)
-            _write_model_report_audit(
+            render_minimal_model_report(experiment, staged_report.path)
+            _finalize_model_report_write(
                 runtime,
+                uow,
                 experiment=experiment,
-                report_path=report_path,
+                report_path=staged_report.final_path,
                 section_status=statuses,
             )
         except Exception:
-            report_path.unlink(missing_ok=True)
+            uow.rollback()
             raise
         return {
             "report_path": str(report_path),
@@ -208,6 +211,8 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
         structured_summary,
     )
     scored_dataset_path = report_dataset_path if report_dataset_path != dataset_path else None
+    uow = ArtifactUnitOfWork()
+    staged_report = uow.stage_file(report_path.parent, report_path.name)
     try:
         render_model_report(
             ModelReportPayload(
@@ -227,20 +232,26 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
                 narratives=narratives,
                 section_status=statuses,
             ),
-            report_path,
+            staged_report.path,
         )
-        _write_model_report_audit(
+        _finalize_model_report_write(
             runtime,
+            uow,
             experiment=experiment,
-            report_path=report_path,
+            report_path=staged_report.final_path,
             section_status=statuses,
             scored_dataset_path=scored_dataset_path,
         )
     except Exception:
-        _cleanup_model_report_outputs(
-            report_path=report_path,
-            scored_dataset_path=scored_dataset_path,
-        )
+        uow.rollback()
+        # The scored dataset (when freshly written by _report_scored_dataset above)
+        # already promoted/committed under its OWN transactional store before this
+        # try block started -- deleting it here is a deliberate policy choice (a
+        # scored parquet with no matching report is not useful on its own), not a
+        # transaction-boundary bug, so it stays a best-effort unlink rather than
+        # joining the report's UoW.
+        if scored_dataset_path is not None and scored_dataset_path.name == "model_report_scored.parquet":
+            scored_dataset_path.unlink(missing_ok=True)
         raise
     return {
         "report_path": str(report_path),
@@ -251,36 +262,57 @@ def _generate_model_report_for(runtime: _Runtime, ctx, experiment, inputs: dict,
     }
 
 
-def _write_model_report_audit(
+def _model_report_audit_kwargs(
+    *,
+    experiment,
+    report_path: Path,
+    section_status: list[dict],
+    scored_dataset_path: Path | None = None,
+) -> dict:
+    artifact_id = experiment.artifact_id or ""
+    return {
+        "kind": "modeling.report.generated",
+        "target_ref": experiment.id,
+        "outcome": "succeeded",
+        "detail": {
+            "artifact_id": artifact_id,
+            "report_path": str(report_path),
+            "scored_dataset_path": str(scored_dataset_path) if scored_dataset_path else "",
+            "section_status": [_jsonable(status) for status in section_status],
+        },
+    }
+
+
+def _finalize_model_report_write(
     runtime: _Runtime,
+    uow: ArtifactUnitOfWork,
     *,
     experiment,
     report_path: Path,
     section_status: list[dict],
     scored_dataset_path: Path | None = None,
 ) -> None:
-    artifact_id = experiment.artifact_id or ""
-    runtime.repo.write_audit(
-        kind="modeling.report.generated",
-        target_ref=experiment.id,
-        outcome="succeeded",
-        detail={
-            "artifact_id": artifact_id,
-            "report_path": str(report_path),
-            "scored_dataset_path": str(scored_dataset_path) if scored_dataset_path else "",
-            "section_status": [_jsonable(status) for status in section_status],
-        },
+    """LT-5: promote the staged report file and write its audit row as one unit --
+    a process kill between "report bytes written" and "audit row committed" must
+    not leave a torn/partial report at the real path with no record of it. Prefers
+    a connection-scoped audit write sharing the promote/commit boundary when the
+    repo exposes one; falls back to the older single-call ``write_audit`` (still a
+    strict improvement over the previous non-staged direct write)."""
+    audit_kwargs = _model_report_audit_kwargs(
+        experiment=experiment,
+        report_path=report_path,
+        section_status=section_status,
+        scored_dataset_path=scored_dataset_path,
     )
-
-
-def _cleanup_model_report_outputs(
-    *,
-    report_path: Path,
-    scored_dataset_path: Path | None,
-) -> None:
-    report_path.unlink(missing_ok=True)
-    if scored_dataset_path is not None and scored_dataset_path.name == "model_report_scored.parquet":
-        scored_dataset_path.unlink(missing_ok=True)
+    write_audit_on_connection = getattr(runtime.repo, "write_audit_on_connection", None)
+    transaction = getattr(runtime.repo, "transaction", None)
+    if callable(write_audit_on_connection) and callable(transaction):
+        uow.finalize_with_connection(
+            transaction,
+            lambda conn: write_audit_on_connection(conn, **audit_kwargs),
+        )
+    else:
+        uow.finalize(lambda: runtime.repo.write_audit(**audit_kwargs))
 
 
 def _dataset_split_rows(metrics, *, split_profile: dict[str, dict] | None = None) -> list[dict]:

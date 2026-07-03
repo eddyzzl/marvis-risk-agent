@@ -40,28 +40,41 @@ class ExperimentStore:
         )
         return experiment_id
 
+    def transaction(self):
+        return self._repo.transaction()
+
     def attach_result(self, experiment_id: str, result: TrainResult) -> None:
         self.get(experiment_id)
-        artifact = replace(
-            result.artifact,
-            experiment_id=experiment_id,
-            feature_importance=result.feature_importance,
-        )
+        artifact = self._prepare_result_artifact(experiment_id, result)
         self._repo.attach_experiment_result_with_artifact_and_audit(
             experiment_id,
             artifact=artifact,
             metrics=result.metrics,
             status="trained",
-            audit={
-                "kind": "modeling.experiment.trained",
-                "target_ref": experiment_id,
-                "outcome": "succeeded",
-                "detail": {
-                    "artifact_id": artifact.id,
-                    "algorithm": artifact.algorithm,
-                    "feature_count": len(artifact.feature_list),
-                },
-            },
+            audit=_attach_result_audit(experiment_id, artifact),
+        )
+
+    def attach_result_on_connection(self, conn, experiment_id: str, result: TrainResult) -> None:
+        """Connection-scoped counterpart of ``attach_result`` (LT-5): lets a caller
+        share this DB write with an ``ArtifactUnitOfWork.finalize_with_connection``
+        call so the artifact-row insert/experiment update/audit write commit or
+        roll back together with whatever else runs on ``conn``."""
+        self.get(experiment_id)
+        artifact = self._prepare_result_artifact(experiment_id, result)
+        self._repo.attach_experiment_result_with_artifact_and_audit_on_connection(
+            conn,
+            experiment_id,
+            artifact=artifact,
+            metrics=result.metrics,
+            status="trained",
+            audit=_attach_result_audit(experiment_id, artifact),
+        )
+
+    def _prepare_result_artifact(self, experiment_id: str, result: TrainResult):
+        return replace(
+            result.artifact,
+            experiment_id=experiment_id,
+            feature_importance=result.feature_importance,
         )
 
     def set_artifact_pmml_path(self, artifact_id: str, pmml_path: str) -> None:
@@ -104,6 +117,19 @@ class ExperimentStore:
                 for experiment_id in experiment_ids
             ]
         }
+
+
+def _attach_result_audit(experiment_id: str, artifact) -> dict:
+    return {
+        "kind": "modeling.experiment.trained",
+        "target_ref": experiment_id,
+        "outcome": "succeeded",
+        "detail": {
+            "artifact_id": artifact.id,
+            "algorithm": artifact.algorithm,
+            "feature_count": len(artifact.feature_list),
+        },
+    }
 
 
 def _comparison_row(experiment: Experiment) -> dict:

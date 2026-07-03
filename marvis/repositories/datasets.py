@@ -202,6 +202,9 @@ class DatasetRepository:
         with connect(self.db_path) as conn:
             _write_audit_row(conn, **kwargs)
 
+    def write_audit_on_connection(self, conn: sqlite3.Connection, **kwargs) -> None:
+        _write_audit_row(conn, **kwargs)
+
 
 def _dataset_insert_values(dataset: Dataset) -> tuple:
     return (
