@@ -3545,19 +3545,6 @@ def test_select_experiment_selects_among_partially_compliant_candidates_without_
     assert "满足交付/审批策略的候选中自动选择" in selected.output["selection_reason"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LT-1 bug: _selection_policy_decision computes SEL-7 overfit_warning/"
-        "sanity_warning (select_tools.py's _selection_policy_quality_warnings) at "
-        "selection time, but tool_post_training_action's _model_card_limitations "
-        "(delivery_tools.py) only reads selection_policy_decision['violations'], "
-        "never ['warnings'] -- so a champion flagged as overfit at selection never "
-        "shows that warning anywhere a reviewer actually reads (model card "
-        "limitations / approval package markdown). The warning is computed and then "
-        "silently dropped on the floor before reaching any human-facing artifact."
-    ),
-)
 def test_post_training_action_model_card_surfaces_sel7_overfit_warning(tmp_path):
     runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
     rows = 240
@@ -3586,7 +3573,10 @@ def test_post_training_action_model_card_surfaces_sel7_overfit_warning(tmp_path)
             "split_col": "split",
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
             "seed": 23,
-            "params": {"n_estimators": 400, "max_depth": 12, "min_child_samples": 1, "num_leaves": 255},
+            # num_boost_round is lgb's boost-round knob here; passing the sklearn
+            # alias n_estimators collides with the recipe's explicit
+            # n_estimators=num_boost_round and raises a duplicate-kwarg TypeError.
+            "params": {"num_boost_round": 400, "max_depth": 12, "min_child_samples": 1, "num_leaves": 255},
         },
         task_id=task.id,
     )

@@ -151,6 +151,12 @@ def _comparison_row(experiment: Experiment) -> dict:
         "oot_accuracy": None if metrics is None else metrics.oot_accuracy,
         "psi_test_vs_train": None if metrics is None else metrics.psi_test_vs_train,
         "psi_oot_vs_train": None if metrics is None else metrics.psi_oot_vs_train,
+        # SEL-7: the overfit gaps must ride along in the comparison row so
+        # _selection_policy_quality_warnings can raise overfit_warning; without
+        # them row.get("overfit_train_test_gap") is always None and the warning
+        # never fires (only overfit_flag was exported before).
+        "overfit_train_test_gap": None if metrics is None else metrics.overfit_train_test_gap,
+        "overfit_train_oot_gap": None if metrics is None else metrics.overfit_train_oot_gap,
         "overfit_flag": None if metrics is None else metrics.overfit_flag,
         # DOM-6: deterministic head/tail lift on the model score, so scenario
         # eval_metric="response_lift" champion selection has a real column to sort.
