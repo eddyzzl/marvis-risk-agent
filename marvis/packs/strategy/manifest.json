@@ -443,7 +443,16 @@
             "type": "number"
           },
           "expected_profit": {
-            "type": "number"
+            "type": ["number", "null"]
+          },
+          "profit_note": {
+            "type": ["string", "null"]
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           },
           "swap_in_count": {
             "type": "integer"

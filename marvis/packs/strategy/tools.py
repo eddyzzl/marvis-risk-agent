@@ -190,6 +190,14 @@ def tool_backtest_strategy(inputs: dict, ctx) -> dict:
     payload["backtest_id"] = backtest_id
     payload["nan_labels_dropped"] = nan_labels_dropped
     payload["label_coverage"] = _label_coverage(len(frame) + nan_labels_dropped, nan_labels_dropped)
+    if result.profit_note:
+        # FIN-3 #4: a profit backtest was requested but the EL chain inputs
+        # (pd_col/ead_col) were missing, so expected_profit is None rather than a
+        # fabricated 0.0. Surface the reason as a red flag instead of failing silently.
+        payload["red_flags"] = [
+            *payload.get("red_flags", []),
+            {"code": "expected_profit_unavailable", "level": "amber", "message": result.profit_note},
+        ]
     return payload
 
 

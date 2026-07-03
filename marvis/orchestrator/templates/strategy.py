@@ -49,7 +49,7 @@ STRATEGY_ANALYSIS = WorkflowTemplate(
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit"}),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
             needs_confirmation=True,
@@ -245,7 +245,7 @@ STRATEGY_DEVELOPMENT = WorkflowTemplate(
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit"}),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
             needs_confirmation=True,
@@ -419,7 +419,7 @@ RULE_STRATEGY = WorkflowTemplate(
                 PostCheck("range", {"field": "approval_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "approved_bad_rate", "min": 0.0, "max": 1.0}),
                 PostCheck("range", {"field": "rejected_bad_rate", "min": 0.0, "max": 1.0}),
-                PostCheck("range", {"field": "expected_profit"}),
+                PostCheck("range", {"field": "expected_profit", "allow_null": True}),  # FIN-3 #4: None when profit requested w/o pd_col (graceful EL degradation)
             ),
             decision_point=True,
             needs_confirmation=True,

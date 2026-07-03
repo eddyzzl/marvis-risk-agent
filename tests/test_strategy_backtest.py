@@ -120,3 +120,103 @@ def test_strategy_conditions_fail_loud_for_numeric_literal_on_non_numeric_column
 
 def test_strategy_package_exports_backtest_strategy():
     assert strategy_pack.backtest_strategy is backtest_strategy
+
+
+# -- FIN-3 #4: EL chain degrades gracefully when pd_col is missing ---------------
+def test_backtest_strategy_degrades_expected_profit_when_pd_col_missing():
+    frame = pd.DataFrame({
+        "score": [580, 620, 730, 760, 590],
+        "bad": [1, 0, 0, 1, 0],
+        "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0],
+    })
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    # A profit backtest is requested (profit_params given) but pd_col is absent, so the
+    # expected-loss chain cannot run. It must degrade gracefully: no raise, no fake 0.0.
+    result = backtest_strategy(
+        frame, strategy, target_col="bad",
+        profit_params=_profit_params(), ead_col="ead", pd_col=None,
+    )
+
+    assert result.expected_profit is None
+    assert result.profit_note is not None
+    assert "pd_col" in result.profit_note
+    # The rest of the backtest still computes normally (score<600 rejects 580 & 590).
+    assert result.approval_rate == pytest.approx(3 / 5)
+
+
+def test_backtest_strategy_computes_expected_profit_when_pd_col_present():
+    frame = pd.DataFrame({
+        "score": [580, 620, 730, 760, 590],
+        "bad": [1, 0, 0, 1, 0],
+        "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0],
+        "pd": [0.20, 0.05, 0.02, 0.10, 0.15],
+    })
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    result = backtest_strategy(
+        frame, strategy, target_col="bad",
+        profit_params=_profit_params(), ead_col="ead", pd_col="pd",
+    )
+
+    # Real profit (float) and no degradation note -- unchanged behavior.
+    assert isinstance(result.expected_profit, float)
+    assert result.profit_note is None
+
+
+def test_backtest_strategy_expected_profit_is_zero_without_profit_params():
+    # Regression guard: 0.0 still means "no profit backtest requested", distinct from
+    # the None graceful-degradation signal above.
+    frame = pd.DataFrame({"score": [700, 720], "bad": [0, 1]})
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    result = backtest_strategy(frame, strategy, target_col="bad")
+
+    assert result.expected_profit == 0.0
+    assert result.profit_note is None
+
+
+def test_compare_strategies_profit_delta_none_when_pd_col_missing():
+    from marvis.packs.strategy.compare import compare_strategies
+
+    frame = pd.DataFrame({
+        "score": [580, 620, 730, 760, 590],
+        "bad": [1, 0, 0, 1, 0],
+        "ead": [1000.0, 2000.0, 1000.0, 500.0, 1000.0],
+    })
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+    baseline = build_strategy(
+        "approval",
+        [{"condition": "score < 650", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+    )
+
+    # Missing pd_col -> profit delta is undefined (None), summary says 不可用, no crash.
+    result = compare_strategies(
+        frame, strategy, baseline, target_col="bad",
+        profit_params=_profit_params(), ead_col="ead", pd_col=None,
+    )
+
+    assert result.deltas["expected_profit"] is None
+    assert "不可用" in result.summary_text
