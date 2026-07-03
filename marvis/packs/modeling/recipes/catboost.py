@@ -23,6 +23,7 @@ from marvis.packs.modeling.recipes.common import (
     cat_feature_indices,
     compute_model_metrics,
     model_params,
+    pop_boost_rounds,
     sample_weight_values,
     split_modeling_frame,
 )
@@ -43,7 +44,9 @@ def train_catboost(backend, dataset_path, config: TrainConfig, *, out_dir: Path)
     }
     features = list(config.features)
     cat_features = cat_feature_indices(train, features, params.pop("cat_features", None))
-    iterations = int(params.pop("iterations", params.pop("num_boost_round", 50)))
+    iterations = pop_boost_rounds(
+        params, default=50, primary="iterations", aliases=("num_boost_round", "n_estimators")
+    )
     od_wait = params.pop("od_wait", None)
     fit_train = train
     if config.early_stopping_rounds:

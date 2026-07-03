@@ -22,6 +22,7 @@ from marvis.packs.modeling.recipes.common import (
     carve_early_stop_fold_for_config,
     compute_model_metrics,
     model_params,
+    pop_boost_rounds,
     normalized_monotone_constraints,
     resolve_auto_scale_pos_weight,
     sample_weight_values,
@@ -49,7 +50,7 @@ def train_xgb(backend, dataset_path, config: TrainConfig, *, out_dir: Path) -> T
     params.pop("monotonic_constraints", None)
     if constraints is not None:
         params["monotone_constraints"] = f"({','.join(str(value) for value in constraints)})"
-    num_boost_round = int(params.pop("num_boost_round", 20))
+    num_boost_round = pop_boost_rounds(params, default=20)
     fit_train = train
     if config.early_stopping_rounds:
         # SEL-4/TUNE-3: early stopping watches a fold carved from train, not test --

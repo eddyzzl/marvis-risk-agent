@@ -171,6 +171,45 @@ def model_params(params: dict | None) -> dict:
     }
 
 
+def pop_boost_rounds(
+    params: dict,
+    *,
+    default: int,
+    primary: str = "num_boost_round",
+    aliases: tuple[str, ...] = ("n_estimators",),
+) -> int:
+    """Resolve the boost-round count and strip its aliases out of ``params``.
+
+    Every tree recipe passes the round count as an explicit estimator kwarg
+    (``n_estimators=`` / ``num_boost_round=`` / ``iterations=``) while also
+    splatting ``**params`` into the constructor. If a caller left one of those
+    aliases inside ``params`` it would collide with that explicit kwarg and raise
+    ``TypeError: got multiple values for keyword argument``. This treats the
+    ``aliases`` as synonyms for ``primary`` and always removes ``primary`` AND
+    every alias from ``params`` so nothing colliding reaches the constructor.
+
+    Precedence when several keys are present: ``primary`` wins, then the
+    ``aliases`` in order, then ``default``. Only parameter normalization -- no
+    default value or training semantics change (INV-1).
+    """
+    resolved = default
+    # Pop every alias unconditionally (so none survive into the constructor)
+    # before applying precedence, and never let ``primary`` also appear in
+    # ``aliases``.
+    alias_values = [
+        params.pop(alias, None) for alias in aliases if alias != primary
+    ]
+    primary_value = params.pop(primary, None)
+    if primary_value is not None:
+        resolved = primary_value
+    else:
+        for alias_value in alias_values:
+            if alias_value is not None:
+                resolved = alias_value
+                break
+    return int(resolved)
+
+
 def cat_feature_indices(
     train: pd.DataFrame, features: list[str], explicit: object = None
 ) -> list[int]:
@@ -791,6 +830,7 @@ __all__ = [
     "model_params",
     "normalize_monotone_constraints_value",
     "normalized_monotone_constraints",
+    "pop_boost_rounds",
     "sample_weight_col",
     "sample_weight_values",
     "split_modeling_frame",
