@@ -267,7 +267,7 @@
 | ✅ | PERF-10 | read_frame 深拷贝改 CoW 视图（`d3336acf`）：内存峰值随配方数从线性变常量；六配方训练字节等价验证 | Med/S | ✅ |
 | ✅ | UX-8 | 8 个死代码模块删除（`caee3d9f`）：join_review/plan_view/plan_confirm/workflow_create/subagent_view/loop_progress/memory_manager/draft_manager，全部先复核零挂载；7 个专属测试文件同步清理 | Med/M | — |
 | ✅ | VD-10 | （随 UX-8 落地）零挂载模块已清除；join_review 的"中止去重"选项无在线等价物，按纯死代码删除不移植 | Med/S | — |
-| ⬜ | VD-11 | 设计 token 剩余缺口：radius 塌缩、spacing/type scale 为零（radius 调整须先出对比稿由用户拍板；含追踪器"legacy hex 清理"） | Med/L | — |
+| ✅ | VD-11 | 零歧义重复模式已收敛（`9bdaac9e`：--radius-pill 37 处，逐字节等价验证）+ 全类别 token 清单（docs/reviews/2026-07-03-vd11-design-token-inventory.md：radius 二档/颜色/spacing/shadow/type scale 值×次数×归类）；**取值调整按红线待用户对比稿拍板**（清单即底稿）；hex 核实无重复 legacy | Med/L | ✅ |
 | ✅ | LLM-4 | role_overrides 按 caller 分级路由（`20f5da11`）：planner/critic/router/gate/distill 可各指模型，默认不配=现状 | Med/M | — |
 | ✅ | LLM-5 | context_window/max_tokens 进 profile+预检预算+typed error（`049c6164`）；gate 内容/planner catalog/记忆注入三触点接截断 | Med/M | — |
 | ✅ | LLM-6 | 终文剥离 <think> 段后再抽 JSON（`572c6e33`，流式期直通、落库剥离） | Med/M | — |
