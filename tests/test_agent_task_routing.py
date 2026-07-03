@@ -68,6 +68,46 @@ def test_strategy_agent_start_builds_plan_and_reaches_strategy_gate(client, tmp_
     assert any(table["title"] == "cutoff 权衡点" for table in done["metadata"]["tables"])
 
 
+def test_strategy_rule_mining_goal_routes_to_rule_strategy_template(client, tmp_path):
+    src = tmp_path / "rules"
+    src.mkdir(parents=True, exist_ok=True)
+    # bad concentrated where f1 is low -> mining returns candidate reject rules.
+    pd.DataFrame({
+        "f1":  list(range(10, 210, 10)),
+        "f2":  [i % 3 for i in range(20)],
+        "bad": [1 if v <= 60 else 0 for v in range(10, 210, 10)],
+    }).to_csv(src / "rules.csv", index=False)
+    created = client.post(
+        "/api/tasks",
+        json={
+            # a rule-mining goal in the task name routes strategy setup to the
+            # rule_strategy template instead of the default strategy_analysis.
+            "model_name": "规则挖掘",
+            "validator": "qa",
+            "source_dir": str(src),
+            "task_type": "strategy",
+            "run_mode": "manual",
+            "target_col": "bad",
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    started = client.post(f"/api/tasks/{task_id}/agent/start", json={})
+    assert started.status_code == 202, started.text
+    assert any("开始规则策略挖掘" in message["content"] for message in started.json()["messages"])
+
+    confirmed = client.post(f"/api/tasks/{task_id}/agent/messages", json={"content": "开始"})
+    assert confirmed.status_code == 202, confirmed.text
+    gate = confirmed.json()["messages"][-1]
+    assert gate["metadata"]["kind"] == "gate"
+    assert "规则挖掘完成" in gate["content"]
+    assert any(
+        table["title"] == "候选规则（按 lift 降序）"
+        for table in gate["metadata"]["tables"]
+    )
+
+
 def test_vintage_agent_start_builds_plan_and_returns_curve(client, tmp_path):
     src = tmp_path / "vintage"
     src.mkdir(parents=True, exist_ok=True)

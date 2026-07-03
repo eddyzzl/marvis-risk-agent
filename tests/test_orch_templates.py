@@ -471,6 +471,61 @@ def test_strategy_development_goal_patterns_do_not_cross_strategy_analysis(tmp_p
     assert set(development.goal_patterns).isdisjoint(set(analysis.goal_patterns))
 
 
+def test_rule_strategy_template_instantiates_and_validates(tmp_path):
+    load_builtin_templates()
+    tool_registry = _tool_registry(tmp_path)
+    planner = Planner(tool_registry, lambda: None, PlanValidator(tool_registry))
+
+    plan = planner.from_template(
+        get_template("rule_strategy"),
+        {
+            "dataset_id": "dataset-1",
+            "target_col": "bad_flag",
+            "adoption_reason": "committee approved",
+        },
+        task_id="task-1",
+    )
+
+    assert PlanValidator(tool_registry).validate(plan) == []
+    assert [step.tool_ref for step in plan.steps] == [
+        ToolRef("strategy", "mine_rules"),
+        ToolRef("strategy", "select_rule_set"),
+        ToolRef("strategy", "evaluate_rule_set"),
+        ToolRef("strategy", "build_strategy"),
+        ToolRef("strategy", "backtest_strategy"),
+        ToolRef("strategy", "adopt_strategy"),
+        ToolRef("strategy", "render_strategy_doc"),
+    ]
+    mine, select, evaluate, build, backtest, adopt, doc = plan.steps
+    # rule-set selection gate + backtest + mandatory adopt are the confirm gates.
+    assert [step.needs_confirmation for step in plan.steps] == [
+        False, True, False, False, True, True, False
+    ]
+    assert [step.title for step in plan.steps if step.decision_point] == ["评估规则集", "回测策略"]
+    # $ref wiring: select consumes the mined candidates; evaluate + build consume
+    # the SELECTED subset (same $ref, so the two never diverge from the gate).
+    assert select.inputs["candidate_rules"] == f"$ref:{mine.id}.output.candidate_rules"
+    # selection default is a literal None (the apply_adjust override slot).
+    assert select.inputs["selection"] is None
+    assert evaluate.inputs["rules"] == f"$ref:{select.id}.output.selected_rules"
+    assert build.inputs["rules"] == f"$ref:{select.id}.output.selected_rules"
+    assert adopt.inputs["backtest_id"] == f"$ref:{backtest.id}.output.backtest_id"
+    assert doc.inputs["strategy_id"] == f"$ref:{build.id}.output.strategy_id"
+    # optional score_col slot omitted -> dropped, not None (build_strategy skips
+    # the direction self-check for arbitrary-feature rules).
+    assert "score_col" not in build.inputs
+
+
+def test_rule_strategy_goal_patterns_disjoint_from_other_strategy_templates(tmp_path):
+    load_builtin_templates()
+    rule = get_template("rule_strategy")
+    analysis = get_template("strategy_analysis")
+    development = get_template("strategy_development")
+    assert set(rule.goal_patterns).isdisjoint(set(analysis.goal_patterns))
+    assert set(rule.goal_patterns).isdisjoint(set(development.goal_patterns))
+    assert "rule_strategy" in builtin_template_ids()
+
+
 def test_vintage_analysis_template_runs_vintage_curve(tmp_path):
     load_builtin_templates()
     tool_registry = _tool_registry(tmp_path)

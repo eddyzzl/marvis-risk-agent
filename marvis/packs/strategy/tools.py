@@ -25,6 +25,11 @@ from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.errors import StrategyError
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
+from marvis.packs.strategy.rules import (
+    DEFAULT_MINE_SEED,
+    evaluate_rule_set,
+    mine_rules,
+)
 from marvis.packs.strategy.strategy import build_strategy, infer_strategy_rule_direction
 from marvis.packs.strategy.tradeoff import (
     recommend_operating_point,
@@ -449,6 +454,261 @@ def tool_render_strategy_doc(inputs: dict, ctx) -> dict:
     )
     _write_strategy_artifact_audit(runtime, ctx, strategy_id, "strategy_doc_md", doc_path)
     return {"doc_path": str(doc_path), "sections": list(sections)}
+
+
+# ---------------------------------------------------------------------------
+# S4 rule strategy: mining, evaluation, and the rule-set selection gate helper.
+# ---------------------------------------------------------------------------
+# A single-rule lift this high (or a hit bad rate this high) usually means a
+# leakage/near-target feature slipped into the candidate set, not a genuine
+# reject rule -- surfaced so a reviewer can drop it before adoption.
+_SUSPECT_LEAKAGE_LIFT = 10.0
+_SUSPECT_LEAKAGE_BAD_RATE = 0.9
+# Two rules co-hitting more than this share (Jaccard) are largely redundant.
+_HIGH_OVERLAP_THRESHOLD = 0.8
+# An included rule whose population share is below this fixed floor is flagged
+# low_support (mirrors bands.py's _SPARSE_BAND_THRESHOLD). Distinct from the
+# caller's min_support MINING filter: a caller may mine at a looser min_support
+# (e.g. 0.01) yet still want a warning on any sub-2% rule before adoption.
+_LOW_SUPPORT_FLOOR = 0.02
+
+
+def tool_mine_rules(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    dataset_id = str(inputs["dataset_id"])
+    target_col = str(inputs["target_col"])
+    feature_cols = _optional_str_list(inputs.get("feature_cols"))
+    columns = _unique([*(feature_cols or []), target_col]) if feature_cols else None
+    frame = _dataset_frame(runtime, dataset_id, columns=columns)
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    resolved_features = feature_cols or _default_feature_cols(frame, target_col)
+    min_support = _float_or(inputs.get("min_support"), 0.02)
+    min_lift = _float_or(inputs.get("min_lift"), 1.5)
+    candidates = mine_rules(
+        frame,
+        feature_cols=resolved_features,
+        target_col=target_col,
+        max_depth=int(inputs.get("max_depth", 3)),
+        min_support=min_support,
+        min_lift=min_lift,
+        top_k=int(inputs.get("top_k", 20)),
+        seed=int(inputs.get("seed", DEFAULT_MINE_SEED)),
+    )
+    candidate_rules = [rule.as_dict() for rule in candidates]
+    red_flags = _mine_red_flags(candidate_rules, nan_labels_dropped)
+    return {
+        "candidate_rules": candidate_rules,
+        "n_rows": int(len(frame)),
+        "feature_cols": list(resolved_features),
+        "red_flags": red_flags,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
+
+
+def tool_evaluate_rule_set(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    dataset_id = str(inputs["dataset_id"])
+    target_col = str(inputs["target_col"])
+    rules_ordered = [dict(rule) for rule in (inputs.get("rules") or []) if isinstance(rule, dict)]
+    frame = _dataset_frame(runtime, dataset_id)
+    frame, nan_labels_dropped = resolve_labeled_frame(
+        frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+    )
+    result = evaluate_rule_set(
+        frame,
+        rules_ordered,
+        target_col=target_col,
+        decision=str(inputs.get("decision") or "reject"),
+    )
+    red_flags = _evaluate_red_flags(result, rules_ordered, nan_labels_dropped)
+    result["red_flags"] = red_flags
+    result["nan_labels_dropped"] = nan_labels_dropped
+    return result
+
+
+def tool_select_rule_set(inputs: dict, ctx) -> dict:
+    """Lightweight rule-set selection gate helper (S4).
+
+    Assembles the user-selected ordered subset of the mined candidate rules into
+    a gate payload and passes it through unchanged. ``selection`` is a literal
+    ``None`` default in the template step's inputs so the generic apply_adjust
+    gate-override channel (agent/gate_execution_adapter.py) can overwrite it with
+    the parsed 「选 1,3,5」/「全选」/「去掉 2」 instruction -- exactly the band_edges
+    precedent. A ``None`` selection means "keep all candidates" (no filter yet).
+    """
+    candidate_rules = [dict(rule) for rule in (inputs.get("candidate_rules") or []) if isinstance(rule, dict)]
+    selection = inputs.get("selection")
+    decision = str(inputs.get("decision") or "reject")
+    selected = [_build_ready_rule(rule, decision) for rule in _apply_rule_selection(candidate_rules, selection)]
+    return {
+        "selected_rules": selected,
+        "selected_count": len(selected),
+        "candidate_count": len(candidate_rules),
+    }
+
+
+def _build_ready_rule(rule: dict, decision: str) -> dict:
+    """Shape a mined candidate into a build_strategy-ready rule dict.
+
+    build_strategy needs {condition, decision(, value)}; a mined CandidateRule
+    carries only condition + display stats (lift/support/source/hit_bad_rate).
+    Attach the reject decision and keep the display fields (build_strategy reads
+    only condition/decision/value and ignores the rest, so they ride along for
+    the renderer/waterfall without affecting the strategy)."""
+    ready = dict(rule)
+    ready["condition"] = str(rule.get("condition", ""))
+    ready["decision"] = decision
+    return ready
+
+
+def _apply_rule_selection(candidate_rules: list[dict], selection) -> list[dict]:
+    """Resolve a parsed selection into an ordered subset of candidate_rules.
+
+    ``selection`` is None (keep all) or a list of 1-based indices in the display
+    order the user chose (e.g. [1, 3, 5]); the returned order follows the
+    selection order, not the candidate order, so the user can also reorder.
+    Out-of-range/duplicate indices are dropped defensively -- the gate reply
+    parser already validated them, this is belt-and-braces."""
+    if selection is None:
+        return [dict(rule) for rule in candidate_rules]
+    ordered: list[dict] = []
+    seen: set[int] = set()
+    for raw in selection:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if index < 1 or index > len(candidate_rules) or index in seen:
+            continue
+        seen.add(index)
+        ordered.append(dict(candidate_rules[index - 1]))
+    return ordered
+
+
+def _mine_red_flags(candidate_rules: list[dict], nan_labels_dropped: int) -> list[dict]:
+    red_flags: list[dict] = []
+    for rule in candidate_rules:
+        lift = _finite(rule.get("lift"))
+        hit_bad_rate = _finite(rule.get("hit_bad_rate"))
+        if (lift is not None and lift > _SUSPECT_LEAKAGE_LIFT) or (
+            hit_bad_rate is not None and hit_bad_rate > _SUSPECT_LEAKAGE_BAD_RATE
+        ):
+            red_flags.append(
+                {
+                    "code": "suspect_leakage",
+                    "level": "red",
+                    "message": (
+                        f"规则 {rule.get('rule_id')}（{rule.get('condition')}）lift="
+                        f"{_fmt_num(lift)}、命中坏率={_fmt_pct(hit_bad_rate)}，疑似泄漏/近目标特征入选，请核查。"
+                    ),
+                }
+            )
+        support = _finite(rule.get("support"))
+        if support is not None and support < _LOW_SUPPORT_FLOOR:
+            red_flags.append(
+                {
+                    "code": "low_support",
+                    "level": "amber",
+                    "message": (
+                        f"规则 {rule.get('rule_id')}（{rule.get('condition')}）支持度 "
+                        f"{_fmt_pct(support)} 低于 {_fmt_pct(_LOW_SUPPORT_FLOOR)} 底线，样本量偏小。"
+                    ),
+                }
+            )
+    if nan_labels_dropped:
+        red_flags.append(
+            {
+                "code": "nan_labels_dropped",
+                "level": "amber",
+                "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+            }
+        )
+    return red_flags
+
+
+def _evaluate_red_flags(result: dict, rules_ordered: list[dict], nan_labels_dropped: int) -> list[dict]:
+    red_flags: list[dict] = []
+    waterfall = result.get("waterfall") or []
+    for row in waterfall:
+        if int(row.get("incremental_hits") or 0) == 0:
+            red_flags.append(
+                {
+                    "code": "rule_shadowed",
+                    "level": "amber",
+                    "message": (
+                        f"规则 {row.get('rule_id')} 在瀑布中零增量命中（被前序规则完全覆盖），可考虑移除。"
+                    ),
+                }
+            )
+    overlap = result.get("overlap_matrix") or []
+    for i in range(len(overlap)):
+        for j in range(i + 1, len(overlap)):
+            share = _finite(overlap[i][j])
+            if share is not None and share > _HIGH_OVERLAP_THRESHOLD:
+                red_flags.append(
+                    {
+                        "code": "high_overlap",
+                        "level": "amber",
+                        "message": (
+                            f"规则 {_rule_id_at(i)} 与 {_rule_id_at(j)} 重叠 {_fmt_pct(share)} "
+                            f"(>{_fmt_pct(_HIGH_OVERLAP_THRESHOLD)})，高度冗余。"
+                        ),
+                    }
+                )
+    if nan_labels_dropped:
+        red_flags.append(
+            {
+                "code": "nan_labels_dropped",
+                "level": "amber",
+                "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+            }
+        )
+    return red_flags
+
+
+def _rule_id_at(index: int) -> str:
+    return f"rule_{index + 1}"
+
+
+def _default_feature_cols(frame: pd.DataFrame, target_col: str) -> list[str]:
+    numeric = frame.select_dtypes(include="number").columns.tolist()
+    return [column for column in numeric if column != target_col]
+
+
+def _optional_str_list(value) -> list[str] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, list):
+        cleaned = [str(item) for item in value if str(item).strip()]
+        return cleaned or None
+    return None
+
+
+def _float_or(value, default: float) -> float:
+    number = _optional_float(value)
+    return default if number is None else number
+
+
+def _finite(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _fmt_num(value) -> str:
+    number = _finite(value)
+    return "n/a" if number is None else f"{number:.2f}"
+
+
+def _fmt_pct(value) -> str:
+    number = _finite(value)
+    return "n/a" if number is None else f"{number * 100:.1f}%"
 
 
 def _write_strategy_artifact_audit(runtime, ctx, strategy_id: str, kind: str, path) -> None:

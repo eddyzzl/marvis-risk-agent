@@ -31,6 +31,18 @@ _SCORE_HINTS = (
 )
 
 
+# S4: goal phrases that route a strategy task to the rule_strategy template
+# (rule mining) instead of the default strategy_analysis. Kept in sync with
+# RULE_STRATEGY.goal_patterns; the strategy_setup intent branch multi-recognizes
+# these -- parallel to how strategy_development got its own goal_patterns (S2).
+_RULE_STRATEGY_GOAL_PATTERNS = ("规则挖掘", "拒绝规则", "规则策略", "rule mining", "rule strategy")
+
+
+def is_rule_strategy_goal(*texts: str | None) -> bool:
+    haystack = " ".join(text.lower() for text in texts if text)
+    return any(pattern.lower() in haystack for pattern in _RULE_STRATEGY_GOAL_PATTERNS)
+
+
 class StrategySetupError(ValueError):
     """Raised when a strategy task cannot infer a scored binary sample."""
 
@@ -59,6 +71,33 @@ class StrategyProposal:
             "rules": self.rules,
             "default_decision": self.default_decision,
         }
+
+
+@dataclass
+class RuleStrategyProposal:
+    """S4: setup proposal that routes to the rule_strategy template. Unlike the
+    lightweight strategy_analysis proposal it carries no pre-built rules -- the
+    template's mine_rules step discovers them -- only the dataset/target anchor
+    and the rule-mining slots. adoption_reason is a placeholder the user reviews
+    at the mandatory adopt gate (the whole point of that forced gate)."""
+
+    dataset_id: str
+    dataset_name: str
+    target_col: str
+    score_col: str | None
+    bad_rate: float | None
+    notes: list[str]
+    template_id: str = "rule_strategy"
+
+    def template_slots(self) -> dict:
+        slots: dict = {
+            "dataset_id": self.dataset_id,
+            "target_col": self.target_col,
+            "adoption_reason": "（待采纳时确认）",
+        }
+        if self.score_col:
+            slots["score_col"] = self.score_col
+        return slots
 
 
 def build_strategy_proposal(
@@ -98,6 +137,54 @@ def build_strategy_proposal(
         bad_rate=profile["bad_rate"],
         notes=profile["notes"],
     )
+
+
+def build_rule_strategy_proposal(
+    registry,
+    backend,
+    task_id: str,
+    source_dir,
+    *,
+    target_col: str | None = None,
+    score_col: str | None = None,
+) -> RuleStrategyProposal:
+    """S4: resolve the dataset/target anchor for a rule-mining task. Score is
+    optional here (rule mining works on arbitrary numeric features, not just a
+    single score); when present it is passed through so build_strategy's rule
+    direction self-check can fire on any score-band rules."""
+    dataset = _resolve_dataset(registry, task_id, source_dir)
+    path = registry.resolve_path(dataset.id)
+    columns = backend.column_names(path)
+    resolved_target = _resolve_target_col(backend, path, columns, target_col)
+    resolved_score = _optional_score_col(columns, score_col)
+    bad_rate = _target_bad_rate(backend, path, resolved_target)
+    notes = ["将在数据上挖掘候选拒绝规则，选定规则集后回测并采纳。"]
+    return RuleStrategyProposal(
+        dataset_id=dataset.id,
+        dataset_name=_dataset_name(dataset),
+        target_col=resolved_target,
+        score_col=resolved_score,
+        bad_rate=bad_rate,
+        notes=notes,
+    )
+
+
+def _optional_score_col(columns: list[str], requested: str | None) -> str | None:
+    requested = str(requested or "").strip()
+    if requested and requested in columns:
+        return requested if requested.isidentifier() else None
+    return None
+
+
+def _target_bad_rate(backend, path, target_col: str) -> float | None:
+    try:
+        frame = backend.read_frame(path, columns=[target_col])
+    except Exception:
+        return None
+    target = pd.to_numeric(frame[target_col], errors="coerce").dropna()
+    if target.empty:
+        return None
+    return float((target == 1).mean())
 
 
 def _resolve_dataset(registry, task_id: str, source_dir):
@@ -183,4 +270,11 @@ def _dataset_name(dataset) -> str:
     return Path(source).name if source else str(getattr(dataset, "id", ""))
 
 
-__all__ = ["StrategyProposal", "StrategySetupError", "build_strategy_proposal"]
+__all__ = [
+    "RuleStrategyProposal",
+    "StrategyProposal",
+    "StrategySetupError",
+    "build_rule_strategy_proposal",
+    "build_strategy_proposal",
+    "is_rule_strategy_goal",
+]

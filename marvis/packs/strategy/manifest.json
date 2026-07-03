@@ -937,6 +937,259 @@
         "write:strategy"
       ],
       "memory_limit_mb": 2048
+    },
+    {
+      "name": "mine_rules",
+      "summary": "Mine deterministic candidate reject rules from a labeled sample via decision-tree paths and univariate cutpoints.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "min_support": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "min_lift": {
+            "type": "number",
+            "minimum": 0
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "candidate_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "n_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "candidate_rules",
+          "n_rows",
+          "red_flags",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_mine_rules",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "evaluate_rule_set",
+      "summary": "Evaluate an ordered rule subset with a first-match-wins waterfall, overlap matrix, and residual/combined stats.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "decision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "rules"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "waterfall": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "overlap_matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "residual": {
+            "type": "object"
+          },
+          "combined": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "decision",
+          "waterfall",
+          "overlap_matrix",
+          "residual",
+          "combined",
+          "red_flags",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_evaluate_rule_set",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "select_rule_set",
+      "summary": "Assemble the user-selected ordered subset of mined candidate rules into a gate payload.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "candidate_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "selection": {
+            "type": [
+              "array",
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "candidate_rules"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "selected_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "selected_rules",
+          "selected_count",
+          "candidate_count"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_select_rule_set",
+      "side_effects": [],
+      "memory_limit_mb": 1024
     }
   ],
   "hooks": [],

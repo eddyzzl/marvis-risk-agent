@@ -21,7 +21,12 @@ from marvis.agent.portfolio_setup import (
     build_states_gate_state,
     parse_states_reply,
 )
-from marvis.agent.strategy_setup import StrategySetupError, build_strategy_proposal
+from marvis.agent.strategy_setup import (
+    StrategySetupError,
+    build_rule_strategy_proposal,
+    build_strategy_proposal,
+    is_rule_strategy_goal,
+)
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
 from marvis.agent_memory.store import AgentMemoryStore
@@ -418,6 +423,11 @@ def _run_strategy_setup(
     runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
 ) -> dict | tuple:
     backend, registry = _modeling_data_runtime(runtime.settings)
+    # S4 intent branch (parallel to strategy_development's goal_patterns): a rule
+    # mining goal -- in the first user message or the task's own name -- routes to
+    # the rule_strategy template instead of the default strategy_analysis.
+    if is_rule_strategy_goal(user_text, getattr(task, "model_name", None)):
+        return _run_rule_strategy_setup(runtime, repo, task, backend, registry)
     proposal = build_strategy_proposal(
         registry,
         backend,
@@ -436,6 +446,32 @@ def _run_strategy_setup(
             f"开始策略分析:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}，"
             f"评分列 `{proposal.score_col}`。已生成默认审批策略候选，回测前会停下确认。"
             f"{note_text}"
+        ),
+        metadata={"intent": "strategy"},
+    )
+    return (proposal.template_id, proposal.template_slots(), {})
+
+
+def _run_rule_strategy_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, backend, registry
+) -> dict | tuple:
+    proposal = build_rule_strategy_proposal(
+        registry,
+        backend,
+        task.id,
+        task.source_dir,
+        target_col=getattr(task, "target_col", "") or None,
+        score_col=getattr(task, "score_col", "") or None,
+    )
+    note_text = ("\n" + " ".join(proposal.notes)) if proposal.notes else ""
+    bad = f"（坏率 {proposal.bad_rate:.2%}）" if proposal.bad_rate is not None else ""
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=(
+            f"开始规则策略挖掘:样本 `{proposal.dataset_name}`，目标列 `{proposal.target_col}`{bad}。"
+            f"将挖掘候选拒绝规则，选定规则集后回测并采纳。{note_text}"
         ),
         metadata={"intent": "strategy"},
     )
