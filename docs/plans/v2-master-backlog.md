@@ -197,7 +197,7 @@
 |---|---|---|---|
 | ✅ | S4 | 两 commit 落地（`8a6a5ed6`/`a4ce4162`）：双通道挖掘（树路径+单变量，确定性）、瀑布评估+重叠矩阵、三方共享条件求值（往返锁）、RULE_STRATEGY 模板+「选 1,3,5」规则集门+采纳面复用 S2；e2e 含门覆盖重跑 | 4–6天 |
 | ✅ | S5 | 两 commit 落地（`d7cd5292`/`d9e551d6`）：monitoring_plan.py 单一来源+run_strategy_monitoring（委托 monitor_run 内核+策略面 ±5pp/±10pp 漂移分级带 IEEE-754 边界 eps、无标签 n/a、纯规则跳 PSI/CSI、last_run_at 写回+审计）、STRATEGY_MONITORING 告警门（挂报告步——executor 先暂停后执行的机制现实，语义等价；红灯三选项处置→next_action 不自动建任务）、逾期可见（health 计数+/api/strategies/monitoring-due）；e2e 红灯全旅程 | 3–5天 |
-| ⬜ | S6 | 即席分析（对话 turn 先行，slice_aggregate 白名单）+ limit_pricing_matrix（已拍板本期做）+ compare_strategies 呈现 | 5–8天 |
+| ✅ | S6 | 三 commit 落地（`6cee5d5c`/`4c8d239d`/`8c6aece9`）：slice_aggregate 白名单算子（标识符白名单防注入+确定性 ORDER BY+截断/空结果旗+审计）、adhoc_analysis 模块（LLM 出 spec→平台校验→口径确认门先行→幻觉列中文澄清，新 PromptSpec 入注册表）、limit_pricing_matrix（2×2×2 手算锁+PD 代理旗+矩阵门后落 csv artifact）、challenger 报告（matrix-heat+数字跟随工具输出+无基线优雅降级）；**问数分支接入 turn 分发器的一枝接线随后单独落地** | 5–8天 |
 
 ## 9. 阶段八：审查 Batch 4 —— 领域剩余（约 1 周）
 
