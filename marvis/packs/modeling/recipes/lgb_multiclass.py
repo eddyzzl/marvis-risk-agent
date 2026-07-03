@@ -20,6 +20,7 @@ from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     compute_multiclass_model_metrics,
     model_params,
+    pop_boost_rounds,
     split_modeling_frame,
 )
 
@@ -54,7 +55,7 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
         "force_col_wise": True,
         "verbosity": -1,
     }
-    num_boost_round = int(params.pop("num_boost_round", 50))
+    num_boost_round = pop_boost_rounds(params, default=50)
     dtrain = lgb.Dataset(
         train[list(config.features)],
         label=_encode_labels(train[config.target_col], class_to_index),

@@ -175,9 +175,13 @@ def _apply_cap(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.Data
         lower = bounds.get("lower")
         upper = bounds.get("upper")
         values = pd.to_numeric(out[column], errors="coerce").to_numpy(dtype=float)
-        mask = np.isfinite(values)
         if lower is not None and upper is not None and np.isfinite(lower) and np.isfinite(upper):
-            values[mask] = np.clip(values[mask], float(lower), float(upper))
+            # ``to_numpy`` may hand back a read-only view (e.g. when the source
+            # column came from a ``Series.fillna()`` whose backing buffer is
+            # WRITEABLE=False in pandas 2.x), so build a fresh array via
+            # ``np.where`` rather than mutating ``values`` in place.
+            mask = np.isfinite(values)
+            values = np.where(mask, np.clip(values, float(lower), float(upper)), values)
         out[column] = values
     return out
 

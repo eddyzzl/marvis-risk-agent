@@ -19,6 +19,7 @@ from marvis.packs.modeling.recipes import get_recipe
 from marvis.packs.modeling.recipes.common import (
     compute_regression_metrics,
     model_params,
+    pop_boost_rounds,
     split_modeling_frame,
 )
 
@@ -39,7 +40,7 @@ def train_lgb_regressor(backend, dataset_path, config: TrainConfig, *, out_dir: 
         "deterministic": True,
         "force_row_wise": True,
     }
-    num_boost_round = int(params.pop("num_boost_round", 20))
+    num_boost_round = pop_boost_rounds(params, default=20)
     dtrain = lgb.Dataset(
         train[list(config.features)],
         label=train[config.target_col].to_numpy(dtype=float),

@@ -320,6 +320,17 @@ def _approval_policy_decision(value) -> dict:
             "code": str(item.get("code") or ""),
             "message": str(item.get("message") or ""),
         })
+    # SEL-7 quality warnings (overfit_warning / sanity_warning) are non-blocking
+    # but must survive normalization so _model_card_limitations can surface them
+    # on the human-facing model card; dropping them here re-hid the warning.
+    warnings = []
+    for item in decision.get("warnings") or []:
+        if not isinstance(item, dict):
+            continue
+        warnings.append({
+            "code": str(item.get("code") or ""),
+            "message": str(item.get("message") or ""),
+        })
     return {
         "status": str(decision.get("status") or ""),
         "explicit_selection": bool(decision.get("explicit_selection")),
@@ -327,6 +338,7 @@ def _approval_policy_decision(value) -> dict:
         "policy": _json_safe(decision.get("policy") if isinstance(decision.get("policy"), dict) else {}),
         "profile": _json_safe(decision.get("profile") if isinstance(decision.get("profile"), dict) else {}),
         "violations": violations,
+        "warnings": warnings,
         "override_reason": str(decision.get("override_reason") or ""),
     }
 
@@ -921,7 +933,16 @@ def _model_card_limitations(
         for item in (selection_policy_decision.get("violations") or [])
         if isinstance(item, dict)
     ]
-    limitations.extend(item for item in violations if item)
+    limitations.extend(f"选型策略违规:{item}" for item in violations if item)
+    # SEL-7 quality warnings (overfit_warning / sanity_warning) do not block
+    # selection, but a reviewer still has to see them on the model card; they
+    # were previously computed at selection time and then dropped on the floor.
+    warnings = [
+        str(item.get("message") or item.get("code") or "")
+        for item in (selection_policy_decision.get("warnings") or [])
+        if isinstance(item, dict)
+    ]
+    limitations.extend(f"选型策略警示:{item}" for item in warnings if item)
     monitoring_status = str(monitoring_policy.get("status") or "")
     if monitoring_status in {"warn", "fail", "missing", "needs_policy"}:
         limitations.append(str(monitoring_policy.get("recommendation") or "Monitoring policy needs review."))

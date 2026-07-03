@@ -3337,26 +3337,6 @@ def test_continuous_screen_then_train_models_regression_end_to_end(tmp_path):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LT-1 bug (distinct from the SEL-7 warning-propagation xfail below): "
-        "chaining impute_missing -> cap_outliers on the SAME column and then "
-        "replaying that chain at scoring time (_ModelArtifactScorer / handoff "
-        "notebook path) crashes. tool_impute_missing's _apply_impute uses "
-        "Series.fillna(), whose backing numpy array can come back "
-        "WRITEABLE=False in pandas 2.x; _apply_cap "
-        "(marvis/feature/preprocessing.py's _apply_cap) then does an in-place "
-        "`values[mask] = np.clip(...)` on `pd.to_numeric(out[column], "
-        "errors='coerce').to_numpy(dtype=float)`, which returns that same "
-        "read-only view rather than a fresh writable array, raising "
-        "`ValueError: assignment destination is read-only`. Reproduced in total "
-        "isolation with a 4-row fillna() + to_numeric().to_numpy(dtype=float) "
-        "round trip -- not specific to parquet I/O or this fixture's shape. Any "
-        "real pipeline chaining impute then cap on one column will hit this the "
-        "moment a human (or handoff notebook) tries to score new raw data."
-    ),
-)
 def test_train_model_persists_combined_impute_cap_woe_chain_and_exports_pmml_consistently(tmp_path):
     """LT-1: chains ALL THREE preprocessing kinds (impute -> cap -> woe) before
     train_model, not just one at a time (existing coverage only exercises impute
@@ -3500,6 +3480,92 @@ def test_post_training_action_exports_pmml_for_single_feature_model(tmp_path):
     assert post_training.output["model_card"]["feature_preview"] == ["x1"]
 
 
+# -- LT-3: recipe boost-round alias normalization (n_estimators collision) ------
+
+
+@pytest.mark.slow
+def test_train_model_lgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_path):
+    """LT-3: the lgb recipe passes n_estimators=num_boost_round explicitly while
+    also splatting **params into LGBMClassifier. A caller who put the sklearn
+    alias n_estimators into train_model's params used to crash the whole invoke
+    with `got multiple values for keyword argument 'n_estimators'`. n_estimators
+    must now be treated as an alias for num_boost_round: training succeeds and the
+    resolved round count is the alias value (400)."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+            "params": {"n_estimators": 400},
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact.params["num_boost_round"] == 400
+    assert "n_estimators" not in artifact.params
+
+
+@pytest.mark.slow
+def test_train_model_lgb_num_boost_round_takes_precedence_over_n_estimators_alias(tmp_path):
+    """LT-3: when BOTH num_boost_round and its n_estimators alias are supplied,
+    the primary key (num_boost_round) wins and the alias is dropped -- no
+    collision, deterministic precedence."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+            "params": {"n_estimators": 400, "num_boost_round": 31},
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact.params["num_boost_round"] == 31
+    assert "n_estimators" not in artifact.params
+
+
+@pytest.mark.slow
+def test_train_model_xgb_accepts_n_estimators_alias_without_kwarg_collision(tmp_path):
+    """LT-3: same alias normalization on the xgb recipe (the other estimator that
+    passes n_estimators=num_boost_round explicitly)."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": dataset.id,
+            "recipe": "xgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "seed": 23,
+            "params": {"n_estimators": 37},
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+    artifact = ModelingRepository(settings.db_path).get_model_artifact(trained.output["artifact_id"])
+    assert artifact.params["num_boost_round"] == 37
+    assert "n_estimators" not in artifact.params
+
+
 def test_select_experiment_selects_among_partially_compliant_candidates_without_override(tmp_path):
     """LT-1: end-to-end (tool facade, not the _pick_best_comparison_row_with_policy
     unit) coverage of the selection_policy "部分满足" path -- some candidates satisfy
@@ -3565,19 +3631,6 @@ def test_select_experiment_selects_among_partially_compliant_candidates_without_
     assert "满足交付/审批策略的候选中自动选择" in selected.output["selection_reason"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "LT-1 bug: _selection_policy_decision computes SEL-7 overfit_warning/"
-        "sanity_warning (select_tools.py's _selection_policy_quality_warnings) at "
-        "selection time, but tool_post_training_action's _model_card_limitations "
-        "(delivery_tools.py) only reads selection_policy_decision['violations'], "
-        "never ['warnings'] -- so a champion flagged as overfit at selection never "
-        "shows that warning anywhere a reviewer actually reads (model card "
-        "limitations / approval package markdown). The warning is computed and then "
-        "silently dropped on the floor before reaching any human-facing artifact."
-    ),
-)
 def test_post_training_action_model_card_surfaces_sel7_overfit_warning(tmp_path):
     runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
     rows = 240
@@ -3606,7 +3659,10 @@ def test_post_training_action_model_card_surfaces_sel7_overfit_warning(tmp_path)
             "split_col": "split",
             "split_values": {"train": "train", "test": "test", "oot": "oot"},
             "seed": 23,
-            "params": {"n_estimators": 400, "max_depth": 12, "min_child_samples": 1, "num_leaves": 255},
+            # num_boost_round is lgb's boost-round knob here; passing the sklearn
+            # alias n_estimators collides with the recipe's explicit
+            # n_estimators=num_boost_round and raises a duplicate-kwarg TypeError.
+            "params": {"num_boost_round": 400, "max_depth": 12, "min_child_samples": 1, "num_leaves": 255},
         },
         task_id=task.id,
     )
