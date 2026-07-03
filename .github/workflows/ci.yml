@@ -32,8 +32,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install uv
-        run: python -m pip install uv
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -60,6 +63,11 @@ jobs:
           CHECK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'fast' }}
         run: |
           if [ "$CHECK_MODE" = "full" ]; then
+            # Manual dispatch reviews the whole branch, not just the tip commit.
+            base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+            if [ -n "$base" ] && [ "$base" != "$(git rev-parse HEAD)" ]; then
+              export CHECK_DIFF_RANGE="${base}...HEAD"
+            fi
             uv run scripts/check
           else
             uv run scripts/check --fast
@@ -85,8 +93,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install uv
-        run: python -m pip install uv
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install locked dependencies
         run: uv sync --locked --extra dev
