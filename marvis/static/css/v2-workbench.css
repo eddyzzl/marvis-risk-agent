@@ -294,7 +294,7 @@
 .review-verdict .verdict {
   width: fit-content;
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--success);
   background: var(--success-soft);
   font-weight: 650;
@@ -822,7 +822,7 @@
   justify-self: start;
   width: max-content;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   border: 1px solid var(--border);
   font-weight: 650;
@@ -1066,7 +1066,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   color: var(--warning-strong);
   background: var(--warning-soft);
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   white-space: nowrap;
 }
 /* UX-5: replan/no_progress event strip + replan badge + active sub-agent rows,
@@ -1083,7 +1083,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   color: var(--text-muted);
   background: var(--surface-soft);
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   white-space: nowrap;
 }
 .plan-rail-events {
@@ -1134,7 +1134,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   color: var(--info-strong, var(--text-muted));
   background: var(--info-soft, var(--surface-subtle));
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   white-space: nowrap;
 }
 .plan-rail-subagent-scope {
@@ -1808,7 +1808,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .model-delivery-policy-reasons span {
   padding: 4px 7px;
   border: 1px solid var(--model-panel-border, var(--border-color, var(--border)));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--model-panel-surface-soft, var(--surface-soft));
   color: var(--model-panel-text-muted, var(--text-muted));
   font-size: 11px;
@@ -1862,7 +1862,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   margin-left: 6px;
   padding: 2px 6px;
   border: 1px solid var(--model-panel-border, var(--border-color, var(--border)));
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   color: var(--model-panel-text-muted, var(--text-muted));
 }
@@ -2015,7 +2015,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   gap: 4px;
   padding: 3px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   color: var(--text-muted);
   font-size: 11px;
@@ -2146,7 +2146,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
   display: inline-block;
   margin-left: 6px;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 10px;
   font-weight: 700;
   vertical-align: middle;
@@ -2192,7 +2192,7 @@ body[data-theme="dark"] .agent-inline-table tbody tr:has(.champion-badge) {
 .screen-badge {
   display: inline-block;
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 600;
 }

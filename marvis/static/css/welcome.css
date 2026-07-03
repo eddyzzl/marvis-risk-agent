@@ -201,7 +201,7 @@
   left: -18px;
   width: 9px;
   height: 60px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   opacity: 0;
   background: linear-gradient(
     90deg,
@@ -401,7 +401,7 @@
   right: 12px;
   z-index: 2;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.03em;
