@@ -9233,6 +9233,7 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
     kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
     cell_body = _slice_function(app_js, "function driverTableCellHtml")
     align_body = _slice_function(metric_tables_js, "export function metricHeaderShouldRightAlign")
+    chart_html_body = _slice_function(app_js, "function driverTableChartHtml")
     tables_body = _slice_function(app_js, "function agentMessageTablesHtml")
 
     ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
@@ -9247,6 +9248,7 @@ def test_driver_gate_tables_render_databar_psi_and_champion_row():
             kind_body,
             cell_body,
             align_body,
+            chart_html_body,
             tables_body,
             "const message = {",
             "  metadata: {",
@@ -9917,3 +9919,247 @@ def test_welcome_sample_data_entry_is_wired_end_to_end():
     assert "await dispatchDriverStart(task.id);" in app_js
 
     assert ".welcome-sample-data-link" in welcome_css
+
+
+
+def test_calibration_and_score_band_chart_functions_exist_in_metric_tables():
+    """VD-4: metric-tables.js must export the two new chart renderers and
+    interaction attacher, mirroring the existing ROC card export shape."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    assert "export function renderCalibrationCard(chart)" in metric_tables_js
+    assert "export function renderScoreBandCard(chart)" in metric_tables_js
+    assert "export function attachCalibrationInteractions(rootEl)" in metric_tables_js
+    node_check = subprocess.run(
+        ["node", "--check", str(STATIC_DIR / "js" / "metric-tables.js")],
+        capture_output=True,
+        text=True,
+    )
+    assert node_check.returncode == 0, node_check.stderr
+
+
+def test_app_js_wires_calibration_and_score_band_charts_into_driver_tables():
+    """VD-4: app.js must import the new renderers and mount them above their
+    driver table via driverTableChartHtml, keyed off table.chart.kind (see
+    marvis/agent/renderers.py::_calibration_table / _score_band_table)."""
+    app_js = _read_static("app.js")
+    assert "renderCalibrationCard," in app_js
+    assert "renderScoreBandCard," in app_js
+    assert "attachCalibrationInteractions," in app_js
+    chart_fn = _slice_function(app_js, "function driverTableChartHtml")
+    assert 'chart.kind === "calibration_curve"' in chart_fn
+    assert 'chart.kind === "score_band_bars"' in chart_fn
+    tables_fn = _slice_function(app_js, "function agentMessageTablesHtml")
+    assert "driverTableChartHtml(table?.chart)" in tables_fn
+    node_check = subprocess.run(
+        ["node", "--check", str(STATIC_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+    )
+    assert node_check.returncode == 0, node_check.stderr
+
+
+def test_calibration_reliability_curve_renders_diagonal_and_tiered_points():
+    """VD-4 acceptance: the calibration chart must draw a diagonal reference
+    (perfect-calibration) line plus one point per reliability-curve bin, with
+    points that deviate from the diagonal tagged into the warn/critical PSI
+    tier so they read as visually distinct from well-calibrated points."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            renderer_body,
+            "const chart = {",
+            "  kind: 'calibration_curve',",
+            "  points: [",
+            "    { avg_predicted_pd: 0.05, observed_bad_rate: 0.04, sample_count: 120, bin: 1 },",
+            "    { avg_predicted_pd: 0.20, observed_bad_rate: 0.50, sample_count: 80, bin: 2 },",
+            "    { avg_predicted_pd: 0.60, observed_bad_rate: 0.58, sample_count: 40, bin: 3 },",
+            "  ],",
+            "  brier_raw: 0.1234,",
+            "  ece_raw: 0.0567,",
+            "};",
+            "const html = renderCalibrationCard(chart);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+
+    # Diagonal perfect-calibration reference line is present.
+    assert 'class="roc-curve roc-curve-baseline"' in html
+    # One scatter point per reliability-curve bin.
+    assert html.count('class="calibration-point"') == 3
+    # The far-off-diagonal bin (0.20 predicted vs 0.50 actual, gap=0.30) is
+    # tagged critical; the near-diagonal bins are not.
+    assert 'data-tier="critical"' in html
+    assert 'data-tier="stable"' in html
+    # Brier/ECE summary surfaces in the header, not silently dropped.
+    assert "0.1234" in html
+    assert "0.0567" in html
+    # Hover tip carries predicted/actual/sample count, matching the ROC card's
+    # data-tip convention (no separate tooltip system needed on this path).
+    assert "预测 20.0%" in html
+    assert "实际 50.0%" in html
+    assert "n=80" in html
+
+
+def test_calibration_reliability_curve_renders_nothing_for_empty_points():
+    """Empty/missing calibration data must not crash or draw an empty frame —
+    driverTableChartHtml skips the chart entirely when points is empty."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+    script = "\n".join(
+        [
+            renderer_body,
+            "const html = renderCalibrationCard({ kind: 'calibration_curve', points: [] });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+    assert "暂无校准数据" in html
+    assert 'class="calibration-point"' not in html
+
+    app_js = _read_static("app.js")
+    chart_fn = _slice_function(app_js, "function driverTableChartHtml")
+    assert "chart.points.length === 0) return" in chart_fn
+
+
+def test_score_band_chart_renders_bars_and_bad_rate_line():
+    """VD-4 acceptance: the score-band chart must draw one sample-count bar
+    plus one bad-rate line point per band, labelled with the bin index on the
+    x-axis, matching the payload's data_field mapping (bin/score bounds/
+    sample_count/bad_rate — see marvis/agent/renderers.py::_score_band_table)."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            renderer_body,
+            "const chart = {",
+            "  kind: 'score_band_bars',",
+            "  split: 'oot',",
+            "  bands: [",
+            "    { bin: 1, score_lower: 0.0, score_upper: 0.1, sample_count: 500, bad_rate: 0.02 },",
+            "    { bin: 2, score_lower: 0.1, score_upper: 0.2, sample_count: 480, bad_rate: 0.05 },",
+            "    { bin: 3, score_lower: 0.2, score_upper: 0.3, sample_count: 300, bad_rate: 0.12 },",
+            "  ],",
+            "};",
+            "const html = renderScoreBandCard(chart);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+
+    assert html.count('class="score-band-bar"') == 3
+    assert html.count('class="score-band-rate-point"') == 3
+    assert 'data-split="oot"' in html
+    assert "oot 分段分布" in html
+    # Bin index labels on the x-axis (Chinese axis labelling requirement).
+    for bin_label in [">1<", ">2<", ">3<"]:
+        assert bin_label in html
+    assert "样本量" in html
+    assert "坏率" in html
+    assert "分箱1 · 样本量 500 · 坏率 2.00%" in html
+    assert "分箱3 · 样本量 300 · 坏率 12.00%" in html
+
+
+def test_score_band_chart_renders_nothing_for_empty_bands():
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+    script = "\n".join(
+        [
+            renderer_body,
+            "const html = renderScoreBandCard({ kind: 'score_band_bars', split: 'oot', bands: [] });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+    assert "暂无分段数据" in html
+    assert 'class="score-band-bar"' not in html
+
+
+def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
+    """Mounting-point contract: driverTableChartHtml must be called with
+    table.chart and its output placed before the table markup (chart is an
+    enhancement above the table, not a replacement — the table always stays),
+    and calling agentMessageTablesHtml with no chart field on a table must
+    not error or inject an empty chart wrapper."""
+    app_js = _read_static("app.js")
+    metric_tables_js = _read_static("js/metric-tables.js")
+    tables_fn = _slice_function(app_js, "function agentMessageTablesHtml")
+    chart_before_table = tables_fn.index("chartHtml") < tables_fn.index("agent-inline-table-scroll")
+    assert chart_before_table
+
+    kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
+    cell_body = _slice_function(app_js, "function driverTableCellHtml")
+    align_body = _slice_function(metric_tables_js, "export function metricHeaderShouldRightAlign")
+    chart_html_body = _slice_function(app_js, "function driverTableChartHtml")
+    cal_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+    band_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+    tables_body = tables_fn
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "import {"
+            " columnFractions, parseNumeric, psiTier, psiTooltipText,"
+            f" }} from {json.dumps(render_metrics_url)};",
+            kind_body,
+            cell_body,
+            align_body,
+            cal_body,
+            band_body,
+            chart_html_body,
+            tables_body,
+            "const messageNoChart = {",
+            "  metadata: { tables: [ { title: '报告章节状态', columns: ['章节', '状态'], rows: [['汇总', '可生成']] } ] },",
+            "};",
+            "const messageWithChart = {",
+            "  metadata: { tables: [ {",
+            "    title: '概率校准（可靠性曲线）',",
+            "    columns: ['类型', '分箱'],",
+            "    rows: [['原始', '1']],",
+            "    chart: { kind: 'calibration_curve', points: [",
+            "      { avg_predicted_pd: 0.1, observed_bad_rate: 0.1, sample_count: 10, bin: 1 },",
+            "    ] },",
+            "  } ] },",
+            "};",
+            "process.stdout.write(JSON.stringify({",
+            "  noChartHtml: agentMessageTablesHtml(messageNoChart),",
+            "  withChartHtml: agentMessageTablesHtml(messageWithChart),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    parsed = json.loads(result.stdout)
+
+    # No chart field -> no chart wrapper injected, table still renders.
+    assert "agent-inline-table-chart" not in parsed["noChartHtml"]
+    assert "报告章节状态" in parsed["noChartHtml"]
+
+    # Chart present -> chart wrapper appears before the table's own <table>.
+    with_chart = parsed["withChartHtml"]
+    assert "agent-inline-table-chart" in with_chart
+    assert 'class="calibration-point"' in with_chart
+    assert with_chart.index("agent-inline-table-chart") < with_chart.index("<table>")

@@ -31,10 +31,13 @@ import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
 import {
+  attachCalibrationInteractions,
   attachMetricTooltip,
   attachRocInteractions,
   metricHeaderShouldRightAlign,
+  renderCalibrationCard,
   renderMetricTableSection,
+  renderScoreBandCard,
 } from "./js/metric-tables.js";
 import { renderPrecisionConsistencyChart } from "./js/precision-consistency.js";
 import { stepCheckerHtml } from "./js/step-checker.js";
@@ -4168,6 +4171,7 @@ function renderAgentConversation() {
   freezeAgentSectionSnapshotsForReruns();
   clearAgentStageMessages();
   renderAgentTimeline(displayedMessages);
+  attachCalibrationInteractions($("agentMessages"));
   requestAgentConversationScrollToLatest();
   // The conversation just changed (a driver turn likely created/advanced the
   // plan). Plan-rail tasks have no validation poll tick to refresh the right
@@ -4501,6 +4505,7 @@ function renderDriverManualAnalysis(messages) {
   panel.setAttribute("aria-hidden", "false");
   panel.setAttribute("aria-label", "分析结果");
   container.innerHTML = driverManualAnalysisHtml(messages);
+  attachCalibrationInteractions(container);
   // Keep the (hidden-for-driver) validation sections ordered after the analysis
   // panel so a later switch to a validation task restores cleanly.
   const scrollContent = $("resultScrollContent");
@@ -4750,10 +4755,31 @@ function agentMessageTablesHtml(message) {
       const caption = table?.title
         ? `<div class="agent-inline-table-title">${escapeHtml(String(table.title))}</div>`
         : "";
-      return `<div class="agent-inline-table">${caption}<div class="agent-inline-table-scroll"><table>${head}${body}</table></div></div>`;
+      const chartHtml = driverTableChartHtml(table?.chart);
+      return `<div class="agent-inline-table">${caption}${chartHtml}<div class="agent-inline-table-scroll"><table>${head}${body}</table></div></div>`;
     })
     .join("");
   return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
+}
+
+// VD-4: renders the calibration reliability curve / score-band bar+line chart
+// above its table when the driver table carries a `chart` payload (see
+// marvis/agent/renderers.py::_calibration_table / _score_band_table). The
+// table itself is unchanged and stays visible below the chart — the chart is
+// an enhancement, not a replacement. Numbers are read straight off payload
+// coordinates (no frontend computation, INV-1). Missing/empty chart data
+// renders nothing rather than an empty frame.
+function driverTableChartHtml(chart) {
+  if (!chart || typeof chart !== "object") return "";
+  if (chart.kind === "calibration_curve") {
+    if (!Array.isArray(chart.points) || chart.points.length === 0) return "";
+    return `<div class="agent-inline-table-chart">${renderCalibrationCard(chart)}</div>`;
+  }
+  if (chart.kind === "score_band_bars") {
+    if (!Array.isArray(chart.bands) || chart.bands.length === 0) return "";
+    return `<div class="agent-inline-table-chart">${renderScoreBandCard(chart)}</div>`;
+  }
+  return "";
 }
 
 function agentMessageModelingSetupHtml(message, options = {}) {

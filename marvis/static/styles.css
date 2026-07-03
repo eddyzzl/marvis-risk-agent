@@ -7407,6 +7407,63 @@ body[data-theme="dark"] .roc-legend button {
   border-color: var(--border-strong);
 }
 
+/* VD-4: calibration reliability curve + score-band bar/line chart, mounted
+   above their driver tables (agent-inline-table) in the plan-driver timeline.
+   Reuses the roc-* axis/grid/readout primitives above so the visual language
+   matches the existing ROC&KS card exactly. */
+.agent-inline-table-chart {
+  margin: 8px 0 10px;
+}
+.calibration-card,
+.score-band-card {
+  background: var(--metric-surface);
+  border: 1px solid var(--metric-border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  min-width: 0;
+  max-width: 360px;
+}
+.calibration-curve-line { stroke: var(--metric-databar-accent); stroke-width: 1.4; }
+.calibration-point {
+  fill: var(--metric-psi-stable);
+  stroke: var(--metric-surface);
+  stroke-width: 1;
+}
+.calibration-point[data-tier="warn"] { fill: var(--metric-psi-warn); }
+.calibration-point[data-tier="critical"] { fill: var(--metric-psi-critical); }
+.calibration-readout {
+  margin-top: 4px;
+  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--chart-readout);
+  min-height: 1.2em;
+}
+.score-band-legend {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--metric-text-muted);
+}
+.score-band-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.score-band-legend-bar { width: 8px; height: 8px; border-radius: 2px; display: inline-block; background: var(--metric-databar-accent); }
+.score-band-legend-line { width: 10px; height: 2px; display: inline-block; background: var(--chart-roc-tpr); }
+.score-band-bar { fill: var(--metric-databar-accent); opacity: 0.85; }
+.score-band-bar:hover { opacity: 1; }
+.score-band-rate-line { fill: none; stroke: var(--chart-roc-tpr); stroke-width: 1.4; }
+.score-band-rate-point { fill: var(--chart-roc-tpr); stroke: var(--metric-surface); stroke-width: 1; }
+body[data-theme="dark"] .calibration-card,
+body[data-theme="dark"] .score-band-card {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+body[data-theme="dark"] .calibration-readout {
+  color: var(--text);
+}
+body[data-theme="dark"] .score-band-legend {
+  color: var(--text-muted);
+}
+
 /* Responsive: when the metric panel shrinks, KPI+ROC columns reflow.
    The grid switches from 3-up to 1-up so neither cards nor curves
    compress past readability, and wide tables get a scoped horizontal
