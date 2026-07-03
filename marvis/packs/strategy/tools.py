@@ -23,6 +23,11 @@ from marvis.packs.strategy.deliverables import (
 )
 from marvis.packs.strategy.doc import render_strategy_doc_markdown
 from marvis.packs.strategy.errors import StrategyError
+from marvis.packs.strategy.pricing import (
+    LimitPricingResult,
+    PricingParams,
+    limit_pricing_matrix,
+)
 from marvis.packs.strategy.profit import ProfitParams, profit_calc
 from marvis.packs.strategy.roll_rate import roll_rate_matrix
 from marvis.packs.strategy.rules import (
@@ -359,6 +364,133 @@ def tool_compare_strategies(inputs: dict, ctx) -> dict:
     payload = _jsonable(result)
     payload["nan_labels_dropped"] = nan_labels_dropped
     return payload
+
+
+def tool_limit_pricing_matrix(inputs: dict, ctx) -> dict:
+    """S6 (A3): a band x limit x rate expected-profit grid with an EL simulation.
+
+    Always computes and returns the full matrix + per-band recommended feasible cell.
+    The strategy_artifacts(kind='limit_pricing_csv') deliverable is written ONLY when
+    ``confirm`` is true -- the driver flips it after the matrix confirmation gate
+    (矩阵确认门后才落 artifact), mirroring adopt_strategy's forced-gate precedent. The
+    CSV is attached to ``strategy_id`` so it rides the same per-strategy artifact list.
+    """
+    runtime = _runtime(ctx)
+    dataset_id = str(inputs["dataset_id"])
+    score_col = str(inputs["score_col"])
+    target_col = _optional_str(inputs.get("target_col"))
+    pd_col = _optional_str(inputs.get("pd_col"))
+    columns = _unique([score_col, target_col, pd_col])
+    frame = _dataset_frame(runtime, dataset_id, columns=columns)
+    if target_col:
+        frame, nan_labels_dropped = resolve_labeled_frame(
+            frame, target_col, drop_nan_labels=bool(inputs.get("drop_nan_labels")),
+        )
+    else:
+        nan_labels_dropped = 0
+
+    params = PricingParams(
+        lgd=float(inputs.get("lgd", 0.6)),
+        funding_rate=float(inputs["funding_rate"]),
+        term_months=int(inputs["term_months"]),
+        cost_per_loan=float(inputs["cost_per_loan"]),
+        el_ead_max=float(inputs.get("el_ead_max", 0.20)),
+    )
+    result = limit_pricing_matrix(
+        frame,
+        score_col=score_col,
+        limit_grid=[float(item) for item in inputs["limit_grid"]],
+        rate_grid=[float(item) for item in inputs["rate_grid"]],
+        params=params,
+        target_col=target_col,
+        pd_col=pd_col,
+        band_edges=[float(edge) for edge in inputs["band_edges"]]
+        if inputs.get("band_edges") is not None
+        else None,
+        n_bands=int(inputs.get("n_bands", 5)),
+    )
+    red_flags = [dict(flag) for flag in result.red_flags]
+    if nan_labels_dropped:
+        red_flags.append({
+            "code": "nan_labels_dropped",
+            "level": "amber",
+            "message": f"已按确认丢弃 {nan_labels_dropped} 行 NaN 标签样本。",
+        })
+
+    assumptions = {
+        "dataset_id": dataset_id,
+        "score_col": score_col,
+        "target_col": target_col,
+        "pd_col": pd_col,
+        "lgd": params.lgd,
+        "funding_rate": params.funding_rate,
+        "term_months": params.term_months,
+        "cost_per_loan": params.cost_per_loan,
+        "el_ead_max": params.el_ead_max,
+        "limit_grid": [float(item) for item in inputs["limit_grid"]],
+        "rate_grid": [float(item) for item in inputs["rate_grid"]],
+        "band_edges": [float(edge) for edge in result.band_edges],
+        "n_bands": int(inputs.get("n_bands", 5)),
+    }
+
+    payload = {
+        "matrix": [_jsonable(cell) for cell in result.matrix],
+        "recommended": [dict(item) for item in result.recommended],
+        "band_edges": [float(edge) for edge in result.band_edges],
+        "assumptions": assumptions,
+        "red_flags": red_flags,
+        "nan_labels_dropped": nan_labels_dropped,
+    }
+
+    strategy_id = _optional_str(inputs.get("strategy_id"))
+    artifacts: list[dict] = []
+    # 矩阵确认门后才落 artifact: only after the user confirms the matrix does the CSV
+    # deliverable get written and registered (adopt_strategy forced-gate precedent).
+    if bool(inputs.get("confirm")) and strategy_id:
+        strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = strategy_dir / f"limit_pricing_{strategy_id}.csv"
+        csv_path.write_text(_limit_pricing_csv(result), encoding="utf-8")
+        runtime.strategies.save_strategy_artifact(
+            strategy_id, kind="limit_pricing_csv", path=str(csv_path)
+        )
+        _write_strategy_artifact_audit(runtime, ctx, strategy_id, "limit_pricing_csv", csv_path)
+        artifacts.append({"kind": "limit_pricing_csv", "path": str(csv_path)})
+    payload["artifacts"] = artifacts
+    return payload
+
+
+def _limit_pricing_csv(result: LimitPricingResult) -> str:
+    header = "band,limit,rate,count,pd,el,ead,expected_profit,roa,feasible,recommended"
+    recommended = {
+        (item["band"], float(item["limit"]), float(item["rate"])) for item in result.recommended
+    }
+    lines = [header]
+    for cell in result.matrix:
+        is_reco = (cell.band, float(cell.limit), float(cell.rate)) in recommended
+        lines.append(
+            ",".join([
+                cell.band,
+                _csv_num(cell.limit),
+                _csv_num(cell.rate),
+                str(cell.count),
+                _csv_num(cell.pd),
+                _csv_num(cell.el),
+                _csv_num(cell.ead),
+                _csv_num(cell.expected_profit),
+                _csv_num(cell.roa),
+                "1" if cell.feasible else "0",
+                "1" if is_reco else "0",
+            ])
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _csv_num(value) -> str:
+    number = float(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.6f}"
 
 
 def tool_adopt_strategy(inputs: dict, ctx) -> dict:

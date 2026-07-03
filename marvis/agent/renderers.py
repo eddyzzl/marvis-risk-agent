@@ -741,6 +741,66 @@ def _render_compare_strategies(o: dict):
     return text, tables
 
 
+def _render_limit_pricing_matrix(o: dict):
+    matrix = [cell for cell in (o.get("matrix") or []) if isinstance(cell, dict)]
+    recommended = [item for item in (o.get("recommended") or []) if isinstance(item, dict)]
+    red_flags = [flag for flag in (o.get("red_flags") or []) if isinstance(flag, dict)]
+    reco_keys = {
+        (str(item.get("band")), _num(item.get("limit")), _num(item.get("rate")))
+        for item in recommended
+    }
+    text = (
+        f"**额度×定价矩阵完成**：{len(matrix)} 个 band×额度×定价单元，"
+        f"推荐 {len(recommended)} 档（每带利润最大可行档）。"
+    )
+    red_items = [flag for flag in red_flags if flag.get("level") == "red"]
+    if red_items:
+        names = "、".join(str(flag.get("code")) for flag in red_items)
+        text += f" 红旗：{names}。"
+
+    def _cell_row(cell: dict) -> list:
+        key = (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate")))
+        recommended_mark = "★" if key in reco_keys else ""
+        profit = cell.get("expected_profit")
+        # Negative-profit cells are red-染 by prefixing a marker the frontend maps to
+        # the warning skin; recommended cells carry a ★ and are hoisted to the top.
+        profit_text = _num(profit)
+        try:
+            if profit is not None and float(profit) < 0:
+                profit_text = f"⚠{profit_text}"
+        except (TypeError, ValueError):
+            pass
+        return [
+            f"{recommended_mark}{cell.get('band', '')}",
+            _num(cell.get("limit")),
+            _pct(cell.get("rate")),
+            _fmt(cell.get("count")),
+            _pct(cell.get("pd")),
+            _num(cell.get("el")),
+            profit_text,
+            _pct(cell.get("roa")),
+            "是" if cell.get("feasible") else "否",
+        ]
+
+    # Recommended cells first (置顶), then the rest in stable order.
+    reco_cells = [
+        cell for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) in reco_keys
+    ]
+    other_cells = [
+        cell for cell in matrix
+        if (str(cell.get("band")), _num(cell.get("limit")), _num(cell.get("rate"))) not in reco_keys
+    ]
+    tables = [{
+        "title": "额度×定价矩阵（★为推荐档，⚠为负利润）",
+        "columns": ["band", "额度", "年化", "样本数", "PD", "EL", "预期利润", "ROA", "可行"],
+        "rows": [_cell_row(cell) for cell in [*reco_cells, *other_cells]],
+    }]
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
 def _render_adopt_strategy(o: dict):
     retired = [str(item) for item in (o.get("retired_strategy_ids") or [])]
     artifacts = [a for a in (o.get("artifacts") or []) if isinstance(a, dict)]
@@ -1375,6 +1435,7 @@ _RENDERERS = {
     "tradeoff_view": _render_tradeoff_view,
     "design_cutoff_bands": _render_design_cutoff_bands,
     "compare_strategies": _render_compare_strategies,
+    "limit_pricing_matrix": _render_limit_pricing_matrix,
     "adopt_strategy": _render_adopt_strategy,
     "render_strategy_doc": _render_strategy_doc,
     "vintage_curve": _render_vintage_curve,
