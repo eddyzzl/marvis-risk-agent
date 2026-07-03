@@ -125,6 +125,10 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "balance_col": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -156,6 +160,12 @@
           },
           "base_counts": {
             "type": "object"
+          },
+          "data_quality_warnings": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         },
         "required": [

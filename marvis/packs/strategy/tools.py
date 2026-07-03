@@ -79,22 +79,22 @@ def tool_vintage_curve(inputs: dict, ctx) -> dict:
 
 def tool_roll_rate(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
-    frame = _dataset_frame(
-        runtime,
-        str(inputs["dataset_id"]),
-        columns=[str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"])],
-    )
+    balance_col = _optional_str(inputs.get("balance_col"))
+    columns = _unique([str(inputs["id_col"]), str(inputs["time_col"]), str(inputs["status_col"]), balance_col])
+    frame = _dataset_frame(runtime, str(inputs["dataset_id"]), columns=columns)
     matrix = roll_rate_matrix(
         frame,
         id_col=str(inputs["id_col"]),
         time_col=str(inputs["time_col"]),
         status_col=str(inputs["status_col"]),
         states=[str(item) for item in inputs["states"]],
+        balance_col=balance_col,
     )
     return {
         "states": list(matrix.states),
         "matrix": [list(row) for row in matrix.matrix],
         "base_counts": dict(matrix.base_counts),
+        "data_quality_warnings": [dict(warning) for warning in matrix.data_quality_warnings],
     }
 
 
