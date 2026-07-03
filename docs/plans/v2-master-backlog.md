@@ -111,7 +111,7 @@
 #### 模型选择与评估口径
 | 状态 | ID | 事项 | KS 影响/工作量 | 验证 |
 |---|---|---|---|---|
-| ⬜ | SEL-1 | 默认切分不建 OOT，时间外推 OOT（oot_by_time）是全仓从未被调用的死代码 | High/M | ✅ |
+| ✅ | SEL-1 | 早已随 EXC 批次落地（`ecab09c2`，本行系陈旧记账，2026-07-03 复核证实）：检测到时间列默认启用 oot_by_time（rank-quantile 口径，末 20% 时间线为 OOT，确定性）、单文件与 join 双路径接线、显式配置/无时间列行为不变、gate 可覆盖；oot_by_time 死代码状态解除（modeling_setup.py:269/588 生产调用） | High/M | ✅ |
 | ✅ | SEL-2 | 公平竞技场已落地（`babd61fe`）：每配方先调参再参赛、树模型统一早停、同切分同特征断言进回归；门文案含"总预算=Σ配方预算"与耗时提示 | High/M | ✅ |
 | ✅ | SEL-3 | LR 重建为 impute→scale→LR Pipeline（`56827495`），随 artifact 可重放 | Med/S | — |
 | ✅ | SEL-4 | 早停折从 train 内切出（`cf924d49`），test 职责单一化 | Med/M | — |
