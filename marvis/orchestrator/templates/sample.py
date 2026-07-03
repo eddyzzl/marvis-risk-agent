@@ -20,6 +20,7 @@ from marvis.orchestrator.templates.portfolio import (
 from marvis.orchestrator.templates.sample_echo import SAMPLE_ECHO
 from marvis.orchestrator.templates.strategy import (
     RULE_STRATEGY,
+    SLICE_AGGREGATE,
     STRATEGY_ANALYSIS,
     STRATEGY_DEVELOPMENT,
     VINTAGE_ANALYSIS,
@@ -44,6 +45,7 @@ _register_builtin_template(STRATEGY_ANALYSIS)
 _register_builtin_template(STRATEGY_DEVELOPMENT)
 _register_builtin_template(RULE_STRATEGY)
 _register_builtin_template(VINTAGE_ANALYSIS)
+_register_builtin_template(SLICE_AGGREGATE)
 _register_builtin_template(MONITORING_RUN)
 _register_builtin_template(STRATEGY_MONITORING)
 _register_builtin_template(PORTFOLIO_ANALYSIS)

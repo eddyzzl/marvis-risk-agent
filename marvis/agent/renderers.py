@@ -940,6 +940,56 @@ def _render_vintage_curve(o: dict):
     return text, tables
 
 
+# S6 ad-hoc slice/aggregate result. INV-1: every number here comes from the
+# slice_aggregate tool (a single deterministic DuckDB SQL); this renderer only
+# lays the tool's own rows/columns into a table and echoes the confirmed 口径
+# (spec_echo) + any red flags, never (re)computing anything.
+_SLICE_OP_LABEL = {
+    "count": "数量",
+    "sum": "求和",
+    "mean": "均值",
+    "min": "最小值",
+    "max": "最大值",
+    "bad_rate": "坏率",
+    "approval_rate": "通过率",
+    "distinct": "去重计数",
+}
+
+
+def _slice_metric_text(metric: dict) -> str:
+    op = str(metric.get("op") or "")
+    label = _SLICE_OP_LABEL.get(op, op)
+    col = metric.get("col")
+    return f"{col} 的{label}" if col else label
+
+
+def _render_slice_aggregate(o: dict):
+    columns = [str(c) for c in (o.get("columns") or [])]
+    rows = [row for row in (o.get("rows") or []) if isinstance(row, dict)]
+    spec = o.get("spec_echo") if isinstance(o.get("spec_echo"), dict) else {}
+    group_by = [str(c) for c in (spec.get("group_by") or [])]
+    metrics = [m for m in (spec.get("metrics") or []) if isinstance(m, dict)]
+    group_text = "、".join(group_by) if group_by else "全体样本"
+    metric_text = "、".join(_slice_metric_text(m) for m in metrics) or "—"
+    echo_parts = [f"口径:按〔{group_text}〕统计〔{metric_text}〕"]
+    if spec.get("month_col") and spec.get("months"):
+        echo_parts.append(f"，时间〔{'、'.join(str(m) for m in spec.get('months') or [])}〕")
+    filters = [f for f in (spec.get("filters") or []) if isinstance(f, dict)]
+    if filters:
+        filter_text = "、".join(f"{f.get('col')}{f.get('op')}{f.get('value')}" for f in filters)
+        echo_parts.append(f"，筛选〔{filter_text}〕")
+    text = "**即席问数结果**（" + str(len(rows)) + " 行）。\n" + "".join(echo_parts) + "。"
+    tables = [{
+        "title": "聚合结果",
+        "columns": columns,
+        "rows": [[_fmt(row.get(col)) for col in columns] for row in rows],
+    }]
+    red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
+    if red_flags:
+        text += "\n" + "\n".join(f"🚩 {str(f.get('message') or '')}" for f in red_flags)
+    return text, tables
+
+
 def _render_propose_join(o: dict):
     joins = o.get("joins") or []
     # GAP-4: business-meaning lookup for raw key-column codes (e.g. als_m3_id_nbank_orgnum),
@@ -1588,6 +1638,7 @@ _RENDERERS = {
     "render_strategy_doc": _render_strategy_doc,
     "render_challenger_report": _render_challenger_report,
     "vintage_curve": _render_vintage_curve,
+    "slice_aggregate": _render_slice_aggregate,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
     "run_strategy_monitoring": _render_run_strategy_monitoring,
