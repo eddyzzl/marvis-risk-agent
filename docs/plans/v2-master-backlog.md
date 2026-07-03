@@ -281,8 +281,8 @@
 | 状态 | ID | 事项 |
 |---|---|---|
 | ✅ | FIN-1 | 落地核验完成（docs/reviews/2026-07-03-fin1-landing-verification.md）：182/182 全落地零落偏（13 核验 agent+对抗复核层零触发+协调者 5 条高风险抽检一致）；双向核验含 SEL-1 反向陈旧记账与 DOM-8/11/12 吸收不完整的先行补齐 |
-| ⬜ | FIN-2 | 全量 code review 第 N 轮：多镜头审查最终代码（bug/可提升），高影响发现对抗验证 |
-| ⬜ | FIN-3 | 修复循环：FIN-1/FIN-2 发现项修复→回归→再审，直至一轮无新 critical/high |
+| ✅ | FIN-2 | 全量审查完成（docs/reviews/2026-07-03-fin2-fin3-closing-review.md）：8 镜头+三席对抗表决（47 agents）；4 确认 HIGH、11 条驳杀、bandit 42 中危全裁误报、10 新工具 manifest 零漂移、失败镜头补跑收口 |
+| ✅ | FIN-3 | 修复循环停机（同报告）：15 commits（4 HIGH 含 .staging 目录 TOCTOU 40 连跑零失败）；第二轮逐 commit 复审 14/14 correct、零新 critical/high → 停机条件达成；收官门禁 2779 passed / 0 failed |
 
 ## 12. 长线追踪（不阻塞完全体 v1；⏸️ 需写明理由）
 
