@@ -630,6 +630,46 @@ def test_update_task_status_missing_raises_key_error(tmp_path):
         )
 
 
+def test_update_status_on_connection_reads_current_status_inside_write_lock(tmp_path):
+    """The expected-status SELECT must run inside the write transaction, not in
+    autocommit, so the read-validate-UPDATE window cannot be raced by a
+    concurrent writer. Even with begin_immediate left at its default, calling on
+    a fresh (not-in-transaction) connection self-promotes to BEGIN IMMEDIATE
+    before the SELECT -- verified by snapshotting conn.in_transaction at the
+    moment the status SELECT runs."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create())
+    repo.update_status(task.id, TaskStatus.SCANNED, "ok", expected=TaskStatus.CREATED)
+
+    in_txn_at_select: list[bool] = []
+    with connect(db_path) as conn:
+        real_execute = conn.execute
+
+        class _Probe:
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().startswith("SELECT status FROM tasks"):
+                    in_txn_at_select.append(conn.in_transaction)
+                return real_execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+        # Default begin_immediate=False + a fresh (autocommit) connection: the
+        # self-guard must still open the write lock before the SELECT.
+        repo.update_status_on_connection(
+            _Probe(),
+            task.id,
+            TaskStatus.RUNNING,
+            "running",
+            expected=TaskStatus.SCANNED,
+        )
+
+    assert in_txn_at_select == [True]
+    assert repo.get_task(task.id).status == TaskStatus.RUNNING
+
+
 def test_init_db_migrates_pre_heartbeat_jobs_table(tmp_path):
     # REL-5: simulate a database created before jobs.heartbeat_at existed —
     # init_db must add the column via _ensure_column without touching existing
