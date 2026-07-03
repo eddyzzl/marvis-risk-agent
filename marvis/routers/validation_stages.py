@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Request
+from marvis.errors import conflict
 
 from marvis.agent.orchestrator import is_metrics_failure
 from marvis.api_report_helpers import require_confirmed_agent_conclusions
@@ -50,17 +51,11 @@ def run_task_notebook(
         TaskStatus.COMPUTING_METRICS,
     }:
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot run notebook in status {task.status.value}",
-        )
+        raise conflict(f"cannot run notebook in status {task.status.value}")
     if is_scan_failure(task):
         detail = task.status_message.removeprefix(SCAN_FAILURE_PREFIX)
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"材料扫描未完整通过：{detail}",
-        )
+        raise conflict(f"材料扫描未完整通过：{detail}")
     try:
         repo.update_status(
             task_id,
@@ -77,10 +72,7 @@ def run_task_notebook(
         )
     except IllegalTransition as exc:
         fail_queued_job(repo, job_id, exc)
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot run notebook in status {exc.current.value}",
-        ) from exc
+        raise conflict(f"cannot run notebook in status {exc.current.value}") from exc
     background_tasks.add_task(
         run_stage_job,
         job_id,
@@ -124,16 +116,10 @@ def run_task_metrics(
         if not legacy_live_notebook_execution_allowed(pipeline_settings):
             close_live_notebook_session(task_id)
             repo.finish_job(job_id, status="failed")
-            raise HTTPException(
-                status_code=409,
-                detail=LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE,
-            )
+            raise conflict(LEGACY_LIVE_NOTEBOOK_DISABLED_MESSAGE)
         if get_live_notebook_session(task_id) is None:
             repo.finish_job(job_id, status="failed")
-            raise HTTPException(
-                status_code=409,
-                detail="live notebook kernel is not available; rerun notebook stage before metrics",
-            )
+            raise conflict("live notebook kernel is not available; rerun notebook stage before metrics")
     if task.status in {
         TaskStatus.CREATED,
         TaskStatus.SCANNED,
@@ -141,16 +127,10 @@ def run_task_metrics(
         TaskStatus.COMPUTING_METRICS,
     }:
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {task.status.value}",
-        )
+        raise conflict(f"cannot generate metrics in status {task.status.value}")
     if task.status == TaskStatus.FAILED and not metrics_retry:
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {task.status.value}",
-        )
+        raise conflict(f"cannot generate metrics in status {task.status.value}")
     try:
         repo.update_status(
             task_id,
@@ -173,10 +153,7 @@ def run_task_metrics(
         )
     except IllegalTransition as exc:
         fail_queued_job(repo, job_id, exc)
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate metrics in status {exc.current.value}",
-        ) from exc
+        raise conflict(f"cannot generate metrics in status {exc.current.value}") from exc
     background_tasks.add_task(
         run_stage_job,
         job_id,
@@ -209,10 +186,7 @@ def run_task_report(
     job_id = start_task_job(repo, task_id, "report")
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot generate report in status {task.status.value}",
-        )
+        raise conflict(f"cannot generate report in status {task.status.value}")
     background_tasks.add_task(
         run_stage_job,
         job_id,
@@ -252,10 +226,7 @@ def validate_task(
         TaskStatus.REVIEW_REQUIRED,
     }:
         repo.finish_job(job_id, status="failed")
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot validate task in status {task.status.value}",
-        )
+        raise conflict(f"cannot validate task in status {task.status.value}")
     settings = request.app.state.settings
     background_tasks.add_task(
         run_stage_job,

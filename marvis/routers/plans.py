@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from marvis.errors import conflict, not_found, unprocessable
 from pydantic import BaseModel, Field
 
 from marvis.db import TaskRepository
@@ -70,7 +71,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
                 novel_mode=body.novel_mode,
             )
     except (KeyError, PlanningError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
 
     problems = validator.validate(plan)
     if problems:
@@ -80,7 +81,7 @@ def create_plan(request: Request, task_id: str, body: CreatePlanRequest) -> dict
     try:
         repo.create_plan(plan)
     except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="plan already exists") from exc
+        raise conflict("plan already exists") from exc
     return _plan_payload(request, plan)
 
 
@@ -98,7 +99,7 @@ def get_step_output(request: Request, step_id: str) -> dict:
     try:
         return request.app.state.plan_repo.load_step_output(resolved_step_id, version=version)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="step output not found") from exc
+        raise not_found("step output not found") from exc
 
 
 def _parse_step_output_id(raw: str) -> tuple[str, int | None]:
@@ -149,9 +150,9 @@ def confirm_plan(request: Request, plan_id: str) -> dict:
     try:
         request.app.state.plan_repo.confirm_plan(plan_id)
     except PlanNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     except IllegalPlanTransition as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     plan = _load_plan(request, plan_id)
     _dispatch_platform_hook(
         getattr(request.app.state, "hook_dispatcher", None),
@@ -166,7 +167,7 @@ def confirm_plan(request: Request, plan_id: str) -> dict:
 def run_plan(request: Request, plan_id: str, background_tasks: BackgroundTasks) -> dict:
     plan = _load_plan(request, plan_id)
     if plan.status not in {PlanStatus.CONFIRMED, PlanStatus.AWAITING_CONFIRM, PlanStatus.RUNNING}:
-        raise HTTPException(status_code=409, detail=f"plan is not runnable: {plan.status.value}")
+        raise conflict(f"plan is not runnable: {plan.status.value}")
     job_id = _start_plan_job(request, plan.task_id)
     background_tasks.add_task(
         _run_plan_job,
@@ -187,16 +188,16 @@ def confirm_step(
 ) -> dict:
     plan = _load_plan(request, plan_id)
     if step_id not in {step.id for step in plan.steps}:
-        raise HTTPException(status_code=404, detail="step not found")
+        raise not_found("step not found")
     job_id = _start_plan_job(request, plan.task_id)
     try:
         request.app.state.plan_repo.confirm_step(step_id)
     except KeyError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     except ConflictError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     background_tasks.add_task(
         _run_plan_job,
         job_id,
@@ -225,10 +226,10 @@ def retry_step(
         )
     except KeyError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
-        raise HTTPException(status_code=404, detail="step not found") from exc
+        raise not_found("step not found") from exc
     except ConflictError as exc:
         _fail_plan_job(_db_path(request), job_id, exc)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     background_tasks.add_task(
         _run_plan_job,
         job_id,
@@ -252,9 +253,9 @@ def cancel_plan(request: Request, plan_id: str) -> dict:
     try:
         repo.set_plan_status(plan_id, PlanStatus.CANCELLED)
     except PlanNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     except IllegalPlanTransition as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     # Cooperative cancel (REL-5): the plan-status flip above is what the
     # executor's run() loop checkpoints on (marvis/orchestrator/executor.py),
     # but a job row already RUNNING for this task would otherwise keep
@@ -282,7 +283,7 @@ def _load_plan(request: Request, plan_id: str):
     try:
         return request.app.state.plan_repo.load_plan(plan_id)
     except PlanNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
 
 
 def _plan_payload(request: Request, plan) -> dict:
@@ -401,7 +402,7 @@ def _start_plan_job(request: Request, task_id: str) -> str:
     try:
         return TaskRepository(_db_path(request)).start_job(task_id, PLAN_JOB_KIND)
     except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL) from exc
+        raise conflict(ACTIVE_JOB_DETAIL) from exc
 
 
 def _run_plan_job(job_id: str, db_path: Path, executor, plan_id: str) -> None:

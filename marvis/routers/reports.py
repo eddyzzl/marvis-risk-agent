@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse
+from marvis.errors import not_found
 
 from marvis.api_report_helpers import (
     latest_driver_report_path,
@@ -28,7 +29,7 @@ def download_task_report(task_id: str, request: Request) -> FileResponse:
     task = get_task_or_404(repo, task_id)
     require_confirmed_agent_conclusions(repo, task)
     if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(status_code=404, detail="report not generated")
+        raise not_found("report not generated")
     report_path = (
         request.app.state.settings.tasks_dir
         / task_id
@@ -36,7 +37,7 @@ def download_task_report(task_id: str, request: Request) -> FileResponse:
         / "validation_report.docx"
     )
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
+        raise not_found("report not generated")
     return FileResponse(
         report_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -50,7 +51,7 @@ def preview_task_report(task_id: str, request: Request) -> HTMLResponse:
     task = get_task_or_404(repo, task_id)
     require_confirmed_agent_conclusions(repo, task)
     if task.status not in {TaskStatus.SUCCEEDED, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(status_code=404, detail="report not generated")
+        raise not_found("report not generated")
     report_path = (
         request.app.state.settings.tasks_dir
         / task_id
@@ -58,7 +59,7 @@ def preview_task_report(task_id: str, request: Request) -> HTMLResponse:
         / "validation_report.docx"
     )
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
+        raise not_found("report not generated")
     return HTMLResponse(docx_to_html_preview(report_path))
 
 
@@ -74,7 +75,7 @@ def download_task_analysis(task_id: str, request: Request) -> FileResponse:
         task.status == TaskStatus.FAILED
         and task.status_message.startswith(REPORT_STAGE_FAILURE_PREFIX)
     ):
-        raise HTTPException(status_code=404, detail="analysis not generated")
+        raise not_found("analysis not generated")
     analysis_path = (
         request.app.state.settings.tasks_dir
         / task_id
@@ -82,7 +83,7 @@ def download_task_analysis(task_id: str, request: Request) -> FileResponse:
         / "validation.xlsx"
     )
     if not analysis_path.exists():
-        raise HTTPException(status_code=404, detail="analysis not generated")
+        raise not_found("analysis not generated")
     return FileResponse(
         analysis_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -96,7 +97,7 @@ def download_driver_report(task_id: str, request: Request) -> FileResponse:
     task = get_task_or_404(repo, task_id)
     report_path = latest_driver_report_path(request.app.state, task_id)
     if report_path is None or not report_path.exists():
-        raise HTTPException(status_code=404, detail="report not generated")
+        raise not_found("report not generated")
     return FileResponse(
         report_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

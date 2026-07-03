@@ -1,3 +1,6 @@
+from marvis.errors import ErrorKind
+
+
 class AnalysisError(ValueError):
     """Base error for the portfolio analysis pack (non-typed, plain message)."""
 
@@ -18,7 +21,7 @@ class MissingBaselineError(AnalysisError):
 
     def to_detail(self) -> dict:
         return {
-            "kind": "missing_baseline",
+            "kind": ErrorKind.MISSING_BASELINE,
             "experiment_id": self.experiment_id,
             "reason": self.reason,
         }

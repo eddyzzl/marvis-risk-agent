@@ -1,7 +1,8 @@
 import logging
 import shutil
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
+from marvis.errors import not_found, unprocessable
 
 from marvis.api_schemas import CreateTaskRequest
 from marvis.api_task_helpers import (
@@ -80,9 +81,9 @@ def create_task(payload: CreateTaskRequest, request: Request) -> dict:
     try:
         algorithm = normalize_algorithm(payload.algorithm, allow_empty=True)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     if payload.oot_ks_min is not None and not (0.0 <= payload.oot_ks_min <= 1.0):
-        raise HTTPException(status_code=422, detail="oot_ks_min 必须是 0 到 1 之间的数字。")
+        raise unprocessable("oot_ks_min 必须是 0 到 1 之间的数字。")
     # Normalize source_dir once at write time so pipeline.py and /scan agree on
     # the canonical absolute path.
     normalized_source_dir = str(
@@ -150,10 +151,7 @@ def purge_preview(task_id: str, request: Request) -> dict:
     try:
         summary = repo.purge_preview(task_id)
     except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task not found: {task_id}",
-        ) from exc
+        raise not_found(f"Task not found: {task_id}") from exc
     return {"task_id": task_id, "purge_summary": summary}
 
 
@@ -169,10 +167,7 @@ def delete_task(task_id: str, request: Request) -> None:
     try:
         summary = repo.purge_task(task_id)
     except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task not found: {task_id}",
-        ) from exc
+        raise not_found(f"Task not found: {task_id}") from exc
     try:
         if task_dir.exists():
             shutil.rmtree(task_dir)

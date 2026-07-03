@@ -7,6 +7,7 @@ import tempfile
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, File, Form, HTTPException, Request, Response, UploadFile
+from marvis.errors import bad_request, conflict, not_found, payload_too_large, unprocessable
 
 from marvis.api_data_payloads import (
     dataset_payload,
@@ -190,7 +191,7 @@ def _require_task(request: Request, task_id: str) -> None:
     try:
         TaskRepository(request.app.state.settings.db_path).get_task(task_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="task not found") from exc
+        raise not_found("task not found") from exc
 
 
 def _join_async_requested(payload: dict) -> bool:
@@ -218,7 +219,7 @@ def _coerce_key_pairs(raw_pairs: list, *, anchor, feature) -> list[KeyPair]:
         anchor_col = str(item.get("anchor_col") or "")
         feature_col = str(item.get("feature_col") or "")
         if anchor_col not in anchor_columns or feature_col not in feature_columns:
-            raise HTTPException(status_code=422, detail="key_pairs contain unknown columns")
+            raise unprocessable("key_pairs contain unknown columns")
         pairs.append(
             KeyPair(
                 anchor_col=anchor_col,
@@ -254,7 +255,7 @@ def upload_task_dataset(
 ) -> dict:
     _require_task(request, task_id)
     if role not in DATASET_ROLES:
-        raise HTTPException(status_code=422, detail="invalid dataset role")
+        raise unprocessable("invalid dataset role")
     settings = request.app.state.settings
     _repo_data, _backend, registry, _join_engine = _data_runtime(request)
     upload_suffix = Path(file.filename or "").suffix.lower()
@@ -262,7 +263,7 @@ def upload_task_dataset(
     try:
         _reject_by_content_length(request, max_upload_bytes)
     except DatasetTooLargeError as exc:
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise payload_too_large(str(exc)) from exc
     upload_dir = settings.datasets_dir / task_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     upload_uow = ArtifactUnitOfWork()
@@ -275,7 +276,7 @@ def upload_task_dataset(
         _stream_upload_to_path(file, upload_artifact.path, max_bytes=max_upload_bytes)
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise payload_too_large(str(exc)) from exc
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
@@ -284,7 +285,7 @@ def upload_task_dataset(
             sheets = list_sheets(upload_path)
             if sheet:
                 if sheet not in sheets:
-                    raise HTTPException(status_code=422, detail="sheet not found")
+                    raise unprocessable("sheet not found")
                 sheets = [sheet]
             datasets = []
             reports = []
@@ -363,10 +364,10 @@ def upload_task_dataset(
         raise
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise payload_too_large(str(exc)) from exc
     except (DataBackendError, DataIngestError, ValueError) as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise bad_request(str(exc)) from exc
     except Exception:
         upload_uow.rollback()
         raise
@@ -409,13 +410,13 @@ def register_task_dataset_from_path(
     _require_task(request, task_id)
     role = str(payload.get("role") or "unknown")
     if role not in DATASET_ROLES:
-        raise HTTPException(status_code=422, detail="invalid dataset role")
+        raise unprocessable("invalid dataset role")
     settings = request.app.state.settings
     repo_data, _backend, registry, _join_engine = _data_runtime(request)
     try:
         source_path = _resolve_local_dataset_path(str(payload.get("path") or ""))
     except InvalidDatasetPathError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
 
     upload_dir = settings.datasets_dir / task_id / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -428,10 +429,10 @@ def register_task_dataset_from_path(
         _copy_local_dataset_path(source_path, upload_artifact.path, max_bytes=max_bytes)
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise payload_too_large(str(exc)) from exc
     except OSError as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=422, detail=f"cannot read path: {exc}") from exc
+        raise unprocessable(f"cannot read path: {exc}") from exc
     upload_path = upload_artifact.final_path
     try:
         upload_uow.promote_all()
@@ -450,10 +451,10 @@ def register_task_dataset_from_path(
         raise
     except DatasetTooLargeError as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise payload_too_large(str(exc)) from exc
     except (DataBackendError, DataIngestError, ValueError) as exc:
         upload_uow.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise bad_request(str(exc)) from exc
     except Exception:
         upload_uow.rollback()
         raise
@@ -489,13 +490,13 @@ def register_task_dataset_from_path(
 @router.get("/datasets/{dataset_id}/preview")
 def preview_dataset(dataset_id: str, request: Request, rows: int = 50) -> dict:
     if rows < 1 or rows > DATASET_PREVIEW_MAX_ROWS:
-        raise HTTPException(status_code=422, detail="rows is outside allowed range")
+        raise unprocessable("rows is outside allowed range")
     _repo_data, backend, registry, _join_engine = _data_runtime(request)
     try:
         path = registry.resolve_path(dataset_id)
         dataset = registry.get(dataset_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="dataset not found") from exc
+        raise not_found("dataset not found") from exc
     frame = backend.read_frame(path, nrows=rows + 1)
     truncated = len(frame) > rows or dataset.row_count > rows
     frame = frame.head(rows)
@@ -524,18 +525,15 @@ def propose_join(
         )
     ]
     if not anchor_id or not feature_ids:
-        raise HTTPException(
-            status_code=422,
-            detail="anchor_dataset_id and feature_dataset_ids are required",
-        )
+        raise unprocessable("anchor_dataset_id and feature_dataset_ids are required")
     _repo_data, _backend, registry, join_engine = _data_runtime(request)
     try:
         anchor = registry.get(anchor_id)
         features = [registry.get(feature_id) for feature_id in feature_ids]
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="dataset not found") from exc
+        raise not_found("dataset not found") from exc
     if anchor.task_id != task_id or any(feature.task_id != task_id for feature in features):
-        raise HTTPException(status_code=404, detail="dataset not found")
+        raise not_found("dataset not found")
     plan = join_engine.propose_join_plan(anchor_id, feature_ids, task_id)
     return join_plan_payload(plan)
 
@@ -546,7 +544,7 @@ def get_join_plan(join_plan_id: str, request: Request) -> dict:
     try:
         plan = repo_data.load_join_plan(join_plan_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="join plan not found") from exc
+        raise not_found("join plan not found") from exc
     return join_plan_payload(plan)
 
 
@@ -558,17 +556,17 @@ def confirm_join_plan(
 ) -> dict:
     feature_id = str(payload.get("feature_id") or payload.get("feature_dataset_id") or "")
     if not feature_id:
-        raise HTTPException(status_code=422, detail="feature_id is required")
+        raise unprocessable("feature_id is required")
     dedup_strategy = payload.get("dedup_strategy")
     if dedup_strategy not in DEDUP_STRATEGIES:
-        raise HTTPException(status_code=422, detail="invalid dedup_strategy")
+        raise unprocessable("invalid dedup_strategy")
     confirmed = bool(payload.get("confirmed", True))
     repo_data, _backend, registry, join_engine = _data_runtime(request)
     try:
         plan = repo_data.load_join_plan(join_plan_id)
         spec = next(item for item in plan.joins if item.feature_dataset_id == feature_id)
     except (KeyError, StopIteration) as exc:
-        raise HTTPException(status_code=404, detail="join plan or feature not found") from exc
+        raise not_found("join plan or feature not found") from exc
     if payload.get("key_pairs"):
         anchor = registry.get(plan.anchor_dataset_id)
         feature = registry.get(feature_id)
@@ -594,7 +592,7 @@ def confirm_join_plan(
             spec.dedup_strategy = dedup_strategy
             repo_data.update_join_spec(plan.id, spec)
     except DedupRequiredError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     if confirmed:
         dispatch_platform_hook(
             getattr(request.app.state, "hook_dispatcher", None),
@@ -622,9 +620,9 @@ def execute_join_plan(
     try:
         plan = repo_data.load_join_plan(join_plan_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="join plan not found") from exc
+        raise not_found("join plan not found") from exc
     if plan.status == "executed":
-        raise HTTPException(status_code=409, detail="join plan already executed")
+        raise conflict("join plan already executed")
     anchor = registry.get(plan.anchor_dataset_id)
     if _join_async_requested(payload):
         task_repo = TaskRepository(request.app.state.settings.db_path)
@@ -658,7 +656,7 @@ def execute_join_plan(
             )
     except JobCancelled:
         task_repo.finish_job(job_id, status="cancelled")
-        raise HTTPException(status_code=409, detail="join execution cancelled") from None
+        raise conflict("join execution cancelled") from None
     except (JoinNotConfirmedError, DedupRequiredError, FanOutError) as exc:
         task_repo.finish_job(
             job_id,
@@ -666,7 +664,7 @@ def execute_join_plan(
             error_name=exc.__class__.__name__,
             error_value=str(exc),
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     except DataBackendError as exc:
         task_repo.finish_job(
             job_id,
@@ -674,7 +672,7 @@ def execute_join_plan(
             error_name=exc.__class__.__name__,
             error_value=str(exc),
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise bad_request(str(exc)) from exc
     except Exception as exc:
         task_repo.finish_job(
             job_id,

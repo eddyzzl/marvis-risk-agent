@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
+from marvis.errors import bad_gateway, conflict, not_found, server_error, unprocessable
 
 from marvis.drafts.errors import DraftNotFound, DraftStateError, FetchError, PromotionError
 from marvis.drafts.promotion import promote_draft, reject_draft, validate_for_promotion
@@ -85,7 +86,7 @@ def run_draft(request: Request, draft_id: str, payload: dict) -> dict:
 def web_search(payload: dict) -> dict:
     query = str(payload.get("query") or "").strip()
     if not query:
-        raise HTTPException(status_code=422, detail="query is required")
+        raise unprocessable("query is required")
     max_results = _bounded_int(payload.get("max_results"), "max_results", default=5, minimum=1, maximum=10)
     try:
         return tool_web_search(
@@ -93,21 +94,21 @@ def web_search(payload: dict) -> dict:
             SimpleNamespace(),
         )
     except FetchError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise bad_gateway(str(exc)) from exc
 
 
 @router.post("/fetch-url")
 def fetch_url(payload: dict) -> dict:
     url = str(payload.get("url") or "").strip()
     if not url:
-        raise HTTPException(status_code=422, detail="url is required")
+        raise unprocessable("url is required")
     tool_payload = {"url": url}
     max_bytes = _bounded_int(payload.get("max_bytes"), "max_bytes", default=500_000, minimum=1, maximum=500_000)
     tool_payload["max_bytes"] = max_bytes
     try:
         return tool_fetch_url(tool_payload, SimpleNamespace())
     except FetchError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise bad_gateway(str(exc)) from exc
 
 
 @router.post("/learning-notes")
@@ -116,7 +117,7 @@ def create_learning_note(request: Request, payload: dict) -> dict:
     contents = _required_text_list(payload.get("contents"), "contents")
     sources = _required_text_list(payload.get("sources"), "sources")
     if not query:
-        raise HTTPException(status_code=422, detail="query is required")
+        raise unprocessable("query is required")
     tool_payload = {
         "query": query,
         "contents": contents,
@@ -134,7 +135,7 @@ def create_learning_note(request: Request, payload: dict) -> dict:
     )
     note = request.app.state.draft_repo.get_learning_note(str(result["learning_note_id"]))
     if note is None:
-        raise HTTPException(status_code=500, detail="learning note was not saved")
+        raise server_error("learning note was not saved")
     return {"learning_note": _public_learning_note(note)}
 
 
@@ -143,9 +144,9 @@ def author_draft(request: Request, payload: dict) -> dict:
     task_id = str(payload.get("task_id") or "").strip()
     goal = str(payload.get("goal") or "").strip()
     if not task_id:
-        raise HTTPException(status_code=422, detail="task_id is required")
+        raise unprocessable("task_id is required")
     if not goal:
-        raise HTTPException(status_code=422, detail="goal is required")
+        raise unprocessable("goal is required")
     tool_payload = {"goal": goal}
     learning_note_id = str(payload.get("learning_note_id") or "").strip()
     if learning_note_id:
@@ -164,7 +165,7 @@ def author_draft(request: Request, payload: dict) -> dict:
     try:
         draft = request.app.state.draft_registry.get(str(result["draft_id"]))
     except DraftNotFound as exc:
-        raise HTTPException(status_code=500, detail="draft was not saved") from exc
+        raise server_error("draft was not saved") from exc
     return {"draft": _public_draft(draft, include_code=False)}
 
 
@@ -188,9 +189,9 @@ def promote(request: Request, draft_id: str, payload: dict) -> dict:
             check=check,
         )
     except DuplicatePluginError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     except (DraftStateError, PromotionError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
     return {
         "check": _public_check(check),
@@ -214,7 +215,7 @@ def reject(request: Request, draft_id: str, payload: dict) -> dict:
             reason=str(payload.get("reason") or ""),
         )
     except DraftStateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     return {"ok": True}
 
 
@@ -222,7 +223,7 @@ def _draft_or_404(request: Request, draft_id: str):
     try:
         return request.app.state.draft_registry.get(draft_id)
     except DraftNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
 
 
 def _public_draft(draft, *, include_code: bool) -> dict:
@@ -277,10 +278,10 @@ def _public_check(check) -> dict:
 
 def _required_text_list(value, field: str) -> list[str]:
     if isinstance(value, (str, bytes)) or not isinstance(value, list):
-        raise HTTPException(status_code=422, detail=f"{field} must be a non-empty list")
+        raise unprocessable(f"{field} must be a non-empty list")
     items = [str(item).strip() for item in value if str(item).strip()]
     if not items:
-        raise HTTPException(status_code=422, detail=f"{field} must be a non-empty list")
+        raise unprocessable(f"{field} must be a non-empty list")
     return items
 
 
@@ -290,7 +291,7 @@ def _bounded_int(value, field: str, *, default: int, minimum: int, maximum: int)
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"{field} must be an integer") from exc
+        raise unprocessable(f"{field} must be an integer") from exc
     if parsed < minimum or parsed > maximum:
-        raise HTTPException(status_code=422, detail=f"{field} must be between {minimum} and {maximum}")
+        raise unprocessable(f"{field} must be between {minimum} and {maximum}")
     return parsed
