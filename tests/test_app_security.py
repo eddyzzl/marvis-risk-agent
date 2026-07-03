@@ -1,9 +1,55 @@
 import json
+import os
+from pathlib import Path
+import re
 
 from fastapi.testclient import TestClient
 
 from marvis import __version__
-from marvis.app import _is_local_client, create_app
+from marvis.app import _is_local_client, _static_asset_version, create_app
+from marvis.data.backend import DUCKDB_TEMP_DIR_NAME
+from marvis.db import PluginRepository, connect, init_db
+
+
+def test_create_app_refreshes_stale_builtin_manifest_before_plugin_registry_load(tmp_path):
+    db_path = tmp_path / "marvis.sqlite"
+    init_db(db_path)
+    manifest_path = Path(__file__).parents[1] / "marvis" / "packs" / "feature" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "write:artifact" in manifest["permissions"]
+    manifest["permissions"] = [
+        permission for permission in manifest["permissions"] if permission != "write:artifact"
+    ]
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO plugins(
+                name, version, display_name, description, module,
+                manifest_json, checksum, builtin, enabled, installed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest["name"],
+                manifest["version"],
+                manifest["display_name"],
+                manifest["description"],
+                manifest["module"],
+                json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+                "",
+                1,
+                1,
+                "2026-06-29T00:00:00Z",
+            ),
+        )
+
+    create_app(tmp_path)
+
+    refreshed = PluginRepository(db_path).get_plugin("feature")
+    assert refreshed is not None
+    refreshed_manifest = json.loads(refreshed["manifest_json"])
+    assert "write:artifact" in refreshed_manifest["permissions"]
 
 
 def test_remote_read_does_not_leak_validator_aliases_via_branding(tmp_path, monkeypatch):
@@ -58,7 +104,87 @@ def test_remote_client_can_read_health_check(tmp_path):
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["sqlite_journal_mode"] in {"wal", "memory"}
+    assert payload["sqlite_wal_degraded"] is False
+    assert isinstance(payload["sqlite_busy_timeout_ms"], int)
+
+
+def test_health_check_reports_llm_configured_false_when_unset(tmp_path):
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["llm_configured"] is False
+
+
+def test_health_check_reports_llm_configured_true_when_enabled_model_saved(tmp_path):
+    from marvis.llm_settings import save_llm_settings
+
+    save_llm_settings(
+        tmp_path,
+        {
+            "default_model_id": "model-a",
+            "models": [
+                {
+                    "model_id": "model-a",
+                    "enabled": True,
+                    "api_base_url": "https://example.test/v1",
+                    "model_name": "gpt",
+                    "api_key": "secret",
+                }
+            ],
+        },
+    )
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["llm_configured"] is True
+
+
+def test_health_check_surfaces_duckdb_runtime_config(tmp_path):
+    """PERF-8: /api/health must expose the DuckDB memory_limit / threads /
+    temp_directory actually applied, so an operator can confirm the JOIN engine
+    is not still running on DuckDB's own unconfigured (all-cores, ~80%-RAM)
+    defaults."""
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["duckdb_memory_limit"]
+    assert payload["duckdb_threads"]
+    assert payload["duckdb_temp_directory"] == str(tmp_path / DUCKDB_TEMP_DIR_NAME)
+
+
+def test_health_check_surfaces_sqlite_wal_degradation(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "marvis.app.sqlite_health",
+        lambda _db_path: {
+            "sqlite_journal_mode": "delete",
+            "sqlite_wal_degraded": True,
+            "sqlite_busy_timeout_ms": 5000,
+        },
+    )
+    app = create_app(tmp_path)
+
+    response = TestClient(app).get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    # This test only cares that sqlite_health()'s output is surfaced verbatim;
+    # duckdb_health() (PERF-8) contributes its own independent keys, asserted in
+    # test_health_check_surfaces_duckdb_runtime_config below.
+    assert payload["status"] == "ok"
+    assert payload["stuck_jobs"] == 0
+    assert payload["sqlite_journal_mode"] == "delete"
+    assert payload["sqlite_wal_degraded"] is True
+    assert payload["sqlite_busy_timeout_ms"] == 5000
 
 
 def test_remote_client_can_read_api_when_explicitly_enabled(tmp_path, monkeypatch):
@@ -112,6 +238,24 @@ def test_trusted_proxy_forwards_remote_client_and_guard_still_applies(tmp_path, 
     assert blocked_write.json()["detail"] == "unsafe API methods are limited to local clients"
 
 
+def test_remote_client_cannot_register_dataset_from_local_path(tmp_path):
+    # TST-2 (roadmap-1e): POST /api/tasks/{id}/datasets/register-path lets the
+    # server read an arbitrary local file by path -- it must be rejected for a
+    # remote client by the same app-wide local-access guard every other unsafe
+    # (non-GET/HEAD/OPTIONS) endpoint relies on, well before path validation
+    # or the (nonexistent) task lookup ever runs.
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("192.168.1.20", 43210))
+
+    response = client.post(
+        "/api/tasks/some-task/datasets/register-path",
+        json={"path": "/etc/passwd", "role": "sample"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "unsafe API methods are limited to local clients"
+
+
 def test_trusted_proxy_forwards_local_client_as_local(tmp_path, monkeypatch):
     monkeypatch.setenv("MARVIS_TRUSTED_PROXY_HOSTS", "127.0.0.1")
     app = create_app(tmp_path)
@@ -160,7 +304,7 @@ def test_remote_index_uses_default_branding_instead_of_workspace_branding(tmp_pa
     assert response.status_code == 200
     assert "私有机构风控平台" not in response.text
     assert "私有机构" not in response.text
-    assert "MARVIS-Agent" in response.text
+    assert "MARVIS-全能风控智能体" in response.text
 
 
 def test_index_replaces_static_asset_version_placeholder(tmp_path):
@@ -170,5 +314,302 @@ def test_index_replaces_static_asset_version_placeholder(tmp_path):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert f"static/app.js?v={__version__}" in response.text
+    assert f"static/app.js?v={__version__}-" in response.text
     assert "__MARVIS_STATIC_VERSION__" not in response.text
+
+
+def test_static_asset_version_changes_when_any_v2_module_changes(tmp_path):
+    # PERF-9 regression: the version hash used to be derived from a
+    # hardcoded 4-file allowlist (app.js/styles.css/welcome.css/
+    # v2-workbench.css), so editing any js/v2/*.js controller left the
+    # version string -- and therefore the cache-busted URL -- unchanged,
+    # and browsers could keep running the stale module indefinitely.
+    static_dir = tmp_path / "static"
+    (static_dir / "js" / "v2").mkdir(parents=True)
+    (static_dir / "app.js").write_text("// app", encoding="utf-8")
+    (static_dir / "js" / "v2" / "screen_gate_controller.js").write_text(
+        "// original", encoding="utf-8"
+    )
+
+    before = _static_asset_version(static_dir)
+
+    edited = static_dir / "js" / "v2" / "screen_gate_controller.js"
+    edited.write_text("// edited", encoding="utf-8")
+    os.utime(edited, (edited.stat().st_atime, edited.stat().st_mtime + 5))
+
+    after = _static_asset_version(static_dir)
+
+    assert before != after
+
+
+def test_static_import_map_covers_every_js_module_and_is_valid_json(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+    html = response.text
+
+    assert "__MARVIS_STATIC_IMPORT_MAP__" not in html
+    start = html.index('<script type="importmap">') + len('<script type="importmap">')
+    end = html.index("</script>", start)
+    import_map = json.loads(html[start : end])
+
+    real_static_dir = Path(__file__).resolve().parents[1] / "marvis" / "static"
+    js_files = sorted(p.name for p in (real_static_dir / "js").glob("*.js"))
+    v2_files = sorted(p.name for p in (real_static_dir / "js" / "v2").glob("*.js"))
+
+    for name in js_files:
+        assert f"./js/{name}" in import_map["imports"]
+        assert import_map["imports"][f"./js/{name}"].startswith(f"static/js/{name}?v=")
+    for name in v2_files:
+        assert f"./js/v2/{name}" in import_map["imports"]
+        assert import_map["scopes"]["static/js/v2/"][f"./{name}"].startswith(
+            f"static/js/v2/{name}?v="
+        )
+
+
+def test_static_response_cache_control_depends_on_version_query_param(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    unversioned = client.get("/static/app.js")
+    assert unversioned.status_code == 200
+    assert unversioned.headers["cache-control"] == "no-cache"
+
+    index_html = client.get("/").text
+    m = re.search(r'src="(static/app\.js\?v=[^"]+)"', index_html)
+    assert m is not None
+    versioned = client.get("/" + m.group(1))
+    assert versioned.status_code == 200
+    assert versioned.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_local_token_unset_preserves_default_local_write_access(tmp_path):
+    # GAP-5 default: MARVIS_LOCAL_TOKEN unset -> unchanged single-user
+    # behavior, no header required from a local client.
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code != 403
+
+
+def test_local_write_without_token_is_rejected_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_local_write_with_wrong_token_is_rejected_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={}, headers={"X-Marvis-Token": "wrong"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_local_write_with_correct_token_is_accepted_when_local_token_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tasks", json={}, headers={"X-Marvis-Token": "s3cr3t-token"})
+
+    assert response.status_code != 403
+
+
+def test_local_token_does_not_gate_safe_get_requests(tmp_path, monkeypatch):
+    # GET stays token-free even when MARVIS_LOCAL_TOKEN is configured, so
+    # the index page (which hands the token to the frontend) is reachable
+    # without already holding it.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/api/tasks")
+
+    assert response.status_code == 200
+
+
+def test_local_token_also_blocks_other_local_users_not_just_remote_clients(tmp_path, monkeypatch):
+    # GAP-5's actual threat model: on a shared JupyterHub-style host, any
+    # other logged-in user's process is also a loopback peer and would
+    # otherwise be treated as fully trusted. The token check must apply
+    # regardless of the is_local verdict.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("127.0.0.1", 43210))
+
+    response = client.post("/api/tasks", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "missing or invalid X-Marvis-Token"
+
+
+def test_index_embeds_local_token_for_local_client_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'data-marvis-local-token="s3cr3t-token"' in response.text
+    assert "__MARVIS_LOCAL_TOKEN__" not in response.text
+
+
+def test_index_omits_local_token_for_remote_client_even_with_remote_read_enabled(tmp_path, monkeypatch):
+    # The token must never be handed to a remote reader -- that would let a
+    # remote client mint itself write access, defeating the entire point of
+    # the token gate.
+    monkeypatch.setenv("MARVIS_LOCAL_TOKEN", "s3cr3t-token")
+    monkeypatch.setenv("MARVIS_ALLOW_REMOTE_READ", "1")
+    app = create_app(tmp_path)
+    client = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "s3cr3t-token" not in response.text
+    assert 'data-marvis-local-token=""' in response.text
+
+
+def test_index_omits_local_token_when_unset(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'data-marvis-local-token=""' in response.text
+
+
+def test_index_embeds_plugin_admin_token_for_local_client(tmp_path):
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert f'data-marvis-plugin-admin-token="{token}"' in response.text
+    assert "__MARVIS_PLUGIN_ADMIN_TOKEN__" not in response.text
+
+
+def test_index_omits_plugin_admin_token_for_remote_client(tmp_path, monkeypatch):
+    # The plugin-admin token must never reach a remote reader (same reasoning as
+    # the local token): it would hand a remote client the write credential.
+    monkeypatch.setenv("MARVIS_ALLOW_REMOTE_READ", "1")
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    client = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert token not in response.text
+    assert 'data-marvis-plugin-admin-token=""' in response.text
+
+
+def test_health_check_reports_monitoring_overdue_count_zero_by_default(tmp_path):
+    # S5: a fresh workspace has no adopted strategies -> monitoring_overdue_count 0.
+    app = create_app(tmp_path)
+    response = TestClient(app).get("/api/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["monitoring_overdue_count"] == 0
+
+
+def _seed_overdue_strategy(db_path):
+    """Adopt a strategy and register a monitoring plan whose cadence is already
+    past (last_run_at long ago) so list_monitoring_due returns it."""
+    from datetime import UTC, datetime, timedelta
+
+    from marvis.packs.strategy.contracts import Strategy, StrategyRule
+    from marvis.packs.strategy.monitoring_plan import build_monitoring_plan, save_monitoring_plan
+    from marvis.repositories.strategy import StrategyRepository
+
+    repo = StrategyRepository(db_path)
+    strategy = Strategy(
+        id="s-overdue",
+        strategy_type="approval",
+        rules=(StrategyRule(condition="score < 500", decision="reject", value=None),),
+        score_col="score",
+        default_decision="approve",
+        description="overdue",
+    )
+    repo.create_strategy("task-1", strategy, created_at="2026-01-01T00:00:00Z")
+    repo.adopt_strategy_with_audit(
+        strategy.id,
+        reason="seed",
+        audit={"kind": "strategy.adopt", "target_ref": strategy.id, "outcome": "succeeded", "detail": {}},
+        adopted_at="2026-01-01T00:00:00Z",
+    )
+    plan = build_monitoring_plan(
+        strategy_id=strategy.id, version=1, approved_bad_rate=0.05, approval_rate=0.8, cadence_days=30
+    )
+    plan["last_run_at"] = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    plan_path = Path(db_path).parent / "monitoring_plan_overdue.json"
+    save_monitoring_plan(plan_path, plan)
+    repo.save_strategy_artifact(strategy.id, kind="monitoring_plan_json", path=str(plan_path))
+    return strategy.id
+
+
+def test_health_check_counts_overdue_strategies(tmp_path):
+    app = create_app(tmp_path)
+    settings = app.state.settings
+    _seed_overdue_strategy(settings.db_path)
+    response = TestClient(app).get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["monitoring_overdue_count"] == 1
+
+
+def test_monitoring_due_endpoint_local_only(tmp_path):
+    app = create_app(tmp_path)
+    settings = app.state.settings
+    strategy_id = _seed_overdue_strategy(settings.db_path)
+
+    # Local client sees the detail.
+    local = TestClient(app).get("/api/strategies/monitoring-due")
+    assert local.status_code == 200
+    body = local.json()
+    assert body["count"] == 1
+    assert body["monitoring_due"][0]["strategy_id"] == strategy_id
+    assert body["monitoring_due"][0]["overdue_days"] > 0
+
+    # Remote client is rejected even with remote read enabled (local-only path).
+    os.environ["MARVIS_ALLOW_REMOTE_READ"] = "1"
+    try:
+        remote = TestClient(app, client=("203.0.113.9", 5555)).get("/api/strategies/monitoring-due")
+    finally:
+        os.environ.pop("MARVIS_ALLOW_REMOTE_READ", None)
+    assert remote.status_code == 403
+
+
+def test_remote_plugin_mutation_blocked_even_with_correct_admin_token(tmp_path):
+    # Layered defense: even if a remote client somehow learns the workspace
+    # plugin-admin token, the shared-host access guard rejects the non-safe
+    # request before the plugin-admin check ever runs. The token file's owner-
+    # only permission and this guard are independent barriers.
+    app = create_app(tmp_path)
+    token = app.state.plugin_admin_token
+    remote = TestClient(app, client=("203.0.113.9", 5555))
+
+    response = remote.post(
+        "/api/plugins/_sample/disable",
+        headers={"X-MARVIS-Plugin-Admin": token},
+    )
+
+    assert response.status_code == 403
+    # The plugin was not mutated (verified via a local read).
+    local = TestClient(app)
+    assert local.get("/api/plugins").json()["plugins"][0]["enabled"] is True

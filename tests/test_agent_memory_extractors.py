@@ -178,3 +178,90 @@ def test_skill_experience_reserved_does_not_create_active_runtime_candidates():
         candidate.memory_type != "skill_experience_reserved" for candidate in candidates
     )
     assert all("skill_experience" not in candidate.payload for candidate in candidates)
+
+
+def test_extract_user_preference_captures_marker_mid_sentence():
+    # MEM-9: a marker later in the sentence ("好的，请记住：...") must not be
+    # dropped just because it fails a hard text.startswith check.
+    candidate = extract_user_preference(
+        {
+            "message_id": "msg-mid",
+            "text": "好的，请记住：以后报告用英文。",
+        }
+    )
+
+    assert candidate is not None
+    assert candidate.memory_type == "user_preference"
+    assert candidate.payload["preference"] == "以后报告用英文。"
+
+
+def test_extract_user_preference_widened_trigger_words():
+    # MEM-9: the trigger vocabulary widened beyond the original six literal
+    # markers to cover other common phrasings ("记一下", "以后都").
+    remember_short = extract_user_preference(
+        {"message_id": "msg-short", "text": "记一下：以后报告统一用小数点两位。"}
+    )
+    from_now_on = extract_user_preference(
+        {"message_id": "msg-future", "text": "以后都用中文写摘要。"}
+    )
+
+    assert remember_short is not None
+    assert remember_short.payload["preference"] == "以后报告统一用小数点两位。"
+    assert from_now_on is not None
+    assert from_now_on.payload["preference"] == "用中文写摘要。"
+
+
+def test_extract_user_preference_no_longer_vetoed_by_bare_runtime_substring():
+    # MEM-9: this exact example from the review -- a lightgbm hyperparameter
+    # named 'runtime' inside an explicit "please remember" instruction -- used
+    # to be silently dropped because the whole message contained the
+    # substring 'runtime'. The topic here is a training hyperparameter, not
+    # the reserved skill/tool runtime, so it must now be captured.
+    candidate = extract_user_preference(
+        {
+            "message_id": "msg-runtime-param",
+            "text": "请记住：训练时用 lightgbm 的 runtime 参数 n_jobs=4",
+        }
+    )
+
+    assert candidate is not None
+    assert candidate.memory_type == "user_preference"
+    assert "n_jobs=4" in candidate.payload["preference"]
+
+
+def test_extract_user_preference_still_vetoes_genuine_skill_runtime_topic():
+    # The narrowed rule must still reject a message whose actual topic is
+    # invoking/running a skill or tool runtime (skill/runtime marker AND an
+    # execute/run/invoke marker), matching
+    # test_skill_experience_reserved_does_not_create_active_runtime_candidates.
+    candidate = extract_user_preference(
+        {
+            "message_id": "msg-skill-run",
+            "text": "请记住：以后自动执行这个 skill 的 runtime。",
+        }
+    )
+
+    assert candidate is None
+
+
+def test_classify_user_preference_capture_reports_reserved_topic_reason():
+    from marvis.agent_memory.extractors import (
+        USER_PREFERENCE_CAPTURED,
+        USER_PREFERENCE_NO_MARKER,
+        USER_PREFERENCE_RESERVED_TOPIC,
+        classify_user_preference_capture,
+    )
+
+    reserved = classify_user_preference_capture(
+        {"message_id": "msg-1", "text": "请记住这个 skill：以后自动调用 auto-validator。"}
+    )
+    captured = classify_user_preference_capture(
+        {"message_id": "msg-2", "text": "请记住：以后报告用英文。"}
+    )
+    no_marker = classify_user_preference_capture(
+        {"message_id": "msg-3", "text": "今天的报告看起来不错。"}
+    )
+
+    assert reserved == USER_PREFERENCE_RESERVED_TOPIC
+    assert captured == USER_PREFERENCE_CAPTURED
+    assert no_marker == USER_PREFERENCE_NO_MARKER

@@ -1,6 +1,9 @@
 import { defaultBranding } from "./state.js";
 import { $ } from "./ui-utils.js";
 
+const defaultDarkFaviconUrl = "static/brand/marvis-favicon-dark.png?v=20260627-browser-chrome";
+const defaultAppleTouchIconUrl = "static/brand/marvis-apple-touch-icon.png?v=20260627-browser-chrome";
+const defaultDarkAppleTouchIconUrl = "static/brand/marvis-apple-touch-icon-dark.png?v=20260627-browser-chrome";
 
 export function normalizeBranding(payload = {}) {
   const branding = { ...defaultBranding };
@@ -15,6 +18,9 @@ export function normalizeBranding(payload = {}) {
   }
   if (typeof payload.logoUrl === "string" && isSafeAssetUrl(payload.logoUrl)) {
     branding.logoUrl = payload.logoUrl.trim();
+  }
+  if (typeof payload.workspaceLogoUrl === "string" && isSafeAssetUrl(payload.workspaceLogoUrl)) {
+    branding.workspaceLogoUrl = payload.workspaceLogoUrl.trim();
   }
   if (typeof payload.faviconUrl === "string" && isSafeAssetUrl(payload.faviconUrl)) {
     branding.faviconUrl = payload.faviconUrl.trim();
@@ -51,6 +57,10 @@ export function isSafeAssetUrl(url) {
 
 export function brandHoverColor(color) {
   if (color === "#000000") return "#1f1f1f";
+  if (color === "#1f1f1f") return "#303034";
+  if (color === "#2b2b2d") return "#343438";
+  if (color === "#303034") return "#3b3b42";
+  if (color === "#343438") return "#3f3f46";
   const parts = [1, 3, 5].map((index) => parseInt(color.slice(index, index + 2), 16));
   return `#${parts.map((value) => Math.max(0, Math.round(value * 0.86)).toString(16).padStart(2, "0")).join("")}`;
 }
@@ -71,13 +81,27 @@ export function applyBranding(branding) {
     $("brandLogo").alt = `${branding.platformName} logo`;
   }
   if ($("workspaceBrandLogo")) {
-    $("workspaceBrandLogo").src = branding.logoUrl;
+    $("workspaceBrandLogo").src = branding.workspaceLogoUrl || branding.logoUrl;
     $("workspaceBrandLogo").alt = `${branding.platformName} logo`;
   }
   const favicon = $("brandFavicon") || document.querySelector('link[rel="icon"]');
   if (favicon) {
     favicon.href = branding.faviconUrl;
     favicon.type = imageMimeType(branding.faviconUrl);
+  }
+  const usesDefaultFavicon = branding.faviconUrl === defaultBranding.faviconUrl;
+  const darkFavicon = $("brandFaviconDark");
+  if (darkFavicon) {
+    darkFavicon.href = usesDefaultFavicon ? defaultDarkFaviconUrl : branding.faviconUrl;
+    darkFavicon.type = usesDefaultFavicon ? "image/png" : imageMimeType(branding.faviconUrl);
+  }
+  const appleTouchIcon = $("brandAppleTouchIcon");
+  if (appleTouchIcon) {
+    appleTouchIcon.href = usesDefaultFavicon ? defaultAppleTouchIconUrl : branding.faviconUrl;
+  }
+  const darkAppleTouchIcon = $("brandAppleTouchIconDark");
+  if (darkAppleTouchIcon) {
+    darkAppleTouchIcon.href = usesDefaultFavicon ? defaultDarkAppleTouchIconUrl : branding.faviconUrl;
   }
   document.documentElement.style.setProperty("--brand-primary", branding.primaryColor);
   document.documentElement.style.setProperty("--brand-primary-hover", brandHoverColor(branding.primaryColor));

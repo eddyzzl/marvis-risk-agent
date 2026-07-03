@@ -1,5 +1,6 @@
 import argparse
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,12 @@ def main(argv: list[str] | None = None) -> None:
                 print("Run `marvis` to start MARVIS.")
         elif args.command == "version":
             _print_version()
+        elif args.command == "eval-llm":
+            _eval_llm(args)
+        elif args.command == "backup":
+            _backup(args)
+        elif args.command == "restore":
+            _restore(args)
         else:
             _serve(_apply_serve_defaults(args))
     except RuntimeError as exc:
@@ -105,6 +112,73 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     subparsers.add_parser("version", help="Print the installed MARVIS version")
 
+    eval_llm_parser = subparsers.add_parser(
+        "eval-llm",
+        help="Run the orchestrator LLM-touchpoint eval suite against a real configured model",
+    )
+    eval_llm_parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model id from settings/llm.json to evaluate (defaults to the configured default model)",
+    )
+    eval_llm_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+    )
+    eval_llm_parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Path to a previous eval-llm JSON report; exits non-zero on regression",
+    )
+
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="Create a consistent backup archive of a workspace",
+    )
+    backup_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace directory to back up (defaults to the profile default, e.g. ./workspace)",
+    )
+    backup_parser.add_argument(
+        "--out",
+        "--output",
+        dest="output",
+        type=Path,
+        default=None,
+        help="Output archive path (defaults to marvis-backup-<timestamp>.tar.gz in the current directory)",
+    )
+    backup_parser.add_argument(
+        "--profile",
+        default="",
+        help="Profile name used to resolve the default --workspace, same as serve --profile",
+    )
+    backup_parser.add_argument(
+        "--include-datasets",
+        action="store_true",
+        help="Also archive workspace/datasets (large; excluded by default)",
+    )
+
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="Restore a workspace from a backup archive created by `marvis backup`",
+    )
+    restore_parser.add_argument("archive", type=Path, help="Backup archive path (.tar.gz)")
+    restore_parser.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="Target workspace directory to restore into",
+    )
+    restore_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the target workspace if it already exists and is not empty",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -164,8 +238,10 @@ def _serve(args: argparse.Namespace) -> None:
     import uvicorn
 
     from marvis.app import create_app
+    from marvis.logging_setup import configure_logging, uvicorn_log_config
 
     options = _resolve_serve_options(args)
+    log_path = configure_logging(options.workspace)
     app = create_app(options.workspace)
     if options.profile:
         print(
@@ -173,8 +249,14 @@ def _serve(args: argparse.Namespace) -> None:
             f" and port {options.port}."
         )
     print(f"MARVIS-Agent running at http://{options.host}:{options.port}")
+    print(f"Logs: {log_path}")
     print("If running behind JupyterHub, try the matching /proxy/<port>/ URL.")
-    uvicorn.run(app, host=options.host, port=options.port)
+    uvicorn.run(
+        app,
+        host=options.host,
+        port=options.port,
+        log_config=uvicorn_log_config(options.workspace),
+    )
 
 
 def _validate(args: argparse.Namespace) -> None:
@@ -204,6 +286,74 @@ def _load_validation_runtime():
     from marvis.settings import build_settings
 
     return build_settings, init_db, PipelineSettings, run_staged_pipeline, load_execution_environment
+
+
+def _eval_llm(args: argparse.Namespace) -> None:
+    from marvis.llm_settings import LLMSettingsError
+    from marvis.orchestrator.eval.cli import EvalCliError, run_eval_llm_cli
+    from marvis.settings import build_settings
+
+    workspace = args.workspace or _profile_defaults(getattr(args, "profile", "")).workspace
+    settings = build_settings(workspace)
+    try:
+        report = run_eval_llm_cli(
+            workspace=settings.workspace,
+            model_id=args.model_id,
+            baseline_path=args.baseline,
+        )
+    except (EvalCliError, LLMSettingsError) as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    recommended = report.get("recommended_tier")
+    print(f"MARVIS eval-llm report written to {report['report_path']}")
+    print(f"model_id={report['model_id']} recommended_tier={recommended}")
+    for tier, data in sorted(report.get("per_tier", {}).items()):
+        print(
+            f"  tier={tier} pass_rate={data['pass_rate']:.2f} "
+            f"guardrail_pass_rate={data['guardrail_pass_rate']:.2f} "
+            f"guardrail_intact={data['guardrail_intact']}"
+        )
+    if "regression_ok" in report:
+        print(f"regression_ok={report['regression_ok']}")
+        for problem in report.get("regression_problems", []):
+            print(f"  - {problem}")
+
+
+def _backup(args: argparse.Namespace) -> None:
+    from marvis.backup import BackupError, create_backup
+
+    workspace = args.workspace or _profile_defaults(getattr(args, "profile", "")).workspace
+    workspace = Path(workspace).expanduser().resolve()
+    output_path = args.output or Path(
+        f"marvis-backup-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}.tar.gz"
+    )
+    try:
+        result = create_backup(workspace, output_path, include_datasets=args.include_datasets)
+    except BackupError as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    print(f"MARVIS backup written to {result.output_path}")
+    print(
+        f"files={result.manifest['file_count']} "
+        f"include_datasets={result.manifest['include_datasets']} "
+        f"marvis_version={result.manifest['marvis_version']}"
+    )
+
+
+def _restore(args: argparse.Namespace) -> None:
+    from marvis.backup import BackupError, restore_backup
+
+    try:
+        manifest = restore_backup(args.archive, args.workspace, force=args.force)
+    except BackupError as exc:
+        print(str(exc))
+        raise SystemExit(1) from exc
+    print(f"MARVIS backup restored to {args.workspace}")
+    print(
+        f"files={manifest['file_count']} "
+        f"backed_up_at={manifest['created_at']} "
+        f"marvis_version={manifest['marvis_version']}"
+    )
 
 
 def _parse_feature_columns(value: str) -> list[str]:

@@ -24,6 +24,12 @@ COLUMN_SPEC_BY_HEADER = {
     # rates / risk
     "逾期率":        {"kind": "percent-heat"},
     "累计逾期率":    {"kind": "percent-heat"},
+    # S3 portfolio: NxN migration/flow matrix cells (colored from the cell's own
+    # 0..1 rate, reusing the percent-heat chip skin). Header-keyed entries cover
+    # the fixed columns the migration renderer emits; dynamic per-state columns
+    # instead carry an explicit matrix-heat column_spec on the renderer's table.
+    "迁徙率":        {"kind": "matrix-heat"},
+    "转移率":        {"kind": "matrix-heat"},
     # discrimination
     "KS":            {"kind": "databar-primary"},
     "KS(%)":         {"kind": "databar-primary"},

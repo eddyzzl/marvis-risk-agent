@@ -9,11 +9,12 @@ from urllib.parse import quote, unquote
 
 
 DEFAULT_BRANDING: dict[str, Any] = {
-    "platformName": "MARVIS-Agent",
-    "browserTitle": "MARVIS-Agent",
-    "primaryColor": "#000000",
-    "logoUrl": "static/brand/marvis-logo.png",
-    "faviconUrl": "static/brand/marvis-favicon.png",
+    "platformName": "MARVIS-全能风控智能体",
+    "browserTitle": "MARVIS-全能风控智能体",
+    "primaryColor": "#303034",
+    "logoUrl": "static/brand/marvis-logo.png?v=20260624-gauge",
+    "workspaceLogoUrl": "static/brand/marvis-workspace-logo.png?v=20260624-gauge",
+    "faviconUrl": "static/brand/marvis-favicon.png?v=20260624-gauge",
     # Optional per-workspace map of real validator name -> display alias, used for
     # the agent's display name. Kept out of the public static JS so real names live
     # only in the deployment's own brand.json, never in the shipped bundle.
@@ -24,6 +25,9 @@ DEFAULT_BRANDING: dict[str, Any] = {
 BRANDING_DIR_NAME = "branding"
 BRANDING_CONFIG_NAME = "brand.json"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+DEFAULT_DARK_FAVICON_URL = "static/brand/marvis-favicon-dark.png"
+DEFAULT_APPLE_TOUCH_ICON_URL = "static/brand/marvis-apple-touch-icon.png"
+DEFAULT_DARK_APPLE_TOUCH_ICON_URL = "static/brand/marvis-apple-touch-icon-dark.png"
 
 
 def load_branding(workspace: str | Path) -> dict[str, Any]:
@@ -47,10 +51,27 @@ def load_branding(workspace: str | Path) -> dict[str, Any]:
     result["primaryColor"] = _color_field(
         config, "primary_color", "primaryColor", fallback=result["primaryColor"]
     )
+    logo_config = _first(config, "logo", "logo_path", "logoPath")
     result["logoUrl"] = _asset_url(
         workspace_path,
-        _first(config, "logo", "logo_path", "logoPath"),
+        logo_config,
         fallback=result["logoUrl"],
+    )
+    workspace_logo_config = _first(
+        config,
+        "workspace_logo",
+        "workspaceLogo",
+        "workspace_logo_path",
+        "workspaceLogoPath",
+    )
+    result["workspaceLogoUrl"] = _asset_url(
+        workspace_path,
+        workspace_logo_config,
+        fallback=(
+            result["logoUrl"]
+            if result["logoUrl"] != DEFAULT_BRANDING["logoUrl"]
+            else result["workspaceLogoUrl"]
+        ),
     )
     result["faviconUrl"] = _asset_url(
         workspace_path,
@@ -65,8 +86,23 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
     platform_name = escape(current["platformName"], quote=True)
     browser_title = escape(current["browserTitle"], quote=True)
     logo_url = escape(current["logoUrl"], quote=True)
+    workspace_logo_url = escape(current["workspaceLogoUrl"], quote=True)
     favicon_url = escape(current["faviconUrl"], quote=True)
     favicon_type = escape(_image_mime_type(current["faviconUrl"]), quote=True)
+    uses_default_favicon = current["faviconUrl"] == DEFAULT_BRANDING["faviconUrl"]
+    dark_favicon_url = escape(
+        DEFAULT_DARK_FAVICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
+    dark_favicon_type = "image/png" if uses_default_favicon else favicon_type
+    apple_touch_icon_url = escape(
+        DEFAULT_APPLE_TOUCH_ICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
+    dark_apple_touch_icon_url = escape(
+        DEFAULT_DARK_APPLE_TOUCH_ICON_URL if uses_default_favicon else current["faviconUrl"],
+        quote=True,
+    )
     primary_color = current["primaryColor"]
     primary_hover = _brand_hover_color(primary_color)
 
@@ -79,26 +115,56 @@ def render_branded_index_html(index_html: str, branding: dict[str, str]) -> str:
         ),
         1,
     )
-    html = html.replace(
+    for title_placeholder in (
+        "<title>MARVIS-全能风控智能体</title>",
         "<title>MARVIS-Agent</title>",
-        f"<title>{browser_title}</title>",
+    ):
+        html = html.replace(title_placeholder, f"<title>{browser_title}</title>", 1)
+    html = html.replace(
+        'id="brandFavicon" rel="icon" type="image/png" media="(prefers-color-scheme: light)" href="static/brand/marvis-favicon.png"',
+        f'id="brandFavicon" rel="icon" type="{favicon_type}" media="(prefers-color-scheme: light)" href="{favicon_url}"',
         1,
     )
     html = html.replace(
-        'type="image/png" href="static/brand/marvis-favicon.png"',
-        f'type="{favicon_type}" href="{favicon_url}"',
+        'id="brandFaviconDark" rel="icon" type="image/png" media="(prefers-color-scheme: dark)" href="static/brand/marvis-favicon-dark.png"',
+        f'id="brandFaviconDark" rel="icon" type="{dark_favicon_type}" media="(prefers-color-scheme: dark)" href="{dark_favicon_url}"',
         1,
     )
-    html = html.replace('src="static/brand/marvis-logo.png"', f'src="{logo_url}"')
     html = html.replace(
+        'id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="static/brand/marvis-apple-touch-icon.png"',
+        f'id="brandAppleTouchIcon" rel="apple-touch-icon" media="(prefers-color-scheme: light)" href="{apple_touch_icon_url}"',
+        1,
+    )
+    html = html.replace(
+        'id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="static/brand/marvis-apple-touch-icon-dark.png"',
+        f'id="brandAppleTouchIconDark" rel="apple-touch-icon" media="(prefers-color-scheme: dark)" href="{dark_apple_touch_icon_url}"',
+        1,
+    )
+    html = html.replace(
+        '<meta name="apple-mobile-web-app-title" content="MARVIS" />',
+        f'<meta name="apple-mobile-web-app-title" content="{platform_name}" />',
+        1,
+    )
+    html = html.replace(
+        'id="brandLogo"\n              class="brand-mark"\n              src="static/brand/marvis-logo.png"',
+        f'id="brandLogo"\n              class="brand-mark"\n              src="{logo_url}"',
+        1,
+    )
+    html = html.replace(
+        'id="workspaceBrandLogo"\n              class="workspace-brand-logo"\n              src="static/brand/marvis-workspace-logo.png"',
+        f'id="workspaceBrandLogo"\n              class="workspace-brand-logo"\n              src="{workspace_logo_url}"',
+        1,
+    )
+    for alt_placeholder in (
+        'alt="MARVIS-全能风控智能体 logo"',
         'alt="MARVIS-Agent logo"',
-        f'alt="{platform_name} logo"',
-    )
-    html = html.replace(
+    ):
+        html = html.replace(alt_placeholder, f'alt="{platform_name} logo"')
+    for name_placeholder in (
+        '<h1 id="platformName">MARVIS-全能风控智能体</h1>',
         '<h1 id="platformName">MARVIS-Agent</h1>',
-        f'<h1 id="platformName">{platform_name}</h1>',
-        1,
-    )
+    ):
+        html = html.replace(name_placeholder, f'<h1 id="platformName">{platform_name}</h1>', 1)
     return html
 
 
@@ -205,6 +271,14 @@ def _normalized_branding(branding: dict[str, str]) -> dict[str, str]:
 def _brand_hover_color(color: str) -> str:
     if color == "#000000":
         return "#1f1f1f"
+    if color == "#1f1f1f":
+        return "#303034"
+    if color == "#2b2b2d":
+        return "#343438"
+    if color == "#303034":
+        return "#3b3b42"
+    if color == "#343438":
+        return "#3f3f46"
     channels = [int(color[index : index + 2], 16) for index in (1, 3, 5)]
     return "#" + "".join(f"{max(0, int(channel * 0.86 + 0.5)):02x}" for channel in channels)
 

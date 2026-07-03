@@ -6,7 +6,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from marvis.feature.correlation import safe_correlation
+from marvis.feature.metrics import head_tail_lift as _feature_head_tail_lift
 from marvis.validation.binning import (
+    assign_bins,
     bin_distribution,
     bin_table,
     compute_ks,
@@ -149,10 +152,9 @@ def compute_bin_tables(
         if rows_split.empty:
             bin_tables[split_key] = []
             continue
-        edges = equal_frequency_bin_edges(rows_split[score_col].to_numpy(dtype=float), config.bin_count)
         bin_tables[split_key] = _model_analysis_eval_table(
             rows_split,
-            edges=edges,
+            edges=context.edges,
             score_col=score_col,
             target_col=target_col,
         )
@@ -174,11 +176,14 @@ def compute_psi_stability_table(
 
     expected_scores = expected_rows[score_col].to_numpy(dtype=float)
     actual_scores = actual_rows[score_col].to_numpy(dtype=float)
-    edges = _psi_reference_edges(expected_scores, config.bin_count)
+    edges = equal_frequency_bin_edges(expected_scores, config.bin_count)
     expected_bins = _bin_counts(expected_scores, edges)
     actual_bins = _bin_counts(actual_scores, edges)
     expected_total = int(expected_bins.sum())
     actual_total = int(actual_bins.sum())
+    expected_dist = _normalized_distribution(expected_bins, expected_total)
+    actual_dist = _normalized_distribution(actual_bins, actual_total)
+    psi_by_bin = _psi_contributions(expected_dist, actual_dist)
     rows: list[PsiStabilityRow] = []
     for index, (expected_count, actual_count) in enumerate(zip(expected_bins, actual_bins), start=1):
         expected_pct = _ratio(expected_count, expected_total)
@@ -190,10 +195,33 @@ def compute_psi_stability_table(
                 expected_pct=float(expected_pct),
                 actual_count=int(actual_count),
                 actual_pct=float(actual_pct),
-                psi=float(compute_psi([expected_pct], [actual_pct])),
+                psi=float(psi_by_bin[index - 1]),
             )
         )
     return rows
+
+
+def _normalized_distribution(counts: np.ndarray, total: int) -> np.ndarray:
+    if total <= 0:
+        return np.zeros_like(counts, dtype=float)
+    return counts.astype(float) / float(total)
+
+
+def _psi_contributions(
+    expected_dist: np.ndarray,
+    actual_dist: np.ndarray,
+    *,
+    smoothing: float = 1e-6,
+) -> np.ndarray:
+    expected = np.where(expected_dist <= 0, smoothing, expected_dist.astype(float))
+    actual = np.where(actual_dist <= 0, smoothing, actual_dist.astype(float))
+    expected_total = float(expected.sum())
+    actual_total = float(actual.sum())
+    if expected_total <= 0 or actual_total <= 0:
+        return np.zeros_like(expected, dtype=float)
+    expected = expected / expected_total
+    actual = actual / actual_total
+    return np.maximum(0.0, (actual - expected) * np.log(actual / expected))
 
 
 def compute_roc_ks_curves(
@@ -269,15 +297,8 @@ def _should_reverse_eval_bins(
         return False
     scores = valid[score_col].to_numpy(dtype=float)
     labels = valid[target_col].to_numpy(dtype=float)
-    if np.std(scores) == 0.0 or np.std(labels) == 0.0:
-        return False
-    correlation = np.corrcoef(
-        scores,
-        labels,
-    )[0, 1]
-    if not np.isfinite(correlation):
-        return False
-    return not bool(correlation > 0)
+    correlation = safe_correlation(scores, labels)
+    return bool(correlation < 0)
 
 
 def _recompute_cumulative_bin_metrics(rows: list[BinRow]) -> list[BinRow]:
@@ -380,7 +401,7 @@ def compute_auc(scores, labels) -> float:
     positive_count = int(labels.sum())
     negative_count = int(len(labels) - positive_count)
     if len(scores) == 0 or positive_count == 0 or negative_count == 0:
-        return 0.0
+        return 0.5
 
     ranks = pd.Series(scores).rank(method="average").to_numpy(dtype=float)
     positive_rank_sum = float(ranks[labels == 1].sum())
@@ -391,23 +412,23 @@ def compute_auc(scores, labels) -> float:
 
 
 def compute_head_tail_lift(scores, labels, fraction: float = 0.05) -> tuple[float | None, float | None]:
-    scores = np.asarray(scores, dtype=float)
-    labels = np.asarray(labels, dtype=int)
-    finite_mask = np.isfinite(scores)
-    scores = scores[finite_mask]
-    labels = labels[finite_mask]
-    if len(scores) == 0:
-        return None, None
-    bad_rate = float(labels.mean())
-    bucket_size = int(len(scores) * fraction)
-    if bucket_size <= 0 or bad_rate == 0.0:
-        return None, None
-
-    order = np.argsort(scores)[::-1]
-    sorted_labels = labels[order]
-    head_lift = float(sorted_labels[:bucket_size].mean() / bad_rate)
-    tail_lift = float(sorted_labels[-bucket_size:].mean() / bad_rate)
-    return head_lift, tail_lift
+    """NEW-2 (S1a): delegates to feature/metrics.py::head_tail_lift, the reference
+    direction-aware implementation (risk_sign = sign(corr(scores, target)), so head is
+    always the high-risk end regardless of whether the score is higher-is-riskier or
+    higher-is-better). This module previously hard-coded a descending sort (head =
+    highest score), which silently mislabeled head/tail for any higher-is-better score
+    (e.g. scorecard points) -- see test_head_tail_lift_flips_for_higher_is_better_score.
+    Only the return-shape is adapted here (dict -> 2-tuple); the algorithm itself is
+    not reimplemented, to avoid the two call sites ever drifting apart again.
+    """
+    result = _feature_head_tail_lift(
+        np.asarray(scores, dtype=float),
+        np.asarray(labels, dtype=int),
+        fractions=(fraction,),
+        min_rows=1,
+    )
+    pct = int(round(fraction * 100))
+    return result.get(f"lift_head_{pct}"), result.get(f"lift_tail_{pct}")
 
 
 def build_effectiveness_result(
@@ -429,25 +450,10 @@ def build_effectiveness_result(
     )
 
 
-def _psi_reference_edges(scores, bin_count: int) -> np.ndarray:
-    scores = np.asarray(scores, dtype=float)
-    scores = scores[np.isfinite(scores)]
-    if len(scores) == 0:
-        return np.asarray([-np.inf, np.inf], dtype=float)
-    quantiles = np.linspace(0.0, 1.0, bin_count + 1)
-    edges = np.unique(np.quantile(scores, quantiles))
-    if len(edges) < 2:
-        return np.asarray([-np.inf, np.inf], dtype=float)
-    edges = edges.astype(float)
-    edges[0] = -np.inf
-    edges[-1] = np.inf
-    return edges
-
-
 def _bin_counts(scores, edges) -> np.ndarray:
-    bins = np.searchsorted(np.asarray(edges, dtype=float)[1:-1], np.asarray(scores, dtype=float), side="left")
-    bins = np.clip(bins, 0, len(edges) - 2)
-    return np.bincount(bins, minlength=len(edges) - 1)
+    bins = assign_bins(scores, edges)
+    valid = bins > 0
+    return np.bincount(bins[valid], minlength=len(edges))[1:len(edges)]
 
 
 def _roc_ks_curve(*, split: str, scores, labels) -> RocKsCurve:

@@ -18,6 +18,17 @@ from marvis.domain import (
     TaskStatus,
 )
 from marvis.execution_environment import ExecutionEnvironmentOption
+from marvis.routers.branding import router as branding_router
+from marvis.routers.evidence import router as evidence_router
+from marvis.routers.materials import router as materials_router
+from marvis.routers.report_fields import router as report_fields_router
+from marvis.routers.reports import router as reports_router
+from marvis.routers.scans import router as scans_router
+from marvis.routers.stage_controls import router as stage_controls_router
+from marvis.routers.tasks import router as tasks_router
+from marvis.routers.validation_agent import router as validation_agent_router
+from marvis.routers.validation_stages import router as validation_stages_router
+from marvis.pipeline import LEGACY_LIVE_NOTEBOOK_ENV_VAR, PipelineSettings
 
 
 class FakeTaskRepository:
@@ -25,6 +36,19 @@ class FakeTaskRepository:
     deleted: list[str] = []
     report_values: dict[str, tuple[dict[str, str], int]] = {}
     jobs: dict[str, dict[str, str]] = {}
+    audits: list[dict] = []
+    purge_summary: dict = {
+        "datasets": 0,
+        "datasets_shared_with_other_tasks": 0,
+        "joins": 0,
+        "plans": 0,
+        "plan_steps": 0,
+        "experiments": 0,
+        "model_artifacts": 0,
+        "strategies": 0,
+        "backtests": 0,
+        "sub_agents": 0,
+    }
 
     def __init__(self, _db_path: Path):
         pass
@@ -109,11 +133,29 @@ class FakeTaskRepository:
                 return job["kind"]
         return None
 
+    def get_active_job_kinds_for_tasks(self, task_ids: list[str]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        task_id_set = set(task_ids)
+        for job in self.jobs.values():
+            if job["task_id"] in task_id_set and job["status"] in {"queued", "running"}:
+                result[job["task_id"]] = job["kind"]
+        return result
+
     def get_latest_failed_job_kind(self, task_id: str) -> str | None:
         self.get_task(task_id)
         for job in reversed(list(self.jobs.values())):
             if job["task_id"] == task_id and job["status"] == "failed":
                 return job["kind"]
+        return None
+
+    def get_latest_job(self, task_id: str, *, kind: str | None = None) -> dict | None:
+        self.get_task(task_id)
+        for job in reversed(list(self.jobs.values())):
+            if job["task_id"] != task_id:
+                continue
+            if kind and job["kind"] != kind:
+                continue
+            return dict(job)
         return None
 
     def get_task(self, task_id: str):
@@ -122,13 +164,37 @@ class FakeTaskRepository:
         except KeyError as exc:
             raise KeyError(f"Task not found: {task_id}") from exc
 
-    def list_tasks(self):
-        return list(self.tasks.values())
+    def list_tasks(self, *, limit: int | None = None, offset: int = 0):
+        tasks = list(self.tasks.values())
+        start = max(0, int(offset))
+        if limit is None:
+            return tasks[start:]
+        return tasks[start:start + max(1, int(limit))]
 
     def delete_task(self, task_id: str):
         self.get_task(task_id)
         self.deleted.append(task_id)
         del self.tasks[task_id]
+
+    def purge_preview(self, task_id: str) -> dict:
+        self.get_task(task_id)
+        return dict(self.purge_summary)
+
+    def purge_task(self, task_id: str, *, actor: str = "system") -> dict:
+        self.get_task(task_id)
+        self.deleted.append(task_id)
+        del self.tasks[task_id]
+        summary = {**self.purge_summary, "dataset_source_paths": []}
+        self.audits.append(
+            {
+                "kind": "task.delete",
+                "target_ref": task_id,
+                "actor": actor,
+                "outcome": "succeeded",
+                "detail": {"purge_summary": self.purge_summary},
+            }
+        )
+        return summary
 
     def update_status(
         self,
@@ -193,13 +259,62 @@ class FakeTaskRepository:
         )
         return new_revision
 
+    def update_report_values_with_audit(
+        self, task_id: str, values, expected_revision: int, *, audit: dict
+    ) -> int:
+        new_revision = self.update_report_values(task_id, values, expected_revision)
+        self.audits.append(audit)
+        return new_revision
+
+    def update_agent_report_conclusions(self, task_id: str, values, expected_revision: int) -> int:
+        return self.update_report_values(task_id, values, expected_revision)
+
+    def update_agent_report_conclusions_with_audit(
+        self, task_id: str, values, expected_revision: int, *, audit: dict
+    ) -> int:
+        new_revision = self.update_agent_report_conclusions(task_id, values, expected_revision)
+        self.audits.append(audit)
+        return new_revision
+
+
+class FakeHookDispatcher:
+    def __init__(self):
+        self.calls = []
+
+    def dispatch(self, event: str, payload: dict, *, task_id: str) -> None:
+        self.calls.append((event, payload, task_id))
+
 
 def _client(tmp_path: Path, monkeypatch) -> TestClient:
     FakeTaskRepository.tasks = {}
     FakeTaskRepository.deleted = []
     FakeTaskRepository.report_values = {}
     FakeTaskRepository.jobs = {}
-    monkeypatch.setattr("marvis.api.TaskRepository", FakeTaskRepository)
+    FakeTaskRepository.audits = []
+    FakeTaskRepository.purge_summary = {
+        "datasets": 0,
+        "datasets_shared_with_other_tasks": 0,
+        "joins": 0,
+        "plans": 0,
+        "plan_steps": 0,
+        "experiments": 0,
+        "model_artifacts": 0,
+        "strategies": 0,
+        "backtests": 0,
+        "sub_agents": 0,
+    }
+    monkeypatch.setattr("marvis.agent.validation_app_service.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.api_stage_helpers.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.evidence.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.report_fields.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.reports.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.scans.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.stage_controls.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr("marvis.routers.tasks.TaskRepository", FakeTaskRepository)
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.TaskRepository",
+        FakeTaskRepository,
+    )
 
     app = FastAPI()
     app.state.settings = SimpleNamespace(
@@ -210,6 +325,15 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     )
     app.state.settings.tasks_dir.mkdir()
     app.include_router(router)
+    app.include_router(evidence_router)
+    app.include_router(materials_router)
+    app.include_router(report_fields_router)
+    app.include_router(reports_router)
+    app.include_router(scans_router)
+    app.include_router(stage_controls_router)
+    app.include_router(tasks_router)
+    app.include_router(validation_agent_router)
+    app.include_router(validation_stages_router)
     return TestClient(app)
 
 
@@ -311,6 +435,206 @@ def test_material_upload_rejects_paths_outside_upload_directory(
     assert "invalid upload path" in response.json()["detail"]
 
 
+def test_material_upload_route_is_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in materials_router.routes
+    }
+
+    assert routes[("/api/material-uploads", ("POST",))] == "marvis.routers.materials"
+
+
+def test_report_download_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in reports_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/report/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/report/preview", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/analysis/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+    assert routes[("/api/tasks/{task_id}/driver-report/download", ("GET",))] == (
+        "marvis.routers.reports"
+    )
+
+
+def test_scan_route_is_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in scans_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/scan", ("POST",))] == "marvis.routers.scans"
+
+
+def test_evidence_route_is_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in evidence_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/evidence", ("GET",))] == (
+        "marvis.routers.evidence"
+    )
+
+
+def test_report_field_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in report_fields_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/report-fields", ("GET",))] == (
+        "marvis.routers.report_fields"
+    )
+    assert routes[("/api/tasks/{task_id}/report-fields", ("PUT",))] == (
+        "marvis.routers.report_fields"
+    )
+
+
+def test_stage_cancel_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in stage_controls_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/notebook/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
+    )
+    assert routes[("/api/tasks/{task_id}/metrics/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
+    )
+    assert routes[("/api/tasks/{task_id}/report/cancel", ("POST",))] == (
+        "marvis.routers.stage_controls"
+    )
+
+
+def test_validation_stage_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in validation_stages_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/notebook", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/metrics", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/report", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+    assert routes[("/api/tasks/{task_id}/validate", ("POST",))] == (
+        "marvis.routers.validation_stages"
+    )
+
+
+def test_validation_agent_routes_are_served_from_dedicated_router():
+    routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in validation_agent_router.routes
+    }
+
+    assert routes[("/api/tasks/{task_id}/agent/messages", ("GET",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/start", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/messages", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/stop", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/summarize", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/report-draft", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+    assert routes[("/api/tasks/{task_id}/agent/report-draft/confirm", ("POST",))] == (
+        "marvis.routers.validation_agent"
+    )
+
+
+def test_create_task_dispatches_task_created_hook(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+            "algorithm": "lgb",
+            "run_mode": "agent",
+        },
+    )
+
+    assert response.status_code == 200
+    task = response.json()
+    assert dispatcher.calls == [
+        (
+            "task.created",
+            {
+                "task_id": task["id"],
+                "task_type": "validation",
+                "status": "created",
+                "run_mode": "agent",
+                "algorithm": "lgb",
+            },
+            task["id"],
+        )
+    ]
+
+
+def test_scan_task_dispatches_task_scanned_hook(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    dispatcher = FakeHookDispatcher()
+    client.app.state.hook_dispatcher = dispatcher
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    dispatcher.calls.clear()
+
+    def fake_scan(repo, task, _settings):
+        return {
+            "task_id": task.id,
+            "status": "scanned",
+            "status_message": "材料扫描完成。",
+            "checks": [{"code": "notebook_contract", "status": "pass"}],
+        }
+
+    monkeypatch.setattr("marvis.routers.scans.perform_scan_task", fake_scan)
+
+    response = client.post(f"/api/tasks/{task_id}/scan")
+
+    assert response.status_code == 200
+    assert dispatcher.calls == [
+        (
+            "task.scanned",
+            {
+                "task_id": task_id,
+                "status": "scanned",
+                "status_message": "材料扫描完成。",
+                "check_count": 1,
+                "failed_check_codes": [],
+            },
+            task_id,
+        )
+    ]
+
+
 def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
     tmp_path: Path,
     monkeypatch,
@@ -338,6 +662,44 @@ def test_task_payload_exposes_active_job_kind_for_reloaded_ui(
     assert got.json()["active_job_kind"] == "report"
     assert listed.status_code == 200
     assert listed.json()[0]["active_job_kind"] == "report"
+
+
+def test_latest_task_job_endpoint_exposes_job_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    FakeTaskRepository.jobs["job-join"] = {
+        "id": "job-join",
+        "task_id": task_id,
+        "kind": "join",
+        "status": "failed",
+        "error_name": "FanOutError",
+        "error_value": "join produced 12 > anchor 10 rows",
+        "traceback": "hidden traceback",
+    }
+
+    response = client.get(f"/api/tasks/{task_id}/jobs/latest?kind=join")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job": {
+            "id": "job-join",
+            "task_id": task_id,
+            "kind": "join",
+            "status": "failed",
+            "error_name": "FanOutError",
+            "error_value": "join produced 12 > anchor 10 rows",
+        }
+    }
 
 
 def test_task_payload_exposes_structured_failure_stage_for_reloaded_ui(
@@ -958,6 +1320,61 @@ def test_list_tasks_returns_array(tmp_path: Path, monkeypatch):
     assert response.json() == []
 
 
+def test_branding_and_task_list_routes_are_served_from_dedicated_routers():
+    branding_routes = {
+        route.path: route.endpoint.__module__
+        for route in branding_router.routes
+    }
+    task_routes = {
+        (route.path, tuple(sorted(route.methods or []))): route.endpoint.__module__
+        for route in tasks_router.routes
+    }
+
+    assert branding_routes["/api/branding"] == "marvis.routers.branding"
+    assert task_routes[("/api/tasks", ("GET",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks", ("POST",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks/{task_id}", ("GET",))] == "marvis.routers.tasks"
+    assert task_routes[("/api/tasks/{task_id}", ("DELETE",))] == "marvis.routers.tasks"
+
+
+def test_list_tasks_supports_limit_offset_headers(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    first = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    second = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "B卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+
+    first_page = client.get("/api/tasks", params={"limit": 1})
+    assert first_page.status_code == 200
+    assert [task["id"] for task in first_page.json()] == [first]
+    assert first_page.headers["x-result-limit"] == "1"
+    assert first_page.headers["x-result-offset"] == "0"
+    assert first_page.headers["x-result-has-more"] == "true"
+
+    second_page = client.get("/api/tasks", params={"limit": 1, "offset": 1})
+    assert second_page.status_code == 200
+    assert [task["id"] for task in second_page.json()] == [second]
+    assert second_page.headers["x-result-limit"] == "1"
+    assert second_page.headers["x-result-offset"] == "1"
+    assert second_page.headers["x-result-has-more"] == "false"
+
+    capped = client.get("/api/tasks", params={"limit": 9999})
+    assert capped.status_code == 200
+    assert capped.headers["x-result-limit"] == "500"
+
+
 def test_execution_environment_settings_round_trip_api(tmp_path: Path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
@@ -1067,6 +1484,59 @@ def test_task_evidence_endpoint_reads_execution_artifacts(tmp_path: Path, monkey
     assert payload["reproducibility"]["summary"]["status"] == "pass"
 
 
+def test_task_evidence_endpoint_caches_parsed_json_until_file_changes(
+    tmp_path: Path, monkeypatch
+):
+    """PERF-6: the 1s polling loop must not re-read+re-parse the 5 evidence JSON
+    files when nothing on disk changed between polls. Proves the mtime/size cache
+    in marvis.routers.evidence both (a) skips the parse on a cache hit and
+    (b) picks up real content changes when the file is rewritten."""
+    import marvis.routers.evidence as evidence_module
+
+    evidence_module._JSON_CACHE.clear()
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={
+            "model_name": "A卡",
+            "validator": "qa",
+            "source_dir": str(tmp_path),
+        },
+    ).json()["id"]
+    execution_dir = tmp_path / "tasks" / task_id / "execution"
+    execution_dir.mkdir(parents=True)
+    contract_path = execution_dir / "runtime_contract.json"
+    contract_path.write_text(json.dumps({"target_col": "y"}), encoding="utf-8")
+
+    first = client.get(f"/api/tasks/{task_id}/evidence")
+    assert first.status_code == 200
+    assert first.json()["contract"]["target_col"] == "y"
+
+    read_calls = {"n": 0}
+    original_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == contract_path:
+            read_calls["n"] += 1
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    second = client.get(f"/api/tasks/{task_id}/evidence")
+    assert second.status_code == 200
+    assert second.json()["contract"]["target_col"] == "y"
+    assert read_calls["n"] == 0, "unchanged file must be served from cache, not re-read"
+
+    # Rewrite with different content/size -- must bust the cache.
+    contract_path.write_text(
+        json.dumps({"target_col": "y", "score_decimal_places": 4}), encoding="utf-8"
+    )
+    third = client.get(f"/api/tasks/{task_id}/evidence")
+    assert third.status_code == 200
+    assert third.json()["contract"]["score_decimal_places"] == 4
+    assert read_calls["n"] == 1, "changed file must be re-read exactly once"
+
+
 def test_task_evidence_endpoint_reads_notebook_stage_reproducibility_artifact(
     tmp_path: Path,
     monkeypatch,
@@ -1129,9 +1599,9 @@ def test_notebook_metrics_and_report_endpoints_dispatch_stages(tmp_path: Path, m
     def fake_report_stage(*, task_id, settings, **_kwargs):
         calls.append(("report", task_id, settings))
 
-    monkeypatch.setattr("marvis.api.run_notebook_stage", fake_notebook_stage)
-    monkeypatch.setattr("marvis.api.run_metrics_stage", fake_metrics_stage)
-    monkeypatch.setattr("marvis.api.run_report_stage", fake_report_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_notebook_stage", fake_notebook_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_metrics_stage", fake_metrics_stage)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_report_stage", fake_report_stage)
 
     create = client.post(
         "/api/tasks",
@@ -1180,7 +1650,7 @@ def test_stage_endpoint_blocks_active_same_task_but_allows_other_tasks(
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.run_report_stage",
+        "marvis.routers.validation_stages.run_report_stage",
         lambda **kwargs: calls.append(kwargs["task_id"]),
     )
     task_id = client.post(
@@ -1218,15 +1688,15 @@ def test_completed_task_can_rerun_prior_workflow_stages(tmp_path: Path, monkeypa
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.routers.validation_stages.run_notebook_stage",
         lambda **_kwargs: calls.append("notebook"),
     )
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **_kwargs: calls.append("metrics"),
     )
     monkeypatch.setattr(
-        "marvis.api.get_live_notebook_session",
+        "marvis.routers.validation_stages.get_live_notebook_session",
         lambda _task_id: object(),
     )
     source = tmp_path / "source"
@@ -1283,7 +1753,7 @@ def test_notebook_endpoint_claims_running_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_notebook_stage",
+        "marvis.routers.validation_stages.run_notebook_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1310,7 +1780,7 @@ def test_cancel_notebook_endpoint_requests_running_notebook_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1336,7 +1806,7 @@ def test_cancel_notebook_endpoint_rejects_non_running_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1361,7 +1831,7 @@ def test_cancel_metrics_endpoint_requests_running_metrics_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1392,7 +1862,7 @@ def test_cancel_metrics_endpoint_rejects_non_running_metrics_task(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1417,7 +1887,7 @@ def test_cancel_report_endpoint_requests_report_stop(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1452,7 +1922,7 @@ def test_cancel_report_endpoint_rejects_without_active_report_job(
     client = _client(tmp_path, monkeypatch)
     requested: list[str] = []
     monkeypatch.setattr(
-        "marvis.api.request_notebook_cancellation",
+        "marvis.routers.stage_controls.request_notebook_cancellation",
         lambda task_id: requested.append(task_id) or True,
         raising=False,
     )
@@ -1513,6 +1983,41 @@ def test_stage_job_records_cancelled_when_stage_returns_cancelled_task(
     assert FakeTaskRepository.jobs[job_id]["status"] == "cancelled"
 
 
+def test_stage_job_dispatches_before_and_after_hooks(tmp_path: Path, monkeypatch):
+    from marvis.api import _run_stage_job
+
+    client = _client(tmp_path, monkeypatch)
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    repo = FakeTaskRepository(tmp_path / "marvis.sqlite")
+    job_id = repo.start_job(task_id, "report")
+    dispatcher = FakeHookDispatcher()
+
+    def stage(*, task_id: str) -> None:
+        assert task_id
+
+    _run_stage_job(
+        job_id,
+        tmp_path / "marvis.sqlite",
+        stage,
+        {"task_id": task_id},
+        hook_dispatcher=dispatcher,
+        before_hook_event="report.before_generate",
+        after_hook_event="report.after_generate",
+    )
+
+    assert dispatcher.calls == [
+        ("report.before_generate", {"job_id": job_id, "task_id": task_id}, task_id),
+        (
+            "report.after_generate",
+            {"job_id": job_id, "task_id": task_id, "status": "succeeded"},
+            task_id,
+        ),
+    ]
+
+
 def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     tmp_path: Path,
     monkeypatch,
@@ -1520,7 +2025,7 @@ def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1540,19 +2045,102 @@ def test_metrics_endpoint_claims_computing_before_dispatching_stage(
     assert calls[0]["stage_claimed"] is True
 
 
-def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
+def test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_explicit_allow(
     tmp_path: Path,
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr(
-        "marvis.api.get_live_notebook_session",
+        "marvis.routers.validation_stages.pipeline_settings_from_request",
+        lambda request, task, feature_columns: PipelineSettings(
+            workspace=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+            report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/metrics")
+
+    assert response.status_code == 409
+    assert "allow_legacy_live_notebook_execution=True" in response.json()["detail"]
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SUCCEEDED
+    assert calls == []
+
+
+def test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_process_env(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.delenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, raising=False)
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.pipeline_settings_from_request",
+        lambda request, task, feature_columns: PipelineSettings(
+            workspace=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+            report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
+        ),
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/metrics")
+
+    assert response.status_code == 409
+    assert f"{LEGACY_LIVE_NOTEBOOK_ENV_VAR}=1" in response.json()["detail"]
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.SUCCEEDED
+    assert calls == []
+
+
+def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv(LEGACY_LIVE_NOTEBOOK_ENV_VAR, "1")
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.get_live_notebook_session",
         lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.pipeline_settings_from_request",
+        lambda request, task, feature_columns: PipelineSettings(
+            workspace=tmp_path,
+            db_path=tmp_path / "marvis.sqlite",
+            report_template_path=tmp_path / "template.docx",
+            notebook_isolated_execution=False,
+            allow_legacy_live_notebook_execution=True,
+        ),
     )
     task_id = client.post(
         "/api/tasks",
@@ -1570,6 +2158,35 @@ def test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel(
     assert calls == []
 
 
+def test_metrics_endpoint_allows_terminal_rerun_without_live_kernel_when_isolated_enabled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.run_metrics_stage",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "marvis.routers.validation_stages.get_live_notebook_session",
+        lambda _task_id: None,
+    )
+    task_id = client.post(
+        "/api/tasks",
+        json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
+    ).json()["id"]
+    FakeTaskRepository.tasks[task_id] = TaskRecord(
+        **{**asdict(FakeTaskRepository.tasks[task_id]), "status": TaskStatus.SUCCEEDED}
+    )
+
+    response = client.post(f"/api/tasks/{task_id}/metrics")
+
+    assert response.status_code == 202
+    assert FakeTaskRepository.tasks[task_id].status == TaskStatus.COMPUTING_METRICS
+    assert calls[0]["settings"].notebook_isolated_execution is True
+
+
 def test_metrics_endpoint_allows_retry_after_metrics_stage_failure(
     tmp_path: Path,
     monkeypatch,
@@ -1577,7 +2194,7 @@ def test_metrics_endpoint_allows_retry_after_metrics_stage_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1606,7 +2223,7 @@ def test_metrics_endpoint_allows_retry_after_legacy_sample_column_failure(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_metrics_stage",
+        "marvis.routers.validation_stages.run_metrics_stage",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1633,7 +2250,7 @@ def test_metrics_endpoint_rejects_non_metrics_failure(
     monkeypatch,
 ):
     client = _client(tmp_path, monkeypatch)
-    monkeypatch.setattr("marvis.api.run_metrics_stage", lambda **_kwargs: None)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_metrics_stage", lambda **_kwargs: None)
     task_id = client.post(
         "/api/tasks",
         json={"model_name": "A卡", "validator": "qa", "source_dir": str(tmp_path)},
@@ -1662,7 +2279,7 @@ def test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility(
     def fake_run_staged_pipeline(*, task_id, settings):
         calls.append((task_id, settings))
 
-    monkeypatch.setattr("marvis.api.run_staged_pipeline", fake_run_staged_pipeline)
+    monkeypatch.setattr("marvis.routers.validation_stages.run_staged_pipeline", fake_run_staged_pipeline)
     create = client.post(
         "/api/tasks",
         json={
@@ -1688,7 +2305,7 @@ def test_validate_rejects_terminal_task_without_dispatching_pipeline(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_staged_pipeline",
+        "marvis.routers.validation_stages.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     task_id = client.post(
@@ -1719,7 +2336,7 @@ def test_validate_accepts_tasks_without_feature_columns(
     client = _client(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        "marvis.api.run_staged_pipeline",
+        "marvis.routers.validation_stages.run_staged_pipeline",
         lambda **kwargs: calls.append(kwargs),
     )
     create = client.post(
@@ -1930,7 +2547,7 @@ def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
     def _raise_limit(*_args, **_kwargs):
         raise ValueError("source_dir has too many files: max_files=2000")
 
-    monkeypatch.setattr("marvis.api.scan_source_dir", _raise_limit)
+    monkeypatch.setattr("marvis.api_scan_helpers.scan_source_dir", _raise_limit)
 
     response = client.post(f"/api/tasks/{task_id}/scan")
 
@@ -1942,13 +2559,13 @@ def test_scan_endpoint_returns_422_when_source_dir_exceeds_limits(
 
 def test_normalize_task_type_whitelists_known_types():
     from marvis.db import _normalize_task_type
-    from marvis.domain import TASK_TYPE_VALIDATION
+    from marvis.domain import TASK_TYPE_VALIDATION, VALID_TASK_TYPES
 
     assert _normalize_task_type(None) == TASK_TYPE_VALIDATION
     assert _normalize_task_type("") == TASK_TYPE_VALIDATION
-    assert _normalize_task_type("validation") == TASK_TYPE_VALIDATION
+    for task_type in VALID_TASK_TYPES:
+        assert _normalize_task_type(task_type) == task_type
     # Unknown / arbitrary strings must not persist as-is.
-    assert _normalize_task_type("modeling") == TASK_TYPE_VALIDATION
     assert _normalize_task_type("'; DROP TABLE tasks;--") == TASK_TYPE_VALIDATION
 
 
@@ -2130,7 +2747,7 @@ def test_delete_task_keeps_record_deleted_when_directory_cleanup_fails(
     def fail_rmtree(path):
         raise PermissionError(f"locked: {path}")
 
-    monkeypatch.setattr("marvis.api.shutil.rmtree", fail_rmtree)
+    monkeypatch.setattr("marvis.routers.tasks.shutil.rmtree", fail_rmtree)
 
     response = client.delete(f"/api/tasks/{task_id}")
 

@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="marvis/static/brand/marvis-logo.png" alt="MARVIS-Agent logo" width="148" />
+  <img src="marvis/static/brand/marvis-workspace-logo.png" alt="MARVIS-Agent V2 logo" width="156" />
 </p>
 
-<h1 align="center">MARVIS-Agent</h1>
+<h1 align="center">MARVIS-Agent V2</h1>
 
 <p align="center">
-  An all-purpose credit-risk agent for modeling, validation, data processing, feature analysis, and strategy workflows.
+  A local-first credit-risk Agent workbench for validation, data processing, feature analysis, modeling, strategy, and vintage workflows.
 </p>
 
 <p align="center">
@@ -16,17 +16,22 @@
 
 ---
 
-MARVIS-Agent is built for governed credit-risk work that should stay close to local files, local runtimes, and auditable evidence. It covers model development, model validation, data processing, feature derivation, feature analysis, strategy generation, strategy validation, monitoring, and governed task automation.
+MARVIS-Agent V2 is the development line for a usable credit-risk Agent workbench. It keeps governed work close to local files, local runtimes, and auditable evidence while expanding beyond the stable V1.1 model-validation workflow.
 
-The current V1.1.9 release ships model validation as the first stable built-in workflow. It can run notebook-based validation tasks, generate structured evidence, and draft Excel/Word validation reports through Agent mode. Model validation is the first workflow, not the product boundary.
+V2 is not just a runtime shell: every task entry shown on the welcome screen is a real end-to-end workflow with human-in-the-loop confirmation, tool execution, structured results, downloads or reports, and audit history. As of V2.0 this covers data join, feature analysis, model development and delivery, scoring and monitoring, strategy development (cutoff bands, rule mining, adoption with versioning), portfolio analysis, limit/pricing, and ad-hoc slice analytics — see `docs/plans/v2-master-backlog.md` and `docs/reviews/` for the full evidence trail.
 
-The current V1.1.x line already ships the Agent Memory Foundation for historical validation metric comparison. Planned next steps are documented in [docs/roadmap.md](docs/roadmap.md): V2 adds the Agent Plugin/Tool Runtime, and later releases build modeling and strategy capability packs on that runtime.
+Current status in this checkout:
+
+- **Model validation** keeps the stable V1.1 manual and Agent-assisted validation path.
+- **Data processing, feature analysis, and model development** are the active V2 build path, using the Plugin/Tool/Workflow runtime and task-level Agent flow.
+- **Strategy, monitoring, portfolio analysis, and vintage workflows** are wired end to end (S1-S6 batches), each behind confirmation gates with red-flag checklists.
 
 ## What You Get
 
 - **Local-first execution**: serve the platform from your own machine or server workspace.
-- **Agent-assisted workflows**: guide credit-risk tasks with structured evidence and report drafting.
-- **Notebook validation runtime**: execute validation notebooks and downstream metrics with reproducible artifacts.
+- **Task-level Agent workbench**: drive credit-risk tasks through conversation, confirmation gates, and a persistent right-rail execution context.
+- **Plugin/Tool/Workflow runtime**: install or ship governed capability packs with schemas, permissions, execution logs, and auditable outputs.
+- **Notebook validation runtime**: keep V1.1 validation notebooks and downstream metrics reproducible while V2 workflows grow around them.
 - **Configurable branding**: keep private customer or institution branding outside source code.
 - **OSS-friendly defaults**: remove local branding config and the app falls back to the public MARVIS brand.
 
@@ -39,9 +44,10 @@ The current V1.1.x line already ships the Agent Memory Foundation for historical
 
 ## Public Default Brand
 
-- Platform name: `MARVIS-Agent`
-- Primary color: black
-- Default logo and favicon: `marvis/static/brand/`
+- Platform name: `MARVIS-全能风控智能体`
+- Primary color: neutral charcoal (`#303034`)
+- Default main logo: `marvis/static/brand/marvis-workspace-logo.png`
+- Default favicon: `marvis/static/brand/marvis-favicon.png`
 
 ## Branding
 
@@ -141,15 +147,15 @@ When running multiple worktrees at the same time, use different ports and differ
 marvis serve --profile main
 # http://127.0.0.1:8000, workspace ./workspace-main
 
-# V1.1 development or comparison
-marvis serve --profile v1-1
-# http://127.0.0.1:8001, workspace ./workspace-v1-1
+# V2 development worktree
+marvis serve --profile v2
+# http://127.0.0.1:8200, workspace ./workspace-v2
 ```
 
 Explicit options override profile defaults:
 
 ```bash
-marvis serve --profile v1-1 --port 8017 --workspace ./custom-workspace
+marvis serve --profile v2 --port 8217 --workspace ./custom-workspace
 ```
 
 ## Update
@@ -194,6 +200,12 @@ marvis
 
 After that, future upgrades can use `marvis update`.
 
+If you are deliberately running a V2 branch or worktree, pass the branch explicitly:
+
+```bash
+marvis update --branch <v2-branch>
+```
+
 ## Tests
 
 ```bash
@@ -201,6 +213,18 @@ python -m pytest -q
 ruff check marvis tests --extend-exclude '*.ipynb'
 node --check marvis/static/app.js
 ```
+
+Tests are tiered with pytest markers (`slow`, `e2e`, `llm`). For fast local
+iteration, run only the fast tier (excludes real-training/real-subprocess
+tests and browser e2e smoke tests):
+
+```bash
+python -m pytest -m "not slow and not e2e" -q
+# or
+scripts/check --fast
+```
+
+CI always runs the full, untiered suite; `--fast` is a local-only speedup.
 
 ## Release Push
 

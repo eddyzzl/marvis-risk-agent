@@ -1,0 +1,6 @@
+{
+  "id": "auditbot-poly",
+  "displayName": "MARVIS Poly",
+  "description": "A low-poly hard-surface audit robot mascot.",
+  "spritesheetPath": "spritesheet.webp"
+}

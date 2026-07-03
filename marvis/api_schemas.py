@@ -16,6 +16,15 @@ class CreateTaskRequest(BaseModel):
     time_col: str = "apply_month"
     run_mode: str = "manual"
     feature_columns: list[str] = Field(default_factory=list)
+    target_type: str = ""
+    recipes: list[str] = Field(default_factory=list)
+    sample_weight_col: str = ""
+    # AGT-4 (optional, modeling tasks only): None/absent → no success criterion is
+    # injected into the plan. Never defaulted to a platform-chosen number.
+    oot_ks_min: float | None = None
+    metrics: list[str] = Field(default_factory=list)
+    # Per-task capability tier (conservative/balanced/aggressive); "" → global default.
+    capability_tier: str = ""
     notebook_path: str | None = None
     sample_path: str | None = None
     pmml_path: str | None = None
@@ -36,7 +45,28 @@ class ExecutionEnvironmentRequest(BaseModel):
 
 class LLMSettingsRequest(BaseModel):
     default_model_id: str = ""
+    capability_tier: str = ""
+    # LLM-4: caller-role -> model_id routing (e.g. {"planner": "model-a",
+    # "gate": "model-b"}); unmapped roles fall back to default_model_id.
+    role_overrides: dict[str, str] = Field(default_factory=dict)
     models: list[dict] = Field(default_factory=list)
+
+
+class LLMConnectionTestRequest(BaseModel):
+    # GAP-8: test a candidate profile before it is saved (e.g. from the "add
+    # model" dialog) by supplying the connection fields directly; alternatively
+    # pass model_id to test an already-saved model (has_api_key must be true
+    # for that model, since its api_key is never round-tripped to the client).
+    model_id: str = ""
+    api_base_url: str = ""
+    model_name: str = ""
+    api_key: str = ""
+    timeout_seconds: int = 10
+
+
+class MemoryPolicyRequest(BaseModel):
+    reference_cross_task: bool = True
+    auto_distill: bool = True
 
 
 class ReportFieldsUpdateRequest(BaseModel):
@@ -48,6 +78,18 @@ class AgentMessageRequest(BaseModel):
     model_id: str | None = None
     effort: str | None = None
     acceptance_mode: str | None = None
+    # Optional edited feature set from the §4 interactive screening table; when a
+    # screening gate is confirmed this overrides the screen's proposed `selected`.
+    selection: list[str] | None = None
+    # Optional per-feature dedup strategy map (feature_id -> first|last) from the §4
+    # join dedup picker; re-confirms confirm_join to resolve non-unique-key conflicts.
+    dedup_strategies: dict[str, str] | None = None
+    # Optional structured parameter overrides from manual controls (for example the
+    # feature-screening leakage/missing thresholds). These bypass LLM text routing.
+    adjust_params: dict[str, object] | None = None
+    # Optional optimistic-lock token for structured gate controls. The frontend sends
+    # the gate step id it rendered; the backend rejects stale tabs/buttons.
+    expected_step_id: str | None = None
 
 
 class AgentModelRequest(BaseModel):

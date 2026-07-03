@@ -10,6 +10,8 @@ MEMORY_TYPES = (
     "validation_pitfall",
     "task_experience",
     "model_experience",
+    "join_experience",
+    "strategy_experience",
     "skill_experience_reserved",
 )
 MEMORY_STATUSES = ("active", "disabled", "deleted", "rejected")
@@ -24,6 +26,23 @@ MODEL_EXPERIENCE_REQUIRED_FIELDS = (
     "scope",
     "source_task_id",
     "important_feature_sources",
+)
+JOIN_EXPERIENCE_REQUIRED_FIELDS = (
+    "match_rate",
+    "anchor_rows",
+    "joined_rows",
+    "feature_table_count",
+    "scope",
+    "source_task_id",
+)
+STRATEGY_EXPERIENCE_REQUIRED_FIELDS = (
+    "strategy_type",
+    "cutoff_summary",
+    "approval_rate",
+    "approved_bad_rate",
+    "expected_profit",
+    "scope",
+    "source_task_id",
 )
 
 
@@ -53,6 +72,30 @@ def validate_model_experience_payload(payload: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
+def validate_join_experience_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        field_name
+        for field_name in JOIN_EXPERIENCE_REQUIRED_FIELDS
+        if _is_missing(payload.get(field_name))
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"missing required join_experience fields: {joined}")
+    return payload
+
+
+def validate_strategy_experience_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        field_name
+        for field_name in STRATEGY_EXPERIENCE_REQUIRED_FIELDS
+        if _is_missing(payload.get(field_name))
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"missing required strategy_experience fields: {joined}")
+    return payload
+
+
 def _is_missing(value: Any) -> bool:
     if value is None:
         return True
@@ -78,3 +121,7 @@ class MemoryCandidate:
         object.__setattr__(self, "memory_type", normalized_type)
         if normalized_type == "model_experience":
             validate_model_experience_payload(self.payload)
+        elif normalized_type == "join_experience":
+            validate_join_experience_payload(self.payload)
+        elif normalized_type == "strategy_experience":
+            validate_strategy_experience_payload(self.payload)

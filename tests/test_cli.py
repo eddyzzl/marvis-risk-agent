@@ -20,11 +20,11 @@ def test_pyproject_declares_runtime_dependency_bounds():
 
     for requirement in [
         '"pydantic>=2.7,<3"',
-        '"pandas>=2.2,<3"',
-        '"packaging>=16.8,<24"',
+        '"pandas>=2.2,<4"',
+        '"packaging>=16.8,<27"',
         '"nbclient>=0.8,<0.12"',
         '"nbformat>=5.9,<6"',
-        '"ipykernel>=6.23.2,<7"',
+        '"ipykernel>=6.23.2,<8"',
         '"scikit-learn>=1.4,<2"',
     ]:
         assert requirement in text

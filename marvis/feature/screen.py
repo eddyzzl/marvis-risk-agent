@@ -1,0 +1,490 @@
+"""Leakage-aware, scale-friendly univariate feature screening.
+
+Credit modeling samples routinely carry thousands of columns that mix genuine
+predictive features with *leakage*: the future-outcome label encodings (e.g.
+``max_overdue_his`` with near-perfect KS) and earlier models' own score/output
+columns (``predprob``/``pred_pmml``). Blindly feeding every numeric column to a
+tree model produces a catastrophic, useless model. This module screens a wide
+candidate set in memory-bounded column batches, ranks features by univariate KS,
+and *flags* suspected leakage so the agent can hand the candidate set back to the
+user for confirmation (the "确认特征集" step) instead of silently selecting it.
+
+Deterministic: KS/IV come from marvis.feature.metrics; no randomness.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+
+import numpy as np
+import pandas as pd
+
+from marvis.feature.binning import equal_frequency_edges
+from marvis.feature.correlation import safe_correlation
+from marvis.feature.metrics import (
+    DEFAULT_IV_BINS,
+    feature_auc,
+    feature_ks,
+    feature_metrics,
+    feature_psi,
+)
+from marvis.feature.transform import detect_sentinel_values
+
+# Columns whose names strongly suggest a model output / score that would leak the
+# target (an earlier model's prediction). These are *soft* flags surfaced for
+# user confirmation, never auto-dropped, because legitimate third-party scores
+# (e.g. ``pred_tongyong``) share the prefix.
+_SUSPECTED_OUTPUT = re.compile(
+    r"(^|_)(pred|predprob|prob|proba|probability|score|prediction)(_|$)|pmml|\.pkl$|_pkl$",
+    re.IGNORECASE,
+)
+
+# FS-4 watch-band: pooled-dev KS below the hard ``leakage_ks`` gate but at or above this
+# floor is strong enough to be conditional/partial leakage (a field that only leaks in
+# part of the population or is a non-linear near-copy of the label), so it is surfaced for
+# confirmation instead of passing silently as a high-ranked feature.
+LEAKAGE_WATCH_LOW = 0.30
+# FS-4 split-shift: a per-feature |ks_train - ks_test| above this flags a migration-type
+# leak (weak in-sample, anomalously strong in a later split) that the pooled KS averages away.
+SPLIT_SHIFT_THRESHOLD = 0.15
+# FS-4/FS-6 default non-holdout split labels used to derive the train vs test masks for
+# per-split KS. A dataset whose split_col carries none of these yields no per-split flags.
+_TRAIN_VALUES = ("train",)
+_TEST_VALUES = ("test",)
+# FS-7 "missing is informative" note: a column below this coverage but still notably
+# discriminative (KS >= _NOTABLE_KS) is annotated because its KS — computed on non-missing
+# rows only — understates it. _NOTABLE_KS reuses the credit-scoring "notably discriminative"
+# bar (0.15) already used for the FS-4 split-shift band. Neither constant touches ranking.
+_LOW_COVERAGE = 0.50
+_NOTABLE_KS = 0.15
+
+
+@dataclass(frozen=True)
+class ScreenResult:
+    ranked: tuple[tuple[str, float | None], ...]
+    """Clean, usable features ordered by descending univariate KS: (feature, ks)."""
+    selected: tuple[str, ...]
+    """Proposed candidate set (top_k of ``ranked``) — for the user to confirm."""
+    leakage: tuple[tuple[str, float, str], ...]
+    """Hard leakage flags (KS >= leakage_ks): (feature, ks, reason)."""
+    suspected: tuple[tuple[str, float, str], ...]
+    """Soft flags (name looks like a model output/score): (feature, ks, reason)."""
+    unusable: tuple[tuple[str, str], ...]
+    """Dropped as non-numeric / near-constant / mostly-missing: (feature, reason)."""
+    scores: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    """Per-feature {ks, missing_rate, unique_count}; iv added for selected ones."""
+    n_screened: int = 0
+    sentinel_columns: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    """Columns with a suspected sentinel/special value (PREP-4): {feature: [(value, share), ...]}.
+    Purely informational (screen_features never drops or auto-treats these) so the caller
+    can prompt for a sentinel_values confirmation before fitting impute/cap/normalize/bin/woe."""
+    split_shift: tuple[tuple[str, float, str], ...] = ()
+    """FS-4 split-shift suspicions: features whose |ks_train - ks_test| exceeds
+    ``SPLIT_SHIFT_THRESHOLD`` — a migration-type / conditional-leakage signal (a field
+    backfilled or redefined over time) that the pooled-dev KS gate cannot see. Purely
+    informational: (feature, |ks_train - ks_test|, reason)."""
+    leakage_watch: tuple[tuple[str, float, str], ...] = ()
+    """FS-4 watch-band: features whose pooled-dev KS lands in [LEAKAGE_WATCH_LOW, leakage_ks)
+    — strong-but-below the hard leakage gate, surfaced for confirmation rather than blocked:
+    (feature, ks, reason)."""
+    ks_decay_watch: tuple[tuple[str, float, str], ...] = ()
+    """FS-6 KS-decay flags (only when ``max_ks_decay`` is set): features whose test/train KS
+    retention ratio falls below the threshold — worked in-sample, decayed out-of-sample.
+    Informational, never dropped: (feature, ks_decay, reason)."""
+    psi_watch: tuple[tuple[str, float, str], ...] = ()
+    """DOM-7b PSI flags (only when ``max_feature_psi`` is set): features whose train-vs-
+    holdout PSI (``scores[col]["psi_split"]``) meets or exceeds the threshold — elevated
+    temporal drift. Informational, never dropped: (feature, psi_split, reason)."""
+
+
+def _dev_mask(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    holdout_values: tuple[str, ...],
+) -> np.ndarray:
+    """Rows used for screening — exclude the holdout (e.g. OOT) so selection never
+    peeks at out-of-time data."""
+    n = len(frame)
+    if not split_col or split_col not in frame.columns or not holdout_values:
+        return np.ones(n, dtype=bool)
+    split = frame[split_col].astype("string")
+    held = split.isin(list(holdout_values)).to_numpy(na_value=False)
+    return ~held
+
+
+def _split_value_masks(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    train_values: tuple[str, ...] = _TRAIN_VALUES,
+    test_values: tuple[str, ...] = _TEST_VALUES,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """FS-4/FS-6 per-split masks: rows labelled train vs test in ``split_col`` (holdout
+    labels like OOT are neither). Returns ``(None, None)`` when ``split_col`` is absent or
+    either split is empty, so callers simply produce no per-split KS (never an error)."""
+    if not split_col or split_col not in frame.columns:
+        return None, None
+    split = frame[split_col].astype("string")
+    train_mask = split.isin(list(train_values)).to_numpy(na_value=False)
+    test_mask = split.isin(list(test_values)).to_numpy(na_value=False)
+    if not train_mask.any() or not test_mask.any():
+        return None, None
+    return train_mask, test_mask
+
+
+def _holdout_value_masks(
+    frame: pd.DataFrame,
+    split_col: str | None,
+    holdout_values: tuple[str, ...],
+    train_values: tuple[str, ...] = _TRAIN_VALUES,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """DOM-7b: rows labelled train vs the (first available) holdout split — the pair PSI
+    is computed over, since holdout (e.g. OOT) is the split that actually tests temporal
+    stability (test is typically a random split of the same time window as train, so a
+    train-vs-test PSI would rarely show drift). Returns ``(None, None)`` when either side
+    is empty or ``split_col``/``holdout_values`` is absent, so callers simply skip PSI."""
+    if not split_col or split_col not in frame.columns or not holdout_values:
+        return None, None
+    split = frame[split_col].astype("string")
+    train_mask = split.isin(list(train_values)).to_numpy(na_value=False)
+    holdout_mask = split.isin(list(holdout_values)).to_numpy(na_value=False)
+    if not train_mask.any() or not holdout_mask.any():
+        return None, None
+    return train_mask, holdout_mask
+
+
+def screen_features(
+    backend,
+    dataset_path: Path,
+    *,
+    features: list[str],
+    target_col: str,
+    split_col: str | None = None,
+    holdout_values: tuple[str, ...] = ("oot",),
+    leakage_ks: float = 0.40,
+    max_missing_rate: float = 0.95,
+    min_unique: int = 2,
+    top_k: int | None = None,
+    batch_size: int = 500,
+    max_ks_decay: float | None = None,
+    max_feature_psi: float | None = None,
+) -> ScreenResult:
+    """Screen ``features`` against ``target_col`` and propose a clean candidate set.
+
+    - ``leakage_ks``: any single feature with univariate KS >= this on the dev rows
+      is flagged as suspected leakage (a well-built multivariate credit model rarely
+      exceeds ~0.35 KS, so a *single* column above ~0.40 is almost always the label
+      or a near-duplicate of it).
+    - ``holdout_values``: split labels (in ``split_col``) excluded from screening.
+    - ``top_k``: size of the proposed candidate set (default: all clean features).
+    - ``max_ks_decay`` (FS-6): when a train/test split exists, ``scores`` always carries
+      per-feature ``ks_train``/``ks_test``/``ks_decay`` (test KS ÷ train KS). Default
+      ``None`` is display-only — no filtering. When set, features whose retention ratio
+      falls *below* it are flagged in ``ks_decay_watch`` (still informational, not dropped).
+    - ``max_feature_psi`` (DOM-7b): when a train/holdout split exists, ``scores`` always
+      carries per-feature ``psi_split`` (PSI of the feature's distribution, train vs the
+      first holdout split in ``holdout_values`` — no labels required, unlike KS). Default
+      ``None`` is display-only — no filtering. When set, features whose ``psi_split`` meets
+      or exceeds it are flagged in ``psi_watch`` (informational, never auto-dropped — same
+      confirm-don't-block pattern as ``leakage_watch``/``ks_decay_watch``).
+    """
+    feats = [f for f in dict.fromkeys(features) if f != target_col]
+    base_cols = [target_col] + ([split_col] if split_col else [])
+    base = backend.read_frame(dataset_path, columns=base_cols)
+    target = base[target_col].to_numpy(dtype=float)
+    dev = _dev_mask(base, split_col, holdout_values)
+    target_dev = target[dev]
+    # FS-4/FS-6: per-split (train vs test) target vectors for split-shift + KS-decay
+    # detection. None when the dataset has no usable train/test split (no per-split flags).
+    train_mask, test_mask = _split_value_masks(base, split_col)
+    target_train = target[train_mask] if train_mask is not None else None
+    target_test = target[test_mask] if test_mask is not None else None
+    # DOM-7b: train vs holdout (e.g. OOT) masks for PSI — a distribution-only check that
+    # needs no labels, so it is computed independently of target_train/target_test above.
+    psi_train_mask, psi_holdout_mask = _holdout_value_masks(base, split_col, holdout_values)
+    psi_edges_by_col: dict[str, np.ndarray] = {}
+
+    scores: dict[str, dict[str, float | None]] = {}
+    leakage: list[tuple[str, float, str]] = []
+    suspected: list[tuple[str, float, str]] = []
+    unusable: list[tuple[str, str]] = []
+    clean: list[tuple[str, float]] = []
+    sentinel_columns: dict[str, list[tuple[float, float]]] = {}
+    split_shift: list[tuple[str, float, str]] = []
+    leakage_watch: list[tuple[str, float, str]] = []
+    ks_decay_watch: list[tuple[str, float, str]] = []
+    psi_watch: list[tuple[str, float, str]] = []
+
+    for start in range(0, len(feats), max(1, batch_size)):
+        batch = feats[start : start + batch_size]
+        frame = backend.read_frame(dataset_path, columns=batch)
+        for col in batch:
+            values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+            v_dev = values[dev]
+            finite = np.isfinite(v_dev)
+            missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
+            unique = int(np.unique(v_dev[finite]).size)
+            sentinel_hits = detect_sentinel_values(v_dev)
+            if sentinel_hits:
+                sentinel_columns[col] = sentinel_hits
+            if missing_rate >= max_missing_rate:
+                unusable.append((col, f"missing rate {missing_rate:.2f} >= {max_missing_rate}"))
+                continue
+            if unique < min_unique:
+                unusable.append((col, f"only {unique} distinct non-null value(s)"))
+                continue
+            ks = feature_ks(v_dev, target_dev)
+            coverage = 1.0 - missing_rate  # FS-7: explicit so callers need not derive it.
+            scores[col] = {
+                "ks": ks,
+                "missing_rate": missing_rate,
+                "coverage": coverage,
+                "unique_count": unique,
+            }
+            # FS-7: a low-coverage yet discriminative column ("missing is itself informative"
+            # — e.g. a bureau-query field where "no record" correlates with risk) is
+            # systematically underrated because KS is computed on non-missing rows only. Note
+            # it (informational; does NOT change ranking, which stays KS-based). "High" KS uses
+            # 0.15, the same notably-discriminative bar the FS-4 split-shift band uses.
+            if coverage < _LOW_COVERAGE and ks >= _NOTABLE_KS:
+                scores[col]["note"] = "缺失即信息候选：覆盖率低但区分力强（KS仅按非缺失行计算，可能被低估）"
+            # FS-4/FS-6: per-split train vs test KS (only when both splits exist). Recorded
+            # for every screened column so the split-shift flag and KS-decay report share it.
+            ks_train = ks_test = ks_decay = None
+            if target_train is not None and target_test is not None:
+                ks_train = feature_ks(values[train_mask], target_train)
+                ks_test = feature_ks(values[test_mask], target_test)
+                # FS-6 KS decay/retention ratio: test KS as a fraction of train KS. None when
+                # train KS is 0 (no train signal to retain). A low ratio means "worked in
+                # sample, failed out-of-sample" — surfaced (and optionally gated by max_ks_decay).
+                ks_decay = (ks_test / ks_train) if ks_train > 0 else None
+                scores[col]["ks_train"] = ks_train
+                scores[col]["ks_test"] = ks_test
+                scores[col]["ks_decay"] = ks_decay
+            # DOM-7b: train-vs-holdout PSI — distribution-only, no labels needed, so it
+            # is computed for every screened column regardless of leakage/watch outcome
+            # below (a leaked feature can still be worth knowing is drifting, and a
+            # dropped/unusable feature never reaches this line in the first place).
+            psi_split = None
+            if psi_train_mask is not None and psi_holdout_mask is not None:
+                edges = psi_edges_by_col.get(col)
+                if edges is None:
+                    train_values_for_psi = values[psi_train_mask]
+                    finite_train_for_psi = train_values_for_psi[np.isfinite(train_values_for_psi)]
+                    if finite_train_for_psi.size:
+                        edges = equal_frequency_edges(finite_train_for_psi, DEFAULT_IV_BINS)
+                        psi_edges_by_col[col] = edges
+                if edges is not None:
+                    try:
+                        psi_split = feature_psi(values[psi_train_mask], values[psi_holdout_mask], edges)
+                    except Exception:
+                        psi_split = None
+                scores[col]["psi_split"] = psi_split
+            if ks >= leakage_ks:
+                leakage.append((col, ks, f"univariate KS {ks:.3f} >= {leakage_ks} — suspected target leakage"))
+                continue
+            # FS-4 split-shift: a big train/test KS gap on a below-gate feature is a
+            # migration-type / conditional-leakage signal the pooled KS averages away.
+            if ks_train is not None and ks_test is not None:
+                delta = abs(ks_train - ks_test)
+                if delta > SPLIT_SHIFT_THRESHOLD:
+                    split_shift.append((
+                        col,
+                        delta,
+                        f"split_shift: |ks_train {ks_train:.3f} - ks_test {ks_test:.3f}| = "
+                        f"{delta:.3f} > {SPLIT_SHIFT_THRESHOLD} — confirm the field is stable over time",
+                    ))
+            # FS-4 watch-band: strong-but-below the hard gate — informational, not blocked.
+            if ks >= LEAKAGE_WATCH_LOW:
+                leakage_watch.append((
+                    col,
+                    ks,
+                    f"leakage_watch: univariate KS {ks:.3f} in [{LEAKAGE_WATCH_LOW}, {leakage_ks}) "
+                    "— strong single-variable signal, confirm it is not partial/conditional leakage",
+                ))
+            # FS-6 KS decay: only flags when the caller opts in via max_ks_decay (default off).
+            if max_ks_decay is not None and ks_decay is not None and ks_decay < max_ks_decay:
+                ks_decay_watch.append((
+                    col,
+                    ks_decay,
+                    f"ks_decay {ks_decay:.3f} < {max_ks_decay} (ks_train {ks_train:.3f} -> "
+                    f"ks_test {ks_test:.3f}) — discrimination decays out-of-sample, confirm stability",
+                ))
+            # DOM-7b PSI watch: only flags when the caller opts in via max_feature_psi
+            # (default off, same display-only-unless-set pattern as max_ks_decay).
+            if max_feature_psi is not None and psi_split is not None and psi_split >= max_feature_psi:
+                psi_watch.append((
+                    col,
+                    psi_split,
+                    f"psi_split {psi_split:.3f} >= {max_feature_psi} (train vs holdout) "
+                    "— elevated temporal drift, confirm the field is stable over time",
+                ))
+            if _SUSPECTED_OUTPUT.search(col):
+                suspected.append((col, ks, "name looks like a model output/score — confirm it is an allowed input"))
+            clean.append((col, ks))
+
+    clean.sort(key=lambda z: z[1], reverse=True)
+    ranked = tuple(clean)
+    selected = tuple(c for c, _ in (clean[:top_k] if top_k else clean))
+
+    # Enrich the proposed set with IV (heavier WoE binning) only for what we keep.
+    if selected:
+        sel_set = set(selected)
+        for start in range(0, len(selected), max(1, batch_size)):
+            batch = list(selected[start : start + batch_size])
+            frame = backend.read_frame(dataset_path, columns=batch)
+            for col in batch:
+                if col not in sel_set:
+                    continue
+                values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)[dev]
+                try:
+                    iv = float(feature_metrics(values, target_dev, feature=col, bins=DEFAULT_IV_BINS).iv)
+                except Exception:
+                    iv = 0.0
+                col_scores = scores.setdefault(col, {})
+                col_scores["iv"] = iv
+                # FS-9: record the binning convention so IV is comparable across tools —
+                # this path always uses equal-frequency DEFAULT_IV_BINS bins.
+                col_scores["iv_binning"] = f"equal_frequency_{DEFAULT_IV_BINS}"
+
+    return ScreenResult(
+        ranked=ranked,
+        selected=selected,
+        leakage=tuple(sorted(leakage, key=lambda z: z[1], reverse=True)),
+        suspected=tuple(suspected),
+        unusable=tuple(unusable),
+        scores=scores,
+        n_screened=len(scores) + len(unusable),
+        sentinel_columns=sentinel_columns,
+        split_shift=tuple(sorted(split_shift, key=lambda z: z[1], reverse=True)),
+        leakage_watch=tuple(sorted(leakage_watch, key=lambda z: z[1], reverse=True)),
+        ks_decay_watch=tuple(sorted(ks_decay_watch, key=lambda z: z[1])),
+        psi_watch=tuple(sorted(psi_watch, key=lambda z: z[1], reverse=True)),
+    )
+
+
+def sentinel_screen_notice(sentinel_columns: dict[str, list[tuple[float, float]]]) -> str:
+    """Screen-gate copy (PREP-4): tell the caller which columns look like they carry
+    sentinel/special values (e.g. -999/9999 "no hit" codes) so they can pass
+    sentinel_values to impute/cap/normalize/bin_feature/woe_encode before fitting,
+    instead of those values silently skewing fit statistics as real observations."""
+    columns = ", ".join(sorted(sentinel_columns))
+    return (
+        f"检测到 {len(sentinel_columns)} 列疑似哨兵/特殊值（如 -999/9999 表示查无/超限）：{columns}；"
+        "建议在 impute/cap/normalize/bin_feature/woe_encode 中传入 sentinel_values 按缺失处理，"
+        "否则这些值会污染填充/标准化/截断/分箱的拟合统计量。"
+    )
+
+
+def screen_features_non_binary(
+    backend,
+    dataset_path: Path,
+    *,
+    features: list[str],
+    target_col: str,
+    target_type: str = "continuous",
+    split_col: str | None = None,
+    holdout_values: tuple[str, ...] = ("oot",),
+    max_missing_rate: float = 0.95,
+    min_unique: int = 2,
+    top_k: int | None = None,
+) -> ScreenResult:
+    """Screen regression/multiclass candidates without binary KS leakage math.
+
+    Eligibility still uses the same dev-row contract as binary screening: OOT or
+    other holdout rows must not decide whether a feature is usable. ``ranked``
+    contains every clean feature, while ``selected`` applies ``top_k``.
+
+    FS-10: previously every clean feature was kept in *input order* (no association
+    with the target at all), so ``top_k`` amounted to picking whichever columns
+    happened to come first. Clean features are now ranked by target association —
+    ``target_type="continuous"`` uses ``|Spearman(feature, target)|`` descending;
+    ``target_type="multiclass"`` uses the one-vs-rest AUC macro-average descending —
+    and the score is recorded in ``scores[col]["assoc_score"]`` (``ks`` stays ``None``
+    for non-binary, unchanged, so existing binary-shaped consumers are unaffected).
+    Both are deterministic (no model, closed-form formulas already used elsewhere).
+    """
+    feats = [f for f in dict.fromkeys(features) if f != target_col]
+    base_cols = [target_col] + ([split_col] if split_col else [])
+    base = backend.read_frame(dataset_path, columns=base_cols) if (split_col or feats) else None
+    dev = _dev_mask(base, split_col, holdout_values) if base is not None else None
+    target_dev = None
+    if base is not None:
+        target_dev = base[target_col].to_numpy(dtype=float)
+        if dev is not None:
+            target_dev = target_dev[dev]
+
+    scores: dict[str, dict[str, float | None]] = {}
+    unusable: list[tuple[str, str]] = []
+    clean: list[tuple[str, None]] = []
+    if feats:
+        frame = backend.read_frame(dataset_path, columns=feats)
+        for col in feats:
+            values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+            v_dev = values if dev is None else values[dev]
+            finite = np.isfinite(v_dev)
+            missing_rate = float(1.0 - finite.mean()) if v_dev.size else 1.0
+            unique = int(np.unique(v_dev[finite]).size)
+            scores[col] = {"ks": None, "missing_rate": missing_rate, "unique_count": unique}
+            if missing_rate >= max_missing_rate:
+                unusable.append((col, "high_missing"))
+                continue
+            if unique < min_unique:
+                unusable.append((col, "constant"))
+                continue
+            scores[col]["assoc_score"] = _non_binary_assoc_score(v_dev, target_dev, target_type)
+            clean.append((col, None))
+
+    # FS-10: rank by |assoc_score| descending (stable sort keeps input order on ties, and
+    # missing/undefined association sorts last) instead of leaving top_k a slice of
+    # whatever order `features` happened to arrive in.
+    clean.sort(key=lambda item: _assoc_sort_key(scores[item[0]].get("assoc_score")), reverse=True)
+    ranked = tuple(clean)
+    selected = tuple(c for c, _ in (clean[:top_k] if top_k else clean))
+    return ScreenResult(
+        ranked=ranked,
+        selected=selected,
+        leakage=(),
+        suspected=(),
+        unusable=tuple(unusable),
+        scores=scores,
+        n_screened=len(feats),
+    )
+
+
+def _non_binary_assoc_score(
+    values: np.ndarray,
+    target: np.ndarray | None,
+    target_type: str,
+) -> float | None:
+    """FS-10 ranking score for a non-binary screen candidate: |Spearman| for a continuous
+    target, one-vs-rest AUC macro-average for multiclass. ``None`` when there is no target
+    to rank against (mirrors the pre-FS-10 no-target-read behavior for callers that omit
+    it) or too few finite pairs to form a correlation/AUC."""
+    if target is None:
+        return None
+    if str(target_type) == "multiclass":
+        classes = np.unique(target[np.isfinite(target)])
+        if classes.size < 2:
+            return None
+        aucs = [
+            feature_auc(values, (target == cls).astype(float), direction_agnostic=True)
+            for cls in classes
+        ]
+        return float(np.mean(aucs))
+    # continuous (default): |Spearman(feature, target)| via rank-transformed Pearson —
+    # the same rank-correlation pattern correlation_matrix() already uses for
+    # method="spearman", reused here instead of reimplementing rank correlation.
+    ranked_values = pd.Series(values).rank().to_numpy(dtype=float)
+    ranked_target = pd.Series(target).rank().to_numpy(dtype=float)
+    return abs(safe_correlation(ranked_values, ranked_target))
+
+
+def _assoc_sort_key(assoc_score: float | None) -> float:
+    """Missing/undefined association sorts last (FS-10) — never crashes the comparator
+    and never outranks a real (even zero) association score."""
+    return assoc_score if assoc_score is not None else float("-inf")
+
+
+__all__ = ["ScreenResult", "screen_features", "screen_features_non_binary", "sentinel_screen_notice"]

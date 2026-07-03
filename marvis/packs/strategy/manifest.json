@@ -1,0 +1,1624 @@
+{
+  "name": "strategy",
+  "version": "0.1.0",
+  "display_name": "Strategy Pack",
+  "description": "Vintage, roll-rate, profitability, strategy construction, backtesting, and tradeoff analysis tools.",
+  "module": "marvis.packs.strategy.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "vintage_curve",
+      "summary": "Compute a strategy-facing vintage curve from the shared deterministic vintage core.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cohort_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mob_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bad_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mob_max": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ref_mob": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "cohort_col",
+          "mob_col",
+          "bad_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "cohorts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mob_axis": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "curves": {
+            "type": "object"
+          },
+          "counts": {
+            "type": "object"
+          },
+          "summary": {
+            "type": "object"
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "cohorts",
+          "mob_axis",
+          "curves",
+          "counts",
+          "summary",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_vintage_curve",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "roll_rate_matrix",
+      "summary": "Compute a roll-rate transition matrix from customer status sequences.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "id_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "time_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "balance_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "id_col",
+          "time_col",
+          "status_col",
+          "states"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "base_counts": {
+            "type": "object"
+          },
+          "data_quality_warnings": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "states",
+          "matrix",
+          "base_counts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_roll_rate",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "profit_calc",
+      "summary": "Calculate deterministic segment profitability from EAD, PD, and cost parameters.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "params": {
+            "$ref": "#/$defs/profit_params"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "ead_col",
+          "pd_col",
+          "params"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "profit_params": {
+            "type": "object",
+            "properties": {
+              "annual_rate": {
+                "type": "number"
+              },
+              "funding_rate": {
+                "type": "number"
+              },
+              "lgd": {
+                "type": "number"
+              },
+              "operating_cost_per_loan": {
+                "type": "number"
+              },
+              "term_months": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "annual_rate",
+              "funding_rate",
+              "lgd",
+              "operating_cost_per_loan",
+              "term_months"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_profit_calc",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "build_strategy",
+      "summary": "Validate and persist a deterministic strategy rule set.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_type": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "limit",
+              "pricing",
+              "reject",
+              "segmentation"
+            ]
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "minItems": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default_decision": {},
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "strategy_type",
+          "rules",
+          "default_decision"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "strategy_type": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_decision": {},
+          "description": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "condition": {
+                  "type": "string"
+                },
+                "decision": {
+                  "type": "string"
+                },
+                "value": {}
+              },
+              "required": [
+                "condition",
+                "decision"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "inferred_score_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "strategy_id",
+          "strategy_type",
+          "score_col",
+          "default_decision",
+          "description",
+          "rules"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_build_strategy",
+      "side_effects": [
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "backtest_strategy",
+      "summary": "Backtest a persisted strategy on a dataset and persist aggregate results.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "baseline_strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profit_params": {
+            "type": "object"
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "strategy_id",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "backtest_id": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "string"
+          },
+          "approval_rate": {
+            "type": "number"
+          },
+          "approved_count": {
+            "type": "integer"
+          },
+          "approved_bad_rate": {
+            "type": "number"
+          },
+          "rejected_bad_rate": {
+            "type": "number"
+          },
+          "expected_profit": {
+            "type": ["number", "null"]
+          },
+          "profit_note": {
+            "type": ["string", "null"]
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "swap_in_count": {
+            "type": "integer"
+          },
+          "swap_out_count": {
+            "type": "integer"
+          },
+          "swap_in_bad_rate": {
+            "type": ["number", "null"]
+          },
+          "swap_out_bad_rate": {
+            "type": ["number", "null"]
+          },
+          "by_segment": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "label_coverage": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "backtest_id",
+          "strategy_id",
+          "approval_rate",
+          "approved_count",
+          "approved_bad_rate",
+          "rejected_bad_rate",
+          "expected_profit",
+          "swap_in_count",
+          "swap_out_count",
+          "swap_in_bad_rate",
+          "swap_out_bad_rate",
+          "by_segment"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_backtest_strategy",
+      "side_effects": [
+        "read:dataset",
+        "read:strategy",
+        "write:backtest"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "tradeoff_view",
+      "summary": "Scan score cutoffs and recommend an operating point under risk constraints.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cutoffs": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "profit_params": {
+            "type": "object"
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "objective": {
+            "type": "string",
+            "enum": [
+              "max_profit",
+              "max_approval"
+            ]
+          },
+          "max_bad_rate": {
+            "type": "number"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          },
+          "score_direction": {
+            "type": "string",
+            "enum": [
+              "higher_is_riskier",
+              "higher_is_better"
+            ]
+          },
+          "confirm_direction_conflict": {
+            "type": "boolean"
+          },
+          "min_approval_rate": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "score_col",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "recommended": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "score_direction": {
+            "type": "string"
+          },
+          "direction_diagnostics": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "points",
+          "recommended"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_tradeoff_view",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "design_cutoff_bands",
+      "summary": "Split scores into deterministic bands and recommend a monotone approve/decline cut under risk constraints.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_direction": {
+            "type": "string",
+            "enum": [
+              "higher_is_riskier",
+              "higher_is_better"
+            ]
+          },
+          "n_bands": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "band_edges": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2
+          },
+          "objective": {
+            "type": "string",
+            "enum": [
+              "max_profit",
+              "max_approval"
+            ]
+          },
+          "max_bad_rate": {
+            "type": "number"
+          },
+          "min_approval_rate": {
+            "type": "number"
+          },
+          "profit_params": {
+            "type": "object"
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          },
+          "confirm_direction_conflict": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "score_col",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "bands": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "band_edges": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "recommended_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "score_direction": {
+            "type": "string"
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "bands",
+          "band_edges",
+          "recommended_rules",
+          "red_flags",
+          "score_direction",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_design_cutoff_bands",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "compare_strategies",
+      "summary": "Compare a candidate strategy against a baseline on a dataset with a 2x2 agreement matrix and deltas.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "baseline_strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profit_params": {
+            "type": "object"
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "matrix_2x2": {
+            "type": "object"
+          },
+          "deltas": {
+            "type": "object"
+          },
+          "summary_text": {
+            "type": "string"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "label_coverage": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "matrix_2x2",
+          "deltas",
+          "summary_text",
+          "red_flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compare_strategies",
+      "side_effects": [
+        "read:dataset",
+        "read:strategy"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "adopt_strategy",
+      "summary": "Adopt a backtested strategy behind a mandatory confirmation gate and emit decision-table and monitoring-plan deliverables.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "backtest_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "adoption_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_stats": {
+            "type": "object"
+          },
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy_id",
+          "backtest_id",
+          "adoption_reason"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "retired_strategy_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "strategy_id",
+          "version",
+          "status",
+          "retired_strategy_ids",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_adopt_strategy",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "render_strategy_doc",
+      "summary": "Render a Chinese-language strategy markdown document from persisted strategy, backtests, and artifacts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_stats": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "doc_path": {
+            "type": "string"
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "doc_path",
+          "sections"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_strategy_doc",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "mine_rules",
+      "summary": "Mine deterministic candidate reject rules from a labeled sample via decision-tree paths and univariate cutpoints.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "min_support": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "min_lift": {
+            "type": "number",
+            "minimum": 0
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "seed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "candidate_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "n_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "candidate_rules",
+          "n_rows",
+          "red_flags",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_mine_rules",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "evaluate_rule_set",
+      "summary": "Evaluate an ordered rule subset with a first-match-wins waterfall, overlap matrix, and residual/combined stats.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "decision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "rules"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "waterfall": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "overlap_matrix": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "residual": {
+            "type": "object"
+          },
+          "combined": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "decision",
+          "waterfall",
+          "overlap_matrix",
+          "residual",
+          "combined",
+          "red_flags",
+          "nan_labels_dropped"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_evaluate_rule_set",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "select_rule_set",
+      "summary": "Assemble the user-selected ordered subset of mined candidate rules into a gate payload.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "candidate_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "selection": {
+            "type": [
+              "array",
+              "string",
+              "null"
+            ]
+          },
+          "decision": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "candidate_rules"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected_rules": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "selected_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "selected_rules",
+          "selected_count",
+          "candidate_count"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_select_rule_set",
+      "side_effects": [],
+      "memory_limit_mb": 1024
+    },
+    {
+      "name": "run_strategy_monitoring",
+      "summary": "Run one monitoring pass for an adopted strategy off its monitoring plan: model PSI/CSI via the monitor_run kernel when model-backed, plus strategy-facing approval/bad-rate drift vs the adoption baseline, refreshing last_run_at.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "strategy_id",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "dataset_id": {
+            "type": "string"
+          },
+          "experiment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overall_level": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "top_drifted_features": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "plan_updated": {
+            "type": "boolean"
+          },
+          "last_run_at": {
+            "type": "string"
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "strategy_id",
+          "dataset_id",
+          "overall_level",
+          "checks",
+          "plan_updated"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_run_strategy_monitoring",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "render_monitoring_report",
+      "summary": "Render a Markdown monitoring report for an adopted strategy: latest per-check table plus an overall-level timeline aggregated from strategy.monitor audit rows, registered as a monitoring_report_md artifact.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "overall_level": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "disposition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string"
+          },
+          "report_path": {
+            "type": "string"
+          },
+          "overall_level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeline": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "next_action": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "strategy_id",
+          "report_path"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_monitoring_report",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "limit_pricing_matrix",
+      "summary": "Deterministic band x limit x rate expected-profit grid with an EL simulation; writes a limit_pricing_csv deliverable only after the matrix confirmation gate.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pd_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ead_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "band_edges": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2
+          },
+          "n_bands": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "limit_grid": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 1
+          },
+          "rate_grid": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 1
+          },
+          "lgd": {
+            "type": "number"
+          },
+          "funding_rate": {
+            "type": "number"
+          },
+          "term_months": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cost_per_loan": {
+            "type": "number"
+          },
+          "el_ead_max": {
+            "type": "number"
+          },
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "score_col",
+          "limit_grid",
+          "rate_grid",
+          "funding_rate",
+          "term_months",
+          "cost_per_loan"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "matrix": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "recommended": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "band_edges": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "assumptions": {
+            "type": "object"
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "matrix",
+          "recommended",
+          "band_edges",
+          "assumptions",
+          "red_flags",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_limit_pricing_matrix",
+      "side_effects": [
+        "read:dataset",
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "render_challenger_report",
+      "summary": "Assemble a challenger-vs-champion Markdown report from a compare output + both backtests + adoption status; registers challenger_report_md. No-op (no artifact) when no champion is supplied.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "champion_strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "compare": {
+            "type": "object"
+          },
+          "challenger_backtest": {
+            "type": "object"
+          },
+          "champion_backtest": {
+            "type": "object"
+          },
+          "adopted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "report_md": {
+            "type": "string"
+          },
+          "report_path": {
+            "type": "string"
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "report_md",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_challenger_report",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "read:dataset",
+    "read:strategy",
+    "write:strategy",
+    "write:backtest"
+  ]
+}

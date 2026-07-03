@@ -18,6 +18,13 @@ def test_bump_version_tag_advances_patch_version():
     assert release_push.bump_version_tag("V1.0.0", "patch") == "V1.0.1"
 
 
+def test_normalize_version_accepts_supported_prerelease_tag():
+    release_push = _load_release_push_module()
+
+    assert release_push.normalize_version("2.0.0-alpha.01") == "V2.0.0-alpha.1"
+    assert release_push.normalize_version("V2.0.0-rc.2") == "V2.0.0-rc.2"
+
+
 def test_normalize_version_rejects_invalid_tag():
     release_push = _load_release_push_module()
 
@@ -27,6 +34,17 @@ def test_normalize_version_rejects_invalid_tag():
         assert "V<MAJOR>.<MINOR>.<PATCH>" in str(exc)
     else:
         raise AssertionError("invalid version tag was accepted")
+
+
+def test_normalize_version_rejects_unsupported_prerelease_suffix():
+    release_push = _load_release_push_module()
+
+    try:
+        release_push.normalize_version("V2.0.0-preview.1")
+    except ValueError as exc:
+        assert "pre-release suffix" in str(exc)
+    else:
+        raise AssertionError("unsupported pre-release tag was accepted")
 
 
 def test_update_release_text_replaces_only_current_release_markers():
@@ -44,6 +62,21 @@ def test_update_release_text_replaces_only_current_release_markers():
     assert "当前 V1.0.1 版本已经稳定落地第一个内置工作流。" in updated
     assert "Example tags: V1.0.0, V1.0.1, V1.1.0." in updated
     assert 'version = "1.0.1"' in updated
+
+
+def test_update_release_text_uses_pep440_for_python_metadata_prerelease():
+    release_push = _load_release_push_module()
+    text = (
+        'version = "1.1.6"\n'
+        '__version__ = "1.1.6"\n'
+        "The current V1.1.6 release ships the first workflow.\n"
+    )
+
+    updated = release_push.update_release_text(text, "1.1.6", "2.0.0-alpha.1")
+
+    assert 'version = "2.0.0a1"' in updated
+    assert '__version__ = "2.0.0a1"' in updated
+    assert "The current V2.0.0-alpha.1 release ships the first workflow." in updated
 
 
 def test_release_files_include_bilingual_readmes():

@@ -63,6 +63,23 @@ PAYLOAD_FIELD_ALLOWLISTS = {
         "source_task_id",
         "important_feature_sources",
     }),
+    "join_experience": frozenset({
+        "match_rate",
+        "anchor_rows",
+        "joined_rows",
+        "feature_table_count",
+        "scope",
+        "source_task_id",
+    }),
+    "strategy_experience": frozenset({
+        "strategy_type",
+        "cutoff_summary",
+        "approval_rate",
+        "approved_bad_rate",
+        "expected_profit",
+        "scope",
+        "source_task_id",
+    }),
     "skill_experience_reserved": frozenset(),
 }
 SECRET_PATTERNS = (
@@ -78,6 +95,21 @@ MEMORY_CANDIDATE_TEXT_MAX_CHARS = 12000
 
 def classify_memory_candidate(candidate: MemoryCandidate) -> MemoryPolicyDecision:
     text = _candidate_text(candidate)
+    reasons = _forbidden_text_reasons(text)
+
+    if not reasons and _unsupported_payload_fields(candidate):
+        reasons.append("unsupported payload fields")
+
+    return MemoryPolicyDecision(allowed=not reasons, reasons=reasons)
+
+
+def classify_distillation_payload(summary: str, structured: dict[str, Any]) -> MemoryPolicyDecision:
+    text = f"{summary}\n{_json_text(structured)}"
+    reasons = _forbidden_text_reasons(text)
+    return MemoryPolicyDecision(allowed=not reasons, reasons=reasons)
+
+
+def _forbidden_text_reasons(text: str) -> list[str]:
     reasons: list[str] = []
 
     if any(pattern.search(text) for pattern in CUSTOMER_DETAIL_PATTERNS):
@@ -92,14 +124,11 @@ def classify_memory_candidate(candidate: MemoryCandidate) -> MemoryPolicyDecisio
         reasons.append("secret")
     if any(pattern.search(text) for pattern in DB_CONNECTION_PATTERNS):
         reasons.append("database connection")
-    if not reasons and _unsupported_payload_fields(candidate):
-        reasons.append("unsupported payload fields")
     if _looks_like_long_report_text(text):
         reasons.append("long report text")
     if len(text) > MEMORY_CANDIDATE_TEXT_MAX_CHARS:
         reasons.append("memory text too long")
-
-    return MemoryPolicyDecision(allowed=not reasons, reasons=reasons)
+    return reasons
 
 
 def _candidate_text(candidate: MemoryCandidate) -> str:

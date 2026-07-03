@@ -185,6 +185,7 @@ def test_summarize_stage_includes_bounded_memory_context_and_metadata(monkeypatc
     assert "不能改变" in prompt["cross_task_memory"]["usage_rules"]
     assert metadata["memory_references"] == [
         {
+            "kind": "raw",
             "id": "mem-1",
             "memory_type": "model_experience",
             "source_task_id": "task-old",

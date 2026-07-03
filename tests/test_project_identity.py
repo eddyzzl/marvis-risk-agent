@@ -60,6 +60,7 @@ def test_pyproject_includes_notebook_data_science_runtime_stack():
         "xlrd",
         "python-docx",
         "pydantic",
+        "sklearn2pmml",
         "pypmml",
         "xgboost",
         "lightgbm",

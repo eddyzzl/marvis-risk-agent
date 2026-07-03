@@ -10,7 +10,9 @@ from marvis.validation.binning import compute_psi
 from marvis.validation.effectiveness import (
     _should_reverse_eval_bins,
     build_effectiveness_result,
+    compute_auc,
     compute_bin_tables,
+    compute_head_tail_lift,
     compute_monthly_ks,
     compute_monthly_psi,
     compute_overall_ks,
@@ -132,8 +134,19 @@ def test_overall_auc_keeps_declared_positive_score_direction():
     train = {row.split: row for row in result.overall}["train"]
 
     assert train.auc == pytest.approx(0.0)
-    assert train.head_lift_5pct == pytest.approx(0.0)
-    assert train.tail_lift_5pct == pytest.approx(5.0)
+    # NEW-2 (S1a): head_lift is direction-aware (risk_sign from corr(score, target)),
+    # not a hard-coded "highest score = head" -- this sample is negatively correlated
+    # (low index/score = high risk, since y = index < 20), so head (high-risk end) is
+    # the LOW-score slice, and lift_head/lift_tail flip relative to a naive descending
+    # sort. See test_head_tail_lift_flips_for_higher_is_better_score for the isolated
+    # regression case.
+    assert train.head_lift_5pct == pytest.approx(5.0)
+    assert train.tail_lift_5pct == pytest.approx(0.0)
+
+
+def test_compute_auc_returns_neutral_for_degenerate_labels():
+    assert compute_auc([0.1, 0.2, 0.3], [1, 1, 1]) == pytest.approx(0.5)
+    assert compute_auc([], []) == pytest.approx(0.5)
 
 
 def test_roc_ks_curve_population_at_ks_uses_rank_position_not_fpr():
@@ -185,15 +198,15 @@ def test_split_bin_tables_follow_model_analysis_auto_sort_direction():
     assert train_bins[0].bad_rate < train_bins[-1].bad_rate
 
 
-def test_bin_table_uses_each_split_edges():
+def test_bin_table_reuses_train_edges_for_each_split():
     sample = _build_sample()
     result = run_effectiveness(sample=sample, config=_config(bin_count=5))
     assert set(result.bin_tables.keys()) == {"train", "test", "oot"}
     edges_train = [row.score_upper for row in result.bin_tables["train"]]
     edges_test = [row.score_upper for row in result.bin_tables["test"]]
-    assert edges_train != edges_test
+    edges_oot = [row.score_upper for row in result.bin_tables["oot"]]
+    assert edges_train == edges_test == edges_oot
     assert len(edges_train) == 5
-    assert len(edges_test) == 5
 
 
 def test_psi_stability_uses_train_test_bins_against_oot_distribution():
@@ -242,8 +255,12 @@ def test_psi_stability_table_uses_shared_compute_psi_smoothing():
     psi_rows = compute_psi_stability_table(sample=sample, config=_config(bin_count=2))
 
     assert psi_rows[0].actual_pct == pytest.approx(0.0)
-    assert psi_rows[0].psi == pytest.approx(
-        compute_psi([psi_rows[0].expected_pct], [psi_rows[0].actual_pct])
+    assert psi_rows[0].psi > 0
+    assert sum(row.psi for row in psi_rows) == pytest.approx(
+        compute_psi(
+            [row.expected_pct for row in psi_rows],
+            [row.actual_pct for row in psi_rows],
+        )
     )
 
 
@@ -313,3 +330,38 @@ def test_effectiveness_can_be_built_from_separate_ks_psi_and_binning_steps():
 
     combined = run_effectiveness(sample=sample, config=config)
     assert separate == combined
+
+
+def test_head_tail_lift_flips_for_higher_is_better_score():
+    """NEW-2 (S1a) core regression: compute_head_tail_lift must be direction-aware,
+    like feature/metrics.py::head_tail_lift, not hard-coded to "highest score = head".
+    Construct a higher_is_better sample (score negatively correlated with bad) and
+    assert the high-risk end (head) lands on the LOW-score slice."""
+    n = 100
+    scores = np.arange(n, dtype=float) / (n - 1)
+    labels = (np.arange(n) < 20).astype(int)  # low score/index -> bad -> higher_is_better
+
+    head_lift, tail_lift = compute_head_tail_lift(scores, labels, fraction=0.05)
+
+    assert head_lift == pytest.approx(5.0)
+    assert tail_lift == pytest.approx(0.0)
+
+
+def test_head_tail_lift_matches_naive_descending_sort_for_higher_is_riskier_score():
+    """Sanity check the non-flipped case is unaffected: score positively correlated
+    with bad (higher_is_riskier) keeps head = highest score, matching the pre-NEW-2
+    behavior for this direction."""
+    n = 100
+    scores = np.arange(n, dtype=float) / (n - 1)
+    labels = (np.arange(n) >= 80).astype(int)  # high score/index -> bad -> higher_is_riskier
+
+    head_lift, tail_lift = compute_head_tail_lift(scores, labels, fraction=0.05)
+
+    assert head_lift == pytest.approx(5.0)
+    assert tail_lift == pytest.approx(0.0)
+
+
+def test_head_tail_lift_returns_none_for_empty_scores():
+    head_lift, tail_lift = compute_head_tail_lift(np.array([]), np.array([]))
+    assert head_lift is None
+    assert tail_lift is None

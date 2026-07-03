@@ -1,0 +1,1039 @@
+# V2 Comprehensive Improvement Plan
+
+Last updated: 2026-07-02
+
+> **SUPERSEDED AS TRACKER (2026-07-02)**: the execution-tracker role of this document has moved to [v2-master-backlog.md](v2-master-backlog.md) — the single source of truth for all remaining V2 work. Its unfinished items have been extracted and mapped there (see its §13). This file is retained as the verification/evidence record for the 2026-06-29 implementation pass; do not update TODO status here.
+
+This document consolidates the remaining V2 work, previous review findings, and a fresh code review across backend architecture, Agent orchestration, modeling workflow, frontend UX, reliability, and release gates. It is now also used as the execution tracker for the implementation pass started on 2026-06-29.
+
+## Review Scope
+
+- Reviewed current repo state, existing plan docs, and review docs under `docs/plans/` and `docs/reviews/`.
+- Reconciled the earlier "not fully finished" items: cross-repository transactional writes, Notebook/plugin sandboxing, `api.py` / `db.py` split, visual token system, and final total review.
+- Ran four read-only expert reviews:
+  - Backend architecture, persistence, transactions, performance.
+  - Agent loop, AUTO decisions, gates, evidence, retry contracts.
+  - Modeling lifecycle, PMML/PKL/report/handoff, sample weights.
+  - Frontend workspace, visual system, user experience.
+- Latest known full-suite evidence must come from the final committed tree before merge/release; earlier dirty-worktree caveats are superseded by the topic commits and verification entries below.
+- 2026-06-29 follow-up review evidence:
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_data_join_api.py tests/test_artifacts_transactional.py tests/test_orch_db.py tests/test_orch_executor.py tests/test_modeling_artifact.py tests/test_modeling_pack.py tests/test_frontend_screen_table.py -q`: `127 passed`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_release_push.py tests/test_modeling_api.py::test_modeling_multiple_files_runs_join_then_modeling_setup -q`: `11 passed`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1804 passed, 2 warnings` in `442.76s` after this document/update pass.
+- Current focused verification from this implementation pass:
+  - `scripts/check --skip-pytest` passes with `git diff --check`, ruff, and `node --check`.
+  - `tests/test_plan_driver.py`: `25 passed` after report section-status renderer changes.
+  - `tests/test_orch_templates.py tests/test_modeling_pack.py tests/test_plan_driver.py`: `57 passed`.
+  - `tests/test_modeling_api.py`: `8 passed` after the G2/G3/selection/report/delivery confirmation chain update.
+  - `tests/test_agent_gate_contracts.py tests/test_agent_autodrive.py tests/test_plan_driver.py tests/test_orch_db.py tests/test_orch_executor.py tests/test_orch_templates.py tests/test_modeling_training_dataset.py`: `101 passed`.
+  - `tests/test_agent_gate_contracts.py tests/test_agent_autodrive.py tests/test_plan_driver.py tests/test_orch_db.py tests/test_orch_executor.py tests/test_orch_templates.py tests/test_modeling_training_dataset.py tests/test_modeling_api.py`: `109 passed`.
+  - `tests/test_frontend_screen_table.py tests/test_frontend_static_v2.py::test_modeling_create_dialog_has_algorithm_selector`: `13 passed` after the sample-weight gate UI/control update.
+  - `tests/test_plan_driver.py tests/test_agent_autodrive.py tests/test_modeling_api.py tests/test_orch_templates.py tests/test_modeling_pack.py`: `89 passed` after the sample-weight adjust/rerun path update.
+  - `tests/test_artifacts_transactional.py tests/test_join_engine.py tests/test_data_repository_registry.py`: `23 passed` after adding `TransactionalArtifactStore` and migrating join execution output staging.
+  - `tests/test_data_ops_pack.py tests/test_data_join_api.py`: `12 passed` after the join staging migration.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/data/registry.py tests/test_data_repository_registry.py tests/test_data_api.py`: passes after moving ordinary dataset upload parquet registration behind `ArtifactUnitOfWork`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_repository_registry.py tests/test_data_api.py -q`: `31 passed` after staging single-upload parquet registration and preserving Excel upload rollback coverage.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the dataset registry upload staging update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py -q`: `13 passed` after staging route-level raw dataset uploads and rolling them back when registration or sheet validation fails.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_metrics_stage_status_failure_rolls_back_outputs_report_and_images tests/test_pipeline_v2.py::test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs -q`: `2 passed` after staging metrics-stage `model_meta.json` with the validation outputs.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports tests/test_frontend_static_v2.py::test_task_search_controller_toggles_search_state_and_resets_query -q`: `3 passed` after extracting task-search state transitions into `static/js/task-search.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plugin_runner.py -q`: `33 passed` after extending the plugin/draft worker file guard to `os.rename`, `os.replace`, `os.link`, and `os.symlink`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_feature_report.py tests/test_feature_analysis_api.py::test_feature_report_is_downloadable_after_run -q`: `5 passed` after moving feature-analysis report XLSX writes behind staged promotion.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/output/test_excel.py tests/output/test_e2e_results_to_outputs.py -q`: `13 passed` after moving validation Excel and `excel_images` writes behind staged promotion.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_metrics_stage_status_failure_rolls_back_outputs_report_and_images tests/test_pipeline_v2.py::test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs tests/output/test_word.py -q`: `5 passed` after confirming staged validation Excel writes still fit the V1 metrics/report rollback path.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_files.py tests/test_memory_policy.py tests/test_notebooks.py tests/test_api_scan_helpers.py tests/test_api_v2.py::test_cancel_metrics_endpoint_requests_running_metrics_stop tests/test_api_v2.py::test_scan_endpoint_returns_v2_artifacts_and_updates_status tests/test_pipeline_v2.py::test_notebook_stage_writes_reproducibility_evidence_before_metrics tests/test_pipeline_v2.py::test_metrics_stage_cancel_returns_to_executed_status -q`: `55 passed` after centralizing atomic text/JSON writes for runtime control and notebook evidence files.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py -q`: `27 passed` after moving notebook success/failure logs onto the same atomic sidecar write helper.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py -q`: `15 passed` after adding an explicit opt-in async job path for join execution while preserving the default synchronous response contract.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_api_state.py tests/test_frontend_v2_join.py -q`: `21 passed` after confirming the existing frontend join execution API contract still posts the synchronous route by default. Superseded by the later async-default frontend contract below.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_join_api.py tests/test_data_ops_pack.py tests/test_join_engine.py -q`: `22 passed` after confirming join/data_ops engine behavior still passes with the optional async route migration path.
+  - `tests/test_artifacts_transactional.py tests/test_data_ops_pack.py tests/test_join_engine.py tests/test_data_repository_registry.py`: `32 passed` after migrating `clean_format` / `dedup_rows` derived outputs to staging and tightening artifact path traversal checks.
+  - `tests/test_data_join_api.py tests/test_data_ops_pack.py`: `13 passed` after the data_ops clean/dedup staging migration.
+  - `tests/test_modeling_prepare.py tests/test_modeling_pack.py::test_reject_inference_tool_registers_augmented_dataset tests/test_modeling_reject_inference.py`: `15 passed` after migrating modeling derived parquet outputs to staging.
+  - `tests/test_modeling_api.py tests/test_orch_templates.py tests/test_modeling_pack.py tests/test_modeling_prepare.py`: `51 passed` after the modeling derived parquet staging migration.
+  - `tests/test_modeling_report.py`: `23 passed` after migrating `model_report_scored.parquet` and final xlsx report rendering to staging.
+  - `tests/test_artifacts_transactional.py tests/test_modeling_artifact.py tests/test_modeling_recipes.py tests/test_modeling_pack.py tests/test_modeling_report.py tests/test_modeling_handoff.py tests/test_plugin_loader.py tests/test_drafts_promotion.py`: `103 passed, 2 warnings` after migrating model binary/meta/PMML/calibration files, plugin install/promote directories, and validation handoff materials to staged transactions.
+  - `tests/test_artifacts_recovery.py tests/test_artifacts_transactional.py`: `16 passed` after adding startup artifact reconciliation for orphan `.staging` directories, plugin backups, and validation handoff material directories.
+  - `tests/test_notebooks.py`: `21 passed` after adding an isolated notebook worker for ordinary full-notebook execution, worker error propagation, and parent timeout artifact preservation.
+  - `tests/test_notebooks.py`: `25 passed` after allowing prepared notebooks to include MARVIS-generated system cells before isolated execution, creating the migration path away from live appended-cell execution.
+  - `tests/test_orch_db.py tests/test_orch_executor.py tests/test_recovery.py tests/test_artifacts_recovery.py`: `59 passed` after adding running step-run recovery for persisted outputs and interrupted runs.
+  - `tests/test_modeling_api.py tests/test_agent_autodrive.py tests/test_data_join_api.py tests/test_feature_analysis_api.py tests/test_orch_api.py`: `60 passed` after moving driver turn orchestration into `marvis/agent/turn_handlers.py`.
+  - `tests/test_data_api.py tests/test_data_join_api.py`: `14 passed` after extracting data/join API payload and preview masking helpers into `marvis/api_data_payloads.py`.
+  - `tests/test_api_v2.py tests/test_orch_api.py`: `85 passed` after the data payload helper extraction kept broader API wrappers import-compatible.
+  - `tests/test_agent_memory_api.py tests/test_memory_policy.py tests/test_memory_determinism_guard.py`: `24 passed` after moving Agent Memory payload/context/audit helpers to `marvis/agent_memory/api_support.py` and `/api/agent-memory...` routes to `marvis/routers/agent_memory.py`.
+  - `tests/test_agent_api.py`: `86 passed` after the Agent Memory router extraction kept validation-agent memory capture/context/audit wrappers import-compatible.
+  - `tests/test_api_v2.py tests/test_orch_api.py tests/test_data_api.py tests/test_data_join_api.py`: `99 passed` after mounting the Agent Memory router separately from the legacy API router.
+  - `tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_frontend_shell_static.py::test_unselected_workspace_shows_centered_welcome_only tests/test_frontend_screen_table.py tests/test_frontend_static_v2.py::test_frontend_uses_v2_task_actions_only`: `15 passed` after adding semantic visual tokens and extracting theme handling to `static/js/theme.js`.
+  - `tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py`: `224 passed` after extracting create-dialog task type definitions and task-type display order into `static/js/task-types.js`.
+  - `tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py`: `224 passed` after extracting the create-dialog controller behavior, payload assembly, material upload, run-mode cards, algorithm/sample-weight controls, and report defaults into `static/js/create-task-dialog.js`.
+  - `tests/test_db.py tests/test_orch_db.py tests/test_plugin_db.py tests/test_modeling_db.py tests/test_strategy_db.py tests/test_drafts_db.py`: `72 passed` after extracting schema/connection setup into `marvis/db_schema.py`.
+  - `tests/test_plugin_db.py tests/test_plugin_registry.py tests/test_plugin_hooks.py tests/test_db.py::test_update_report_values_with_audit_records_changed_keys tests/test_db.py::test_update_report_values_with_audit_rolls_back_when_audit_fails tests/test_db.py::test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails`: `31 passed` after making `PluginRepository.write_audit/list_audit` reuse the shared audit row helpers.
+  - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py`: `35 passed` after enriching failure envelopes with editable input defaults and explicit downstream reset step ids.
+  - `tests/test_plan_driver.py`: `38 passed` after propagating the latest failed step-run `error_kind` into `FailureEnvelope` so validation/postcheck/runtime failures are distinguishable in retry UX.
+  - `tests/test_orch_executor.py tests/test_orch_db.py`: `44 passed` after adding tool version, manifest hash, source dataset refs, and artifact refs to persisted step evidence.
+  - `tests/test_agent_autodrive.py`: `24 passed` after adding a deterministic AUTO low-risk control allowlist for declared-but-expensive tuning and delivery actions.
+  - `tests/test_orch_api.py tests/test_frontend_v2_plan.py tests/test_frontend_static_v2.py`: `238 passed` after exposing failure envelopes on plan step API payloads and rendering retry defaults/reset scope in both V2 plan views.
+  - `tests/test_modeling_recipes.py tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `116 passed, 2 warnings` after adding sample-weight quality diagnostics to modeling setup, gate metadata, frontend controls, and AUTO prompts.
+  - `tests/test_orch_db.py tests/test_orch_api.py tests/test_orch_executor.py tests/test_plan_driver.py`: `96 passed` after making step confirmation require the persisted step to still be `awaiting_confirm`.
+  - `tests/test_agent_gate_contracts.py tests/test_plan_driver.py tests/test_agent_autodrive.py`: `63 passed` after making AUTO halt on gate-level high-risk flags and wide downstream reset policies.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_agent_autodrive.py`: `72 passed` after expanding the modeling setup panel/contract with target type, algorithms, tuning budget, PMML support, split/OOT diagnostics, and AUTO context.
+  - `tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules`: `23 passed` after extracting `renderModelingSetupPanel` into `static/js/v2/modeling_setup_panel.js`.
+  - `tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules`: `23 passed` after moving the modeling sample-weight adjust controller into `static/js/v2/modeling_setup_panel.js`.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `58 passed` after adding structured model comparison/delivery readiness metadata and the `ModelDeliveryPanel` frontend module.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `59 passed` after merging model-report path and section readiness into the delivery panel for both final gates and done messages.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after adding editable target type, algorithm, tuning-trial, and sample-weight controls to `ModelingSetupPanel` with required override reasons for structural changes.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after allowing family-mismatch recipes to be selected when switching target type and blocking target/algorithm family mismatches before submission.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `60 passed` after adding delivery-panel business signals for stability, feature count, calibration state, and handoff readiness.
+  - `tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `25 passed` after adding a lightweight DOM-structure smoke for the modeling setup and delivery panels.
+  - `tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `61 passed` after adding backend modeling override guidance and frontend risk-guidance rendering for target type, algorithms, tuning budget, sample weight, and split quality.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `1 passed` after adding optional real-browser desktop/mobile smoke for the modeling setup and delivery panels.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `3 passed` after expanding optional browser smoke to the real app welcome shell, modeling create dialog, plan rail, screen selector table, desktop/mobile, and light/dark startup paths.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_frontend_shell_static.py::test_unselected_workspace_shows_centered_welcome_only -q`: `26 passed, 3 skipped` after the broader Playwright smoke stayed opt-in for default CI.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `61 passed` after adding model delivery policy signals for scorecard status, monotonicity evidence, approval recommendation, and approval-policy readiness.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `3 passed` after extending the browser smoke to cover delivery policy cards.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py -q`: `71 passed` after turning model-delivery policy signals into executable `select_experiment.selection_policy` gates with required PMML/handoff, scorecard preference, monotonicity checks, feature/PSI limits, audited override reasons, and robust string-boolean normalization.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_policy_selection_prefers_compliant_scorecard_candidate tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_orch_templates.py::test_standard_modeling_template_instantiates_valid_report_plan tests/test_orch_templates.py::test_modeling_template_phases_gates_and_refs -q`: `4 passed` after the final policy helper/static-check fix.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py::test_modeling_selection_gate_carries_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renderer_and_branch_are_wired tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `4 passed` after wiring executable policy decisions into model-delivery metadata/readiness and the frontend delivery panel.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `61 passed` after the model-delivery policy-decision panel wiring.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_orch_templates.py::test_standard_modeling_template_instantiates_valid_report_plan tests/test_orch_templates.py::test_modeling_template_phases_gates_and_refs tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `7 passed` after adding the post-training approval package artifact and wiring it into delivery metadata, renderers, templates, and frontend artifact lists.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `5 passed` after adding the human-readable Markdown approval package and exposing it through delivery metadata/readiness/front-end artifacts while keeping the JSON evidence package.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `84 passed` after the Markdown approval package update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Markdown approval package update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_orch_templates.py::test_standard_modeling_template_instantiates_valid_report_plan tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_plan_driver.py::test_render_registry_has_modeling_renderers_and_generic_fallback tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `13 passed` after adding the post-training challenger/backtest task package and delivery-panel wiring.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after fixing select-experiment readiness so challenger/backtest readiness appears only once the G5 action/outputs exist.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the challenger/backtest task package update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py::test_create_challenger_backtest_task_writes_materials_task_and_audit tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_plan_driver.py::test_render_registry_has_modeling_renderers_and_generic_fallback tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions tests/test_frontend_screen_table.py::test_modeling_panels_combined_dom_smoke_contract -q`: `7 passed` after adding versioned monitoring-policy JSON/Markdown artifacts, approval-package evidence, delivery readiness, and frontend artifact rendering.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after the monitoring-policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the monitoring-policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py::test_create_challenger_backtest_task_writes_materials_task_and_audit tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_orch_templates.py::test_standard_modeling_template_instantiates_valid_report_plan tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions -q`: `6 passed` after adding optional prior Champion/Challenger comparison artifacts, template-slot wiring, previous-selected auto-resolution, and delivery-panel risk counting.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after the Champion/Challenger comparison update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Champion/Challenger comparison update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `96 passed` after the approval-package update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py::test_live_notebook_session_reuses_kernel_for_appended_cells tests/test_notebooks.py::test_live_notebook_session_rejects_appended_cells_by_default tests/test_pipeline_v2.py::test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook tests/test_pipeline_v2.py::test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed -q`: `4 passed` after making live notebook appended-cell execution opt-in per session.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py -q`: `22 passed` after the live notebook appended-cell safety update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_metrics_stage_marks_sample_column_failure_as_metrics_failure tests/test_pipeline_v2.py::test_metrics_stage_success_captures_model_experience_memory tests/test_pipeline_v2.py::test_metrics_stage_cancel_returns_to_executed_status -q`: `3 passed` after confirming the V1 metrics stage still works with explicitly authorized live notebook sessions/fakes.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py::test_appended_system_cells_are_visible_before_execution tests/test_notebooks.py::test_live_notebook_session_reuses_kernel_for_appended_cells tests/test_notebooks.py::test_live_notebook_appended_execution_requires_policy tests/test_notebooks.py::test_live_notebook_appended_policy_rejects_unlisted_marvis_kind tests/test_notebooks.py::test_live_notebook_session_rejects_appended_cells_by_default tests/test_pipeline_v2.py::test_v1_validation_appended_policy_matches_generated_cell_kinds -q`: `6 passed` after replacing naked live appended-cell permission with an explicit V1 validation policy and generated-cell-kind allowlist.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py tests/test_pipeline_v2.py -q`: `51 passed` after the explicit appended-cell policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py tests/test_join_engine.py tests/test_data_ops_pack.py tests/test_data_join_api.py -q`: `33 passed` after adding `ArtifactUnitOfWork` and migrating join result registration to the reusable artifact+DB/audit callback boundary.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes with `git diff --check`, ruff, and `node --check` after the artifact/directory transaction migration.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step-run recovery update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the API/DB/frontend split updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `api_data_payloads.py` extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the failure-envelope retry contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the failure-envelope `error_kind` propagation update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the evidence lineage update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO high-risk control guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the frontend failure retry contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight diagnostics update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the step confirmation state guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO gate-risk policy update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the plugin/draft `process:spawn` sandbox guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the modeling setup panel expansion.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` renderer extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelingSetupPanel` controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `task-types.js` create-dialog config extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `CreateTaskDialog` controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_v2_plan_rail_fetch_errors_are_visible_and_retryable tests/test_frontend_static_v2.py::test_plan_rail_matches_validation_stepper_with_nested_subtasks tests/test_frontend_static_v2.py::test_plan_rail_retry_step_posts_edited_inputs tests/test_frontend_static_v2.py::test_plan_rail_artifact_preview_is_wired_to_real_app_shell tests/test_frontend_static_v2.py::test_strategy_and_vintage_welcome_cards_are_enabled tests/test_frontend_static_v2.py::test_agent_message_meta_label_includes_plan_step_context -q`: `6 passed` after extracting `PlanRailController` into `static/js/v2/plan_rail_controller.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py -q`: `224 passed` after updating app-shell/static contracts for the extracted `PlanRailController`.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the `PlanRailController` extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `PlanRailController` extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `240 passed` after extracting agent conversation/timeline pure helpers into `static/js/agent-conversation-view.js`.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the conversation helper extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the conversation helper extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `240 passed` after extracting task workspace storage/greeting helpers into `static/js/task-workspace-state.js`.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the task workspace state helper extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the task workspace state helper extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_screen_table_renderer_and_manual_branch_are_wired tests/test_frontend_screen_table.py::test_screen_confirm_posts_edited_selection tests/test_frontend_screen_table.py::test_screen_threshold_adjust_posts_structured_params tests/test_frontend_screen_table.py::test_screen_table_only_latest_gate_is_interactive tests/test_frontend_screen_table.py::test_screen_threshold_adjust_rejects_empty_and_posts_valid_payload -q`: `5 passed` after extracting the feature-screen renderer/controller into `static/js/v2/screen_gate_controller.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `240 passed` after updating the app-shell/static contracts for the extracted screen gate controller.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the screen gate controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the screen gate controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_dedup_picker_renderer_and_branch_are_wired tests/test_frontend_screen_table.py::test_dedup_picker_posts_strategies tests/test_frontend_screen_table.py::test_join_c1_form_renderer_and_submit_are_wired tests/test_frontend_screen_table.py::test_join_gate_controller_posts_c1_and_dedup_payloads -q`: `4 passed` after extracting C1/dedup data-join gate rendering and submit handling into `static/js/v2/join_gate_controller.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `242 passed` after updating app-shell/static contracts for the extracted join gate controller.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the join gate controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the join gate controller extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_screen_table_renderer_and_manual_branch_are_wired tests/test_frontend_screen_table.py::test_screen_table_only_latest_gate_is_interactive tests/test_frontend_static_v2.py::test_driver_manual_analysis_omits_plan_overview_messages -q`: `3 passed` after extracting manual driver analysis branching into `static/js/v2/driver_manual_analysis.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `242 passed` after updating frontend contracts for the extracted manual analysis module.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the manual analysis extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the manual analysis extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_driver_gate_confirm_controller_renders_and_posts_confirm tests/test_frontend_static_v2.py::test_agent_mode_creation_and_stepper_hide_manual_buttons -q`: `2 passed` after extracting generic driver gate confirmation into `static/js/v2/driver_gate_confirm.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_v2_workflow_create.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py -q`: `243 passed` after updating app-shell/static contracts for the extracted driver gate confirm controller.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the driver gate confirm extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver gate confirm extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_driver_report_download_frontend.py -q`: `1 passed` after making driver-report downloads use an absolute `/api/...` URL and updating the PlanRailController affordance test.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the driver-report download URL fix.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py::test_agent_messages_can_list_after_cursor tests/test_agent_api.py::test_agent_messages_endpoint_supports_after_id_cursor -q`: `2 passed` after adding optional bounded pagination and `has_more` metadata to Agent message listing.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `86 passed` after preserving the existing Agent API contract while adding optional message-list limits.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent message pagination update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py::test_list_tasks_returns_created_tasks tests/test_api_v2.py::test_list_tasks_returns_array tests/test_api_v2.py::test_list_tasks_supports_limit_offset_headers -q`: `3 passed` after adding optional `limit/offset` pagination and `X-Result-*` headers to task listing.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `66 passed` after preserving `/api/tasks` list-body compatibility while adding task-list pagination.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the task-list pagination update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_db.py::test_draft_repository_round_trips_note_draft_and_run tests/test_drafts_api.py::test_list_and_detail_draft_endpoints -q`: `2 passed` after adding optional draft-list `limit/offset`, `has_more`, and effective pagination metadata.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_api.py tests/test_drafts_db.py tests/test_drafts_registry.py tests/test_drafts_promotion.py -q`: `37 passed` after preserving draft registry/run/promotion behavior with paginated listing.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plugin_db.py::test_plugin_repository_writes_audit_records tests/test_modeling_db.py::test_modeling_repository_round_trips_experiment_and_artifact -q`: `2 passed` after adding optional repository-level `limit/offset` pagination to audit and model-artifact lists.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plugin_db.py tests/test_modeling_db.py tests/test_db.py tests/test_orch_db.py -q`: `59 passed` after preserving existing DB repository behavior with the new audit/artifact pagination parameters.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Agent Memory router/support extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `PluginRepository` audit helper de-duplication.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `ModelDeliveryPanel` metadata/rendering update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the model-report readiness merge into delivery metadata.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the editable modeling setup controls update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the modeling setup algorithm-family guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the modeling override-guidance and optional Playwright smoke update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the broader browser smoke update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after adding executable model-selection policy gates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1794 passed, 2 warnings` after fixing the theme-module test contract and live-notebook session parameter.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload tests/test_frontend_screen_table.py::test_model_delivery_panel_renders_selection_and_actions -q`: `4 passed` after adding JSON/Markdown model-card artifacts to G5 delivery.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after adding a real app-shell modeling-task smoke that loads `index.html`, task list, plan rail, and model-delivery message metadata in Chromium.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_orch_templates.py tests/test_plan_driver.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py tests/test_db.py tests/test_modeling_db.py -q`: `134 passed` after the model-card and real-task smoke update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the model-card and real-task smoke update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_artifact.py tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py -q`: `81 passed` after surfacing calibrated-score PMML limitations in capabilities, readiness, model cards, and approval packages.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_policy_selection_prefers_compliant_scorecard_candidate tests/test_modeling_pack.py::test_selection_policy_rejects_partial_scorecard_monotonicity tests/test_modeling_pack.py::test_selection_policy_rejects_zero_monotone_constraints tests/test_plan_driver.py::test_model_delivery_policy_signals_warn_on_partial_scorecard_monotonicity -q`: `4 passed` after tightening scorecard/monotonicity policy evidence so partial scorecard directions and all-zero tree constraints no longer pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_plan_driver.py tests/test_frontend_screen_table.py -q`: `77 passed` after the stricter scorecard/monotonicity policy fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_artifact.py tests/test_modeling_pack.py::test_calibrate_model_records_diagnostics_and_report_sheet tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload -q`: `17 passed` after the native Booster edge fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the native Booster edge fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py -q`: `30 passed` after extending AUTO risk flags to halt on strategy/vintage `manual_review` and `approval` domain markers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py tests/test_agent_gate_contracts.py tests/test_plan_driver.py::test_screen_gate_carries_structured_screen_payload tests/test_plan_driver.py::test_plan_overview_message_carries_gate_envelope tests/test_plan_driver.py::test_resume_structured_screen_control_rejects_stale_or_missing_gate_token -q`: `37 passed` after the AUTO domain-risk fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO domain-risk fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_plan.py tests/test_frontend_v2_plan_confirm.py tests/test_frontend_static_v2.py::test_plan_rail_retry_step_posts_edited_inputs tests/test_frontend_v2_api_state.py -q`: `31 passed` after adding schema-driven retry fields to both the modular V2 plan view and main plan rail while preserving JSON textarea fallback.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the schema-driven retry fields update.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the latest modeling/AUTO/retry updates, covering the current real-browser Chromium smoke suite.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_metric_overview_uses_semantic_visual_tokens tests/test_frontend_static_v2.py::test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable -q`: `2 passed` after centralizing metric/report/KPI/ROC chart tokens.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `211 passed` after the visual-token contract update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the metric/report/KPI/ROC visual-token update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py -q`: `212 passed` after tokenizing generic download actions, send-stop composer controls, disabled/focus states, and user-message composer bubbles.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the generic action/composer token update, confirming the current Chromium smoke suite still loads the app shell, task list, plan rail, and modeling delivery metadata.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_screen_table.py::test_modeling_panels_use_semantic_model_visual_tokens tests/test_frontend_screen_table.py::test_modeling_setup_weight_picker_renderer_and_branch_are_wired tests/test_frontend_screen_table.py::test_model_delivery_panel_renderer_and_branch_are_wired -q`: `3 passed` after centralizing modeling setup/delivery panel state tokens.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py::test_modeling_panels_use_semantic_model_visual_tokens -q`: `213 passed` after replacing older V2 workbench/manual-gate fallback colors with semantic tokens and moving welcome badge/toast colors into global tokens.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py tests/test_frontend_shell_static.py tests/test_frontend_v2_memory.py -q`: `222 passed` after extracting the Agent Memory management panel controller into `static/js/agent-memory-panel.js`.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after confirming the browser shell still loads after the Agent Memory panel split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_drafts.py::test_draft_tools_panel_controller_wires_api_and_render_state tests/test_frontend_static_v2.py::test_system_settings_center_keeps_extensions_without_runtime_workbench tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports -q`: `4 passed` after extracting the Draft Tools management panel controller into `static/js/draft-tools-panel.js`.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after confirming the browser shell still loads after the Draft Tools panel split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1901 passed, 4 skipped, 2 warnings` after the Draft Tools panel split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_strategy_db.py tests/test_strategy_pack.py tests/test_orch_templates.py::test_strategy_analysis_template_marks_backtest_decision_point -q`: `37 passed` after extracting `StrategyRepository` into `marvis/repositories/strategy.py` while preserving `marvis.db` compatibility.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_api.py tests/test_drafts_db.py tests/test_drafts_registry.py tests/test_drafts_tools.py tests/test_drafts_promotion.py tests/test_drafts_sandbox.py tests/test_plugin_db.py tests/test_db.py -q`: `91 passed` after extracting `DraftRepository` into `marvis/repositories/drafts.py` while preserving `marvis.db` compatibility and same-transaction plugin-promotion status updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1902 passed, 4 skipped, 2 warnings` after the DraftRepository split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plugin_db.py tests/test_plugin_registry.py tests/test_plugin_hooks.py tests/test_plugin_loader.py tests/test_plugin_runner.py tests/test_app_security.py tests/test_api_v2.py -q`: `160 passed` after extracting `PluginRepository` into `marvis/repositories/plugins.py` while preserving `marvis.db` compatibility and same-transaction draft-promotion plugin registration.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1903 passed, 4 skipped, 2 warnings` after the PluginRepository split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_repository_registry.py tests/test_modeling_prepare.py tests/test_modeling_pack.py::test_reject_inference_audit_failure_rolls_back_dataset_and_file -q`: `31 passed` after extracting `DatasetRepository` into `marvis/repositories/datasets.py` while preserving `marvis.db` compatibility and dataset/join audit rollback behavior.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_db.py tests/test_modeling_experiment.py -q`: `13 passed` after extracting `ModelingRepository` into `marvis/repositories/modeling.py` while preserving `marvis.db` compatibility, experiment/artifact audit rollback behavior, and `TrainConfig.drop_nan_labels` round-trip persistence.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_db.py tests/test_modeling_experiment.py tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_modeling_recipes.py -q`: `80 passed, 2 warnings` after the ModelingRepository split also preserved validation handoff status/audit rollback and broader modeling pack behavior.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1906 passed, 4 skipped, 2 warnings` after the ModelingRepository split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_orch_db.py tests/test_orch_subagent.py -q`: `53 passed` after extracting shared audit row/list helpers into `marvis/repositories/audit.py` while preserving `marvis.db._write_audit_row` monkeypatch compatibility for Task/Plan repository rollback tests.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1906 passed, 4 skipped, 2 warnings` after the shared audit helper split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after extracting `TaskRepository` into `marvis/repositories/tasks.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_api_v2.py tests/test_modeling_handoff.py tests/test_recovery.py -q`: `125 passed` after preserving task CRUD/status/report/message behavior and TaskRepository audit rollback compatibility through the new module.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py tests/test_agent_memory_api.py tests/test_orch_api.py -q`: `58 passed` after confirming plan/runtime readers still work without the old task helpers in `db.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1907 passed, 4 skipped, 2 warnings` after the TaskRepository split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after extracting `PlanRepository` into `marvis/repositories/plans.py` and reducing `marvis/db.py` to a compatibility entrypoint.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_orch_db.py tests/test_orch_subagent.py tests/test_orch_executor.py tests/test_plan_driver.py tests/test_orch_api.py tests/test_plan_phase_and_listing.py -q`: `120 passed` after preserving plan/subagent/executor/driver/API behavior through the new module.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_recovery.py tests/test_agent_memory_api.py tests/test_agent_memory_store.py -q`: `73 passed` after confirming `marvis.db` compatibility exports and `_now` remain available to task, recovery, and Agent Memory callers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1908 passed, 4 skipped, 2 warnings` after the PlanRepository split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py tests/test_api_v2.py tests/test_memory_policy.py -q`: `173 passed` after extracting validation-agent stop/rerun/cancellation helpers into `marvis/agent/validation_service.py` while preserving `marvis.api` compatibility monkeypatch paths.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_orch_api.py tests/test_frontend_static_v2.py::test_agent_mode_creation_and_stepper_hide_manual_buttons tests/test_frontend_static_v2.py::test_agent_message_meta_label_includes_plan_step_context -q`: `22 passed` after the validation service extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the validation service extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1908 passed, 4 skipped, 2 warnings` after the validation service extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py::test_modeling_manifest_registers_expected_tools tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload -q`: `13 passed` after moving validation handoff and challenger/backtest material package activation behind `ArtifactUnitOfWork.finalize`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1908 passed, 4 skipped, 2 warnings` after the handoff/backtest `ArtifactUnitOfWork` directory-staging migration.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py tests/test_api_v2.py tests/test_memory_policy.py -q`: `174 passed` after extracting the validation-agent job loop into `marvis/agent/validation_runner.py` while keeping `marvis.api` monkeypatch-compatible stage wrappers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1909 passed, 4 skipped, 2 warnings` after the validation-agent job-loop extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_memory_consolidation.py tests/test_memory_policy.py -q`: `16 passed` after making hook-driven Agent Memory consolidation respect `auto_distill=False` while leaving manual consolidation available.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1910 passed, 4 skipped, 2 warnings` after the Agent Memory consolidation policy gate.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_memory_distill_db.py tests/test_memory_determinism_guard.py -q`: `8 passed` after making memory distillation retrieval deterministic for same-score ties.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_feature_pack.py tests/test_feature_iv.py tests/test_feature_encode.py -q`: `22 passed` after making WOE encoding fit bins/maps on non-holdout rows while applying the encoding to all rows.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1912 passed, 4 skipped, 2 warnings` after the WOE non-holdout fit update.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed`, confirming the local Playwright browser smoke is available in `py_313`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_recipes.py tests/test_modeling_reject_inference.py tests/test_modeling_pack.py -q`: `61 passed, 2 warnings` after making sample-weight diagnostics and training require strictly positive weights and omitting zero-weight fuzzy reject-inference rows.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `87 passed` after making AUTO report-conclusion confirmation use the same audited repository path as manual confirmation.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_join_engine.py tests/test_data_join_api.py -q`: `51 passed` after validating JOIN dedup strategies at both engine and structured gate-control boundaries.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `88 passed` after moving validation-agent evidence loading and overfitting enrichment into `marvis/agent/validation_evidence.py` while preserving `marvis.api` compatibility aliases.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1915 passed, 4 skipped, 2 warnings` after the latest WOE, sample-weight, AUTO audit, JOIN dedup strategy, and validation-evidence extraction commits.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1921 passed, 4 skipped, 2 warnings` after Agent Memory pagination, direct memory-reference message lookup, validation-message helper extraction, and additional artifact/registry rollback coverage.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_notebooks.py tests/test_pipeline_v2.py tests/test_api_v2.py`: `131 passed` after making staged V1 validation notebook/reproducibility/metrics default to isolated full-notebook worker execution, adding cancelled-worker handling, preserving the explicit legacy live-session compatibility path, and allowing terminal metrics reruns to use the isolated fallback when no live kernel exists.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1925 passed, 4 skipped, 2 warnings` after the isolated staged-validation path update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_agent_api.py`: `88 passed` after moving validation-agent message metadata/streaming helpers into `marvis/agent/validation_messages.py` while keeping `marvis.api` compatibility wrappers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the validation-message helper extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_agent_api.py`: `89 passed` after moving validation-agent stage implementations into `marvis/agent/validation_stages.py` with explicit dependency injection so `marvis.api` monkeypatch compatibility remains intact.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_api.py tests/test_orch_templates.py tests/test_modeling_recipes.py::test_build_modeling_proposal_derives_continuous_target_type_from_regressor tests/test_modeling_recipes.py::test_build_modeling_proposal_uses_explicit_target_type_default_recipe tests/test_modeling_recipes.py::test_build_modeling_proposal_stays_binary_for_classification_recipes tests/test_modeling_recipes.py::test_build_modeling_proposal_derives_multiclass_target_type_from_recipe -q`: `24 passed` after making default selection policies target-type-aware so continuous/multiclass workflows do not hard-block on PMML/handoff requirements they cannot satisfy.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py::test_artifact_unit_of_work_commits_artifacts_after_db_context_succeeds tests/test_artifacts_transactional.py::test_artifact_unit_of_work_rolls_back_artifact_when_db_context_fails tests/test_data_repository_registry.py::test_dataset_repository_connection_scoped_join_result_rolls_back_with_transaction tests/test_data_repository_registry.py::test_join_engine_uses_connection_scoped_artifact_unit_of_work tests/test_data_repository_registry.py::test_join_engine_rolls_back_result_dataset_and_file_when_executed_audit_fails -q`: `5 passed` after making join-result registration use a SQLite connection-scoped artifact unit of work.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_api.py::test_modeling_business_materials_flow_into_report_and_delivery -q`: `1 passed` after adding source-dir business-column and feature-dictionary auto-detection, preserving business passthrough columns through `make_split`, injecting task project metadata into report slots, and proving the report/delivery chain creates available business sections plus model-card/approval/handoff outputs.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_recipes.py -q`: `27 passed, 2 warnings` after the modeling setup inference update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_api.py -q`: `10 passed` after the real business-material smoke was added to the conversational modeling API suite and expanded to no-split auto-split preservation.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py::test_post_training_action_skips_native_tree_booster_without_failing -q`: `2 passed` after extending G5 native Booster skip coverage from LightGBM to both LightGBM and XGBoost.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_api.py::test_modeling_business_materials_without_split_survive_auto_split tests/test_modeling_api.py::test_modeling_business_materials_flow_into_report_and_delivery tests/test_modeling_handoff.py::test_post_training_action_skips_native_tree_booster_without_failing -q`: `4 passed` after preserving business and sample-weight passthrough columns in the setup-time auto-split derived dataset and fixing XGBoost native Booster experiment metadata.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_api.py tests/test_modeling_recipes.py tests/test_modeling_handoff.py -q`: `45 passed, 2 warnings` after the subagent review fixes.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py`: `13 passed` after moving validation handoff and challenger/backtest task creation onto connection-scoped `TaskRepository` writes inside `ArtifactUnitOfWork.finalize_with_connection`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_modeling_api.py`: `52 passed` after validating the broader modeling delivery path.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_db.py tests/test_modeling_db.py tests/test_modeling_handoff.py`: `48 passed` after confirming the regular task/modeling repository compatibility paths still pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the connection-scoped handoff/backtest update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_frontend_static_v2.py::test_agent_mode_hides_empty_scan_section_until_evidence_or_messages tests/test_frontend_static_v2.py::test_agent_conversation_panel_layout_and_message_shapes`: `2 passed` after extracting conversation transcript DOM mounting into `static/js/agent-conversation-mount.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_frontend_shell_static.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `247 passed` after confirming the frontend split still satisfies static app-shell, V2, screen-table, and API-state contracts.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the conversation mount extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the conversation mount extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py::test_post_training_action_skips_catboost_with_specific_pmml_guidance tests/test_modeling_handoff.py`: `14 passed` after adding CatBoost native-only G5 delivery guidance coverage.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py tests/test_modeling_api.py`: `53 passed` after confirming broader modeling delivery contracts still pass with the CatBoost edge fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the CatBoost G5 edge fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1929 passed, 4 skipped, 2 warnings` after the connection-scoped handoff/backtest update, conversation mount extraction, and CatBoost G5 edge fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_frontend_shell_static.py::test_empty_workspace_greeting_changes_by_local_time tests/test_frontend_shell_static.py::test_workspace_greeting_logic_runs_under_node tests/test_frontend_shell_static.py::test_task_workspace_view_shell_logic_runs_under_node`: `3 passed` after moving workspace greeting/current-task shell DOM updates into `static/js/task-workspace-view.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_frontend_shell_static.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py`: `248 passed` after confirming frontend static contracts still pass with the workspace-view split.
+  - `CONDA_NO_PLUGINS=true MARVIS_RUN_PLAYWRIGHT_SMOKE=1 conda run -n py_313 python -m pytest tests/test_frontend_playwright_smoke.py -q`: `4 passed` after the workspace-view split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the workspace-view split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_db.py::test_modeling_repository_rolls_back_artifact_params_when_audit_fails tests/test_modeling_pack.py::test_calibrate_model_records_diagnostics_and_report_sheet tests/test_modeling_pack.py::test_calibrate_model_rolls_back_files_and_meta_when_audit_fails -q`: `3 passed` after moving calibration file/meta/params persistence behind a connection-scoped artifact unit-of-work.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_db.py tests/test_modeling_pack.py -q`: `38 passed` after confirming broader modeling pack and repository behavior still pass with the calibration UOW boundary.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the calibration UOW update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_pipeline_v2.py::test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session tests/test_pipeline_v2.py::test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook tests/test_pipeline_v2.py::test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_explicit_allow tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled -q`: `5 passed` after making legacy live notebook execution require a second explicit allow flag and making isolated metrics close stale live sessions.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_notebooks.py tests/test_pipeline_v2.py tests/test_api_v2.py -q`: `132 passed` after confirming notebook, pipeline, and API behavior still pass with the legacy live-session double opt-in.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the legacy live-session double opt-in update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_pack.py::test_selection_policy_string_false_is_not_enabled tests/test_modeling_pack.py::test_selection_policy_normalizes_string_thresholds_and_rejects_nonfinite tests/test_modeling_pack.py::test_selection_policy_rejects_missing_feature_and_psi_evidence tests/test_modeling_pack.py::test_selection_policy_prefers_weighted_oot_psi_when_available -q`: `4 passed` after accepting string policy thresholds while rejecting non-finite OOT PSI thresholds.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_pack.py -q`: `31 passed` after confirming the broader modeling pack still passes with finite policy-threshold normalization.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1933 passed, 4 skipped, 2 warnings` after the workspace-view split, calibration UOW boundary, legacy live-session double opt-in, and finite modeling-policy threshold updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_frontend_shell_static.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py tests/test_frontend_v2_api_state.py -q`: `249 passed` after moving task snapshot DOM rendering, empty-meta copy, and copy-path tile markup into `static/js/task-workspace-view.js`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1934 passed, 4 skipped, 2 warnings` after the task snapshot renderer extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py::test_post_training_action_skips_mlp_without_creating_validation_task tests/test_modeling_handoff.py -q`: `9 passed` after adding the MLP/DNN native-only G5 delivery fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py::test_post_training_action_writes_sample_weight_governance_artifacts -q`: `1 passed` after adding structured sample-weight governance to model-card, approval-package, and monitoring-policy artifacts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py -q`: `10 passed` after the sample-weight governance artifact update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_handoff.py tests/test_modeling_pack.py::test_train_models_supports_catboost_and_sample_weight_col tests/test_plan_driver.py::test_done_message_carries_post_training_delivery_payload -q`: `12 passed` after confirming downstream modeling delivery contracts still consume the updated post-training payload.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the sample-weight governance artifact update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_pack.py::test_selection_policy_rejects_missing_feature_and_psi_evidence tests/test_plan_driver.py::test_driver_n_trials_only_adjust_requires_fresh_modeling_gate_token tests/test_modeling_handoff.py::test_post_training_action_skips_malformed_scorecard_without_pmml_failure -q`: `3 passed` after blocking selection-policy candidates with missing feature-count/OOT-PSI evidence, making `n_trials`-only modeling setup adjusts require a fresh gate token, and aligning scorecard PMML capability checks with real WOE export validation.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py::test_driver_modeling_setup_adjust_reruns_spec_and_downstream_screen tests/test_plan_driver.py::test_driver_n_trials_only_adjust_requires_fresh_modeling_gate_token tests/test_plan_driver.py::test_driver_sample_weight_adjust_rejects_unknown_candidate_without_reset tests/test_modeling_pack.py::test_policy_selection_prefers_compliant_scorecard_candidate tests/test_modeling_pack.py::test_selection_policy_rejects_partial_scorecard_monotonicity tests/test_modeling_pack.py::test_selection_policy_rejects_zero_monotone_constraints tests/test_modeling_pack.py::test_selection_policy_rejects_missing_feature_and_psi_evidence tests/test_modeling_handoff.py -q`: `18 passed` after the AUTO/modeling edge-fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_artifact.py tests/test_modeling_handoff.py tests/test_modeling_pack.py::test_policy_selection_prefers_compliant_scorecard_candidate tests/test_modeling_pack.py::test_selection_policy_rejects_missing_feature_and_psi_evidence tests/test_plan_driver.py::test_driver_n_trials_only_adjust_requires_fresh_modeling_gate_token -q`: `21 passed` after rechecking the shared scorecard PMML validator against artifact export and post-training delivery paths.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_artifact.py -q`: `9 passed` after adding LGBMClassifier/XGBClassifier `sklearn2pmml` export and `pypmml` probability round-trip coverage alongside LR, scorecard, and native-Booster PMML boundaries.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py -q`: `34 passed` after blocking AUTO `confirm` on explicit high-risk gate flags and broad downstream reset scopes, including production/champion deployment markers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_autodrive.py tests/test_agent_gate_contracts.py tests/test_plan_driver.py::test_screen_gate_carries_structured_screen_payload tests/test_plan_driver.py::test_plan_overview_message_carries_gate_envelope tests/test_plan_driver.py::test_resume_structured_screen_control_rejects_stale_or_missing_gate_token -q`: `41 passed` after confirming the stricter AUTO gate-risk policy still fits the typed gate contracts and current PlanDriver gate metadata.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_api_state.py tests/test_frontend_v2_join.py -q`: `22 passed` after making the V2 join API wrapper default to background execution and adding join-review polling for accepted `job_id` responses while preserving explicit synchronous override.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py tests/test_data_join_api.py tests/test_data_ops_pack.py tests/test_join_engine.py -q`: `37 passed` after confirming direct data/join APIs, data_ops pack, and the join engine still pass with the frontend async-default contract.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py::test_get_latest_job_returns_filtered_status_and_error tests/test_api_v2.py::test_latest_task_job_endpoint_exposes_job_error_without_traceback tests/test_frontend_v2_api_state.py tests/test_frontend_v2_join.py -q`: `25 passed` after adding the latest task-job status endpoint and surfacing JOIN background job failures in the V2 join review component.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_db.py tests/test_api_v2.py -q`: `107 passed` after confirming the latest-job API preserves existing task/DB contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1980 passed, 4 skipped, 2 warnings` in `545.56s` before the final small-risk pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_v2_join.py tests/test_frontend_static_v2.py::test_busy_state_is_scoped_to_selected_task_for_parallel_tasks tests/test_frontend_static_v2.py::test_delete_task_blocks_active_jobs_instead_of_stale_running_status tests/test_data_api.py::test_join_api_execute_coerces_async_flags tests/test_orch_api.py::test_plan_run_records_cancelled_job_when_executor_returns_cancelled -q`: `23 passed` after binding JOIN polling to the accepted job id, adding plan/join busy states, coercing async flags, and mapping cancelled plan jobs to cancelled.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py tests/test_orch_api.py tests/test_frontend_v2_join.py tests/test_frontend_v2_api_state.py tests/test_frontend_static_v2.py -q`: `285 passed` after the same final small-risk pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after extracting `PlanMessageComposer` for plan overview, gate, done, review, and failure-envelope messages.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO/modeling edge-fixture update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the AUTO high-risk confirm guard update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1871 passed, 4 skipped, 2 warnings` after splitting `n_trials` gate validation across modeling setup and tuning gates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after extracting gate-control validation into `marvis/agent/gate_response_adapter.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the `GateResponseAdapter` extraction.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py::test_training_attach_failure_rolls_back_unattached_artifact_files -q`: `2 passed` after adding regression coverage for `train_model` / `train_models` attach failures rolling back unattached artifact files and restoring `model_meta.json`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py tests/test_pipeline_v2.py::test_metrics_stage_success_captures_model_experience_memory tests/test_pipeline_v2.py::test_metrics_stage_status_failure_rolls_back_outputs_report_and_images tests/test_pipeline_v2.py::test_metrics_stage_reruns_isolated_notebook_even_with_stale_live_session tests/test_pipeline_v2.py::test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook tests/test_pipeline_v2.py::test_metrics_stage_cancel_returns_to_executed_status -q`: `23 passed` after staging metrics outputs and transactionally removing stale report artifacts with rollback on final status failure.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_explicit_allow tests/test_notebooks.py -q`: `59 passed` after confirming pipeline, notebook, and metrics endpoint compatibility with staged metrics outputs.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifacts_transactional.py tests/test_pipeline_v2.py tests/test_recovery.py tests/test_v1_compat_pack.py -q`: `77 passed` after confirming the legacy live `run_pipeline` path also stages metrics outputs and does not promote partial metrics files when final metrics status persistence fails.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_modeling_pack.py tests/test_modeling_handoff.py -q`: `50 passed` after adding selection-policy requirements, metric thresholds, violations, and override reasons to model-card JSON/Markdown so policy thresholds are visible outside approval packages.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_report.py tests/test_modeling_training_dataset.py -q`: `26 passed` after reusing `TrainingDataset` as a cached report/scoring backend for repeated scored-dataset reads.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the cached report/scoring backend update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after extracting gate adjust/replan execution into `marvis/agent/gate_execution_adapter.py` and shared plan/turn DTO helpers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_pack.py -q`: `28 passed` after making selection-policy OOT PSI gates prefer `weighted_psi_oot_vs_train` when sample-weight metrics are available.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_pack.py -q`: `33 passed` after adding `selection_policy.metric_thresholds` plus common shortcuts such as `min_oot_ks` and `max_oot_rmse`, so final-model selection can enforce configurable business performance thresholds.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1936 passed, 4 skipped, 2 warnings` after the task snapshot renderer, PlanDriver message composer, and modeling policy-threshold updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plan_driver.py -q`: `38 passed` after moving screen selection and join dedup gate controls into `GateExecutionAdapter`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_data_repository_registry.py::test_dataset_registry_register_existing_on_connection tests/test_data_ops_pack.py::test_data_ops_derived_frame_registration_failure_rolls_back_staged_file tests/test_data_ops_pack.py::test_data_ops_derived_frame_connection_failure_rolls_back_promoted_file tests/test_data_ops_pack.py::test_data_ops_clean_format_and_dedup_rows_via_runner -q`: `4 passed` after moving data_ops derived dataset registration onto the connection-scoped artifact unit-of-work path.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_modeling_prepare.py tests/test_modeling_pack.py::test_reject_inference_tool_registers_augmented_dataset tests/test_modeling_pack.py::test_reject_inference_audit_failure_rolls_back_dataset_and_file -q`: `14 passed` after moving modeling prepare/reject-inference derived parquet registration onto connection-scoped artifact unit-of-work paths.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 pytest tests/test_plugin_loader.py tests/test_plugin_runner.py -q`: `42 passed` after requiring untrusted plugin/draft code to declare `process:spawn` before starting child processes.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_branding_and_task_list_routes_are_served_from_dedicated_routers tests/test_api_v2.py::test_list_tasks_returns_array tests/test_api_v2.py::test_list_tasks_supports_limit_offset_headers tests/test_api_v2.py::test_create_then_get_task -q`: `4 passed` after extracting `/api/branding` and task-list GET routes into dedicated routers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py tests/test_branding.py tests/test_app_security.py -q`: `89 passed` after confirming the router split preserves task create/list compatibility and branding access-control behavior.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the branding/task-list router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_branding_and_task_list_routes_are_served_from_dedicated_routers tests/test_api_v2.py::test_create_then_get_task tests/test_api_v2.py::test_list_tasks_returns_array tests/test_api_v2.py::test_list_tasks_supports_limit_offset_headers tests/test_api_v2.py::test_delete_task_removes_repo_record_and_task_dir tests/test_api_v2.py::test_delete_task_rejects_active_job_even_when_status_is_stale -q`: `6 passed` after moving task create/detail/delete into `marvis/routers/tasks.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `67 passed` after the task router split preserved the legacy API test fixture contract.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py tests/test_branding.py tests/test_app_security.py tests/test_orch_api.py -q`: `109 passed` after confirming the task/branding routers still work through the real app factory.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py tests/test_data_join_api.py -q`: `14 passed` after confirming task child data/join routes are not shadowed by `/api/tasks/{task_id}`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the task create/detail/delete router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_api.py -q`: `10 passed` after moving dataset upload/list/preview and join propose/get/confirm/execute routes into `marvis/routers/data.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_data_join_api.py tests/test_data_api.py -q`: `15 passed` after the data router split preserved the data-join conversational flow and direct HTTP join APIs.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py tests/test_orch_api.py tests/test_app_security.py -q`: `101 passed` after confirming the data router split still works through the real app factory and API compatibility tests.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the data router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_artifact_api.py -q`: `4 passed` after moving artifact download/preview routes into `marvis/routers/artifacts.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_app_security.py tests/test_api_v2.py::test_create_then_get_task -q`: `15 passed` after confirming the artifact router still works through the real app factory and local-only security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the artifact router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_material_upload_preserves_folder_paths_under_workspace tests/test_api_v2.py::test_material_upload_rejects_paths_outside_upload_directory tests/test_api_v2.py::test_material_upload_route_is_served_from_dedicated_router -q`: `3 passed` after moving material upload routes into `marvis/routers/materials.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `68 passed` after preserving the API v2 fixture contract with the material upload router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_app_security.py::test_remote_read_does_not_expose_settings_or_branding -q`: `1 passed` after confirming the material router remains behind the same local-only middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the material upload router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1893 passed, 4 skipped, 2 warnings` after the current router-extraction series and compatibility alias fix.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_report_download_routes_are_served_from_dedicated_router tests/test_api_v2.py::test_report_download_endpoint_returns_generated_word tests/test_api_v2.py::test_analysis_download_endpoint_returns_generated_excel tests/test_api_v2.py::test_analysis_download_allows_failed_report_stage_with_generated_excel tests/test_api_v2.py::test_download_endpoints_ignore_stale_outputs_before_current_stage -q`: `5 passed` after moving report/analysis/driver-report download and preview routes into `marvis/routers/reports.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py tests/test_feature_analysis_api.py::test_feature_report_is_downloadable_after_run tests/test_agent_api.py::test_agent_report_preview_requires_confirmed_agent_conclusions tests/test_agent_api.py::test_agent_report_generation_requires_confirmed_conclusions -q`: `72 passed` after preserving report download/preview behavior through the dedicated reports router.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_artifact_api.py -q`: `6 passed` after confirming the router split preserves API structure and artifact routes.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the reports router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_scan_route_is_served_from_dedicated_router tests/test_api_v2.py::test_scan_task_dispatches_task_scanned_hook tests/test_api_v2.py::test_scan_endpoint_reports_notebook_contract_errors_before_execution tests/test_api_v2.py::test_scan_endpoint_translates_multiple_missing_rmc_contract_fields tests/test_api_v2.py::test_scan_endpoint_returns_422_when_source_dir_exceeds_limits -q`: `5 passed` after moving `/api/tasks/{task_id}/scan` into `marvis/routers/scans.py` and extracting scan helpers into `marvis/api_scan_helpers.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `70 passed` after preserving the API v2 fixture contract with the scan router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py::test_agent_start_message_runs_only_material_scan_and_waits_for_continue tests/test_agent_api.py::test_agent_continue_from_scanned_runs_only_notebook_stage -q`: `2 passed` after keeping the validation-agent scan-stage compatibility alias.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py::test_agent_reproducibility_summary_prompt_excludes_other_stage_evidence -q`: `1 passed` after confirming scanned validation-agent tasks still skip duplicate scan work.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_app_security.py -q`: `16 passed` after confirming the scan router still works through the real app factory and security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_evidence_route_is_served_from_dedicated_router tests/test_api_v2.py::test_task_evidence_endpoint_reads_execution_artifacts tests/test_api_v2.py::test_task_evidence_endpoint_reads_notebook_stage_reproducibility_artifact -q`: `3 passed` after moving `/api/tasks/{task_id}/evidence` into `marvis/routers/evidence.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_scan_endpoint_returns_v2_artifacts_and_updates_status -q`: `1 passed` after confirming scan output still feeds the evidence endpoint.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `71 passed` after preserving the API v2 fixture contract with the evidence router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_app_security.py -q`: `16 passed` after confirming the evidence router still works through the real app factory and security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_report_field_routes_are_served_from_dedicated_router tests/test_api_v2.py::test_report_fields_default_training_description_uses_task_algorithm tests/test_api_v2.py::test_report_fields_get_and_put_round_trip_revision tests/test_api_v2.py::test_report_fields_include_metric_values_from_completed_output tests/test_api_v2.py::test_report_fields_include_ordered_metric_table_sections_from_completed_output -q`: `5 passed` after moving report-field GET/PUT into `marvis/routers/report_fields.py` and extracting shared report-field payload helpers.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `72 passed` after preserving the API v2 fixture contract with the report-fields router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `86 passed` after confirming agent chat evidence still receives report-field metric/text values through the shared builder.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_app_security.py -q`: `16 passed` after confirming the report-fields router still works through the real app factory and security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_stage_cancel_routes_are_served_from_dedicated_router tests/test_api_v2.py::test_cancel_notebook_endpoint_requests_running_notebook_stop tests/test_api_v2.py::test_cancel_notebook_endpoint_rejects_non_running_task tests/test_api_v2.py::test_cancel_metrics_endpoint_requests_running_metrics_stop tests/test_api_v2.py::test_cancel_metrics_endpoint_rejects_non_running_metrics_task tests/test_api_v2.py::test_cancel_report_endpoint_requests_report_stop tests/test_api_v2.py::test_cancel_report_endpoint_rejects_without_active_report_job -q`: `7 passed` after moving notebook/metrics/report cancel controls into `marvis/routers/stage_controls.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `73 passed` after preserving the API v2 fixture contract with the stage-controls router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_app_security.py -q`: `16 passed` after confirming the stage-controls router still works through the real app factory and security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_validation_stage_routes_are_served_from_dedicated_router tests/test_api_v2.py::test_notebook_metrics_and_report_endpoints_dispatch_stages tests/test_api_v2.py::test_notebook_endpoint_claims_running_before_dispatching_stage tests/test_api_v2.py::test_metrics_endpoint_claims_computing_before_dispatching_stage tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel tests/test_api_v2.py::test_metrics_endpoint_allows_retry_after_metrics_stage_failure tests/test_api_v2.py::test_metrics_endpoint_allows_retry_after_legacy_sample_column_failure tests/test_api_v2.py::test_metrics_endpoint_rejects_non_metrics_failure tests/test_api_v2.py::test_legacy_validate_endpoint_runs_staged_pipeline_for_cli_compatibility tests/test_api_v2.py::test_validate_rejects_terminal_task_without_dispatching_pipeline tests/test_api_v2.py::test_validate_accepts_tasks_without_feature_columns -q`: `11 passed` after moving notebook/metrics/report/validate execution routes into `marvis/routers/validation_stages.py` and extracting stage job helpers into `marvis/api_stage_helpers.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py -q`: `74 passed` after preserving the API v2 fixture contract with the validation-stage router split.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py -q`: `86 passed` after preserving validation-agent stage execution through the compatibility aliases.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_structure.py tests/test_app_security.py -q`: `16 passed` after confirming the validation-stage router still works through the real app factory and security middleware.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m ruff check marvis/api.py marvis/app.py marvis/routers/validation_agent.py tests/test_api_v2.py`: passes after moving validation-agent HTTP endpoints into `marvis/routers/validation_agent.py`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_validation_agent_routes_are_served_from_dedicated_router tests/test_agent_api.py::test_agent_messages_endpoint_supports_after_id_cursor tests/test_agent_autodrive.py::test_agent_mode_autodrives_join_to_completion -q`: `3 passed` after confirming the new validation-agent router preserves message pagination and driver AUTO entrypoints.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/pipeline.py marvis/routers/validation_stages.py tests/test_pipeline_v2.py tests/test_api_v2.py`: passes after tightening the legacy live notebook path to require `MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION=1`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_legacy_live_notebook_execution_requires_process_env tests/test_pipeline_v2.py::test_notebook_stage_writes_reproducibility_evidence_before_metrics tests/test_pipeline_v2.py::test_metrics_stage_marks_sample_column_failure_as_metrics_failure tests/test_pipeline_v2.py::test_metrics_stage_success_captures_model_experience_memory tests/test_pipeline_v2.py::test_metrics_stage_status_failure_rolls_back_outputs_report_and_images tests/test_pipeline_v2.py::test_metrics_stage_cancel_returns_to_executed_status tests/test_pipeline_v2.py::test_staged_metrics_use_live_notebook_sample_without_rerunning_notebook tests/test_pipeline_v2.py::test_completed_task_cannot_rerun_metrics_after_live_notebook_session_closed tests/test_pipeline_v2.py::test_full_pipeline_marks_word_failures_as_report_stage_failures tests/test_pipeline_v2.py::test_legacy_run_pipeline_metrics_status_failure_does_not_promote_outputs tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_explicit_allow tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_legacy_live_mode_without_process_env tests/test_api_v2.py::test_metrics_endpoint_rejects_terminal_rerun_without_live_kernel_when_isolated_disabled -q`: `13 passed` after covering the legacy live notebook triple opt-in and terminal metrics rerun guard.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py tests/test_api_v2.py tests/test_notebooks.py -q`: `137 passed` after confirming the broader pipeline, API, and notebook contracts still pass with the triple opt-in guard.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the legacy live notebook triple opt-in update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1949 passed, 4 skipped, 2 warnings` after the legacy live notebook triple opt-in update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check tests/test_notebooks.py tests/test_plugin_runner.py`: passes after adding Notebook worker secret-stripping regression coverage.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py::test_notebook_worker_env_strips_host_secrets tests/test_plugin_runner.py::test_tool_runner_starts_worker_with_explicit_utf8_encoding -q`: `2 passed` after checking plugin and notebook worker envs strip host API keys.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_notebooks.py tests/test_plugin_runner.py -q`: `59 passed` after confirming Notebook/plugin worker behavior still passes with the secret-stripping fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the Notebook worker secret-stripping regression fixture.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/pipeline.py tests/test_pipeline_v2.py tests/test_notebooks.py`: passes after making the Arrow sample fallback subprocess use the restricted Notebook worker env.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py::test_load_sample_falls_back_to_selected_python_for_arrow_files tests/test_notebooks.py::test_notebook_worker_env_strips_host_secrets -q`: `2 passed` after asserting the selected-Python sample fallback does not inherit host API keys.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_pipeline_v2.py tests/test_notebooks.py -q`: `60 passed` after confirming pipeline fallback and Notebook worker behavior still pass with the restricted env.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the selected-Python sample fallback restricted-env update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/repositories/drafts.py tests/test_drafts_db.py marvis/api_data_payloads.py tests/test_data_api.py tests/test_frontend_v2_join.py && node --check marvis/static/js/v2/join_review.js`: passes after the draft status TOCTOU guard and JOIN synthetic-aggregate warning update.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_db.py::test_draft_repository_rejects_stale_status_update tests/test_data_api.py::test_join_api_marks_aggregate_dedup_as_synthetic tests/test_frontend_v2_join.py::test_join_review_renders_diagnostics_warnings_and_forces_dedup -q`: `3 passed` after covering stale draft status updates and JOIN aggregate-dedup warnings.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_drafts_db.py tests/test_drafts_promotion.py tests/test_drafts_sandbox.py tests/test_data_api.py tests/test_data_join_api.py tests/test_frontend_v2_join.py tests/test_frontend_screen_table.py::test_dedup_picker_posts_strategies tests/test_frontend_screen_table.py::test_join_gate_controller_posts_c1_and_dedup_payloads -q`: `55 passed` after confirming draft, direct data/JOIN API, direct join review, and Agent dedup controls still pass.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the draft TOCTOU, JOIN aggregate warning, and modeling roadmap freshness updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check`: passes with `1952 passed, 4 skipped, 2 warnings` in `530.04s` after the draft TOCTOU guard, JOIN synthetic-aggregate warning, and modeling roadmap freshness updates.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/agent/turn_handlers.py tests/test_agent_autodrive.py tests/test_plan_driver.py tests/test_frontend_screen_table.py && node --check marvis/static/js/v2/driver_gate_confirm.js`: passes after binding generic gate confirmation and AUTO confirming actions to the current `expected_step_id`.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py::test_resume_plain_confirm_rejects_stale_gate_token_when_supplied tests/test_agent_autodrive.py::test_agent_autodrive_binds_gate_step_token_to_confirming_actions tests/test_frontend_screen_table.py::test_driver_gate_confirm_controller_renders_and_posts_confirm -q`: `4 passed` after covering stale-token rejection for plain confirms, frontend confirm payloads, and AUTO confirm/replan token binding.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_plan_driver.py tests/test_agent_autodrive.py tests/test_frontend_screen_table.py -q`: `90 passed` after confirming broader driver, AUTO, and gate-control frontend behavior still passes.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 ruff check marvis/api_scan_helpers.py tests/test_api_scan_helpers.py && CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_scan_helpers.py -q`: `1 passed` after moving scan evidence files and scan-stage cleanup behind `ArtifactUnitOfWork` rollback on status persistence failure.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_scan_endpoint_returns_v2_artifacts_and_updates_status tests/test_api_v2.py::test_scan_endpoint_reports_notebook_contract_errors_before_execution tests/test_api_v2.py::test_scan_endpoint_returns_422_when_source_dir_exceeds_limits -q`: `3 passed` after preserving scan endpoint behavior through the staged execution-directory swap.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_api_v2.py::test_scan_task_dispatches_task_scanned_hook tests/test_api_v2.py::test_scan_endpoint_translates_multiple_missing_rmc_contract_fields -q`: `2 passed` after confirming scan hooks and RMC contract translation still work.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_agent_api.py::test_agent_auto_accept_runs_all_remaining_stages_without_continue_prompts tests/test_agent_api.py::test_agent_rerun_scan_resets_steps_without_deleting_history -q`: `2 passed` after confirming Agent scan/rerun flows still use the staged scan path correctly.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/platform-confirm.js`: passes after extracting the platform confirmation modal controller.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports tests/test_frontend_static_v2.py::test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm tests/test_frontend_static_v2.py::test_platform_confirm_controller_resolves_confirm_and_cancel -q`: `4 passed` after covering the extracted platform confirmation controller and package/static contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the platform confirmation controller extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/dialogs.js`: passes after moving backdrop-click dialog dismissal into the dialog module.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_dialogs_close_when_clicking_backdrop tests/test_frontend_static_v2.py::test_dialog_backdrop_dismissal_closes_only_open_backdrop_clicks -q`: `2 passed` after covering extracted backdrop dismissal behavior.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the dialog backdrop dismissal extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/dialogs.js`: passes after moving material-upload selection text/rendering into the dialog module.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_static_v2.py::test_create_dialog_moves_material_source_to_bottom_segment tests/test_frontend_static_v2.py::test_material_upload_selection_renderer_summarizes_files -q`: `2 passed` after covering material-upload empty, file-list, folder-count, and DOM status rendering.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the material-upload status renderer extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/toast.js`: passes after extracting the coming-soon toast controller.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports tests/test_frontend_static_v2.py::test_strategy_and_vintage_welcome_cards_are_enabled tests/test_frontend_static_v2.py::test_coming_soon_toast_controller_reuses_node_and_resets_timer -q`: `4 passed` after covering the extracted toast controller and package/static contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the toast controller extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/focus-ring.js`: passes after extracting the form-control focus-ring guard.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports tests/test_frontend_static_v2.py::test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls tests/test_frontend_static_v2.py::test_form_control_focus_ring_guard_handles_pointer_and_label_focus -q`: `4 passed` after covering the extracted focus-ring guard and package/static contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the focus-ring guard extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/layout-resize.js`: passes after extracting layout width persistence and resize handling.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 python -m pytest tests/test_frontend_shell_static.py::test_app_entry_is_split_into_frontend_modules tests/test_package_data.py::test_static_es_module_files_exist_for_declared_imports tests/test_frontend_static_v2.py::test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions tests/test_frontend_static_v2.py::test_sidebar_brand_title_stays_on_one_line tests/test_frontend_static_v2.py::test_layout_resize_controller_restores_drags_and_persists_widths -q`: `5 passed` after covering the extracted layout resize controller and package/static contracts.
+  - `CONDA_NO_PLUGINS=true conda run -n py_313 scripts/check --skip-pytest`: passes after the layout resize controller extraction and plan update.
+  - `node --check marvis/static/app.js && node --check marvis/static/js/metric-tables.js && node --check marvis/static/js/precision-consistency.js && node --check marvis/static/js/step-checker.js`: passes after the ARCH-11 mechanical split extracting the metric-table/curve renderers, the score-precision-consistency chart helpers, and the shared step-checker glyph.
+  - `/opt/miniconda3/envs/py_313/bin/python -m pytest tests/test_frontend_shell_static.py tests/test_frontend_smoke.py tests/test_frontend_static_v2.py tests/test_frontend_screen_table.py tests/test_driver_report_download_frontend.py tests/test_project_identity.py tests/test_app_security.py tests/test_frontend_v2_api_state.py tests/test_frontend_v2_artifact.py tests/test_frontend_v2_capability.py tests/test_frontend_v2_drafts.py tests/test_frontend_v2_plugin.py tests/test_frontend_v2_skill.py tests/test_package_data.py -q`: `350 passed` after covering the extracted metric-tables/precision-consistency/step-checker modules and package/static contracts (baseline 350).
+
+## Executive Summary
+
+V2 is materially stronger than the original runtime: PlanDriver is the common execution path, modeling has real recipes and PMML/report/handoff tools, evidence output versioning exists, plugin/tool started checkpoints exist, and the old settings-level V2 workbench has been removed from the UI.
+
+It is not ready to call "complete" yet. The main remaining gap is not one isolated bug; it is that several capabilities are working as primitives but are not yet productized as reliable, typed, user-facing workflows. The highest-value next work is:
+
+1. Finish gate adapters, stale-token coverage, and structured failure/retry UX on top of the new `GateEnvelope`/`FailureEnvelope` base. The failure envelope now flows through the plan API into retry panels, and retry panels now render schema-driven fields with a JSON fallback; deeper per-tool schema/adapter registries remain.
+2. Broaden AUTO coverage and safety tests around the new structured `confirm|adjust|replan|clarify|halt` path.
+3. Finish the remaining modeling productization with the native/export edge-case fixtures and broader domain-policy coverage. Real business-material smoke now exists for conversational modeling: source-dir business columns and feature dictionary are auto-detected, preserved through existing and auto-generated split frames, and verified through report/delivery outputs. JSON and Markdown model cards, approval packages, monitoring policies, prior Champion comparison, PMML/native delivery metadata, PMML-backed challenger/backtest packages, stricter scorecard/monotonicity policy fixtures, native LightGBM/XGBoost Booster, CatBoost, and MLP/DNN skip coverage, and the current Playwright Chromium smoke now exist.
+4. Add a deeper DB+file `UnitOfWork` over the staged artifact stores and recovered `StepRunLedger`.
+5. Continue deeper `api.py`, `db.py`, and `app.js` decomposition after the first stable splits. Low-coupling routes have started moving out of `api.py`: `/api/branding` now lives in `marvis/routers/branding.py`; task list/create/detail/delete now live in `marvis/routers/tasks.py`; dataset upload/list/preview and join propose/get/confirm/execute now live in `marvis/routers/data.py`; artifact download/preview now lives in `marvis/routers/artifacts.py`; material uploads now live in `marvis/routers/materials.py`; report/analysis/driver-report download and preview routes now live in `marvis/routers/reports.py`; task scan now lives in `marvis/routers/scans.py`; task evidence now lives in `marvis/routers/evidence.py`; report-field GET/PUT now lives in `marvis/routers/report_fields.py`; notebook/metrics/report cancel controls now live in `marvis/routers/stage_controls.py`; notebook/metrics/report/validate execution routes now live in `marvis/routers/validation_stages.py`; validation-agent messages, report-draft/confirm, start/stop/summarize, and driver-turn HTTP endpoints now live in `marvis/routers/validation_agent.py`; validation-agent job-loop orchestration now lives in `marvis/agent/validation_runner.py`; validation-agent message metadata/streaming helpers now live in `marvis/agent/validation_messages.py`; validation-agent stage implementations now live in `marvis/agent/validation_stages.py`. `api.py` still holds compatibility wrappers, LLM/model resolution, route registration, and legacy aliases.
+6. Keep CI and local `scripts/check` green while making the remaining large refactors.
+
+## 2026-06-29 Follow-up Review Implementation Update
+
+The follow-up review confirmed several earlier concerns were still real and fixed them in the current working tree:
+
+- Persisted plan step outputs/evidence are now redacted before storage; sensitive JSON-style keys and bearer tokens are masked while alphanumeric business ids such as join plan ids are preserved.
+- Stale structured dedup controls now require `expected_step_id`; old or missing dedup gate tokens are rejected instead of applying to the current gate accidentally.
+- Multi-file modeling now reuses the C1 file-role/target confirmation gate before creating the `modeling_with_join` plan. The previous behavior guessed anchor/features from heuristics and immediately started modeling.
+- PMML export now receives the explicit modeling target column, so a sample-weight column that appears before the label cannot be misidentified as the PMML target.
+- Automatic experiment selection now prefers delivery-ready candidates when any candidate supports the requested post-training path, instead of choosing solely by metric.
+- `post_training_action` has a dedicated renderer so export/handoff success, skip, and reason states are visible in the conversation.
+- `AUTO` gate formatting now includes modeling setup controls such as sample-weight candidates.
+- Transactional artifact rollback now restores a previous final file if promotion already replaced it and a later failure occurs.
+- Step-run recovery now handles the crash window where a succeeded run/output version exists but the step row has not yet been updated.
+- Create-task tier values now match backend capability tiers (`autonomous`, not the stale `aggressive` value), and the create dialog follows the globally selected tier by default.
+- CI now installs from `uv.lock`, uses a real diff range, and `scripts/check` falls back to checking `HEAD` when the configured diff base is unavailable.
+- `scripts/release_push.py` now accepts supported prerelease tags such as `V2.0.0-alpha.1` and writes Python metadata in PEP 440 form such as `2.0.0a1`.
+- Continuation update after commit `0b54507b`:
+  - The real `app.js` workspace shell now imports and mounts `artifact_view.js`; right-rail plan steps with `output_ref` render a `查看输出` action into `#artifactPanel`, so dataset/metrics/artifact refs are no longer only covered by isolated module tests.
+  - AUTO decisions now pass a deterministic safety policy before reaching `PlanDriver`: `adjust` may only operate controls explicitly declared by the current `GateEnvelope`; undeclared parameters such as expensive tuning changes are converted to `halt`.
+  - Screen gates now explicitly declare a `selection` control, so AUTO can safely return feature selections only at gates that expose that control.
+  - Draft code safety scanning now includes AST checks for dangerous imports and file APIs such as `Path.read_text()`, closing a previously noted draft sandbox escape before subprocess execution.
+  - Failure messages now carry a richer `FailureEnvelope`: retryability, editable input JSON schema with current defaults, stale token, and the exact failed/downstream steps that a retry will reset.
+  - Step evidence now records tool version, manifest hash, source dataset refs, artifact refs, input hash/summary, parent output refs, seed, and renderer hint in one persisted envelope.
+  - AUTO adjust now has a deterministic low-risk control allowlist: undeclared controls still halt, and declared high-risk controls such as expensive tuning budgets or post-training handoff/export actions also halt for human review.
+  - Failed plan steps returned by the plan API now include `failure_envelope`; the main right rail and modular V2 plan view both use its editable input defaults and reset-scope metadata in retry panels, and now render schema-derived retry fields for string/number/integer/boolean/enum/object/array inputs while preserving the JSON textarea fallback.
+  - Modeling setup now diagnoses sample-weight candidates for numeric validity, missingness, range, mean, feature exclusion, and exposes those diagnostics in gate metadata, front-end controls, renderer tables, and AUTO prompts.
+  - Step confirmation is now guarded at the repository write boundary: only steps still persisted as `awaiting_confirm` can set `confirmed = 1`; stale or non-gate confirm calls return API 409 and record the spawned job as failed instead of silently mutating a pending/failed step.
+  - AUTO safety policy now also reads `GateEnvelope.risk_flags` and `downstream_reset_policy`; `confirm`/`adjust`/`replan` decisions halt when a gate declares handoff/export/destructive/manual-review/production deployment risk or a broad reset scope/count, even if the requested control itself is otherwise low risk.
+  - The modeling setup gate now renders a real setup panel rather than only a weight picker: it stays visible without weight candidates, shows target type, selected algorithms, primary tuning recipe, candidate feature count, tuning trials, metric policy, algorithm/PMML support, split/OOT counts and warnings, feeds the same context into AUTO prompts, and its renderer plus setup-adjust controller are extracted to `static/js/v2/modeling_setup_panel.js`. Target type, algorithms, tuning trials, and sample weight can now be adjusted through structured controls; structural changes require a human override reason and rerun the spec plus downstream screening. Family-mismatch recipes such as `lgb_regressor`/`lgb_multiclass` are selectable when changing target type, and invalid target/algorithm combinations are blocked before submission.
+  - Model comparison, final experiment selection, and post-training delivery outputs now carry a shared `model_delivery` metadata payload; `static/js/v2/model_delivery_panel.js` renders selected experiment, candidate metrics, stability/feature-count/calibration/delivery business signals, model-report readiness/section coverage, PMML/native/handoff readiness, action status, artifacts, and skip/unsupported states in both manual analysis and agent-message views.
+  - Final small-risk pass: `join_review.js` now ignores latest JOIN jobs whose id does not match the accepted `job_id`, the shell recognizes `active_job_kind` values `join` and `plan`, JOIN async flags coerce string booleans such as `"false"` correctly, and plan jobs returned as `PlanStatus.CANCELLED` are recorded as cancelled rather than succeeded.
+
+Items confirmed still not complete and therefore still part of the plan:
+
+- OS-level sandboxing is not complete, but the default V1 validation path no longer depends on a long-lived live notebook kernel. Plugin/draft tools and full-notebook validation execution have subprocess/resource-limit isolation; the plugin/draft worker file guard now covers direct OS rename/replace/link/symlink APIs as well as `Path`/`shutil` writes; staged V1 notebook, reproducibility, and metrics execution now run through isolated prepared notebooks by default, including terminal metrics reruns when no live kernel exists. The live keep-alive appended-cell path remains as a triple-opt-in legacy compatibility mode (`notebook_isolated_execution=False` plus `allow_legacy_live_notebook_execution=True` plus `MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION=1`) guarded by policy plus the V1 generated-cell allowlist, and isolated metrics close stale live sessions before worker reruns.
+- DB plus filesystem writes are staged and recoverable for many high-risk artifact paths. `ArtifactUnitOfWork` now supports SQLite connection-scoped finalization, and join result registration, route-level raw dataset uploads, ordinary dataset upload registration, data_ops clean/dedup derived dataset registration, modeling prepare outputs, reject-inference augmented samples, Excel multi-sheet upload registration, validation handoff packages, V1 metrics outputs/model meta, and V1 report docx/images use that boundary; a full repository-wide `UnitOfWork` is still not complete across all tool execution.
+- `api.py` and `app.js` remain large after the first splits; `db.py` is now a thin compatibility entrypoint plus `_now`. `turn_handlers.py`, `validation_runner.py`, `validation_messages.py`, `api_data_payloads.py`, `api_task_helpers.py`, `api_report_helpers.py`, `api_report_field_helpers.py`, `api_scan_helpers.py`, `api_stage_helpers.py`, `agent_memory/api_support.py`, `routers/agent_memory.py`, `routers/branding.py`, `routers/tasks.py` for base task list/create/detail/delete, `routers/data.py` for dataset/join APIs, `routers/artifacts.py` for artifact download/preview, `routers/materials.py`, `routers/reports.py` for report/analysis/driver-report download and preview routes, `routers/scans.py`, `routers/evidence.py`, `routers/report_fields.py`, `routers/stage_controls.py`, `routers/validation_stages.py`, `routers/validation_agent.py`, `repositories/strategy.py`, `repositories/drafts.py`, `repositories/plugins.py`, `repositories/datasets.py`, `repositories/modeling.py`, `repositories/audit.py`, `repositories/tasks.py`, `repositories/plans.py`, `db_schema.py`, `theme.js`, `task-types.js`, `create-task-dialog.js`, renderers, gate payloads, and adjust specs are good first cuts, not the final architecture.
+- AUTO report-conclusion confirmation now uses `update_agent_report_conclusions_with_audit`, matching manual confirmation so automatically generated final-report text remains governed and rollback-safe.
+- Structured JOIN dedup controls and `JoinEngine.confirm_join_spec` now reject unsupported dedup strategies before a spec is marked confirmed, so invalid client/AUTO input cannot defer failure to execute time.
+- The frontend now has richer modeling setup and model delivery/readiness panels, including editable setup controls, setup override guidance, core business signals, scorecard/monotonicity/approval policy signals, executable policy-decision status/violations/override reasons, lightweight Node DOM-structure smoke, and optional Playwright desktop/mobile smoke for setup/delivery panels, the real welcome shell, modeling create dialog, plan rail, screen selector table, light/dark startup paths, and a real app-shell modeling task with task list, plan rail, and delivery metadata. The modeling pack now enforces `select_experiment.selection_policy` for PMML/handoff, scorecard preference, monotonicity, feature count, OOT PSI, configurable metric thresholds such as `min_oot_ks` / `max_oot_rmse`, and override reasons. `post_training_action` writes JSON evidence, human-readable Markdown approval packages and JSON/Markdown model cards that show the configured policy requirements, metric thresholds, violations, and override reasons, versioned monitoring-policy JSON/Markdown artifacts, prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, and can create a PMML-backed challenger/backtest validation task package with JSON/Markdown plan evidence. Calibrated models now explicitly state when PMML does not include the calibration layer while validation handoff notebooks load `calibration.joblib`. Scorecard/monotonicity policy now rejects partial scorecard direction evidence and all-zero tree constraints; LGB/XGB sklearn-wrapper PMML exports now have `pypmml` probability round-trip coverage; native LightGBM/XGBoost Booster plus CatBoost plus MLP/DNN artifacts now have G5 skip/model-card coverage; and the real business-material smoke now verifies source business columns/dictionaries through existing-split and auto-split report/delivery outputs. The remaining gap is narrower export edge-case coverage and more end-to-end policy/report-language fixtures.
+- The visual token system is mostly complete for the primary workspace surfaces: semantic task/surface/status tokens, metric/report/KPI/ROC chart tokens, modeling setup/delivery state tokens, generic download action tokens, send-stop composer tokens, disabled/focus tokens, user-message bubble tokens, agent code-highlight tokens, settings/progress shadows, reusable status borders, welcome badge/toast tokens, and older V2 workbench/manual-gate token fallbacks now exist. Remaining local palettes are mostly intentional global token definitions, chart constants, brand colors, and a few legacy non-modeling utility/settings effects.
+- Broader AUTO safety fixtures now cover declared destructive/export/handoff/manual-review/approval risk flags and wide downstream resets. More fixtures are still useful for future extracted modeling setup panels and additional business-domain controls.
+
+Current merge stance: this branch is not "V2 complete" yet. It can become an intermediate PR only after full `scripts/check` from the final tree and a PR description that explicitly lists the remaining items above. Direct merge to `main` as a finished V2 release is still too risky.
+
+## Status Against Earlier 10 Recommendations
+
+| # | Item | Status | Evidence / Gap | Next Action |
+|---|---|---|---|---|
+| 1 | AUTO structured decisions | Mostly done | `auto_drive.py` now parses `confirm|adjust|replan|clarify|halt` with params, selection, dedup strategies, replan goal, clarifying question, confidence, current-gate allowed action enforcement, and a low-risk control allowlist that blocks expensive tuning and delivery actions even if declared by a gate. Safety fixtures now cover destructive/export/handoff, production/champion deployment flags, broad downstream resets, strategy/vintage manual-review or approval markers, and the `n_trials`-only modeling setup stale-token path; explicit high-risk gates block AUTO `confirm` as well as `adjust`/`replan`. | Add more fixtures for future extracted modeling setup gates and frontend stale-control paths. |
+| 2 | Modeling business lifecycle | Partial | `choose_modeling_spec`, `configure_tuning`, `select_experiment`, and `post_training_action` are now tools/template steps; `TrainingDataset` caching is wired for multi-recipe train; the modeling setup panel shows and edits target type, algorithms, tuning budget, and sample-weight controls with override reasons, target/algorithm family guards, and risk guidance for structural changes. Model comparison/final-selection/post-training outputs now render through a dedicated delivery readiness panel, including report section coverage, stability/calibration/feature-count/delivery signals, scorecard/monotonicity/approval policy signals, executable policy-decision status, violations, override reasons, and prior Champion comparison status. `select_experiment.selection_policy` now makes those final-model policy signals executable and marks the selected experiment for later Champion resolution: default delivery templates require PMML and validation handoff, hard policy can require scorecard/monotonicity/feature-count/PSI limits, configurable metric thresholds, and override reasons; stricter policy fixtures now reject partial scorecard monotonic directions, all-zero tree monotone constraints, missing feature-count/OOT-PSI/effect metric evidence when those policy limits are requested, non-finite OOT PSI/metric thresholds, and now prefer weighted OOT PSI evidence when sample-weight metrics exist. `post_training_action` now writes JSON evidence, human-readable Markdown approval packages that surface configured selection-policy requirements and metric thresholds, JSON/Markdown model cards, versioned monitoring-policy JSON/Markdown artifacts with target-type-aware threshold checks, optional prior Champion/Challenger comparison JSON/Markdown artifacts from explicit references or earlier selected experiments, exposes the Markdown artifacts in readiness/artifact lists while preserving JSON for machines, can create a PMML-backed challenger/backtest validation task package with copied sample/model/PMML/notebook/dictionary material plus JSON/Markdown plan evidence, and flags calibrated-score PMML limitations in capabilities/readiness/model cards/approval packages. Malformed scorecard WOE payloads now fail PMML readiness during capability precheck and skip delivery actions cleanly with model-card limitations instead of failing during export. Lightweight DOM smoke plus optional Playwright smoke cover setup/delivery, welcome/create, plan rail, screen table, and a real app-shell modeling task with delivery metadata. Conversational API smoke now covers real business materials: source-dir business columns and feature dictionaries flow into report sections and delivery artifacts, including no-split samples that require setup-time auto split. | Expand remaining native/export and end-to-end policy/report-language fixtures outside the approval package before calling the workflow complete. |
+| 3 | PlanDriver decomposition | Mostly done | Tool output renderers moved to `marvis/agent/renderers.py`; structured gate payload builders moved to `marvis/agent/gate_payloads.py`; gate dependency rendering moved to `marvis/agent/gate_adapters.py`; gate response/control validation moved to `marvis/agent/gate_response_adapter.py`; basic adjust parameter specs moved to `marvis/agent/adjust_specs.py`; adjust/replan execution, downstream reset logic, screen selection, and join dedup apply moved to `marvis/agent/gate_execution_adapter.py`; plan overview, gate, done, review, and failure-envelope message composition moved to `marvis/agent/plan_message_composer.py`; plan inspection helpers and driver turn DTOs now live outside `PlanDriver`. `PlanDriver` now owns the main turn loop and instruction-routing handoff. | Continue extracting remaining instruction-routing seams only where they reduce coupling. |
+| 4 | V2 turn orchestration out of `api.py` | Mostly done | Driver turn handlers for data join, feature analysis, modeling, strategy, vintage now live in `marvis/agent/turn_handlers.py`; data/join payload and preview masking helpers now live in `marvis/api_data_payloads.py`; shared task validation/hook helpers now live in `marvis/api_task_helpers.py`; report confirmation/path helpers now live in `marvis/api_report_helpers.py`; report-field payload helpers now live in `marvis/api_report_field_helpers.py`; scan helpers now live in `marvis/api_scan_helpers.py`; stage job and pipeline settings helpers now live in `marvis/api_stage_helpers.py`; Agent Memory payload/context/audit helpers now live in `marvis/agent_memory/api_support.py`, and `/api/agent-memory...` routes plus message-memory-reference lookup live in `marvis/routers/agent_memory.py`; `/api/branding` now lives in `marvis/routers/branding.py`; task list/create/detail/delete now live in `marvis/routers/tasks.py`; dataset upload/list/preview and join propose/get/confirm/execute now live in `marvis/routers/data.py`; artifact download/preview now lives in `marvis/routers/artifacts.py`; material upload now lives in `marvis/routers/materials.py`; report/analysis/driver-report download and preview routes now live in `marvis/routers/reports.py`; task scan now lives in `marvis/routers/scans.py`; task evidence now lives in `marvis/routers/evidence.py`; report-field GET/PUT now lives in `marvis/routers/report_fields.py`; notebook/metrics/report cancel controls now live in `marvis/routers/stage_controls.py`; notebook/metrics/report/validate execution routes now live in `marvis/routers/validation_stages.py`; validation-agent conversation/report-draft/start/stop/summarize and driver-turn HTTP endpoints now live in `marvis/routers/validation_agent.py`; validation-agent stop/rerun/cancellation helper logic now lives in `marvis/agent/validation_service.py`; validation-agent job-loop orchestration now lives in `marvis/agent/validation_runner.py`; validation-agent evidence loading, overfitting enrichment, message metadata/streaming helpers, and stage implementations now live in `marvis/agent/validation_evidence.py`, `marvis/agent/validation_messages.py`, and `marvis/agent/validation_stages.py`; `api.py` now keeps compatibility wrappers, LLM/tier resolution, route registration, and legacy aliases. | Continue reducing compatibility wrappers and route-registration coupling once external monkeypatch paths are no longer needed. |
+| 5 | Modeling data loaded once | Partial | `TrainingDataset` adapter and read-count tests exist for `train_models`; report generation now reuses the same adapter as a cached report/scoring backend after scored dataset creation, so score bands, OOT binning, univariate rows, split profile, and product-removal stress can share the already-scored frame. Some non-report auxiliary paths still read independently. | Expand adapter opportunistically to remaining auxiliary paths where profiling shows repeated reads. |
+| 6 | Evidence versioning | Mostly done | `EvidenceEnvelope` is stored beside raw output and includes input summary/hash, parent refs, source dataset refs, artifact refs, tool version, manifest hash, seed, and renderer hint; raw output compatibility is preserved. Running step-runs now recover persisted outputs or finalize as interrupted after restart. Runtime control/evidence sidecar files such as notebook progress snapshots, worker-returned step events, scan preview steps, metrics cancel markers, memory policy settings, and notebook success/failure/cancel/resource-limit logs now use sibling-temp atomic writes. `ArtifactUnitOfWork` now gives artifact promotion plus SQLite connection-scoped DB/audit commit semantics for the join result path, route-level raw dataset uploads, ordinary dataset upload registration, data_ops clean/dedup derived dataset registration, modeling prepare outputs, reject-inference augmented samples, Excel multi-sheet upload registration, calibrated-model file/meta/params persistence, validation handoff/backtest task materials, scan evidence execution-directory replacement plus scan-stage outputs/images cleanup, V1 metrics outputs/model meta, validation Excel/embedded image directories, and V1 report docx/images plus terminal task status; promoted raw-upload/parquet/calibration/meta/scan/metrics/validation-excel/docx/image files roll back when their paired registration/status/audit or writer step fails. | Expand the DB+file `UnitOfWork` to remaining multi-write modeling/reporting/artifact tools and keep expanding domain-specific lineage where tools expose richer refs. |
+| 7 | Sample-weight gate | Done | Backend detects/validates candidates, now requiring strictly positive numeric weights; create dialog distinguishes no weight vs explicit column; the extracted modeling setup panel renders detected candidates, diagnostics, target/split/tuning context, risk guidance, and posts structured setup adjusts that rerun `choose_modeling_spec` and downstream screening. Structural setup edits now require an override reason. Post-training writes structured sample-weight governance into model-card, approval-package, and monitoring-policy JSON/Markdown artifacts, including approval review items and monitoring defaults for availability/non-positive-rate/distribution drift. | Keep regression coverage green as modeling delivery evolves. |
+| 8 | Frontend task workspace split | Partial | Some V2 modules exist; theme handling is now in `static/js/theme.js`; create-dialog task type definitions live in `static/js/task-types.js`; dialog backdrop dismissal and material-source upload behavior/status rendering live in `static/js/dialogs.js`; coming-soon toast behavior lives in `static/js/toast.js`; form-control focus-ring suppression lives in `static/js/focus-ring.js`; layout width persistence and resize handling live in `static/js/layout-resize.js`; create-dialog behavior/payload/material upload/run-mode/algorithm/sample-weight/report-default control now lives in `static/js/create-task-dialog.js`; plan fetch/cache/retry/render, status mapping, right-rail artifact preview wiring, and plan-step lookup now live in `static/js/v2/plan_rail_controller.js`; agent conversation/timeline pure helpers now live in `static/js/agent-conversation-view.js`; transcript DOM mounting, bucket creation, frozen snapshot insertion, default order restoration, and streaming-message patching now live in `static/js/agent-conversation-mount.js`; manual driver analysis branching and latest screen-gate interactivity live in `static/js/v2/driver_manual_analysis.js`; generic manual gate confirm rendering/submit handling lives in `static/js/v2/driver_gate_confirm.js`; task selection storage, result-scroll storage, and greeting rules now live in `static/js/task-workspace-state.js`; current-task title/subtitle, task snapshot DOM rendering, empty-workspace class, greeting DOM write, and hero-layout scheduling now live in `static/js/task-workspace-view.js`; task search open/close/toggle state now lives in `static/js/task-search.js`; Agent Memory management state/list/detail/API actions now live in `static/js/agent-memory-panel.js`; Draft Tools management state/list/detail/API actions now live in `static/js/draft-tools-panel.js`; platform confirmation modal behavior now lives in `static/js/platform-confirm.js`; modeling setup renderer/controller live in `static/js/v2/modeling_setup_panel.js`; feature-screen renderer/controller live in `static/js/v2/screen_gate_controller.js`; data-join C1/dedup gate renderer/controllers live in `static/js/v2/join_gate_controller.js`; metric-overview table/KPI/trend/ROC renderers live in `static/js/metric-tables.js`; score-precision-consistency chart helpers live in `static/js/precision-consistency.js`; the shared step-status-checker glyph lives in `static/js/step-checker.js`; task/welcome tones, metric/report/KPI/ROC chart palettes, and modeling setup/delivery state palettes use semantic tokens. `app.js` still owns broader workspace/right-rail orchestration. | Continue extracting the DOM-owning `TaskWorkspace`. |
+| 9 | PMML manifest contract | Done | Manifest now advertises `lr/lgb/xgb/scorecard`, matching current PMML-supported list. | Keep regression test. |
+| 10 | CI gate | Done | `.github/workflows/ci.yml` and `scripts/check` exist; `docs/versioning.md` references the local gate. | Keep full CI green after remaining refactors. |
+
+## Code Review Findings
+
+### P0: Merge And Release Risk
+
+1. Automated CI was missing; it is now added.
+   - Impact: every PR/merge relies on local discipline; large refactors can silently break frontend syntax, pytest groups, or docs formatting.
+   - Implemented: `scripts/check` plus `.github/workflows/ci.yml` now run `git diff --check`, ruff, `node --check`, and pytest; `docs/versioning.md` documents the local command.
+   - Remaining acceptance: CI must pass on the final committed branch after all remaining refactors.
+
+2. Keep the branch reviewable with topic commits.
+   - Current state: tracked changes are being grouped into explicit commits; unrelated local untracked files remain outside this plan.
+   - Impact: final review and release risk stay manageable only if each remaining fix is committed and verified independently.
+   - Acceptance: `git status --short --untracked-files=no` is clean, then smoke/full checks are rerun from the committed tree.
+
+### P1: Agent Intelligence And Gate Contracts
+
+1. AUTO is now structured, but needs deeper safety coverage.
+   - Current behavior: `auto_drive.py` accepts bounded `confirm|adjust|replan|clarify|halt` decisions and only executes actions allowed by the current gate envelope.
+   - Remaining problem: AUTO can now carry structured fields, but future domain-specific gates still need fixtures proving which adjustments are safe, bounded, and non-destructive.
+   - Implemented:
+     - Define `AutoDecisionV2` with `action`, `reason`, `params`, `selection`, `dedup_strategies`, `replan_goal`, `clarifying_question`, `confidence`.
+     - Allow only actions present in the current `GateEnvelope.allowed_actions`.
+     - Add safety policy: AUTO may adjust low-risk thresholds within declared bounds; destructive, production/handoff/export, or broad-reset changes require halt/clarify and cannot be auto-confirmed.
+   - Remaining:
+     - Keep adding domain fixtures as new gate controls are extracted.
+   - Tests:
+     - Parse valid/invalid JSON.
+     - Disallow undeclared actions.
+     - Verify AUTO can adjust screen thresholds and halt on high-risk actions.
+
+2. Gate metadata now has a typed base, but adapters are still incomplete.
+   - Current behavior: gate messages still carry bespoke metadata such as `tables`, `screen`, `dedup`, and `output_refs`, plus a `gate_envelope` typed envelope.
+   - Problem: backend, frontend, and AUTO do not share one typed contract for allowed actions, stale controls, retryability, and rendering.
+   - Implemented: introduce `GateEnvelope`:
+     - `schema_version`, `kind`, `target_step_id`, `stale_token`.
+     - `source_output_refs`, `allowed_actions`, `controls`, `render_blocks`.
+     - `risk_flags`, `retry_policy`, `downstream_reset_policy`.
+   - Tests:
+     - Snapshot envelopes for plan overview, join C1/C2, feature screen, modeling setup/tune/train/compare/report, strategy, vintage.
+     - Frontend stale-gate tests for screen, dedup, and generic confirm.
+
+3. PlanDriver decomposition has started, but is not finished.
+   - Current behavior: the driver loop and adjust/replan logic remain in `plan_driver.py`; markdown/table renderers live in `marvis/agent/renderers.py`, and screen/dedup gate payload builders live in `marvis/agent/gate_payloads.py`.
+   - Problem: every new domain step increases risk of regressions in unrelated tasks.
+   - Implemented:
+     - `marvis/agent/gates/contracts.py`: `GateEnvelope`, `GateAction`, `GateControl`.
+     - `marvis/agent/renderers.py`: tool output to render blocks.
+   - Remaining:
+     - expand `marvis/agent/gate_adapters.py` into per-tool/per-step gate adapters.
+     - expand `marvis/agent/adjust_specs.py` into tool/step schema-driven specs.
+     - Leave `PlanDriver` as orchestration: start, resume, route instruction, persist messages.
+   - Acceptance: `PlanDriver` no longer imports task-specific screen/dedup/model renderer details.
+
+4. Failure and retry UX is not a first-class contract.
+   - Current behavior: failure transcript is mostly plain text with limited metadata; plan rail has retry UI.
+   - Problem: user and AUTO need one consistent contract for what is retryable, what inputs can be edited, how typed controls map back to JSON, and what downstream steps reset.
+   - Fix: add `FailureEnvelope` with `failed_step_id`, `error_kind`, `retryable`, `editable_input_schema`, `suggested_actions`, `stale_token`, `downstream_reset`.
+   - Tests: force tool failure, edit retry inputs, verify downstream reset and recovered completion.
+   - Current update: modular V2 plan view and main plan rail render schema-derived retry fields and submit typed values before falling back to raw JSON; failure envelopes now source `error_kind` from the latest failed/interrupted step-run ledger row instead of defaulting every failure to `execution`.
+
+### P1: Evidence, Transactions, And Runtime Safety
+
+1. Tool side effects now have a recoverable run ledger, but not full DB+file transactionality.
+   - Current behavior: executor records a `plan_step_runs` attempt before invocation, finalizes it after output storage, and startup/run recovery now closes in-flight step runs. If a persisted output version exists for the current running attempt, recovery attaches the latest output ref, marks the run succeeded, and completes post-checks without rerunning the tool. If no output exists, recovery marks the run interrupted and fails the step for explicit retry.
+   - Risk: the system is recoverable, but file side effects, output version storage, step state, and run finalization are still not one atomic unit across SQLite plus filesystem.
+   - Implemented:
+     - Add `step_runs` table with `run_id`, `step_id`, `attempt`, `started_at`, `tool_result_ref`, `side_effects`, `finalized_at`, `error_kind`.
+     - Record run start before invocation.
+   - Remaining:
+     - Finalize output version, step state, and run state in one SQLite transaction where possible.
+     - Continue expanding `ArtifactUnitOfWork.finalize_with_connection` to additional staged file plus DB commit paths.
+     - Surface interrupted runs in the plan rail as deterministic retry/repair state.
+   - Tests: done for crash after output ref before step update, no-output interruption, stale output after reset, and no unsafe replan/rerun on recovered running failure.
+
+2. File and DB writes still need recovery semantics, but the main artifact paths now use staged promotion.
+   - Current state: join execution output, route-level raw dataset uploads, ordinary dataset upload parquet outputs, data_ops clean/dedup derived outputs, modeling derived parquet/model/meta/PMML/calibration outputs, Excel multi-sheet upload parquet outputs, report scored parquet output, feature-analysis report XLSX, final xlsx reports, plugin install/promote directories, validation handoff materials, V1 metrics outputs/model meta, and V1 validation report docx/images now use staged file or directory promotion.
+   - Fix:
+     - Done for join execution output: add `TransactionalArtifactStore` with stage, promote, rollback, and orphan cleanup; `JoinEngine.execute_join_plan` writes to `.staging` and promotes only the final artifact.
+     - Done for upload ingestion: `/datasets/upload` writes raw uploads through `ArtifactUnitOfWork` and only retains the raw file after sheet validation and dataset registration succeed; ordinary `DatasetRegistry.register_from_upload` writes normalized upload parquet files through `ArtifactUnitOfWork`, registers the dataset row on the same SQLite connection when available, and rolls back staged or promoted parquet files when registration fails; Excel multi-sheet upload now stages every sheet parquet and registers all dataset rows on one shared SQLite connection before promoting files.
+     - Done for data_ops derived outputs: `clean_format` and `dedup_rows` write parquet files through staging, register derived datasets on a shared SQLite connection boundary when available, and roll back promoted parquet files if connection-scoped dataset insertion fails.
+     - Done for modeling derived parquet outputs: `prepare_modeling_frame` / `make_split` and `reject_inference` write through staging, register datasets/audits on a shared SQLite connection boundary when available, and roll back promoted parquet files if registration/audit fails.
+     - Done for report outputs: `model_report_scored.parquet`, feature-analysis report XLSX, validation Excel XLSX plus `excel_images`, `render_model_report`, and `render_minimal_model_report` write through staging.
+     - Done for model artifacts: native binaries, model meta, PMML export, and calibration payloads write through staged files with rollback on writer/validation failure; calibration now stages the calibration file plus both meta files and commits params/audit through a connection-scoped `ArtifactUnitOfWork`.
+     - Done for directory/report artifacts: plugin install and promoted draft plugin directories use `TransactionalDirectoryStore`; validation handoff and challenger/backtest material packages now use `ArtifactUnitOfWork` directory staging with backup restore on DB/audit failure, and their task/audit/status writes now run through connection-scoped `TaskRepository` callbacks inside the same artifact UOW boundary. V1 `run_report_stage` now stages `validation_report.docx` and `images/`, then promotes them with the terminal task-status update on a shared `TaskRepository` connection boundary.
+     - Done for startup reconciliation: `create_app` runs artifact recovery and stores the report in `app.state.artifact_recovery_report`; orphan `.staging` directories are removed, plugin backups are restored or cleaned by DB checksum, and validation handoff material directories are reconciled against validation task `source_dir`.
+     - Done for step-run reconciliation: executor recovery finalizes running step attempts as succeeded when the current run has a persisted output version, or interrupted when no output was persisted.
+     - Done for runtime sidecar writes: shared `write_text_atomic` / `write_json_atomic` helpers now cover notebook progress snapshots, worker-returned notebook step events, scan preview step JSON, metrics cancel markers, memory policy settings, and notebook success/failure/cancel/resource-limit logs.
+     - Done for SQLite-scoped UOW slices: `ArtifactUnitOfWork.finalize_with_connection` promotes staged artifacts, runs DB writes inside a repository connection context, rolls back promoted artifacts if the callback or DB commit fails, lets join execution register result datasets/plan status/audit on the same SQLite connection, and now covers ordinary dataset upload registration, Excel multi-sheet upload registration, data_ops clean/dedup, modeling prepare/reject-inference derived dataset registration, calibrated-model file/meta/params writes, validation handoff task/status/audit writes, challenger/backtest task/audit writes, scan evidence execution-directory replacement plus scan-stage output/image cleanup, and V1 report docx/images plus terminal task-status writes.
+     - Done for train-model attach failure: `train_model` and `train_models` keep the repository attach/audit transaction atomic and clean unattached model binaries/meta files while restoring the previous latest `model_meta.json` when attach fails.
+     - Done for metrics-stage outputs: metrics JSON/XLSX/pickle/log are written to a stage-work directory, `execution/model_meta.json` is written to a staged artifact path and consumed there by metrics generation, then all are promoted with final task status update; stale report docx/images and previous model meta are restored if status persistence fails. The explicit legacy live `run_pipeline` compatibility path reuses the same staged metrics/model-meta promotion before report generation.
+     - Remaining: expand connection-scoped DB+filesystem unit-of-work semantics to broader multi-write tool execution.
+   - Tests: done for store promote/rollback/orphan cleanup, sibling staged-file promotion, directory backup restore, writer failure rollback, protected file/directory removal rollback, plugin/draft audit-failure rollback, validation handoff audit-failure rollback, model artifact staging, app startup recovery, atomic sidecar write success/rollback, connection-scoped artifact+DB commit, connection failure rollback, rollback idempotence after finalize failure, join-result transaction rollback, route-level raw upload rollback on sheet-validation or dataset-registration failure, ordinary dataset upload rollback on connection-scoped dataset insertion failure, data_ops derived parquet rollback on connection-scoped dataset insertion failure, Excel multi-sheet upload rollback on connection-scoped dataset insertion failure, modeling prepare/reject-inference rollback on connection-scoped dataset/audit failure, train-model artifact attach failure rollback, feature-report XLSX save-failure rollback, validation Excel/image save-failure rollback, metrics-stage model-meta rollback on terminal status persistence failure, scan evidence/output/image rollback on status persistence failure, metrics-stage output/report/image rollback on terminal status persistence failure, V1 report docx/images rollback on terminal status persistence failure, and regression guards proving handoff/backtest no longer call the legacy task write methods.
+
+3. Evidence output refs are versioned but not semantically complete.
+   - Current behavior: `plan_step_output_versions` preserves versions and refs.
+   - Gap: missing normalized input snapshot, dataset ids, artifact paths, seed, parent refs, tool/plugin identity, manifest hash, and renderer hints.
+   - Fix:
+     - Add `EvidenceEnvelope` while preserving raw-output compatibility.
+     - Store `input_hash`, `input_summary`, `source_dataset_refs`, `artifact_refs`, `parent_output_refs`, `tool_name`, `tool_version`, `manifest_hash`, `random_seed`.
+   - Tests: v1 raw output can still load; v2 evidence can drive renderer and audit.
+
+4. Notebook/plugin sandboxing is not OS-level.
+   - Current state: plugin and draft tools run in one-shot subprocess workers with resource limits, timeout kill, network guard, process-spawn guard for non-builtin code, file guards for `Path`/`shutil` writes plus direct OS rename/replace/link/symlink APIs, and audited stdout/stderr tails. Full-notebook execution has an isolated worker with parent timeout kill, parent-side cancellation kill, and artifact preservation. Prepared notebooks can include MARVIS-generated system cells before execution, and staged V1 notebook/reproducibility/metrics now use that isolated prepared-notebook path by default; terminal metrics reruns can recompute through the isolated fallback when no live kernel exists. The live keep-alive notebook kernel path now requires `notebook_isolated_execution=False`, `allow_legacy_live_notebook_execution=True`, and `MARVIS_ALLOW_LEGACY_LIVE_NOTEBOOK_EXECUTION=1`; isolated metrics close stale live sessions before rerunning in the worker path. Appended-cell execution is opt-in per session, requires an explicit policy plus generated V1 validation cell-kind allowlist, and is protected by RSS monitoring/interrupt/shutdown rather than full subprocess session RPC.
+   - Fix:
+     - Done for plugin/draft tools: run in subprocess with memory/CPU/file-size limits, restricted worker environment, local-only network by default, `process:spawn` required before untrusted non-builtin code can start child processes, and guarded file APIs including direct OS rename/replace/link/symlink calls.
+     - Done for ordinary notebook execution: add `marvis.notebook_worker`, `run_notebook(..., isolated=True)`, worker error propagation, and parent timeout artifact preservation.
+     - Done for staged V1 validation defaults: run base notebook plus generated reproducibility/metrics cells inside isolated prepared notebooks, support cancellation of the worker from parent process, and rerun metrics from terminal states without requiring a preserved live kernel.
+     - Remaining for the compatibility live-session path: either replace keep-alive kernel mutation with a worker RPC protocol, or keep it as triple-opt-in legacy-only and disabled from safety-critical defaults.
+     - Add slow/OOM integration tests at the pipeline/job layer for the isolated staged validation path.
+
+### P1: Modeling Workflow And Business Closure
+
+1. G2 algorithm/task selection now has a typed backend step and editable UI controls.
+   - Current behavior: `choose_modeling_spec` normalizes target type, recipe family, eligible/disabled algorithms, metric policy, sample-weight policy, tuning budget, fixed params, and exposes a rendered gate table before feature screening.
+   - Current update: sample-weight candidates now render inside a fuller setup panel; changing the selected candidate posts structured `adjust_params.sample_weight_col` and reruns the modeling spec plus downstream screening. The panel also shows target type, split/OOT diagnostics, algorithm family, PMML support, tuning budget, metric policy, and warnings. The create dialog also distinguishes "no weight" from an explicit column.
+   - Current update: the same panel now lets users change target type, algorithm set, and tuning trials through structured controls. Target/algorithm/trial changes require an explicit reason, post `adjust_params`, and rerun `choose_modeling_spec` plus downstream screening under the current gate token. Target/algorithm family mismatches are blocked in the UI while still exposing regression/multiclass recipes when switching target type.
+   - Current update: model comparison, final selection, and post-training delivery now share a structured delivery-readiness panel for candidate metrics, selected experiment, PMML/native/handoff support, model-card/approval/monitoring artifacts, action status, artifacts, and unsupported/skip reasons.
+   - Current update: the new setup/delivery surfaces have lightweight DOM smoke plus optional Playwright smoke for setup/delivery, welcome/create, plan rail, screen table, and a real app-shell modeling task that loads task list, plan, and delivery metadata.
+   - Remaining problem: real business-material smoke now exists; remaining native/export and broader domain-policy fixtures still need coverage.
+   - Remaining fix:
+     - Done: expand scorecard/monotonicity/approval signals into enforceable scorecard policy gates, including partial scorecard-direction and all-zero tree-constraint failures.
+     - Keep the typed modeling spec as the single downstream contract.
+
+2. G3 tuning needs a typed control surface.
+   - Current behavior: tuning exists, but configuration is not a first-class gate.
+   - Fix:
+     - Add `configure_tuning` gate with skip/tune choice, search space, metric, time budget, sample weight usage, random seed, and agent recommendation.
+     - Allow AUTO to propose bounded changes, but require human confirmation for expensive searches.
+
+3. G4 model selection is automatic.
+   - Current behavior: `train_models` still computes a best experiment, and `select_experiment` now stores/announces the final chosen experiment with candidate readiness context and executable delivery/model-risk policy checks.
+   - Problem: production credit/risk modeling still needs richer business choice controls beyond the current PMML/handoff/scorecard/monotonicity/feature-count/PSI policy set.
+   - Fix:
+     - Done: add `select_experiment` tool/gate and structured delivery panel.
+     - Done: surface stability, calibration, feature count, and delivery readiness in comparison/selection panels.
+     - Done: enforce PMML/handoff, scorecard preference, monotonicity, feature-count, OOT PSI, configurable metric thresholds, and override-reason requirements in `selection_policy`.
+     - Done: add versioned monitoring-threshold policy artifacts with target-type-aware checks and configurable thresholds.
+     - Done: add real app-shell Playwright smoke for a modeling task with plan rail and delivery metadata.
+     - Done: calibrated-score PMML limitation is explicit in delivery capabilities, PMML readiness reason, model card, and approval package.
+     - Done: default selection policy is now target-type-aware; binary remains PMML/handoff strict, while continuous/multiclass flows select a model and surface unsupported delivery actions as skip/limitations rather than failing selection.
+     - Done: run real business-material smoke through the conversational modeling API, including business columns, feature dictionary, report sections, delivery artifacts, and no-split auto-split preservation.
+     - Done: model-card JSON/Markdown now includes selection-policy configuration, readable requirements, violations, override reasons, and metric thresholds, so configurable thresholds are visible outside approval packages.
+     - Remaining: broaden native/export and end-to-end policy/report-language fixtures.
+
+4. G5 post-training closure is not a workflow.
+   - Current behavior: report generation and `post_training_action` are workflow steps; PMML/handoff success, skip, and reason states are now visible in a dedicated delivery panel.
+   - Fix:
+     - Done: add `post_training_action` gate with actions:
+       - export `.pkl` native artifact.
+       - export `.pmml` when supported.
+       - generate model report.
+       - hand off to validation.
+       - generate JSON and Markdown approval packages.
+       - generate JSON and Markdown model cards.
+       - create PMML-backed challenger/backtest validation task packages with JSON and Markdown plans.
+     - generate versioned monitoring-policy JSON and Markdown artifacts.
+     - Done: cover native LightGBM/XGBoost Booster, CatBoost, and MLP/DNN G5 delivery close so unsupported PMML/handoff actions skip with explicit limitations and no validation task side effects.
+     - Done: cover LGBMClassifier/XGBClassifier sklearn-wrapper PMML export with `pypmml` probability round-trip validation.
+     - Done: cover multiclass end-to-end close so non-PMML/non-handoff candidates do not trigger a false selection-policy failure before report/delivery.
+     - Remaining:
+       - real business-material smoke is now covered by `test_modeling_business_materials_flow_into_report_and_delivery` and `test_modeling_business_materials_without_split_survive_auto_split`.
+       - expand remaining exporter edge-case fixtures beyond the current LR/scorecard/LGB/XGB PMML-compatible, calibrated-model, native Booster, CatBoost, MLP/DNN, and multiclass paths.
+     - Show unsupported PMML states and calibrated-score limitations clearly.
+
+5. `TrainingDataset` adapter is missing.
+   - Current behavior: preparation, split, tuning, recipes, report scoring, and artifact schema inference repeatedly read full frames.
+   - Fix:
+     - Add `TrainingDataset` with cached train/test/OOT frames or lazy references, label, features, weight, schema, split masks, and bounded sample.
+     - Update recipes to consume `TrainingDataset` rather than calling `read_frame`.
+   - Tests: backend read-count test proves each dataset partition is loaded once per training run.
+
+6. Sample weight support is backend-capable but not user-grade.
+   - Current behavior: explicit sample weight works; candidates are detected; create-time input is policy-based; the first modeling gate can choose "no weight" or a detected candidate and rerun the dependent steps.
+   - Fix:
+     - Done: move detected-candidate choice into the modeling gate.
+     - Done: validate/display missingness and strictly positive numeric values; runtime training rejects null/non-numeric/non-positive weights; reject-inference fuzzy augmentation omits zero-weight duplicate sides.
+     - Remaining: keep enriching leakage-risk/business-rationale guidance as more domain policy fixtures are added; keep excluding weight from features.
+
+7. Hard-coded metric gates conflict with "no fixed metric target".
+   - Current behavior: the modeling template no longer hard-fails on `oot_ks >= 0.3331`; fixed thresholds now live only in generic reviewer/post-check fixtures or configurable modeling policy artifacts, and approval-package Markdown now shows configured `selection_policy` requirements and metric thresholds.
+   - Fix:
+     - Done: replace the fixed modeling-template success gate with explicit selection/delivery policy and monitoring-policy artifacts.
+     - Done: model cards now show configured selection-policy requirements and metric thresholds, while monitoring-policy Markdown shows monitoring warn/fail thresholds.
+     - Remaining: broaden end-to-end policy/report-language fixtures as new business policies are added.
+
+8. Reports should surface missing business context.
+   - Current behavior: binary reports are richer; non-binary reports are minimal; chat renderer now shows unavailable business sections from `section_status`.
+   - Fix:
+     - Done: report message shows generated sections, skipped sections, and missing inputs.
+     - Add non-binary report sections where applicable.
+     - Add business decision summary: threshold, approval recommendation, reject inference status, monitoring plan.
+
+### P2: API And Database Architecture
+
+1. `api.py` remains a bottleneck.
+   - Current state: driver turn orchestration for data_join, feature_analysis, modeling, strategy, and vintage has moved to `marvis/agent/turn_handlers.py`; Agent Memory HTTP routes are now in `marvis/routers/agent_memory.py`; memory payload/context/audit support is in `marvis/agent_memory/api_support.py`; `/api/branding`, base task list/create/detail/delete, dataset, join, artifact, material upload, report/analysis/driver-report download/preview, scan, evidence, report-field, stage-cancel, validation-stage execution, and validation-agent conversation/driver-turn routes are now mounted from dedicated routers. Validation-agent stop/rerun/cancellation helper logic now lives in `marvis/agent/validation_service.py`; the validation-agent job loop now lives in `marvis/agent/validation_runner.py`; validation-agent message metadata/streaming helpers now live in `marvis/agent/validation_messages.py`; validation-agent stage implementations now live in `marvis/agent/validation_stages.py`. `api.py` still owns compatibility wrappers and legacy route/model glue.
+   - Fix order:
+     - Done: `marvis/agent/turn_handlers.py`: data_join, feature_analysis, modeling, strategy, vintage.
+     - Done: `marvis/api_data_payloads.py`: data/join response payloads and dataset preview masking.
+     - Done: `marvis/api_task_helpers.py`: shared task validation, task 404/active-job checks, source-dir normalization, and platform hook payload helpers.
+     - Done: `marvis/routers/branding.py`: workspace branding endpoint.
+     - Done: `marvis/routers/tasks.py`: base task list/create/detail/delete endpoints and pagination headers.
+     - Done: `marvis/routers/data.py`: dataset upload/list/preview and join propose/get/confirm/execute routes.
+     - Done: `marvis/routers/artifacts.py`: artifact download/preview routes with task-artifact path containment.
+     - Done: `marvis/routers/materials.py`: material folder upload endpoint and upload-path validation.
+     - Done: `marvis/routers/reports.py`: report/analysis/driver-report download and preview routes.
+     - Done: `marvis/api_scan_helpers.py` plus `marvis/routers/scans.py`: scan preflight, source scan, scan route, and task.scanned hook payload.
+     - Done: `marvis/routers/evidence.py`: task execution evidence payload.
+     - Done: `marvis/api_report_field_helpers.py` plus `marvis/routers/report_fields.py`: report-field payload construction and GET/PUT routes.
+     - Done: `marvis/routers/stage_controls.py`: notebook/metrics/report cancellation controls.
+     - Done: `marvis/api_stage_helpers.py` plus `marvis/routers/validation_stages.py`: notebook/metrics/report/validate execution routes and shared stage job runner helpers.
+     - Done: `marvis/routers/validation_agent.py`: agent messages/start/stop/summarize/report-draft/confirm and driver-turn HTTP endpoints.
+     - Done: `marvis/agent/validation_service.py`: validation-agent stop/rerun/cancellation helper logic, re-exported through `marvis.api` compatibility aliases.
+     - Done: `marvis/agent/validation_runner.py`: validation-agent job-loop orchestration, called through `marvis.api` compatibility wrappers.
+     - Done: `marvis/agent/validation_messages.py`: validation-agent stage labels, conclusion formatting, model metadata, and streaming message update/cancellation helpers, called through `marvis.api` compatibility wrappers.
+     - Done: `marvis/agent/validation_stages.py`: validation-agent scan/reproducibility/metrics/report-draft stage implementations, called through `marvis.api` compatibility wrappers with explicit dependency injection for existing monkeypatch paths.
+     - Remaining: shrink the compatibility wrapper surface once callers and tests target service-level seams directly.
+   - Acceptance: `api.py` is mostly app-level compatibility glue and imports no domain-heavy execution code.
+
+2. `db.py` is now a thin compatibility entrypoint; schema/connection setup and repositories have moved out.
+   - Fix order:
+     - Done: `marvis/db_schema.py`: schema constants/migrations plus connection setup/pragmas/row factory, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/strategy.py`: strategy and backtest persistence, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/drafts.py`: learning-note, draft-tool, run history, and draft status persistence, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/plugins.py`: plugin/tool registry persistence and audit listing, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/datasets.py`: dataset and join-plan persistence, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/modeling.py`: experiment and model-artifact persistence, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/audit.py`: shared audit row/list helpers, re-exported by `marvis.db` for compatibility.
+     - Done: `marvis/repositories/tasks.py`: task CRUD/status/jobs/report values/agent messages and validation-handoff transaction helpers, re-exported from `marvis.db` for compatibility.
+     - Done: `marvis/repositories/plans.py`: plan, step run/output, summary, sub-agent, and plan audit persistence, re-exported from `marvis.db` for compatibility.
+     - `UnitOfWork`: one transaction-scoped object exposing repositories.
+   - Acceptance: new domains do not add hundreds of lines to `db.py`.
+
+3. Cross-repository writes need a common transaction pattern.
+   - Current state: several `*_with_audit` helpers exist, but transaction boundaries are bespoke.
+   - Fix:
+     - Document write categories: DB-only, file+DB, external side effect+DB.
+     - Migrate one domain at a time to `UnitOfWork` and artifact staging.
+   - First candidate: dataset/join, because it exercises file output plus DB registration and is easier than plugin install.
+
+4. Several list APIs are unbounded or weakly bounded.
+   - Current update: Agent message listing already supports `after_id`; the repository and GET endpoint now also accept an optional bounded `limit`, clamp API requests to 500, and return `has_more` plus the effective limit without changing the default full-list behavior used by existing callers. Task listing now supports optional `limit/offset`, clamps API requests to 500, returns pagination metadata through `X-Result-Limit`, `X-Result-Offset`, and `X-Result-Has-More`, and keeps the default response body as the existing list for compatibility. Draft listing now supports optional `limit/offset`, clamps API requests to 500, returns `has_more`, `limit`, and `offset` in the response body, and preserves the default `drafts` payload for existing callers. Audit and model-artifact repositories now accept optional `limit/offset` with stable ordering and matching indexes while preserving default full-list behavior for existing tests/callers.
+   - Remaining fix: extend repository-level pagination/cursors to other high-volume message-style lists as they become exposed through user-facing endpoints.
+   - Tests: Agent message default compatibility, max-limit clamp, stable ordering, cursor continuation, and `has_more`; task list default compatibility, limit/offset headers, max-limit clamp, and stable ordering; draft default compatibility, stable ordering, status filtering, max-limit clamp, and `has_more`; audit/artifact default compatibility, stable ordering, filtering, and offset continuation.
+
+### P2: Frontend UX, Visual System, And Product Depth
+
+1. `app.js` decomposition is unfinished.
+   - Current state: V2 modules exist, theme handling has moved to `static/js/theme.js`; create-dialog task type definitions/display ordering live in `static/js/task-types.js`; dialog backdrop dismissal and material-source upload behavior/status rendering live in `static/js/dialogs.js`; coming-soon toast behavior lives in `static/js/toast.js`; form-control focus-ring suppression lives in `static/js/focus-ring.js`; layout width persistence and resize handling live in `static/js/layout-resize.js`; create-dialog behavior/payload/material upload/run-mode/algorithm/sample-weight/report-default logic lives in `static/js/create-task-dialog.js`; plan fetch/cache/retry/render, status mapping, right-rail artifact preview wiring, and plan-step lookup live in `static/js/v2/plan_rail_controller.js`; conversation/timeline pure helpers live in `static/js/agent-conversation-view.js`; conversation transcript DOM mounting, bucket creation, in-place streaming patching, and default result-scroll order restoration now live in `static/js/agent-conversation-mount.js`; manual driver analysis branching and latest screen-gate interactivity live in `static/js/v2/driver_manual_analysis.js`; generic manual gate confirm rendering and submit handling live in `static/js/v2/driver_gate_confirm.js`; task selection storage, result-scroll storage, and greeting rules live in `static/js/task-workspace-state.js`; current-task shell DOM writes and task snapshot DOM rendering live in `static/js/task-workspace-view.js`; task search open/close/toggle state lives in `static/js/task-search.js`; Agent Memory management state/list/detail/API actions live in `static/js/agent-memory-panel.js`; Draft Tools management state/list/detail/API actions live in `static/js/draft-tools-panel.js`; platform confirmation modal behavior lives in `static/js/platform-confirm.js`; feature-screen gate rendering and threshold/selection submit handling live in `static/js/v2/screen_gate_controller.js`; data-join C1/dedup gate rendering and submit handling live in `static/js/v2/join_gate_controller.js`. Broader workspace/right-rail orchestration still lives in one global controller.
+   - Fix order:
+     - Done: `CreateTaskDialog` config and controller behavior are extracted; `app.js` keeps the post-create workspace refresh and Agent composer seeding.
+     - Done: `PlanRailController` owns plan fetch/cache/retry/render, status mapping, gated actions, artifact preview wiring, and plan-step lookup.
+     - Done: `AgentConversationView` pure helpers for timeline stages, frozen snapshot re-anchoring, message bucketing, report-message filtering, and advance-intent detection are extracted.
+     - Done: `AgentConversationMount` owns transcript DOM bucket creation, timeline mounting, frozen snapshot insertion, default scroll order restoration, and streaming-message in-place patching.
+     - Done: manual driver analysis branching, overview filtering, latest screen-gate interactivity, and renderer injection are extracted to `DriverManualAnalysis`.
+     - Done: generic manual gate confirmation button rendering and submit handling are extracted to `DriverGateConfirm`.
+     - Done: `TaskWorkspace` pure state helpers for selected-task storage, result-scroll storage, and empty-workspace greeting rules are extracted.
+     - Done: `TaskWorkspaceView` owns current-task title/subtitle rendering, task snapshot DOM rendering, empty-workspace class toggling, greeting DOM writes, and hero-layout sync scheduling.
+     - Done: feature-screen gate rendering, latest-gate readonly behavior, threshold adjust submit, and feature-selection submit are extracted to `ScreenGateController`.
+     - Done: data-join C1 role assignment and dedup strategy rendering/submit handling are extracted to `JoinGateController`.
+     - `DriverConversationView`: manual analysis rendering, generic driver confirmation, agent transcript DOM mounting.
+     - `TaskWorkspace`: task shell, active task state, right rail coordination.
+
+2. Modeling needs a dedicated setup and analysis surface.
+   - Fix:
+     - Done: `ModelingSetupPanel` with target/split counts, target type, algorithm choices, detected sample weights, split/OOT warnings.
+     - Done: `ModelDeliveryPanel` with selected experiment, candidate metrics, PMML/native/handoff readiness, action state, artifact refs, and unsupported/skip reasons.
+     - Screen table as a real modeling selector: threshold sliders plus numeric inputs, `top_k`, sort/filter chips, selected-count summary, leakage override reason, reset-to-proposal.
+     - Done: extend model comparison with stability, calibration, feature count, and delivery-readiness business signals.
+     - Remaining: native/export and broader domain-policy edge-case coverage.
+
+3. Visual tokens are partial, not a system.
+   - Current state: semantic task tones, surface/border/status tokens, welcome/task icon palettes, welcome badge/toast tokens, metric cards, report section tones, KPI cards, PSI bands, ROC chart palettes, modeling setup/delivery status tokens, generic download action tokens, send-stop composer tokens, disabled/focus tokens, user-message bubble tokens, agent code-highlight tokens, settings/progress shadows, reusable status borders, and older V2 workbench/manual-gate token fallbacks are centralized. Remaining local hard-coded colors are mostly global token definitions, chart/brand constants, and a few legacy non-modeling utility/settings effects.
+   - Fix:
+     - Done for task types and core surface/status tokens.
+     - Done for metric cards, report section tones, KPI cards, PSI bands, ROC chart lines/axis/grid/legend, and dark/light static parity checks.
+     - Done for modeling setup/delivery panel surface, text, signal, readiness, warning, and error tokens.
+     - Done for generic download actions, send-stop composer controls, disabled/focus states, user-message composer bubbles, agent code-highlight colors, settings/progress shadows, and reusable status borders.
+     - Done for older V2 workbench/manual-gate fallback colors and welcome badge/toast tokens.
+     - Replace remaining hard-coded local hex colors in legacy non-modeling utility/settings effects only where they are not intentional brand/chart/global-token constants.
+
+4. UX should communicate business readiness, not just execution progress.
+   - Fix:
+     - Plan rail statuses: "needs decision", "running", "blocked", "ready for handoff", "needs business input".
+     - Done: modeling delivery card shows report section coverage, PMML support, validation handoff state, and selected experiment.
+     - Clear stale-gate warnings and retry contracts.
+
+5. Accessibility and visual smoke should become test gates.
+   - Tests:
+     - `node --check` for extracted modules.
+     - Static tests for required controls and stale tokens.
+     - Optional Playwright smoke now exists for setup/delivery panels, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, light/dark startup paths, and a real app-shell modeling task with delivery metadata.
+
+### P2: Performance And Data Scale
+
+1. Full-frame pandas reads remain common.
+   - Fix:
+     - Use `TrainingDataset` for modeling.
+     - Add DuckDB/query-backed helpers for feature screening and large summaries where feasible.
+     - Keep bounded samples for UI previews.
+
+2. Expensive jobs are mixed across direct request handlers and background tasks.
+   - Fix:
+     - Define job policy: quick synchronous route vs background job vs subprocess sandbox.
+     - Apply to join, validation stages, modeling train/tune/report, notebook/plugin execution.
+   - Current update: `/api/joins/{join_plan_id}/execute` still supports synchronous execution when explicitly requested, and the V2 frontend join wrapper now defaults to background execution via `async_execute: true`. The async path creates a task job with `kind="join"`, rejects existing active jobs, records succeeded/failed job state from a fresh data runtime, and `join_review.js` polls the accepted `job_id` path by refreshing the join plan and reading `/api/tasks/{task_id}/jobs/latest?kind=join` for failure details without exposing traceback. String flags such as `"false"` no longer accidentally opt into async execution.
+   - Remaining: wire the main app workspace to the V2 join component and standardize the same first-class task/job status UX across other long-running task kinds before treating join execution as fully productized background work.
+
+3. Add performance regression tests.
+   - Tests:
+     - Large parquet feature screening smoke.
+     - Multi-recipe modeling read-count and runtime smoke.
+     - Join match-rate performance smoke.
+     - Done: Agent Memory raw/distillation API routes now support bounded `limit`/`offset`/`has_more`, source-task indexed filtering, payload-filter scans that do not miss matches beyond the first storage page, frontend "load more" pagination, and direct single-message lookup for memory-reference inspection instead of scanning a whole conversation.
+
+### P3: Practical Business Problem Solving
+
+1. Add a model approval package.
+   - Contents: selected experiment, metrics by split, stability, calibration, reject inference status, excluded features and reasons, sample-weight choice, PMML/native artifact state, validation handoff link, monitoring plan.
+
+2. Add challenger and monitoring workflows.
+   - Done: create PMML-backed challenger/backtest validation tasks directly from G5, with copied model/sample/PMML/notebook/dictionary material and JSON/Markdown plan evidence.
+   - Done: store monitoring thresholds and drift checks as versioned JSON/Markdown policy artifacts from G5.
+   - Done: generate optional prior Champion/Challenger comparison JSON/Markdown artifacts from an existing experiment id, explicit champion metrics, or an earlier selected experiment in the same task; carry the comparison into approval packages, challenger/backtest plans, delivery readiness, and the frontend artifact list.
+
+3. Improve Agent recommendations.
+   - Recommendations should cite evidence refs and show tradeoffs:
+     - metric gain vs feature count.
+     - PMML support vs native model performance.
+     - stability vs raw OOT KS/AUC.
+     - sample weight use vs data quality.
+   - AUTO should propose a bounded action and explain why it is safe.
+
+4. Add domain-specific defaults without hard-coding outcomes.
+   - Default recipes and metrics should reflect credit/risk modeling, but thresholds should be configurable policy, not fixed magic numbers.
+
+## Implementation Roadmap
+
+### Phase A: Stabilize Review And CI Gates
+
+Goal: make every later change safer to merge.
+
+Tasks:
+- Done: add `scripts/check` as the local canonical command.
+- Done: add GitHub Actions CI for `git diff --check`, Python lint, `node --check`, and pytest.
+- Done: update docs with current required local checks.
+- Done: add this status table that tracks which V2 items are done/partial/not done.
+
+Acceptance:
+- CI runs on PR and branch push.
+- Local command reproduces CI.
+- No implementation phase starts without a passing baseline.
+
+### Phase B: Gate, AUTO, Evidence, Retry Contracts
+
+Goal: turn Agent execution into a typed, inspectable, recoverable loop.
+
+Tasks:
+- Done: add `GateEnvelope`, `FailureEnvelope`, and `EvidenceEnvelope`.
+- Mostly done: add output renderers, gate payload helpers, dependency gate adapters, message composer, and basic adjust specs; per-tool form adapters and schema-driven adjust specs remain.
+- Done: extend AUTO to structured bounded decisions.
+- Mostly done: add stale-token style `expected_step_id` enforcement for structured screen/dedup/modeling controls, rendered generic confirm buttons, and AUTO confirm/replan actions; raw typed manual replies remain compatible because they have no stable browser-side token.
+- Done for current gate-risk policy: explicit high-risk flags and broad downstream reset policies halt AUTO `confirm`, `adjust`, and `replan`; `clarify` remains available for asking the user.
+- Mostly done: add retry/failure contract metadata, downstream reset behavior, real step-run `error_kind` propagation, and first schema-driven retry fields; deeper per-tool form adapters remain.
+
+Acceptance:
+- Existing manual driver flows still work.
+- AUTO can safely adjust a declared screen gate in tests.
+- Invalid/undeclared AUTO actions halt with a reason.
+- Evidence refs remain backward compatible.
+
+### Phase C: Modeling Lifecycle Closure
+
+Goal: make modeling a complete business workflow, not only train/report primitives.
+
+Tasks:
+- Done: add G2 modeling spec step/gate (`choose_modeling_spec`).
+- Done: add G3 tuning configuration gate.
+- Done: add `select_experiment`.
+- Done: add G5 `post_training_action` gate.
+- Done: add G5 challenger/backtest task package creation for PMML-capable final models.
+- Done: add G5 versioned monitoring-policy artifact generation and delivery readiness.
+- Mostly done for modeling setup gate: add sample-weight propagation, G2 spec output, create-time no-weight/explicit policy, detected-candidate gate adjust/rerun, target/algorithm/tuning/split/PMML display, editable setup controls with override reasons, AUTO context, extracted setup renderer/controller, setup override guidance, lightweight DOM smoke, optional Playwright smoke for setup/delivery plus workspace surfaces, stricter model-policy fixtures, and real business-material smoke through report/delivery.
+- Done for `train_models`: add `TrainingDataset` adapter and read-count tests.
+- Done: remove hard-coded `oot_ks >= 0.3331` as a universal success gate.
+- Done for chat renderer: improve report renderer with section status and missing inputs; broader report content remains.
+
+Acceptance:
+- A user can create a modeling task, confirm algorithms/weights, tune/train, select an experiment, export `.pkl` and `.pmml` when supported, generate report, hand off to validation, and create a PMML-backed challenger/backtest validation task package.
+- Tests cover PMML support boundaries, report missing-section visibility, sample-weight propagation, and read-count regression.
+
+### Phase D: Transactional Runtime Hardening
+
+Goal: close remaining crash windows and file/DB inconsistency risks.
+
+Tasks:
+- Done: add `StepRunLedger`.
+- Done for first slice: add `TransactionalArtifactStore`.
+- Done for join execution: migrate join output persistence to staged write, final promote, and rollback on audit/DB failure.
+- Done for upload ingestion: route-level raw uploads, ordinary upload-normalized parquet files, and Excel multi-sheet parquet files are staged and rolled back when validation or dataset registration fails before DB commit.
+- Done for data_ops derived outputs: migrate `clean_format` and `dedup_rows` parquet outputs to staged write/final promote/rollback.
+- Done for feature pack derived outputs: migrate shared feature-frame registration helper to staged parquet write/final promote/rollback.
+- Done for modeling derived parquet outputs: migrate `prepare_modeling_frame` / `make_split` and `reject_inference` output datasets to staged write/final promote/rollback.
+- Done for report outputs: migrate `model_report_scored.parquet`, feature-analysis report XLSX, and final xlsx reports to staged write/final promote.
+- Done for modeling model artifacts: migrate native binaries, meta files, PMML exports, and calibration payloads to staged write/final promote/rollback; calibration file/meta/params/audit now share a connection-scoped UOW boundary.
+- Done for train-model artifact attach failures: clean unattached `train_model` / `train_models` binaries and per-artifact meta files, restore the previous latest `model_meta.json`, and leave the failed experiment without a DB artifact reference.
+- Done for V1 metrics-stage outputs: write metrics JSON/XLSX/pickle/log to a stage-work directory, write `execution/model_meta.json` through staged artifact promotion, promote them with the terminal metrics status update, transactionally remove stale report docx/images only after status persistence succeeds, and apply the same staged metrics/model-meta promotion to the explicit legacy live `run_pipeline` path.
+- Done for validation handoff and challenger/backtest materials: migrate material directory activation to `ArtifactUnitOfWork` directory staging and run task/audit/status persistence through connection-scoped `TaskRepository` callbacks inside `finalize_with_connection`.
+- Done for plugin install/promote paths: migrate zip install and draft promotion directory swaps to `TransactionalDirectoryStore`.
+- Done: add orphan reconciliation on startup with `app.state.artifact_recovery_report`.
+- Done: recover in-flight `plan_step_runs` by finalizing current persisted-output attempts as succeeded and no-output attempts as interrupted without unsafe reruns.
+- Partial: add OS-level subprocess sandbox for plugin/draft tools and full-notebook validation execution; untrusted plugin/draft child process spawning now requires explicit `process:spawn`, direct OS file move/link APIs are guarded, and staged V1 notebook/reproducibility/metrics default to isolated prepared-notebook workers with parent-side cancellation and terminal metrics rerun fallback, while the live keep-alive path is now triple-opt-in legacy compatibility mode and still needs worker RPC redesign or continued exclusion from safety-critical defaults.
+
+Acceptance:
+- Crash-window tests pass.
+- Staged artifacts are cleaned or promoted deterministically.
+- OOM/timeout notebook/plugin tests leave a recoverable task state.
+
+### Phase E: Architecture Split
+
+Goal: reduce merge risk and make future domains cheaper to add.
+
+Tasks:
+- Done: move driver turn orchestration out of `api.py` into `marvis/agent/turn_handlers.py`.
+- Done: split Agent Memory routes, branding, base task list/create/detail/delete routes, dataset/join routes, artifact download/preview routes, material uploads, report/analysis/driver-report download/preview routes, task scan, task evidence, report-field GET/PUT, stage cancellation controls, validation-stage execution routes, and validation-agent conversation/report-draft/start/stop/summarize HTTP routes.
+- Mostly done: validation-agent stop/rerun/cancellation helpers, job-loop orchestration, evidence helpers, validation message/formatting/streaming helpers, and stage implementations now live outside `api.py`; continue shrinking compatibility wrappers once tests and callers target service-level seams directly.
+- Done: split `db.py` schema/connection setup into `marvis/db_schema.py`; `StrategyRepository`, `DraftRepository`, `PluginRepository`, `DatasetRepository`, `ModelingRepository`, `TaskRepository`, `PlanRepository`, and shared audit helpers now live in `marvis/repositories/strategy.py`, `marvis/repositories/drafts.py`, `marvis/repositories/plugins.py`, `marvis/repositories/datasets.py`, `marvis/repositories/modeling.py`, `marvis/repositories/tasks.py`, `marvis/repositories/plans.py`, and `marvis/repositories/audit.py`; `marvis/db.py` remains a compatibility export layer.
+- Continue introducing `UnitOfWork` semantics and migrate one domain at a time.
+- Partial: add pagination to high-volume list endpoints. Task, draft, Agent message, and Agent Memory raw/distillation lists now expose bounded pagination/continuation metadata; Agent memory-reference inspection now uses direct message lookup; continue auditing remaining admin/auxiliary lists as data volume grows.
+
+Acceptance:
+- `api.py` becomes app compatibility and route registration, not domain orchestration.
+- `db.py` becomes compatibility exports or a thin package entrypoint.
+- New tests assert route registration and repository behavior.
+
+### Phase F: Frontend Workspace And Visual System
+
+Goal: make V2 feel like a professional task workspace rather than a generic chat plus tables.
+
+Tasks:
+- Extracted `CreateTaskDialog`: task type definitions/display order live in `static/js/task-types.js`, and controller behavior/payload/material upload/run-mode/algorithm/sample-weight/report-default logic lives in `static/js/create-task-dialog.js`.
+- Extracted `PlanRailController`: plan fetch/cache/retry/render, status mapping, plan-step context lookup, and right-rail artifact preview wiring live in `static/js/v2/plan_rail_controller.js`.
+- Started `DriverConversationView`: timeline stages, frozen snapshot re-anchoring, message bucketing, report-message filtering, advance-intent detection, transcript DOM mounting, manual analysis branching, latest screen-gate interactivity, and generic gate confirmation live outside `app.js`; workspace DOM state remains in `app.js`.
+- Started `TaskWorkspace`: selected-task storage, result-scroll storage, empty-workspace greeting rules, greeting DOM writes, current-task shell DOM rendering, task snapshot rendering, and task-search state transitions live in `static/js/task-workspace-state.js` / `static/js/task-workspace-view.js` / `static/js/task-search.js`; active task orchestration and right-rail coordination remain in `app.js`.
+- Extracted `DriverManualAnalysis`: manual mode overview filtering, analysis-section branching, latest screen-gate interactivity, and injected renderer orchestration live in `static/js/v2/driver_manual_analysis.js`.
+- Extracted `DriverGateConfirm`: generic manual gate confirmation button rendering and POST handling live in `static/js/v2/driver_gate_confirm.js`.
+- Extracted `PlatformConfirm`: destructive-action confirmation modal behavior now lives in `static/js/platform-confirm.js` with direct Node coverage for confirm, cancel, and escape-close resolution.
+- Extracted dialog backdrop dismissal and material-upload status rendering: all native dialog backdrop-click close behavior plus upload selection text/DOM status now live in `static/js/dialogs.js` with direct Node coverage.
+- Extracted `ComingSoonToast`: unavailable-task toast DOM creation/reuse, ARIA attributes, visible state, and timer reset now live in `static/js/toast.js` with direct Node coverage.
+- Extracted `FormControlFocusRingGuard`: pointer, mouse, touch, focus, and label-click focus-ring suppression now lives in `static/js/focus-ring.js` with direct Node coverage.
+- Extracted `LayoutResizeController`: sidebar/progress width restoration, persistence, pointer drag, and keyboard resize handling now live in `static/js/layout-resize.js` with direct Node coverage.
+- Extracted `ScreenGateController`: feature-screen table rendering, latest-gate readonly behavior, threshold-adjust submit, and selected-feature submit live in `static/js/v2/screen_gate_controller.js`.
+- Extracted `AgentMemoryPanel`: raw/distillation view state, list/detail rendering, memory CRUD/rollback actions, and inline inspect routing live in `static/js/agent-memory-panel.js`.
+- Extracted `DraftToolsPanel`: draft-tool list/detail rendering, lazy-load state, run/promote/reject actions, JSON input validation, and admin-header API calls live in `static/js/draft-tools-panel.js`.
+- Extracted `JoinGateController`: C1 file-role assignment and dedup strategy rendering/submit handling live in `static/js/v2/join_gate_controller.js`.
+- Extracted metric-table renderers (ARCH-11): the validation metric-overview table/section/cell renderers, KPI cards, trend sparkline, ROC&KS curve cards + interactions, metric tooltip delegation, and enhanced/legacy table builders live in `static/js/metric-tables.js` (pure, escapeHtml + render-metrics helpers injected via imports).
+- Extracted score-precision-consistency helpers (ARCH-11): rounded-score matching, per-decimal consistency-bar building, tier/percent/label formatting, and the four-rounding chart renderer live in `static/js/precision-consistency.js`; `renderReproducibilityEvidence` imports `renderPrecisionConsistencyChart`.
+- Extracted step-checker glyph (ARCH-11): the shared pending/running/succeeded/failed/stopped/review status-checker markup lives in `static/js/step-checker.js`, imported by both the workflow stepper and the plan rail controller.
+- Add `ModelingSetupPanel` and model comparison/post-training panels.
+- Mostly done: implement semantic task/surface/status, metric/report/chart, modeling setup/delivery state tokens, generic download/composer action tokens, agent code-highlight tokens, settings/progress/status-border tokens, and extract theme controller; older non-modeling utility/settings tokens remain.
+- Expand screen selector controls beyond the extracted controller: sliders, `top_k`, filters, reset, and override reasons.
+
+Acceptance:
+- `app.js` shrinks materially and no longer owns all task responsibilities.
+- Frontend tests cover extracted modules and modeling gate controls.
+- Playwright smoke verifies setup/delivery, welcome shell, modeling create dialog, plan rail, screen table, desktop/mobile, light/dark startup paths, and a real app-shell modeling task with task list, plan, and delivery metadata.
+
+### Phase G: Business Deliverables And Agent Quality
+
+Goal: improve actual business usefulness and decision quality.
+
+Tasks:
+- Add model approval package output.
+- Add challenger/monitoring workflow entrypoints.
+- Add Agent recommendation templates that cite evidence refs.
+- Done: add policy-driven thresholds for modeling acceptance through `selection_policy.metric_thresholds` and common shortcuts, and surface configured selection-policy requirements/thresholds in approval-package Markdown.
+- Add eval fixtures for join C2, feature screening, modeling selection, PMML handoff, and retry recovery.
+
+Acceptance:
+- Generated outputs answer "can I use this model in business?" with evidence and next actions.
+- Agent recommendations are traceable to concrete output refs.
+
+### Phase H: Final Review Before Merge
+
+Goal: decide whether the branch can merge to `main`.
+
+Checklist:
+- `git status --short` clean except intentional release artifacts.
+- `scripts/check` passes.
+- Full pytest passes in the intended env.
+- Frontend smoke passes.
+- Manual smoke:
+  - Create data join task.
+  - Create feature analysis task.
+  - Create modeling task through G2-G5.
+  - Export PMML/PKL for supported algorithms.
+  - Handoff selected model to validation.
+  - Force a retryable failure and recover.
+- Review docs updated with remaining known limitations.
+- Release/tag flow documented and chosen before merge.
+
+## Suggested Commit Breakdown
+
+1. `ci: add v2 check workflow`
+2. `agent: introduce gate and evidence envelopes`
+3. `agent: add structured auto decisions`
+4. `modeling: add lifecycle gates and experiment selection`
+5. `modeling: add training dataset adapter`
+6. `runtime: add step run ledger and artifact staging`
+7. `api: extract v2 turn handlers`
+8. `db: split schema connection and repositories`
+9. `frontend: extract task workspace controllers`
+10. `frontend: add modeling controls and visual tokens`
+11. `docs: update v2 completion status and merge checklist`
+
+## Open Decisions
+
+- AUTO autonomy level: default recommendation is "bounded low-risk adjustments only"; high-cost tuning, destructive resets, handoff, and export should require user confirmation.
+- Notebook/plugin sandbox mechanism: default recommendation is subprocess with resource limits first; containerization can be evaluated later if local developer friction is acceptable.
+- PMML promise: keep `.pkl` as the source-of-truth native artifact for every algorithm; `.pmml` is a compatibility artifact only when exporter and validation loader are proven.
+- Visual redesign depth: default recommendation is semantic token consolidation plus task workspace polish, not a full product redesign before runtime contracts are stable.
+
+## Merge Risk Assessment
+
+Current state should be treated as not ready for direct `main` merge if the goal is "V2 complete". It may be mergeable as an intermediate PR only if the PR description clearly labels the remaining work above and final CI/local checks pass from the committed tree.
+
+The highest risks before a production-style merge are:
+
+- CI gate exists, but full CI/full pytest still must pass from the final committed tree.
+- AUTO can apply structured decisions, but broader safe-remediation policy fixtures are still needed.
+- Modeling final handoff is now workflow-capable for G2-G5 backend steps, sample-weight/setup adjustment has a working gate with algorithm-family guards and risk guidance, delivery readiness has a dedicated UI with core business signals, scorecard/monotonicity/approval policy signals, validation handoff, model cards, approval packages, monitoring-policy artifacts, prior Champion comparison artifacts, and challenger/backtest task packages, and real business-material smoke now verifies the report/delivery chain; remaining export/domain edge-case fixtures still remain, but CatBoost native-only G5 skip guidance is now covered.
+- Runtime crash windows are recoverable for staged artifacts and running step attempts; join result registration, data_ops clean/dedup derived registration, and modeling prepare/reject-inference derived registration now have SQLite connection-scoped DB+filesystem boundaries, but this is not yet repository-wide.
+- `api.py` and `app.js` are still large, but the first stable splits have landed (`turn_handlers`, `agent/validation_runner`, `agent/validation_messages`, `agent/validation_stages`, `agent/plan_message_composer`, `api_data_payloads`, `api_task_helpers`, `api_report_helpers`, `api_report_field_helpers`, `api_scan_helpers`, `api_stage_helpers`, `agent_memory/api_support`, `agent/validation_service`, `routers/agent_memory`, `routers/branding`, `routers/tasks`, `routers/data`, `routers/artifacts`, `routers/materials`, `routers/reports`, `routers/scans`, `routers/evidence`, `routers/report_fields`, `routers/stage_controls`, `routers/validation_stages`, `routers/validation_agent`, `repositories/strategy`, `repositories/drafts`, `repositories/plugins`, `repositories/datasets`, `repositories/modeling`, `repositories/tasks`, `repositories/plans`, `repositories/audit`, `db_schema`, `theme.js`, `task-types.js`, `create-task-dialog.js`, `agent-conversation-view.js`, `agent-conversation-mount.js`, `task-workspace-state.js`, `task-workspace-view.js`, `task-search.js`); remaining risk is deeper helper/service, UnitOfWork, and workspace-controller extraction.
+- OS-level sandboxing for notebook/plugin execution is not complete; default staged V1 validation now uses isolated full-notebook workers, while the legacy live appended notebook compatibility path is triple-opt-in, policy/allowlist guarded, and still not subprocess-session isolated.
+
+## Definition Of Done For V2 Complete
+
+V2 can be called complete only when:
+
+- All core task types run through typed gates and evidence envelopes.
+- AUTO can perform bounded structured actions and stops safely outside declared permissions.
+- Modeling covers G2-G5 with explicit user or AUTO decisions, selected experiment, PMML/PKL/report/handoff closure.
+- Runtime side effects are recoverable through step-run ledger recovery and artifact staging, with any remaining non-atomic boundaries explicitly documented.
+- API, DB, and frontend controllers are split enough that new domains do not expand monolith files.
+- CI, focused modeling API smoke, and real business-material smoke are green from a clean committed tree.
+- Final review documents remaining limitations as product choices, not unfinished core architecture.

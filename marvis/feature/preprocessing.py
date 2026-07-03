@@ -1,0 +1,287 @@
+"""Preprocessing chain persistence and scoring-time replay (PREP-2).
+
+Feature-pack transforms (impute/cap/normalize/onehot) fit their parameters on
+train-only rows and apply them in place, but historically only echoed the fitted
+params in the tool's JSON response -- nothing was written to disk alongside the
+derived dataset, so a model trained downstream had no way to replay those exact
+transforms on new raw data at scoring time.
+
+This module defines the on-disk lineage format (a JSON sidecar next to each
+derived dataset's parquet file) and the replay primitives that both the
+in-process ``_ModelArtifactScorer`` and the generated handoff notebook use to
+turn ``preprocessing_steps`` back into concrete column transforms.
+
+A ``PreprocessingStep`` is a plain, JSON-safe dict:
+
+    {"kind": "impute" | "cap" | "normalize" | "onehot" | "missing_indicator"
+             | "woe" | "categorical_woe",
+     "columns": [...],
+     "params": {...}}
+
+``params`` mirrors what each tool already returns today (fill_values /
+bounds / scaler_params / mapping), keyed by column name so ``kind`` +
+``columns`` + ``params`` fully describes the transform.
+
+``missing_indicator`` (PREP-8) is emitted alongside ``impute`` when
+``add_indicators=true`` is passed to ``impute_missing``: ``params[column]`` is
+the derived indicator column name (e.g. ``col__was_missing``). It is appended
+as its own step *before* the paired ``impute`` step in the chain, so replay
+computes the 0/1 "was this value missing" flag from the pre-fill NaN mask
+first, then imputes -- reproducing the same indicator the platform derived at
+fit time instead of silently dropping the missingness signal.
+
+``woe``/``categorical_woe`` (W3a tail) record the general-purpose feature-pack
+``woe_encode``/``woe_encode_categorical`` tools' fitted maps -- ``params[column]``
+is the tool's own ``woe_maps[column]`` entry (a serialized ``WOEResult`` /
+``CategoricalWOEResult``) verbatim, so replay reconstructs the exact same
+mapping and appends the ``{column}_woe`` column. The **scorecard recipe's**
+internal WOE fitting (``recipes/scorecard.py``) is a separate, already-solved
+path -- it persists its own ``woe_maps``/``scorecard_table`` directly on the
+model artifact and replays through the scorecard scorer/PMML/handoff code,
+independent of this sidecar; it is not duplicated here.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from marvis.feature.contracts import CategoricalWOECategory, CategoricalWOEResult, WOEResult
+from marvis.feature.encode import apply_categorical_woe, woe_encode
+from marvis.feature.errors import FeatureError
+from marvis.feature.transform import apply_scaler
+
+
+_SIDECAR_SUFFIX = ".preprocessing.json"
+
+
+def sidecar_path(dataset_path: Path) -> Path:
+    """The lineage sidecar path for a dataset parquet file."""
+    path = Path(dataset_path)
+    return path.with_name(path.name + _SIDECAR_SUFFIX) if path.suffix != ".json" else path
+
+
+def read_preprocessing_chain(dataset_path: Path) -> list[dict[str, Any]]:
+    """Read the accumulated preprocessing chain for a dataset, or ``[]`` when the
+    dataset has no lineage sidecar (e.g. a historical / non-derived dataset)."""
+    path = sidecar_path(dataset_path)
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    steps = payload.get("preprocessing_steps") if isinstance(payload, dict) else None
+    return [dict(step) for step in steps] if isinstance(steps, list) else []
+
+
+def write_preprocessing_chain(dataset_path: Path, steps: list[dict[str, Any]]) -> Path:
+    """Write the accumulated preprocessing chain sidecar next to ``dataset_path``."""
+    path = sidecar_path(dataset_path)
+    payload = {"preprocessing_steps": steps}
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def append_step(
+    source_dataset_path: Path | None,
+    *,
+    kind: str,
+    columns: list[str],
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build the accumulated chain for a newly derived dataset: the source
+    dataset's chain (if any) plus this one new step."""
+    chain = read_preprocessing_chain(source_dataset_path) if source_dataset_path else []
+    chain = [*chain, {"kind": str(kind), "columns": [str(c) for c in columns], "params": params}]
+    return chain
+
+
+def apply_preprocessing_steps(frame: pd.DataFrame, steps: list[dict[str, Any]]) -> pd.DataFrame:
+    """Replay a preprocessing chain on new raw data, in order.
+
+    Mirrors each tool's own apply semantics (in-place overwrite for
+    impute/cap/normalize; drop+dummy for onehot) so scoring-time output matches
+    what the platform computed at training/derivation time. Missing input
+    columns are skipped per-column (a step targeting a column that does not
+    exist in ``frame`` is a no-op for that column) rather than raising, mirroring
+    each tool's existing missing-value tolerance.
+    """
+    out = frame.copy()
+    for step in steps:
+        kind = str(step.get("kind") or "")
+        columns = [str(c) for c in step.get("columns") or []]
+        params = step.get("params") or {}
+        if kind == "impute":
+            out = _apply_impute(out, columns, params)
+        elif kind == "cap":
+            out = _apply_cap(out, columns, params)
+        elif kind == "normalize":
+            out = _apply_normalize(out, columns, params)
+        elif kind == "onehot":
+            out = _apply_onehot(out, columns, params)
+        elif kind == "missing_indicator":
+            out = _apply_missing_indicator(out, columns, params)
+        elif kind == "woe":
+            out = _apply_woe(out, columns, params)
+        elif kind == "categorical_woe":
+            out = _apply_categorical_woe_step(out, columns, params)
+        else:
+            raise FeatureError(f"unsupported preprocessing step kind: {kind!r}")
+    return out
+
+
+def _apply_impute(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        value = params.get(column)
+        if isinstance(value, dict) and "value" in value:
+            value = value["value"]
+        out[column] = out[column].fillna(value)
+    return out
+
+
+def _apply_missing_indicator(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay missing-indicator columns (PREP-8): ``params[column]`` is the indicator
+    column name (e.g. ``col__was_missing``). Must run *before* the ``impute`` step
+    that fills ``column`` -- ``tool_impute_missing`` always appends the
+    ``missing_indicator`` step ahead of the paired ``impute`` step in the chain."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        indicator_col = params.get(column)
+        if not indicator_col:
+            continue
+        out[str(indicator_col)] = out[column].isna().astype(int)
+    return out
+
+
+def _apply_cap(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        bounds = params.get(column) or {}
+        lower = bounds.get("lower")
+        upper = bounds.get("upper")
+        values = pd.to_numeric(out[column], errors="coerce").to_numpy(dtype=float)
+        if lower is not None and upper is not None and np.isfinite(lower) and np.isfinite(upper):
+            # ``to_numpy`` may hand back a read-only view (e.g. when the source
+            # column came from a ``Series.fillna()`` whose backing buffer is
+            # WRITEABLE=False in pandas 2.x), so build a fresh array via
+            # ``np.where`` rather than mutating ``values`` in place.
+            mask = np.isfinite(values)
+            values = np.where(mask, np.clip(values, float(lower), float(upper)), values)
+        out[column] = values
+    return out
+
+
+def _apply_normalize(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        column_params = params.get(column) or {}
+        kind = "minmax" if "min" in column_params else "zscore"
+        values = pd.to_numeric(out[column], errors="coerce").to_numpy(dtype=float)
+        out[column] = apply_scaler(values, column_params, kind=kind)
+    return out
+
+
+def _apply_onehot(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    present = [column for column in columns if column in frame.columns]
+    if not present:
+        return frame.copy()
+    out = frame.copy()
+    dummy_frames = []
+    for column in present:
+        categories = params.get(column) or []
+        data = {
+            f"{column}_{category}": (out[column] == category).astype(int)
+            for category in categories
+        }
+        dummy_frames.append(pd.DataFrame(data, index=out.index))
+    out = out.drop(columns=present)
+    if dummy_frames:
+        out = pd.concat([out, *dummy_frames], axis=1)
+    return out
+
+
+def _apply_woe(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay numeric WOE encoding (W3a tail): ``params[column]`` is a serialized
+    ``WOEResult`` (as returned by ``woe_encode``'s ``woe_maps``). Adds the
+    ``{column}_woe`` column alongside the original (WOE never overwrites its
+    source column -- ``tool_woe_encode`` doesn't either)."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        entry = params.get(column)
+        if not entry:
+            continue
+        woe = WOEResult(
+            feature=column,
+            edges=tuple(float(value) for value in entry["edges"]),
+            woe_by_bin=tuple(float(value) for value in entry["woe_by_bin"]),
+            na_woe=entry.get("na_woe"),
+        )
+        encoded = woe_encode(out, column, woe)
+        out[encoded.name] = encoded
+    return out
+
+
+def _apply_categorical_woe_step(frame: pd.DataFrame, columns: list[str], params: dict) -> pd.DataFrame:
+    """Replay categorical WOE encoding (W3a tail): ``params[column]`` is a serialized
+    ``CategoricalWOEResult`` (as returned by ``woe_encode_categorical``'s
+    ``woe_maps``). Adds the ``{column}_woe`` column alongside the original."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        entry = params.get(column)
+        if not entry:
+            continue
+        categories = tuple(
+            CategoricalWOECategory(
+                category=str(item["category"]),
+                count=int(item["count"]),
+                bad_count=int(item["bad_count"]),
+                good_count=int(item["good_count"]),
+                bad_rate=float(item["bad_rate"]),
+                woe=float(item["woe"]),
+                iv_contribution=float(item["iv_contribution"]),
+            )
+            for item in entry["categories"]
+        )
+        woe = CategoricalWOEResult(
+            feature=column,
+            categories=categories,
+            rare_categories=tuple(str(value) for value in entry.get("rare_categories") or ()),
+            min_count=int(entry["min_count"]),
+            smoothing=float(entry["smoothing"]),
+            default_woe=float(entry["default_woe"]),
+            na_woe=entry.get("na_woe"),
+            total_iv=float(entry.get("total_iv", 0.0)),
+        )
+        encoded = apply_categorical_woe(out, column, woe)
+        out[encoded.name] = encoded
+    return out
+
+
+__all__ = [
+    "append_step",
+    "apply_preprocessing_steps",
+    "read_preprocessing_chain",
+    "sidecar_path",
+    "write_preprocessing_chain",
+]

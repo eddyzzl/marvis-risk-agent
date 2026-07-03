@@ -1,65 +1,39 @@
 import numpy as np
 import pandas as pd
 
+from marvis.feature.binning import assign_bins as _feature_assign_bins
+from marvis.feature.binning import equal_frequency_edges
+from marvis.feature.metrics import compute_psi as _feature_compute_psi
+from marvis.feature.metrics import feature_ks
 from marvis.validation.results import BinRow
 
 
 def equal_frequency_bin_edges(scores, bin_count: int):
-    quantiles = np.linspace(0.0, 1.0, bin_count + 1)
-    values = np.asarray(scores, dtype=float)
-    values = values[np.isfinite(values)]
-    if len(values) == 0:
-        return np.asarray([-np.inf, np.inf], dtype=float)
-    edges = np.quantile(values, quantiles)
-    return edges
+    return equal_frequency_edges(np.asarray(scores, dtype=float), bin_count)
 
 
 def assign_bins(scores, edges):
-    scores = np.asarray(scores, dtype=float)
-    inner_edges = np.asarray(edges, dtype=float)[1:-1]
-    # side="left" gives right-inclusive bins (lower, upper]: a score equal to an
-    # inner edge falls into the LOWER bin (matches pd.cut(right=True)). Scores
-    # below/above the outer edges clamp to the first/last bin.
-    raw = np.searchsorted(inner_edges, scores, side="left") + 1
-    return np.clip(raw, 1, len(edges) - 1)
+    assigned = _feature_assign_bins(np.asarray(scores, dtype=float), np.asarray(edges, dtype=float))
+    return np.where(assigned >= 0, assigned + 1, 0)
 
 
 def bin_distribution(scores, edges) -> np.ndarray:
     """Proportion of scores falling in each bin (zeros vector when empty)."""
+    scores = np.asarray(scores, dtype=float)
     if len(scores) == 0:
         return np.zeros(len(edges) - 1, dtype=float)
     bins = assign_bins(scores, edges)
-    counts = np.bincount(bins, minlength=len(edges))[1:len(edges)]
+    valid = bins > 0
+    counts = np.bincount(bins[valid], minlength=len(edges))[1:len(edges)]
     return counts / counts.sum() if counts.sum() else counts.astype(float)
 
 
 def compute_ks(scores, labels) -> float:
-    scores = np.asarray(scores, dtype=float)
-    labels = np.asarray(labels, dtype=int)
-    finite_mask = np.isfinite(scores)
-    scores = scores[finite_mask]
-    labels = labels[finite_mask]
-    if len(scores) == 0 or labels.sum() == 0 or labels.sum() == len(labels):
-        return 0.0
-    total_bad = int(labels.sum())
-    total_good = len(labels) - total_bad
-    order = np.argsort(scores, kind="mergesort")
-    sorted_scores = scores[order]
-    sorted_labels = labels[order]
-    cum_bad = np.cumsum(sorted_labels)
-    cum_total = np.arange(1, len(sorted_labels) + 1)
-    threshold_indexes = np.r_[np.where(np.diff(sorted_scores) != 0)[0], len(sorted_scores) - 1]
-    bad_cdf = cum_bad[threshold_indexes] / total_bad
-    good_cdf = (cum_total[threshold_indexes] - cum_bad[threshold_indexes]) / total_good
-    return float(np.max(np.abs(bad_cdf - good_cdf)))
+    return feature_ks(np.asarray(scores, dtype=float), np.asarray(labels, dtype=int))
 
 
 def compute_psi(expected_distribution, actual_distribution, smoothing: float = 1e-6) -> float:
-    expected = np.asarray(expected_distribution, dtype=float)
-    actual = np.asarray(actual_distribution, dtype=float)
-    expected = np.where(expected == 0, smoothing, expected)
-    actual = np.where(actual == 0, smoothing, actual)
-    return float(np.sum((actual - expected) * np.log(actual / expected)))
+    return _feature_compute_psi(expected_distribution, actual_distribution, smoothing=smoothing)
 
 
 def bin_table(
@@ -70,9 +44,12 @@ def bin_table(
     target_col: str,
 ) -> list[BinRow]:
     scores = dataframe[score_col].to_numpy(dtype=float)
-    labels = dataframe[target_col].to_numpy(dtype=int)
+    labels = pd.to_numeric(dataframe[target_col], errors="coerce").to_numpy(dtype=float)
     bins = assign_bins(scores, edges)
-    total = len(scores)
+    valid = (bins > 0) & np.isfinite(labels)
+    labels = labels[valid].astype(int)
+    bins = bins[valid]
+    total = len(labels)
     total_bad = int(labels.sum())
     overall_bad_rate = total_bad / total if total else 0.0
 

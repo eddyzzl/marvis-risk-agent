@@ -1,0 +1,170 @@
+{
+  "name": "v1_compat",
+  "version": "0.1.0",
+  "display_name": "V1 Validation Compatibility Pack",
+  "description": "Wraps stable V1 model validation stages as MARVIS tools.",
+  "module": "marvis.packs.v1_compat.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "scan_materials",
+      "summary": "Scan the task source directory and record V1 validation materials.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["scanned", "failed"]},
+          "materials": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {"type": "string"},
+                "path": {"type": "string"},
+                "name": {"type": "string"},
+                "size_bytes": {"type": "integer"},
+                "sha256": {"type": ["string", "null"]}
+              },
+              "required": ["role", "path", "name", "size_bytes", "sha256"],
+              "additionalProperties": false
+            }
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "status": {"type": "string"},
+                "detail": {"type": "string"},
+                "selected": {"type": "string"}
+              },
+              "required": ["name", "status", "detail"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["task_id", "status", "materials", "checks"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_scan_materials",
+      "side_effects": ["read:task", "read:materials", "write:task"]
+    },
+    {
+      "name": "run_notebook",
+      "summary": "Run the stable V1 notebook reproducibility stage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["executed", "failed"]},
+          "notebook_cells": {"type": "integer"},
+          "sample_ref": {"type": "string"},
+          "runtime_model_ref": {"type": "string"},
+          "evidence_ref": {"type": "string"}
+        },
+        "required": ["task_id", "status", "notebook_cells", "sample_ref", "runtime_model_ref", "evidence_ref"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 3600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_run_notebook",
+      "side_effects": ["read:task", "read:materials", "write:task", "write:artifacts"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "compute_validation_metrics",
+      "summary": "Run the stable V1 validation metrics stage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["writing_artifacts", "review_required", "failed"]},
+          "ks": {"type": "number", "minimum": 0, "maximum": 1},
+          "auc": {"type": "number", "minimum": 0, "maximum": 1},
+          "psi": {"type": ["number", "null"], "minimum": 0},
+          "score_consistency_passed": {"type": "boolean"},
+          "validation_results_ref": {"type": "string"}
+        },
+        "required": ["task_id", "status", "ks", "auc", "psi", "score_consistency_passed", "validation_results_ref"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compute_validation_metrics",
+      "side_effects": ["read:task", "read:artifacts", "write:task", "write:artifacts"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "render_reports",
+      "summary": "Render the stable V1 Excel and Word report artifacts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1}
+        },
+        "required": ["task_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["succeeded", "review_required", "failed"]},
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {"type": "string", "enum": ["excel", "word"]},
+                "path": {"type": "string"},
+                "download_url": {"type": ["string", "null"]}
+              },
+              "required": ["kind", "path", "download_url"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["task_id", "status", "artifacts"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_reports",
+      "side_effects": ["read:task", "read:artifacts", "write:task", "write:artifacts"],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": ["read:task", "write:task", "read:materials", "read:artifacts", "write:artifacts"]
+}

@@ -190,6 +190,32 @@ def test_reproducibility_uses_positional_rows_for_non_integer_sample_index():
     assert {row.row_index for row in result.rows} == {0, 1, 2}
 
 
+def test_reproducibility_uses_positional_scores_for_filtered_integer_sample_index():
+    sample = pd.DataFrame(
+        {
+            "x1": [0.1, 0.2, 0.3],
+            "x2": [0.0, 0.0, 0.0],
+            "sample_score": [0.5, 0.55, 0.6],
+            "y": [0, 1, 0],
+            "split": ["train"] * 3,
+            "apply_month": ["202503"] * 3,
+        },
+        index=[10, 11, 12],
+    )
+    code_scores = sample["sample_score"].astype(float)
+    submitted_pmml = _FakeScorer({0: 0.5, 1: 0.55, 2: 0.6})
+
+    result = run_reproducibility(
+        sample=sample,
+        config=_config(),
+        code_scores=code_scores,
+        submitted_pmml_scorer=submitted_pmml,
+    )
+
+    assert result.summary.status is ConsistencyStatus.PASS
+    assert {row.row_index for row in result.rows} == {0, 1, 2}
+
+
 def test_reproducibility_uses_raw_dataframe_for_submitted_pmml():
     sample = pd.DataFrame({
         "x1": [0.1, 0.2],

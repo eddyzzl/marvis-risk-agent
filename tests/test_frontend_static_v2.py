@@ -59,6 +59,60 @@ def _contrast_ratio(left: str, right: str) -> float:
     return (light + 0.05) / (dark + 0.05)
 
 
+def test_artifact_metrics_object_values_render_as_readable_key_values():
+    module_url = (STATIC_DIR / "js" / "v2" / "artifact_view.js").as_uri()
+    script = (
+        f"import({json.dumps(module_url)}).then((module) => {{"
+        "  const html = module.metricsHtml({ stats: { mean: 0.532, std: 0.042 } });"
+        "  process.stdout.write(html);"
+        "});"
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "mean: 0.532；std: 0.042" in result.stdout
+    assert '{"mean":0.532' not in result.stdout
+
+
+def test_v2_artifact_preview_uses_tabular_numeric_metrics():
+    css = _read_static("styles.css")
+
+    assert '[data-v2-artifact-view="true"] :is(.metrics-preview, .dataset-preview table)' in css
+    assert 'font-feature-settings: "tnum"' in css
+    assert '[data-v2-artifact-view="true"] .metrics-preview td' in css
+    assert "text-align: right" in css
+
+
+def test_agent_message_polling_uses_incremental_cursor_when_safe():
+    app_js = _read_static("app.js")
+
+    assert "function agentMessageCanPollIncrementally" in app_js
+    assert "message?.metadata?.optimistic || message?.metadata?.streaming" in app_js
+    assert "function mergeIncrementalAgentMessages" in app_js
+    assert "?after_id=${encodeURIComponent(lastMessageId)}" in app_js
+    assert "if (payload.incremental)" in app_js
+
+
+def test_v2_plan_rail_fetch_errors_are_visible_and_retryable():
+    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "createPlanRailController" in app_js
+    assert "planRailController.render({ force, renderSignatures })" in app_js
+    assert "const v2PlanFetchErrors = new Map()" in plan_js
+    assert "if (!response.ok) throw new Error(`HTTP ${response.status}`)" in plan_js
+    assert "计划读取失败" in plan_js
+    assert "当前显示的是上次缓存的计划" in plan_js
+    assert "const fetchErrorBanner = fetchError" in plan_js
+    assert "return fetchErrorBanner + headerBadge + eventStrip + subAgentRows + phasesHtml + startControl;" in plan_js
+    assert "data-plan-rail-retry" in plan_js
+    assert "function retryFetch" in plan_js
+
+
 def _agent_timeline_items_for(
     messages: list[dict],
     visible_stages: list[str],
@@ -66,15 +120,12 @@ def _agent_timeline_items_for(
     frozen_snapshots: list[dict] | None = None,
     selected_task_id: str | None = None,
 ) -> list[dict]:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentTimelineStageDefinitions")
-    end = app_js.index("function renderAgentTimeline", start)
-    timeline_source = app_js[start:end]
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     snapshots = frozen_snapshots or []
     snapshot_task = selected_task_id or ("test-task" if snapshots else "")
     script = "\n".join(
         [
-            timeline_source,
+            f"import * as conversation from {json.dumps(module_url)};",
             (
                 f"const selectedTaskId = {json.dumps(snapshot_task)};"
                 if snapshot_task
@@ -88,7 +139,12 @@ def _agent_timeline_items_for(
             "if (__seedSnapshots.length && selectedTaskId) {",
             "  taskFrozenSectionSnapshots.set(selectedTaskId, __seedSnapshots);",
             "}",
-            "const items = agentTimelineItems(messages, visibleStages).map((item) => {",
+            "const snapshotsByTrigger = conversation.agentFrozenSnapshotsByTriggerId({",
+            "  selectedTaskId,",
+            "  taskFrozenSectionSnapshots,",
+            "  agentMessages: messages,",
+            "});",
+            "const items = conversation.agentTimelineItems(messages, visibleStages, { snapshotsByTrigger }).map((item) => {",
             "  if (item.type === 'stage') return { type: item.type, stage: item.stage };",
             "  if (item.type === 'frozen') return {",
             "    type: item.type,",
@@ -101,7 +157,7 @@ def _agent_timeline_items_for(
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -110,23 +166,24 @@ def _agent_timeline_items_for(
 
 
 def _agent_messages_html_for(messages: list[dict], label_stage: str | None = None) -> str:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentMessagesHtml")
-    end = app_js.index("function clearAgentStageMessages", start)
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     script = "\n".join(
         [
+            f"import * as conversation from {json.dumps(module_url)};",
             "function agentStageLabel(stage) { return 'Agent'; }",
             "function agentMessageHtml(message, labelStage = message?.stage, options = {}) {",
             "  const label = message.role === 'user' ? '' : agentStageLabel(labelStage);",
             "  return `${options.hideMeta || !label ? '' : `<meta>${label}</meta>`}<body>${message.content}</body>`;",
             "}",
-            app_js[start:end],
             f"const messages = {json.dumps(messages, ensure_ascii=False)};",
-            f"process.stdout.write(agentMessagesHtml(messages, {json.dumps(label_stage, ensure_ascii=False)}));",
+            "process.stdout.write(conversation.agentMessagesHtml(",
+            f"  messages, {json.dumps(label_stage, ensure_ascii=False)},",
+            "  { agentStageLabel, agentMessageHtml },",
+            "));",
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -135,18 +192,16 @@ def _agent_messages_html_for(messages: list[dict], label_stage: str | None = Non
 
 
 def _agent_report_messages_for_display(messages: list[dict]) -> list[dict]:
-    app_js = _read_static("app.js")
-    start = app_js.index("function agentReportMessagesForDisplay")
-    end = app_js.index("function clearAgentStageMessages", start)
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     script = "\n".join(
         [
-            app_js[start:end],
+            f"import * as conversation from {json.dumps(module_url)};",
             f"const messages = {json.dumps(messages, ensure_ascii=False)};",
-            "process.stdout.write(JSON.stringify(agentReportMessagesForDisplay(messages)));",
+            "process.stdout.write(JSON.stringify(conversation.agentReportMessagesForDisplay(messages)));",
         ]
     )
     result = subprocess.run(
-        ["node", "-e", script],
+        ["node", "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
@@ -349,6 +404,7 @@ def test_word_report_preview_dialog_uses_task_dialog_backdrop():
 def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actions():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    layout_resize_js = _read_static("js/layout-resize.js")
 
     title_start = styles_css.index(".step-title {")
     title_end = styles_css.index("}", title_start)
@@ -375,12 +431,345 @@ def test_step_rail_narrow_layout_keeps_titles_horizontal_and_stacks_report_actio
     assert '<span class="step-copy">' in renderer
     assert '<div class="step-sub">' not in renderer
 
-    assert "const PROGRESS_WIDTH_MIN = 314;" in app_js
-    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
-    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in app_js
+    assert "export const PROGRESS_WIDTH_MIN = 314;" in layout_resize_js
+    assert "clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
+    assert "clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX)" in layout_resize_js
+    assert 'from "./js/layout-resize.js"' in app_js
 
 
-def test_completed_report_actions_render_below_step_copy_with_excel_green():
+def test_plan_rail_matches_validation_stepper_with_nested_subtasks():
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    plan_start = plan_js.index("function planRailHtml")
+    plan_end = plan_js.index("function render({", plan_start)
+    plan_renderer = plan_js[plan_start:plan_end]
+    substeps_start = plan_js.index("function planSubstepGroupHtml")
+    substeps_end = plan_js.index("function driverHasBlockingError", substeps_start)
+    substeps_renderer = plan_js[substeps_start:substeps_end]
+
+    assert "function planPhaseStatus" in plan_js
+    assert "function planPhaseHint" in plan_js
+    assert "function planRetryControlHtml" in plan_js
+    assert "function planSubstepGroupHtml" in plan_js
+    assert "const phaseNumber = phaseIndex + 1;" in plan_renderer
+    assert 'class="step plan-rail-step' in plan_renderer
+    assert '<span class="step-number">${phaseNumber}</span>' in plan_renderer
+    assert '<strong class="step-title">${escapeHtml(phase)}</strong>' in plan_renderer
+    assert "planSubstepGroupHtml(phaseSteps, phaseNumber)" in plan_renderer
+    assert '<section class="notebook-step-group plan-rail-substeps">' in substeps_renderer
+    assert '<h4>子任务 · ${steps.length}</h4>' in substeps_renderer
+    assert "const subNumber = parentNumber ? `${parentNumber}.${index + 1}` : `${index + 1}`;" in substeps_renderer
+    assert '<span class="notebook-step-no">${escapeHtml(subNumber)}</span>' in substeps_renderer
+    assert '<span class="plan-substep-copy">' in substeps_renderer
+    assert "const description = step.description || step.summary || PLAN_STEP_HINTS" in substeps_renderer
+    assert 'const descriptionHtml = description ? `<small>${escapeHtml(description)}</small>` : "";' in substeps_renderer
+    assert 'const retry = status === "failed" ? planRetryControlHtml(step, toolSchemaFor(ref)) : "";' in substeps_renderer
+    assert "`<strong>${escapeHtml(step.title || \"未命名步骤\")}</strong>`" in substeps_renderer
+    assert "descriptionHtml" in substeps_renderer
+    assert "retry" in substeps_renderer
+    assert 'data-plan-retry-step="${escapeHtml(stepId)}"' in plan_js
+    assert 'class="plan-retry-inputs"' in plan_js
+    assert ': "";' in substeps_renderer
+    assert '<section class="plan-rail-phase"' not in plan_renderer
+    assert "plan-rail-major-number" not in plan_renderer
+    assert "plan-rail-phase-name" not in plan_renderer
+    assert "plan-rail-substep" not in plan_renderer
+    assert "let number = 0;" not in plan_renderer
+
+    plan_step_rule = _css_rule(v2_css, ".plan-rail-step")
+    assert "cursor: default" in plan_step_rule
+
+    plan_substeps_rule = _css_rule(v2_css, ".plan-rail-substeps")
+    assert "margin-top: 6px" in plan_substeps_rule
+    assert ".plan-substep-copy" in v2_css
+    assert "display: grid" in _css_rule(v2_css, ".plan-substep-copy")
+    assert "white-space: nowrap" in _css_rule(v2_css, ".plan-substep-copy small")
+    assert "grid-column: 1 / -1" in _css_rule(v2_css, ".plan-step-retry")
+    assert "width: 100%" in _css_rule(v2_css, ".plan-step-retry")
+
+    assert ".plan-rail-phase" not in v2_css
+    assert ".plan-rail-major-number" not in v2_css
+
+
+def test_layout_resize_controller_restores_drags_and_persists_widths():
+    script = """
+import assert from "node:assert/strict";
+import {
+  createLayoutResizeController,
+  PROGRESS_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+} from "./marvis/static/js/layout-resize.js";
+
+const styleValues = new Map([
+  ["--sidebar-width", "400px"],
+  ["--progress-width", "400px"],
+]);
+const root = {
+  style: {
+    setProperty(name, value) {
+      styleValues.set(name, value);
+    },
+  },
+};
+const bodyClasses = new Set();
+const body = {
+  classList: {
+    add(value) {
+      bodyClasses.add(value);
+    },
+    remove(value) {
+      bodyClasses.delete(value);
+    },
+    contains(value) {
+      return bodyClasses.has(value);
+    },
+  },
+};
+const storageData = {
+  marvis_layout: JSON.stringify({ sidebar: 320, progress: 999 }),
+};
+const storage = {
+  getItem(key) {
+    return storageData[key] || null;
+  },
+  setItem(key, value) {
+    storageData[key] = value;
+  },
+};
+const listeners = {};
+const removed = [];
+const controller = createLayoutResizeController({
+  body,
+  clamp: (value, min, max) => Math.min(Math.max(value, min), max),
+  getComputedStyleFn: () => ({
+    getPropertyValue(name) {
+      return styleValues.get(name) || "";
+    },
+  }),
+  root,
+  storage,
+  windowObj: {
+    addEventListener(name, fn) {
+      listeners[name] = fn;
+    },
+    removeEventListener(name, fn) {
+      removed.push([name, fn]);
+      if (listeners[name] === fn) delete listeners[name];
+    },
+  },
+});
+
+controller.restoreLayoutWidths();
+assert.equal(styleValues.get("--sidebar-width"), `${SIDEBAR_WIDTH_MIN}px`);
+assert.equal(styleValues.get("--progress-width"), `${PROGRESS_WIDTH_MAX}px`);
+
+let prevented = false;
+controller.startResizeDrag("left", {
+  clientX: 100,
+  preventDefault() {
+    prevented = true;
+  },
+});
+assert.equal(prevented, true);
+assert.equal(bodyClasses.has("is-resizing"), true);
+listeners.pointermove({ clientX: 400 });
+assert.equal(styleValues.get("--sidebar-width"), "520px");
+listeners.pointerup();
+assert.equal(bodyClasses.has("is-resizing"), false);
+assert.equal(removed.length, 2);
+assert.equal(JSON.parse(storageData.marvis_layout).sidebar, 520);
+
+styleValues.set("--progress-width", "400px");
+let keyPrevented = false;
+controller.handleResizeKey("right", {
+  key: "ArrowRight",
+  shiftKey: false,
+  preventDefault() {
+    keyPrevented = true;
+  },
+});
+assert.equal(keyPrevented, true);
+assert.equal(styleValues.get("--progress-width"), "388px");
+assert.equal(JSON.parse(storageData.marvis_layout).progress, 388);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
+
+
+def test_plan_rail_retry_step_posts_edited_inputs():
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    retry_text_body = _slice_function(plan_js, "function planRetryInputsText")
+    retry_fields_body = _slice_function(plan_js, "function planRetrySchemaFieldsHtml")
+    retry_parse_structured_body = _slice_function(plan_js, "function collectPlanRetryStructuredInputs")
+    retry_scope_body = _slice_function(plan_js, "function planRetryScopeHtml")
+    retry_body = _slice_function(plan_js, "async function retryPlanStep")
+    click_body = _slice_function(plan_js, "function handleClick")
+
+    assert "step?.failure_envelope?.editable_input_schema" in retry_text_body
+    assert 'Object.prototype.hasOwnProperty.call(spec, "default")' in retry_text_body
+    assert 'data-plan-retry-input-key="${encodedKey}"' in retry_fields_body
+    assert 'data-plan-retry-input-type="${typeLabel}"' in retry_fields_body
+    assert "plan-retry-schema-fields" in retry_fields_body
+    assert "collectPlanRetryStructuredInputs(form)" in _slice_function(plan_js, "function parsePlanRetryInputs")
+    assert "[data-plan-retry-input-key]" in retry_parse_structured_body
+    assert "step?.failure_envelope" in retry_scope_body
+    assert "downstream_reset_steps" in retry_scope_body
+    assert "plan-retry-scope" in retry_scope_body
+    assert "grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))" in _css_rule(v2_css, ".plan-retry-schema-fields")
+    assert "color: var(--text-muted)" in _css_rule(v2_css, ".plan-retry-scope")
+    assert 'button?.dataset?.planRetryStep || ""' in retry_body
+    assert 'parsePlanRetryInputs(button.closest("[data-plan-step-retry]"))' in retry_body
+    assert "JSON.stringify({ inputs })" in retry_body
+    assert "v2PlanCache.delete(taskId)" in retry_body
+    assert "window.setTimeout(() => retryFetch(taskId), 1000)" in retry_body
+    assert "[data-plan-retry-step]" in click_body
+    assert "void retryPlanStep(planRetryButton);" in click_body
+    assert "[data-plan-rail-retry]" in click_body
+
+
+def test_plan_retry_replace_semantics_warning_is_always_present():
+    """LT-4: a smoke pass on the retry flow found /api/plans/{id}/steps/{id}/retry
+    fully REPLACES the step's inputs_json (marvis/repositories/plans.py
+    retry_failed_step, UPDATE ... SET inputs_json = ?) rather than merging with
+    the step's existing inputs. Before any schema form existed this was invisible
+    footgun risk on the JSON editor -- assert the warning copy renders next to it
+    unconditionally, and that the JSON editor keeps pre-filling current values
+    (the mitigation for a user who edits only part of the object)."""
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    warning_body = _slice_function(plan_js, "function planRetryReplaceWarningHtml")
+    control_body = _slice_function(plan_js, "function planRetryControlHtml")
+
+    assert "整体替换" in warning_body
+    assert "非合并" in warning_body
+    assert "plan-retry-warning" in warning_body
+    assert "planRetryReplaceWarningHtml()" in control_body
+    assert "planRetryInputsText(step)" in control_body
+    assert "color: var(--warning-strong)" in _css_rule(v2_css, ".plan-retry-warning")
+    assert "background: var(--warning-soft)" in _css_rule(v2_css, ".plan-retry-warning")
+
+
+def test_plan_retry_schema_form_marks_required_fields_and_falls_back_to_inferred_schema():
+    """LT-4: the schema form (planRetrySchemaFieldsHtml) previously only ever
+    saw the failure_envelope's *inferred* editable_input_schema (value-typed,
+    no `required`/`enum`/`title` -- see marvis/agent/gates/contracts.py
+    _editable_input_schema). It now accepts an optional real tool input_schema
+    (sourced from the already-existing GET /api/plugins/{name}/tools) and
+    marks required fields with a red `*`. When no real schema resolves, the
+    form must render exactly as before (defensive fallback, no behavior
+    regression)."""
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "const step = {",
+            "  id: 'step-1',",
+            "  index: 0,",
+            "  title: 'Propose join',",
+            "  status: 'failed',",
+            "  tool_ref: { plugin: 'data_ops', tool: 'propose_join' },",
+            "  depends_on: [],",
+            "  inputs: { dataset_id: 'ds-1', strategy: 'left' },",
+            "  failure_envelope: {",
+            "    editable_input_schema: {",
+            "      type: 'object',",
+            "      properties: {",
+            "        dataset_id: { type: 'string', default: 'ds-1' },",
+            "        strategy: { type: 'string', default: 'left' },",
+            "      },",
+            "    },",
+            "    downstream_reset_steps: [],",
+            "  },",
+            "};",
+            "const plan = { id: 'plan-1', status: 'failed', steps: [step] };",
+            "const toolsResponses = {",
+            "  'data_ops': { tools: [{ name: 'propose_join', input_schema: {",
+            "    type: 'object',",
+            "    properties: {",
+            "      dataset_id: { type: 'string', title: '数据集' },",
+            "      strategy: { type: 'string', enum: ['left', 'inner'], title: '策略' },",
+            "    },",
+            "    required: ['dataset_id', 'strategy'],",
+            "  } }] },",
+            "};",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "let renders = 0;",
+            "function makeController(listPluginToolsClient) {",
+            "  return createPlanRailController({",
+            "    $,",
+            "    getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "    getSelectedTaskId: () => 'task-A',",
+            "    getAgentMessages: () => [],",
+            "    isAgentMode: () => false,",
+            "    renderWorkflowStepper: () => { renders += 1; controller.render({ force: true, renderSignatures: {} }); },",
+            "    setActionStatus: () => {},",
+            "    listPluginToolsClient,",
+            "  });",
+            "}",
+            "let controller = makeController((name) => Promise.resolve(toolsResponses[name] || { tools: [] }));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "const withRealSchema = elements.workflowStepper.innerHTML;",
+            "",
+            "elements.workflowStepper.innerHTML = '';",
+            "controller = makeController((name) => Promise.reject(new Error('network down')));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "const withFailedFetch = elements.workflowStepper.innerHTML;",
+            "process.stdout.write(JSON.stringify({ withRealSchema, withFailedFetch }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    with_real_schema = payload["withRealSchema"]
+    with_failed_fetch = payload["withFailedFetch"]
+
+    # Real schema resolved: both fields are required (red `*`), strategy
+    # renders as a <select> from its real enum, and titles come from the
+    # real schema instead of the raw key.
+    assert with_real_schema.count('<span class="plan-retry-required">*</span>') == 2
+    assert '<option value="left" selected>left</option>' in with_real_schema
+    assert '<option value="inner">inner</option>' in with_real_schema
+    assert "数据集" in with_real_schema
+    assert "策略" in with_real_schema
+    assert 'plan-retry-schema-field required' in with_real_schema
+
+    # Defensive fallback: schema fetch rejected, so the form still renders
+    # from the inferred failure_envelope schema alone -- flat text inputs,
+    # no required marks, no crash (behavior does not regress).
+    assert "plan-retry-required" not in with_failed_fetch
+    assert 'data-plan-retry-input-key="dataset_id"' in with_failed_fetch
+    assert 'data-plan-retry-input-key="strategy"' in with_failed_fetch
+    assert "整体替换" in with_failed_fetch
+
+
+def test_completed_report_actions_render_below_step_copy_with_office_colors():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
 
@@ -400,6 +789,7 @@ def test_completed_report_actions_render_below_step_copy_with_excel_green():
     assert 'data-step-action="previewWordReport"' in downloads_renderer
     assert 'data-step-action="downloadWordReport"' in downloads_renderer
     assert 'data-step-action="downloadExcelAnalysis"' in downloads_renderer
+    assert "step-action-button primary word" in downloads_renderer
     assert "step-action-button excel" in downloads_renderer
 
     step_renderer_start = app_js.index("function renderWorkflowStepper")
@@ -416,12 +806,37 @@ def test_completed_report_actions_render_below_step_copy_with_excel_green():
     assert "flex-wrap: nowrap;" in action_rule
     assert "justify-content: stretch;" in action_rule
 
+    word_start = styles_css.index(".step-action-button.word")
+    word_end = styles_css.index("}", word_start)
+    word_rule = styles_css[word_start:word_end]
+    assert "background: var(--download-word-bg);" in word_rule
+    assert "border-color: var(--download-word-border);" in word_rule
+    assert "color: var(--action-on-solid);" in word_rule
+    assert "box-shadow: var(--button-solid-shadow)" in word_rule
+    assert "var(--brand-primary)" not in word_rule
+
+    word_hover_start = styles_css.index(".step-action-button.word:hover")
+    word_hover_end = styles_css.index("}", word_hover_start)
+    word_hover_rule = styles_css[word_hover_start:word_hover_end]
+    assert "background: var(--download-word-bg-hover);" in word_hover_rule
+    assert "border-color: var(--download-word-border-hover);" in word_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in word_hover_rule
+
     excel_start = styles_css.index(".step-action-button.excel")
     excel_end = styles_css.index("}", excel_start)
     excel_rule = styles_css[excel_start:excel_end]
-    assert "background: #1f7a3f;" in excel_rule
-    assert "border-color: #1f7a3f;" in excel_rule
-    assert "color: #fff;" in excel_rule
+    assert "background: var(--download-excel-bg);" in excel_rule
+    assert "border-color: var(--download-excel-border);" in excel_rule
+    assert "color: var(--action-on-solid);" in excel_rule
+    assert "box-shadow: var(--button-solid-shadow)" in excel_rule
+    assert "var(--brand-primary)" not in excel_rule
+
+    excel_hover_start = styles_css.index(".step-action-button.excel:hover")
+    excel_hover_end = styles_css.index("}", excel_hover_start)
+    excel_hover_rule = styles_css[excel_hover_start:excel_hover_end]
+    assert "background: var(--download-excel-bg-hover);" in excel_hover_rule
+    assert "border-color: var(--download-excel-border-hover);" in excel_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in excel_hover_rule
 
 
 def test_report_download_readiness_requires_generated_report_flag():
@@ -460,6 +875,48 @@ def test_report_download_readiness_requires_generated_report_flag():
         "busyReport": False,
         "readyReport": True,
     }
+
+
+def test_generic_actions_and_composer_use_semantic_visual_tokens():
+    styles_css = _read_static("styles.css")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+
+    for token in [
+        "--focus-ring",
+        "--button-disabled-bg",
+        "--action-on-solid",
+        "--download-word-bg",
+        "--download-word-bg-hover",
+        "--download-excel-bg",
+        "--download-excel-bg-hover",
+        "--agent-send-stop-bg",
+        "--agent-send-stop-bg-hover",
+        "--agent-send-stop-shadow",
+        "--agent-user-message-bg",
+        "--agent-user-message-shadow",
+    ]:
+        assert token in root_vars
+
+    for token in [
+        "--focus-ring",
+        "--button-disabled-bg",
+        "--agent-composer-chip-bg-hover",
+        "--agent-send-stop-bg",
+        "--agent-send-stop-bg-hover",
+        "--agent-send-stop-shadow",
+        "--agent-user-message-bg",
+        "--agent-user-message-shadow",
+    ]:
+        assert token in dark_vars
+
+    disabled_rule = _css_rule(styles_css, ".button:disabled")
+    assert "background: var(--button-disabled-bg);" in disabled_rule
+
+    focus_start = styles_css.index(".button:focus-visible,")
+    focus_end = styles_css.index("}", focus_start)
+    focus_rule = styles_css[focus_start:focus_end]
+    assert "outline: 3px solid var(--focus-ring);" in focus_rule
 
 
 def test_stage_actions_capture_task_id_before_polling():
@@ -538,6 +995,7 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    focus_ring_js = _read_static("js/focus-ring.js")
 
     assert "static/app.js?v=__MARVIS_STATIC_VERSION__" in index_html
     assert '<script type="module" src="static/app.js?v=__MARVIS_STATIC_VERSION__"></script>' in index_html
@@ -551,32 +1009,35 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "static/app.js?v=20260603-field-focus-ring" not in index_html
     assert "static/app.js?v=20260603-dark-masks" not in index_html
 
-    assert "function formControlFocusTarget(target)" in app_js
-    assert "function installFormControlFocusRingGuard" in app_js
-    assert 'target?.closest?.("input, textarea, select")' in app_js
-    assert "let lastPointerDownControl = null;" in app_js
-    assert "let lastPointerDownAt = 0;" in app_js
-    assert 'document.addEventListener("pointerdown", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("mousedown", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("touchstart", handleFormControlPointerDown, true);' in app_js
-    assert 'document.addEventListener("click", handleFormControlLabelClick, true);' in app_js
-    assert 'document.addEventListener("focusin", handleFormControlFocusIn, true);' in app_js
-    assert 'document.addEventListener("focusout", handleFormControlFocusOut, true);' in app_js
-    assert "const pointerFocusPending = performance.now() - lastPointerDownAt < 750;" in app_js
-    focus_in_start = app_js.index("function handleFormControlFocusIn")
-    focus_in_end = app_js.index("function handleFormControlFocusOut", focus_in_start)
-    focus_in_body = app_js[focus_in_start:focus_in_end]
+    assert "export function formControlFocusTarget(target)" in focus_ring_js
+    assert "export function installFormControlFocusRingGuard" in focus_ring_js
+    assert 'target?.closest?.("input, textarea, select")' in focus_ring_js
+    assert "let lastPointerDownControl = null;" in focus_ring_js
+    assert "let lastPointerDownAt = 0;" in focus_ring_js
+    assert 'root.addEventListener("pointerdown", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("mousedown", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("touchstart", handleFormControlPointerDown, true);' in focus_ring_js
+    assert 'root.addEventListener("click", handleFormControlLabelClick, true);' in focus_ring_js
+    assert 'root.addEventListener("focusin", handleFormControlFocusIn, true);' in focus_ring_js
+    assert 'root.addEventListener("focusout", handleFormControlFocusOut, true);' in focus_ring_js
+    assert "const pointerFocusPending = now() - lastPointerDownAt < suppressionWindowMs;" in focus_ring_js
+    focus_in_start = focus_ring_js.index("function handleFormControlFocusIn")
+    focus_in_end = focus_ring_js.index("function handleFormControlFocusOut", focus_in_start)
+    focus_in_body = focus_ring_js[focus_in_start:focus_in_end]
     assert 'control.classList.toggle(' in focus_in_body
     assert '"suppress-pointer-focus-ring"' in focus_in_body
     assert "pointerFocusPending && lastPointerDownControl !== control" in focus_in_body
-    label_click_start = app_js.index("function handleFormControlLabelClick")
-    label_click_end = app_js.index("document.addEventListener", label_click_start)
-    label_click_body = app_js[label_click_start:label_click_end]
+    label_click_start = focus_ring_js.index("function handleFormControlLabelClick")
+    label_click_end = focus_ring_js.index("root.addEventListener", label_click_start)
+    label_click_body = focus_ring_js[label_click_start:label_click_end]
     assert 'event.target.closest?.("label")' in label_click_body
     assert "label.contains(focused)" in label_click_body
     assert "focused.id === label.htmlFor" in label_click_body
     assert 'focused.classList.add("suppress-pointer-focus-ring")' in label_click_body
-    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in app_js
+    assert 'if (control) control.classList.remove("suppress-pointer-focus-ring");' in focus_ring_js
+    assert 'from "./js/focus-ring.js"' in app_js
+    assert "function formControlFocusTarget(target)" not in app_js
+    assert "function installFormControlFocusRingGuard" not in app_js
     assert "installFormControlFocusRingGuard();" in app_js
 
     suppress_start = styles_css.index("input.suppress-pointer-focus-ring:focus-visible,")
@@ -586,6 +1047,102 @@ def test_pointer_focus_ring_only_shows_when_clicking_inside_form_controls():
     assert "select.suppress-pointer-focus-ring:focus-visible" in suppress_rule
     assert "outline: none" in suppress_rule
     assert "box-shadow: none" in suppress_rule
+
+
+def test_form_control_focus_ring_guard_handles_pointer_and_label_focus():
+    script = """
+import assert from "node:assert/strict";
+import { installFormControlFocusRingGuard } from "./marvis/static/js/focus-ring.js";
+
+function classList() {
+  return {
+    values: new Set(),
+    add(value) {
+      this.values.add(value);
+    },
+    remove(value) {
+      this.values.delete(value);
+    },
+    toggle(value, enabled) {
+      if (enabled) this.add(value);
+      else this.remove(value);
+    },
+    contains(value) {
+      return this.values.has(value);
+    },
+  };
+}
+
+function control(id) {
+  const item = {
+    id,
+    classList: classList(),
+    closest(selector) {
+      return selector === "input, textarea, select" ? item : null;
+    },
+  };
+  return item;
+}
+
+const listeners = {};
+let time = 1000;
+let active = null;
+const timeouts = [];
+installFormControlFocusRingGuard({
+  activeElement: () => active,
+  now: () => time,
+  root: {
+    addEventListener(name, fn, capture) {
+      listeners[name] = { fn, capture };
+    },
+  },
+  setTimeoutFn: (fn, delay) => {
+    timeouts.push({ fn, delay });
+  },
+});
+
+for (const name of ["pointerdown", "mousedown", "touchstart", "click", "focusin", "focusout"]) {
+  assert.equal(listeners[name].capture, true);
+}
+
+const first = control("first");
+const second = control("second");
+listeners.pointerdown.fn({ target: first });
+time += 100;
+listeners.focusin.fn({ target: second });
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), true);
+listeners.focusout.fn({ target: second });
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), false);
+
+listeners.pointerdown.fn({ target: first });
+time += 100;
+listeners.focusin.fn({ target: first });
+assert.equal(first.classList.contains("suppress-pointer-focus-ring"), false);
+
+const label = {
+  htmlFor: "",
+  contains(node) {
+    return node === second;
+  },
+  closest(selector) {
+    return selector === "label" ? label : null;
+  },
+};
+active = second;
+listeners.click.fn({ target: label });
+assert.equal(timeouts[0].delay, 0);
+timeouts[0].fn();
+assert.equal(second.classList.contains("suppress-pointer-focus-ring"), true);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_initialization_failure_shows_service_connection_error():
@@ -600,9 +1157,10 @@ def test_initialization_failure_shows_service_connection_error():
 
 def test_create_task_payload_omits_notebook_contract_fields():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     for field in ["report_values"]:
-        assert f"{field}:" in app_js
+        assert f"{field}:" in create_dialog_js
 
     for removed_field in [
         "algorithm:",
@@ -617,27 +1175,33 @@ def test_create_task_payload_omits_notebook_contract_fields():
         "feature_columns:",
     ]:
         assert removed_field not in app_js
+        assert removed_field not in create_dialog_js
 
 
 def test_create_task_uses_single_model_name_field():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
     assert 'id="modelName"' in index_html
     assert "模型名称" in index_html
     assert 'id="modelVersion"' not in index_html
     assert "模型版本" not in index_html
-    assert 'model_version: ""' in app_js
+    assert 'model_version: ""' in create_dialog_js
     assert '$("modelVersion")' not in app_js
-    assert "请先填写模型名称、验证人员和材料目录。" in app_js
+    assert '$("modelVersion")' not in create_dialog_js
+    assert "请先填写模型名称、验证人员和材料目录。" in create_dialog_js
     assert "请先填写模型名称、版本" not in app_js
+    assert "请先填写模型名称、版本" not in create_dialog_js
 
 
 def test_task_display_does_not_require_model_version_separator():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "function taskDisplayName" in app_js
-    assert "taskDisplayName(selectedTask)" in app_js
+    assert "taskDisplayName," in app_js
+    assert "taskDisplayName?.(selectedTask)" in workspace_view_js
     assert "${selectedTask.model_name} · ${selectedTask.model_version}" not in app_js
     assert "${task.model_name} · ${task.model_version}" not in app_js
 
@@ -689,29 +1253,25 @@ def test_create_dialog_hides_v2_config_controls():
         assert f'id="{element_id}"' in index_html
 
 
-def test_create_dialog_omits_algorithm_choice_without_frontend_training_description_default():
-    index_html = _read_static("index.html")
-    app_js = _read_static("app.js")
+def test_create_dialog_omits_legacy_model_training_description_autofill():
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    assert 'id="modelAlgorithm"' not in index_html
-    assert "模型算法" not in index_html
-    assert '$("modelAlgorithm").value' not in app_js
-    create_task_start = app_js.index("async function createTask")
-    create_task_end = app_js.index("if (!payload.model_name", create_task_start)
-    assert '"algorithm":' not in app_js[create_task_start:create_task_end]
-    defaults_start = app_js.index("function defaultCreateReportValues")
-    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
-    defaults = app_js[defaults_start:defaults_end]
+    # The legacy auto-filled "model_training_description" report value stays removed —
+    # the modeling algorithm is now a real user choice (the create-dialog picker),
+    # not an auto-derived training blurb.
+    defaults_start = create_dialog_js.index("function defaultCreateReportValues")
+    defaults_end = create_dialog_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = create_dialog_js[defaults_start:defaults_end]
     assert '"TEXT:model_training_description"' not in defaults
-    assert "MODEL_TRAINING_DESCRIPTIONS" not in app_js
+    assert "MODEL_TRAINING_DESCRIPTIONS" not in create_dialog_js
 
 
 def test_create_dialog_auto_fills_removed_report_values():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    defaults_start = app_js.index("function defaultCreateReportValues")
-    defaults_end = app_js.index("function prefillCreateTaskReportFields", defaults_start)
-    defaults = app_js[defaults_start:defaults_end]
+    defaults_start = create_dialog_js.index("function defaultCreateReportValues")
+    defaults_end = create_dialog_js.index("function prefillCreateTaskReportFields", defaults_start)
+    defaults = create_dialog_js[defaults_start:defaults_end]
 
     assert 'const today = formatDateInput();' in defaults
     assert '"TEXT:draft_date": today' in defaults
@@ -755,6 +1315,9 @@ def test_create_dialog_uses_visual_run_mode_cards():
 
     assert ".run-mode-cards {" in styles_css
     assert ".run-mode-card {" in styles_css
+    run_mode_rule = _css_rule(styles_css, ".run-mode-card")
+    assert "border-radius: var(--radius)" in run_mode_rule
+    assert "border-radius: var(--radius-control)" not in run_mode_rule
     assert ".run-mode-card:hover:not(.disabled) {\n" not in styles_css
     hover_start = styles_css.index(".run-mode-card:hover:not(.disabled):not(:has(input:checked))")
     hover_end = styles_css.index("}", hover_start)
@@ -783,12 +1346,99 @@ def test_create_dialog_uses_visual_run_mode_cards():
     assert ".mode-choice" not in styles_css
 
 
-def test_create_task_requires_run_mode_and_allows_agent_mode():
-    app_js = _read_static("app.js")
+def test_create_dialog_updates_run_mode_copy_by_task_type():
+    index_html = _read_static("index.html")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
 
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_renderer = app_js[create_start:create_end]
+    assert 'data-run-mode-description="manual"' in index_html
+    assert 'data-run-mode-description="agent"' in index_html
+    assert "function setRunModeDescription" in create_dialog_js
+    assert 'setRunModeDescription("manual", definition.manualModeDescription);' in create_dialog_js
+    assert 'setRunModeDescription("agent", definition.agentModeDescription);' in create_dialog_js
+    assert "由验证人员逐步执行材料扫描、Notebook 验证与报告生成" not in index_html
+    assert "智能解析材料、规划验证步骤并辅助生成验证报告" not in index_html
+
+    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
+    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
+    definitions = task_types_js[definitions_start:definitions_end]
+    expected_copy = {
+        "data_join": [
+            "用结构化控件确认主表、目标列、join key、去重策略，再执行左连接",
+            "Agent 先读 schema 提议角色和键，汇总命中率/膨胀风险，等你确认后执行",
+        ],
+        "feature_analysis": [
+            "选择指标并查看 IV/KS/AUC/PSI/coverage/lift/共线结果，导出分析报告",
+            "Agent 根据字段和字典建议补算指标、解释异常特征，并按你的反馈重跑",
+        ],
+        "modeling": [
+            "确认目标列、train/test/OOT 切分和算法，执行泄漏筛选、调参、训练和报告",
+            "Agent 组织读样本、切分确认、泄漏筛选、调参训练与结果解释",
+        ],
+        "validation": [
+            "逐步完成材料扫描、Notebook 复现、分数一致性、效果稳定性和报告生成",
+            "Agent 辅助扫描材料、解释验证证据、推进确认步骤并起草验证报告",
+        ],
+        "strategy": [
+            "识别评分列和目标列，生成候选规则，在回测前确认并查看收益权衡",
+            "Agent 根据评分、目标和客群起草规则，回测通过率、坏账、swap 和收益权衡",
+        ],
+        "vintage": [
+            "识别 cohort、MOB 和坏账列，计算 Vintage 曲线并展示风险趋势",
+            "Agent 识别 Vintage 字段，计算曲线并解释 cohort 风险变化",
+        ],
+    }
+    for task_type, copy_items in expected_copy.items():
+        task_start = definitions.index(f"  {task_type}: {{")
+        task_end = definitions.index("\n  },", task_start)
+        task_definition = definitions[task_start:task_end]
+        assert "manualModeDescription:" in task_definition
+        assert "agentModeDescription:" in task_definition
+        for copy in copy_items:
+            assert copy in task_definition
+
+
+def test_create_dialog_does_not_preselect_modes_or_modeling_algorithms():
+    index_html = _read_static("index.html")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
+
+    assert 'name="runMode" type="radio" value="manual" checked' not in index_html
+    assert 'name="runMode" type="radio" value="agent" checked' not in index_html
+    assert 'name="modelAlgorithm" value="lgb" checked' not in index_html
+    assert 'name="modelAlgorithm" value="xgb" checked' not in index_html
+    assert 'name="modelAlgorithm" value="lr" checked' not in index_html
+    assert 'name="modelAlgorithm" value="scorecard" checked' not in index_html
+
+    definitions_start = task_types_js.index("export const taskTypeDefinitions = {")
+    definitions_end = task_types_js.index("export const taskTypeDisplayOrder", definitions_start)
+    definitions = task_types_js[definitions_start:definitions_end]
+    assert 'defaultRunMode: "manual"' not in definitions
+    assert 'defaultRunMode: "agent"' not in definitions
+    assert definitions.count('defaultRunMode: ""') == 6
+
+    dialog_start = create_dialog_js.index("function openTaskDialog")
+    dialog_end = create_dialog_js.index("function openTaskDialogFromCard", dialog_start)
+    dialog_body = create_dialog_js[dialog_start:dialog_end]
+    assert "input.checked = false;" in dialog_body
+    assert "resetModelAlgorithmChoices();" in dialog_body
+    assert "updateAlgorithmFieldVisibility();" in dialog_body
+    assert "definition.defaultRunMode ===" not in dialog_body
+
+    assert "function resetModelAlgorithmChoices" in create_dialog_js
+    apply_start = create_dialog_js.index("function applyTaskTypeToDialog")
+    apply_end = create_dialog_js.index("function updateAlgorithmFieldVisibility", apply_start)
+    apply_body = create_dialog_js[apply_start:apply_end]
+    assert "checked: false" in apply_body
+    assert "checked: definition.defaultRunMode" not in apply_body
+
+
+def test_create_task_requires_run_mode_and_allows_agent_mode():
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+
+    create_start = create_dialog_js.index("async function createTask")
+    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
+    create_renderer = create_dialog_js[create_start:create_end]
 
     assert "const selectedRunMode" in create_renderer
     assert "请选择执行模式。" in create_renderer
@@ -800,6 +1450,7 @@ def test_create_task_requires_run_mode_and_allows_agent_mode():
 def test_create_dialog_moves_material_source_to_bottom_segment():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     dialogs_js = _read_static("js/dialogs.js")
     styles_css = _read_static("styles.css")
 
@@ -824,38 +1475,106 @@ def test_create_dialog_moves_material_source_to_bottom_segment():
     assert 'aria-selected="false"' in material_section
     assert 'id="materialSourcePathPanel"' in material_section
     assert 'id="materialSourceUploadPanel"' in material_section
+    assert 'class="material-source-panel material-upload-panel hidden"' not in material_section
+    assert 'class="material-source-panel material-upload-panel"' in material_section
     assert 'id="sourceDir"' in material_section
     assert "材料目录" in material_section
     assert 'id="materialUploadInput" class="visually-hidden" type="file" multiple />' in material_section
-    assert 'id="materialFolderUploadInput"' in material_section
-    assert "webkitdirectory" in material_section
+    assert 'id="materialFolderUploadInput"' not in material_section
+    assert "webkitdirectory" not in material_section
     assert 'class="material-upload-dropzone"' in material_section
-    assert 'class="material-upload-dropzone" role="button"' not in material_section
+    assert 'role="button"' in material_section
+    assert 'tabindex="0"' in material_section
+    assert 'aria-describedby="materialUploadStatus"' in material_section
     assert 'class="material-upload-icon"' in material_section
     assert 'id="materialUploadStatus"' in material_section
     assert "点击或拖拽上传" in material_section
-    assert "选择文件夹" in material_section
+    assert 'id="materialUploadFileButton"' not in material_section
+    assert 'id="materialUploadFolderButton"' not in material_section
+    assert ">选择文件</button>" not in material_section
+    assert ">选择文件夹</button>" not in material_section
+    assert "material-upload-actions" not in material_section
     assert "暂未开放" not in material_section
 
     assert "export function createMaterialSourceController" in dialogs_js
+    assert "export function materialUploadSelectionText" in dialogs_js
+    assert "export function renderMaterialUploadSelection" in dialogs_js
     assert "function bindDropzone()" in dialogs_js
     assert "captureFiles(input.files)" in dialogs_js
-    assert "file.webkitRelativePath" in dialogs_js
-    assert "captureFiles(event.dataTransfer?.files)" in dialogs_js
+    assert "file?.webkitRelativePath" in dialogs_js
+    assert 'dropzone.addEventListener("click", openFilePicker)' in dialogs_js
+    assert 'dropzone.addEventListener("keydown", (event) =>' in dialogs_js
+    assert "function walkDroppedEntry" in dialogs_js
+    assert "typeof item.webkitGetAsEntry" in dialogs_js
+    assert "captureFileItems(await droppedFileItems(event.dataTransfer))" in dialogs_js
     assert 'dropzone.classList.add("is-dragover")' in dialogs_js
-    assert "materialSourceController.bindDropzone();" in app_js
+    assert 'pathPanel.classList.toggle("hidden", !isPath)' in dialogs_js
+    assert 'uploadPanel.classList.toggle("hidden", isPath)' in dialogs_js
+    assert "function renderMaterialUploadSelection" not in app_js
+    assert "onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ })" in app_js
+    assert "createTaskDialog.bindMaterialSourceControls();" in app_js
+    assert "materialSourceController.bindDropzone();" in create_dialog_js
 
     assert ".material-source-section" in styles_css
     assert ".material-source-segment" in styles_css
     assert ".material-source-tab" in styles_css
     assert ".material-upload-dropzone" in styles_css
     assert ".material-upload-dropzone.is-dragover" in styles_css
+    assert ".material-upload-actions" not in styles_css
     segment_rule = _css_rule(styles_css, ".material-source-segment")
     assert "width: 100%;" in segment_rule
+    assert "border-radius: var(--radius-control)" in segment_rule
+    source_tab_rule = _css_rule(styles_css, ".material-source-tab")
+    assert "border-radius: var(--radius-control)" in source_tab_rule
+
+
+def test_material_upload_selection_renderer_summarizes_files():
+    script = """
+import assert from "node:assert/strict";
+import {
+  materialUploadSelectionText,
+  renderMaterialUploadSelection,
+} from "./marvis/static/js/dialogs.js";
+
+assert.equal(materialUploadSelectionText([]), "请选择文件或文件夹。");
+assert.equal(
+  materialUploadSelectionText([
+    { name: "a.csv", relativePath: "raw/a.csv" },
+    { name: "b.csv", relativePath: "raw/b.csv" },
+    { name: "c.csv", relativePath: "features/c.csv" },
+    { name: "d.csv", relativePath: "features/sub/d.csv" },
+  ]),
+  "已选择 a.csv、b.csv、c.csv 等 4 个文件，包含 3 个目录。",
+);
+
+const elements = {
+  materialUploadStatus: { textContent: "" },
+};
+renderMaterialUploadSelection({
+  files: [{ name: "sample.parquet", relativePath: "oot/sample.parquet" }],
+  getElementById: (id) => elements[id],
+});
+assert.equal(elements.materialUploadStatus.textContent, "已选择 sample.parquet，包含 1 个目录。");
+
+renderMaterialUploadSelection({
+  files: [],
+  getElementById: (id) => elements[id],
+});
+assert.equal(elements.materialUploadStatus.textContent, "请选择文件或文件夹。");
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
 
 
 def test_create_task_upload_mode_posts_materials_before_creating_task():
-    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
     api_js = _read_static("js/api.js")
 
     api_start = api_js.index("export async function api")
@@ -864,33 +1583,50 @@ def test_create_task_upload_mode_posts_materials_before_creating_task():
     assert "body instanceof FormData" in api_body
     assert '"Content-Type": "application/json"' not in api_body
 
-    upload_start = app_js.index("async function uploadMaterialFiles")
-    upload_end = app_js.index("async function createTask", upload_start)
-    upload_body = app_js[upload_start:upload_end]
+    # UX-12: uploadMaterialFiles is XMLHttpRequest-based (not fetch/api()) so it
+    # can report upload progress — fetch has no upload-progress event at all.
+    upload_start = create_dialog_js.index("function uploadMaterialFiles")
+    upload_end = create_dialog_js.index("async function createTask", upload_start)
+    upload_body = create_dialog_js[upload_start:upload_end]
     assert "new FormData()" in upload_body
     assert 'formData.append("files"' in upload_body
     assert 'formData.append("relative_paths"' in upload_body
-    assert 'api("api/material-uploads"' in upload_body
+    assert "new XMLHttpRequest()" in upload_body
+    assert 'xhr.open("POST", "/api/material-uploads")' in upload_body
+    assert "xhr.upload.onprogress" in upload_body
+    assert "onProgress(event.loaded, event.total)" in upload_body
+    # a 2xx response resolves with the parsed JSON payload; a non-2xx (or a
+    # network-level xhr.onerror) rejects with a real Error, matching the
+    # error.message contract runAction()'s catch block expects.
+    assert "resolve(payload)" in upload_body
+    assert "reject(new Error(message))" in upload_body
+    assert 'reject(new Error("材料上传失败：网络错误。"))' in upload_body
 
-    create_start = app_js.index("async function createTask")
-    create_end = app_js.index("async function refreshTasks", create_start)
-    create_body = app_js[create_start:create_end]
+    create_start = create_dialog_js.index("async function createTask")
+    create_end = create_dialog_js.index("function bindMaterialSourceControls", create_start)
+    create_body = create_dialog_js[create_start:create_end]
     assert "await uploadMaterialFiles" in create_body
     assert "payload.source_dir = upload.source_dir" in create_body
     assert "文件上传暂未开放" not in create_body
+    # UX-12: percentage readout only kicks in above the size threshold, and the
+    # status text is driven by the same setCreateStatus channel as every other
+    # busy state (no separate progress-bar component).
+    assert "MATERIAL_UPLOAD_PERCENT_THRESHOLD_BYTES" in create_dialog_js
+    assert "onProgress: showPercent" in create_body
 
 
 def test_run_mode_cards_can_be_deselected_by_clicking_selected_card():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
 
-    assert "function bindRunModeDeselectableCards" in app_js
-    assert "handleRunModeCardPointerDown" in app_js
-    assert "handleRunModeCardClick" in app_js
-    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in app_js
-    assert 'if (card.dataset.wasChecked !== "true") return;' in app_js
-    assert "event.preventDefault();" in app_js
-    assert "input.checked = false;" in app_js
-    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in app_js
+    assert "function bindRunModeDeselectableCards" in create_dialog_js
+    assert "handleRunModeCardPointerDown" in create_dialog_js
+    assert "handleRunModeCardClick" in create_dialog_js
+    assert 'card.dataset.wasChecked = input.checked ? "true" : "false";' in create_dialog_js
+    assert 'if (card.dataset.wasChecked !== "true") return;' in create_dialog_js
+    assert "event.preventDefault();" in create_dialog_js
+    assert "input.checked = false;" in create_dialog_js
+    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in create_dialog_js
     assert "bindRunModeDeselectableCards();" in app_js
 
 
@@ -909,6 +1645,12 @@ def test_create_dialog_sections_are_unframed():
     assert "background:" not in section_rule
     assert "padding: 0" in section_rule
 
+    form_control_start = styles_css.index("\ninput,\ntextarea,\nselect {\n  width: 100%;")
+    form_control_end = styles_css.index("}", form_control_start)
+    form_control_rule = styles_css[form_control_start:form_control_end]
+    assert "border-radius: var(--radius-control)" in form_control_rule
+    assert "border-radius: var(--radius)" not in form_control_rule
+
 
 def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     styles_css = _read_static("styles.css")
@@ -924,7 +1666,7 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
     head_end = styles_css.index("}", head_start)
     head_rule = styles_css[head_start:head_end]
     assert "height: 55px" in head_rule
-    assert "padding: 10px 16px" in head_rule
+    assert "padding: 11px 16px" in head_rule
 
     panel_start = styles_css.index(".task-dialog:not(.environment-dialog) .task-dialog-panel {")
     panel_end = styles_css.index("}", panel_start)
@@ -957,9 +1699,13 @@ def test_create_dialog_scrolls_only_when_content_exceeds_viewport():
 def test_workbench_uses_middle_output_and_right_step_rail_layout():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
 
     assert 'id="progressRail"' in index_html
     assert 'aria-label="验证步骤"' in index_html
+    assert 'progressRail?.setAttribute("aria-label", "计划步骤");' in plan_js
+    assert 'progressRail?.setAttribute("aria-label", "验证步骤");' in app_js
     assert 'id="taskSnapshot"' in index_html
     assert index_html.index('id="scanSection"') < index_html.index('id="notebookSection"')
     assert index_html.index('id="notebookSection"') < index_html.index('id="metricSection"')
@@ -981,6 +1727,24 @@ def test_workbench_uses_middle_output_and_right_step_rail_layout():
     assert ".supporting-evidence {\n  display: none;" not in styles_css
     assert "#reportSection[aria-hidden=\"true\"]" in styles_css
     assert "#reportSection {\n  display: none;" not in styles_css
+
+
+def test_plan_rail_artifact_preview_is_wired_to_real_app_shell():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'id="artifactPanel"' in index_html
+    assert 'id="artifactPanelBody"' in index_html
+    assert 'import { attachArtifactHandlers, renderArtifact } from "./artifact_view.js";' in plan_js
+    assert 'function planOutputButtonHtml(step)' in plan_js
+    assert 'data-artifact="${escapeHtml(outputRef)}"' in plan_js
+    assert "attachArtifactHandlers(root, artifactPreviewContainer" in plan_js
+    assert "artifactRenderer(target, artifactRef)" in plan_js
+    assert "planRailController.installArtifactHandlers(document);" in app_js
+    assert ".artifact-panel {" in styles_css
+    assert ".artifact-panel-body" in styles_css
 
 
 def test_report_editor_form_and_summary_are_removed_from_frontend():
@@ -1010,6 +1774,7 @@ def test_report_editor_form_and_summary_are_removed_from_frontend():
 
 
 def test_sidebar_empty_state_is_compact():
+    index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
@@ -1018,6 +1783,7 @@ def test_sidebar_empty_state_is_compact():
     empty_rule = styles_css[empty_start:empty_end]
     assert "padding: 9px 12px" in empty_rule
     assert '<div class="empty-state">暂无任务</div>' in app_js
+    assert '<div class="empty-state">暂无任务</div>' in index_html
     assert "暂无任务。先创建一个验证任务。" not in app_js
 
     task_empty_start = styles_css.index(".task-list > .empty-state {")
@@ -1036,18 +1802,34 @@ def test_shell_has_collapsible_compact_sidebar():
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
     assert root_vars["--collapsed-entry-size"] == "44px"
     assert root_vars["--collapsed-entry-gutter"] == "16px"
+    assert root_vars["--collapsed-search-top"] == "79px"
     assert root_vars["--collapsed-popover-left"] == (
         "calc(var(--collapsed-entry-gutter) + var(--collapsed-entry-size) + 10px)"
     )
 
     assert 'id="sidebarCollapseButton"' in index_html
     assert 'id="sidebarBrandTrigger"' in index_html
+    assert 'id="collapsedCreateTaskButton"' in index_html
     assert 'aria-label="收起侧栏"' in index_html
     assert "toggleSidebarCollapsed" in app_js
     assert "expandSidebarFromBrand" in app_js
     assert "handleSidebarBrandKeydown" in app_js
     assert "restoreSidebarCollapsed" in app_js
+    assert "ensurePetWithinViewport({ persist: true });" in app_js
+    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in app_js
+    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in app_js
+    assert "window.setTimeout(() => {" in app_js
+    assert '$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;' in app_js
     assert 'localStorage.setItem("sidebarCollapsed"' in app_js
+    assert 'localStorage.getItem("marvis_layout")' in index_html
+    assert 'style.setProperty("--sidebar-width"' in index_html
+    assert 'style.setProperty("--progress-width"' in index_html
+    assert 'localStorage.getItem("sidebarCollapsed") === "1"' in index_html
+    assert 'classList.add("sidebar-collapsed")' in index_html
+    assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("marvis_layout")')
+    assert index_html.index('localStorage.getItem("marvis_layout")') < index_html.index('id="taskSidebar"')
+    assert index_html.index('id="appShell"') < index_html.index('localStorage.getItem("sidebarCollapsed") === "1"')
+    assert index_html.index('localStorage.getItem("sidebarCollapsed") === "1"') < index_html.index('id="taskSidebar"')
     assert ".app-shell.sidebar-collapsed" in styles_css
     assert "--sidebar-width: 314px" in styles_css
     assert "--sidebar-width: 0px" in styles_css
@@ -1098,7 +1880,7 @@ def test_shell_has_collapsible_compact_sidebar():
     collapsed_brand_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo")
     assert "cursor: pointer" in collapsed_brand_rule
     assert "pointer-events: auto" in collapsed_brand_rule
-    assert "border-radius: 14px" in collapsed_brand_rule
+    assert "border-radius: var(--radius)" in collapsed_brand_rule
     collapsed_brand_hover_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .brand-logo:hover")
     assert "background: transparent" in collapsed_brand_hover_rule
     assert "box-shadow: none" in collapsed_brand_hover_rule
@@ -1142,6 +1924,14 @@ def test_shell_has_collapsible_compact_sidebar():
     )
     assert "display: none" in collapsed_hidden_rule
 
+    collapsed_list_head_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .list-head")
+    assert "top: var(--collapsed-search-top)" in collapsed_list_head_rule
+    assert "flex-direction: column" in collapsed_list_head_rule
+    assert "gap: 8px" in collapsed_list_head_rule
+
+    collapsed_create_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed .collapsed-create-toggle")
+    assert "display: inline-flex" in collapsed_create_rule
+
 
 def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     index_html = _read_static("index.html")
@@ -1167,6 +1957,9 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     brand_token_rule = _css_rule(styles_css, ":root")
     assert "--sidebar-control-size: 34px" in brand_token_rule
     assert "--sidebar-control-icon-size: 17px" in brand_token_rule
+    assert "--radius-control: 10px" in brand_token_rule
+    assert "--brand-primary: #303034" in brand_token_rule
+    assert "--brand-primary-hover: #3b3b42" in brand_token_rule
     assert "--brand-icon-color: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
     assert "--brand-icon-hover-bg:" not in brand_token_rule
     assert "--brand-icon-ring: color-mix(in srgb, var(--brand-primary)" in brand_token_rule
@@ -1174,6 +1967,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     collapse_rule = _css_rule(styles_css, ".sidebar-collapse-button")
     assert "width: var(--sidebar-control-size)" in collapse_rule
     assert "height: var(--sidebar-control-size)" in collapse_rule
+    assert "border-radius: var(--radius-control)" in collapse_rule
     assert "color: var(--text)" in collapse_rule
 
     search_toggle_start = styles_css.index("\n.list-search-toggle {")
@@ -1181,13 +1975,25 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     search_toggle_rule = styles_css[search_toggle_start:search_toggle_end]
     assert "width: var(--sidebar-control-size)" in search_toggle_rule
     assert "height: var(--sidebar-control-size)" in search_toggle_rule
+    assert "border-radius: var(--radius-control)" in search_toggle_rule
     assert "color: var(--text)" in search_toggle_rule
+
+    collapsed_create_start = styles_css.index("\n.collapsed-create-toggle {")
+    collapsed_create_end = styles_css.index("}", collapsed_create_start)
+    collapsed_create_rule = styles_css[collapsed_create_start:collapsed_create_end]
+    assert "display: none" in collapsed_create_rule
+    assert "width: var(--collapsed-entry-size)" in collapsed_create_rule
+    assert "height: var(--collapsed-entry-size)" in collapsed_create_rule
+    assert "border-radius: var(--radius-control)" in collapsed_create_rule
+    assert "color: var(--text)" in collapsed_create_rule
 
     settings_summary_start = styles_css.index("\n.sidebar-settings summary {")
     settings_summary_end = styles_css.index("}", settings_summary_start)
     settings_summary_rule = styles_css[settings_summary_start:settings_summary_end]
     assert "min-height: var(--sidebar-control-size)" in settings_summary_rule
+    assert "border-radius: var(--radius-control)" in settings_summary_rule
     assert "color: var(--text)" in settings_summary_rule
+    assert "font-size: 14px" in settings_summary_rule
 
     shared_icon_rule_start = styles_css.index(".nav-action svg,")
     shared_icon_rule_end = styles_css.index("}", shared_icon_rule_start)
@@ -1195,6 +2001,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     for selector in [
         ".sidebar-collapse-button svg",
         ".list-search-toggle svg",
+        ".collapsed-create-toggle svg",
         ".sidebar-settings summary svg",
     ]:
         assert selector in shared_icon_rule
@@ -1214,7 +2021,7 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     assert "var(--accent" not in collapse_hover_rule
 
     search_input_rule = _css_rule(styles_css, "body.search-active .task-search input")
-    assert "border-color: var(--brand-primary)" in search_input_rule
+    assert "border-color: var(--button-outline-border)" in search_input_rule
     assert "box-shadow: 0 0 0 3px var(--brand-icon-ring)" in search_input_rule
     assert "var(--accent" not in search_input_rule
 
@@ -1230,12 +2037,14 @@ def test_sidebar_icon_controls_share_settings_sizing_and_interaction():
     assert "var(--accent" not in search_close_hover_rule
 
     search_toggle_hover_start = styles_css.index(
-        ".list-search-toggle:hover,\n.list-search-toggle:focus-visible {"
+        ".list-search-toggle:hover,\n.list-search-toggle:focus-visible,"
     )
     search_toggle_hover_end = styles_css.index("}", search_toggle_hover_start)
     search_toggle_hover_rule = styles_css[search_toggle_hover_start:search_toggle_hover_end]
     assert "color: var(--text)" in search_toggle_hover_rule
     assert "background: var(--option-hover)" in search_toggle_hover_rule
+    assert ".collapsed-create-toggle:hover" in search_toggle_hover_rule
+    assert ".collapsed-create-toggle:focus-visible" in search_toggle_hover_rule
     assert "var(--brand-icon-hover-bg)" not in search_toggle_hover_rule
     assert "var(--brand-icon-ring)" not in search_toggle_hover_rule
     assert "var(--accent" not in search_toggle_hover_rule
@@ -1257,7 +2066,7 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
     styles_css = _read_static("styles.css")
 
     root_vars = _css_vars(_css_rule(styles_css, ":root"))
-    assert root_vars["--collapsed-search-top"] == "92px"
+    assert root_vars["--collapsed-search-top"] == "79px"
 
     scrim_rule = _css_rule(styles_css, ".search-scrim")
     assert "z-index: 50" in scrim_rule
@@ -1266,18 +2075,42 @@ def test_collapsed_sidebar_search_flyout_stays_above_scrim_and_aligns_with_searc
     active_sidebar_selector = "body.search-active .app-shell.sidebar-collapsed .task-sidebar"
     assert f"{active_sidebar_selector} {{" in styles_css
     active_sidebar_rule = _css_rule(styles_css, active_sidebar_selector)
-    assert "z-index: 70" in active_sidebar_rule
+    assert "position: static" in active_sidebar_rule
+    assert "z-index: auto" in active_sidebar_rule
+
+    active_brand_selector = "body.search-active .app-shell.sidebar-collapsed .sidebar-head"
+    active_brand_rule = _css_rule(styles_css, active_brand_selector)
+    assert "opacity: 0" not in active_brand_rule
+    assert "pointer-events: none" in active_brand_rule
 
     flyout_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-list-wrap")
     assert "top: calc(var(--collapsed-search-top) - 10px)" in flyout_rule
     assert "top: 58px" not in flyout_rule
     assert "z-index: 60" in flyout_rule
     assert "pointer-events: auto" in flyout_rule
+    assert "padding: 10px" in flyout_rule
+    assert "background: var(--sidebar-bg)" in flyout_rule
+    assert "border: 1px solid var(--sidebar-border)" in flyout_rule
+    assert "background: var(--surface)" not in flyout_rule
+    assert "border: 1px solid transparent" not in flyout_rule
+    assert "body.search-active .task-row {\n  box-shadow:" not in styles_css
+
+    active_collapsed_create_rule = _css_rule(
+        styles_css, "body.search-active .app-shell.sidebar-collapsed .collapsed-create-toggle"
+    )
+    assert "display: none" in active_collapsed_create_rule
 
     collapsed_search_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-search")
     assert "width: 100%" in collapsed_search_rule
     assert "opacity: 1" in collapsed_search_rule
     assert "transition: none" in collapsed_search_rule
+
+    collapsed_head_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .list-head")
+    assert "padding: 0 0 10px" in collapsed_head_rule
+
+    collapsed_task_list_rule = _css_rule(styles_css, "body.search-active .app-shell.sidebar-collapsed .task-list")
+    assert "display: grid" in collapsed_task_list_rule
+    assert "padding: 0" in collapsed_task_list_rule
 
 
 def test_sidebar_brand_title_stays_on_one_line():
@@ -1311,34 +2144,74 @@ def test_sidebar_brand_title_stays_on_one_line():
     assert "text-overflow" not in brand_rule
     assert "letter-spacing: 0" in brand_rule
 
-    assert "const SIDEBAR_WIDTH_MIN = 314;" in app_js
-    assert "const SIDEBAR_WIDTH_MAX = 520;" in app_js
-    assert "clamp(stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
-    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
-    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in app_js
+    layout_resize_js = _read_static("js/layout-resize.js")
+    assert "export const SIDEBAR_WIDTH_MIN = 314;" in layout_resize_js
+    assert "export const SIDEBAR_WIDTH_MAX = 520;" in layout_resize_js
+    assert "stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar" in layout_resize_js
+    assert "clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
+    assert "clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)" in layout_resize_js
+    assert 'from "./js/layout-resize.js"' in app_js
     assert "grid-template-columns: min(var(--sidebar-width), 314px) minmax(0, 1fr)" in styles_css
 
 
 def test_sidebar_footer_and_create_action_match_brand_treatment():
+    index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
+
+    assert "<span>新建任务</span>" in index_html
+    assert "<span>创建任务</span>" not in index_html
+    assert 'aria-label="新建任务"' in index_html
+    assert 'title="新建任务"' in index_html
 
     footer_start = styles_css.index(".sidebar-footer {")
     footer_end = styles_css.index("}", footer_start)
     footer_rule = styles_css[footer_start:footer_end]
     assert "border-top" not in footer_rule
 
+    toolbar_start = styles_css.index(".list-toolbar {")
+    toolbar_end = styles_css.index("}", toolbar_start)
+    toolbar_rule = styles_css[toolbar_start:toolbar_end]
+    assert "flex-shrink: 0" in toolbar_rule
+    assert "padding: 2px 10px 16px" in toolbar_rule
+
     create_start = styles_css.index(".nav-action {")
     create_end = styles_css.index("}", create_start)
     create_rule = styles_css[create_start:create_end]
-    assert "color: #ffffff" in create_rule
-    assert "background: var(--brand-primary)" in create_rule
-    assert "border: 1px solid var(--brand-primary)" in create_rule
+    assert "color: var(--button-primary-text)" in create_rule
+    assert "background: var(--button-primary-bg)" in create_rule
+    assert "border: 0" in create_rule
+    assert "border-radius: var(--radius-control)" in create_rule
+    assert "box-shadow: var(--button-solid-shadow)" in create_rule
+    assert "0 7px 10px" not in create_rule
+    assert "0 5px 10px" not in create_rule
+    assert "0 10px 14px" not in create_rule
+    assert "linear-gradient" not in create_rule
+    assert "inset" not in create_rule
     assert "justify-content: center" in create_rule
+    assert "transform 140ms ease" not in create_rule
+
+    create_hover_start = styles_css.index(".nav-action:hover,")
+    create_hover_end = styles_css.index("}", create_hover_start)
+    create_hover_rule = styles_css[create_hover_start:create_hover_end]
+    assert "color: var(--button-primary-text-hover)" in create_hover_rule
+    assert "background: var(--button-primary-bg-hover)" in create_hover_rule
+    assert "outline: none" in create_hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in create_hover_rule
+    assert "0 8px 12px" not in create_hover_rule
+    assert "0 7px 14px" not in create_hover_rule
+    assert "0 12px 18px" not in create_hover_rule
+    assert "transform:" not in create_hover_rule
+    assert "linear-gradient" not in create_hover_rule
+    assert "inset" not in create_hover_rule
+    assert "border-color" not in create_hover_rule
+    assert 'body[data-theme="dark"] .nav-action {' not in styles_css
+    assert 'body[data-theme="dark"] .nav-action:hover,' not in styles_css
 
 
 def test_empty_workspace_copy_is_shorter_and_direct():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     assert "验证任务" in index_html
     assert "选择或创建验证任务" not in index_html
@@ -1347,30 +2220,32 @@ def test_empty_workspace_copy_is_shorter_and_direct():
     assert "先创建任务或从左侧选择已有任务" not in index_html
     assert "核心任务信息" in index_html
     assert "选择任务后显示核心任务信息" not in index_html
-    assert "核心任务信息" in app_js
+    assert "核心任务信息" in workspace_view_js
     assert "选择任务后显示核心任务信息" not in app_js
+    assert "选择任务后显示核心任务信息" not in workspace_view_js
     assert '选择任务后点击\\"扫描材料\\"开始' in app_js
     assert '还没扫描材料。选择任务后点击\\"扫描材料\\"开始。' not in app_js
 
 
 def test_selected_task_header_omits_local_validation_subtitle():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_static("styles.css")
 
     current_start = app_js.index("function renderCurrentTask")
     current_end = app_js.index("function workflowStepStatus", current_start)
     current_renderer = app_js[current_start:current_end]
-    selected_branch = current_renderer[current_renderer.index("title.textContent = taskDisplayName") :]
 
     assert "本地验证任务" not in current_renderer
-    assert 'subtitle.textContent = "";' in selected_branch
+    assert "renderCurrentTaskWorkspace({" in current_renderer
+    assert 'if (subtitle) subtitle.textContent = "";' in workspace_view_js
     assert ".workspace-subtitle:empty" in styles_css
     assert "display: none" in styles_css[
         styles_css.index(".workspace-subtitle:empty") : styles_css.index("}", styles_css.index(".workspace-subtitle:empty"))
     ]
 
 
-def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_only():
+def test_task_selection_keeps_same_task_active_and_refresh_restores_remembered_task():
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
@@ -1389,8 +2264,13 @@ def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function renderMetricPreview", select_start)
     select_renderer = app_js[select_start:select_end]
-    assert "if (selectedTaskId === task.id)" in select_renderer
-    assert "deselectCurrentTask()" in select_renderer
+    assert "if (selectedTaskId === task.id && selectedTask)" in select_renderer
+    same_task_start = select_renderer.index("if (selectedTaskId === task.id && selectedTask)")
+    same_task_end = select_renderer.index("resetAgentTypingState", same_task_start)
+    same_task_branch = select_renderer[same_task_start:same_task_end]
+    assert "selectedTask = task;" in same_task_branch
+    assert "rememberSelectedTaskId(task.id);" in same_task_branch
+    assert "deselectCurrentTask()" not in same_task_branch
     assert "rememberSelectedTaskId(task.id);" in select_renderer
     assert "rememberSelectedTaskId(null);" in select_renderer
     assert "renderMetricPreview({});" in select_renderer
@@ -1407,12 +2287,70 @@ def test_task_selection_can_be_toggled_off_and_refresh_restores_remembered_task_
     assert "rememberSelectedTaskId(null);" in delete_renderer
 
 
+def test_refresh_restores_selected_task_before_async_detail_loads():
+    app_js = _read_static("app.js")
+    index_html = _read_static("index.html")
+    state_js = _read_static("js/state.js")
+    styles_css = _read_static("styles.css")
+
+    assert 'export const resultScrollPositionsStorageKey = "marvis_result_scroll_positions";' in state_js
+    assert "function loadResultScrollPositions" in app_js
+    assert "function restoreResultScrollPositionAfterRender" in app_js
+
+    restore_body = _slice_function(app_js, "function restoreSelectedTaskPlaceholder")
+    assert "const storedTaskId = storedSelectedTaskId();" in restore_body
+    assert "selectedTaskId = storedTaskId;" in restore_body
+    assert "selectedTask = null;" in restore_body
+
+    current_body = _slice_function(app_js, "function renderCurrentTask")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
+    assert "renderCurrentTaskWorkspace({" in current_body
+    assert "const hasTaskContext = Boolean(selectedTask || selectedTaskId);" in workspace_view_js
+    assert 'classList.toggle("is-empty", !hasTaskContext)' in workspace_view_js
+    assert "正在恢复任务" in workspace_view_js
+
+    load_scroll_call = app_js.index("loadResultScrollPositions();")
+    restore_call = app_js.index("restoreSelectedTaskPlaceholder();")
+    initialize_call = app_js.index("initializeApp();")
+    assert load_scroll_call < restore_call
+    assert restore_call < initialize_call
+
+    init_body = _slice_function(app_js, "async function initializeApp")
+    assert "await refreshTasks();" in init_body
+    assert 'class="app-booting"' in index_html
+    assert "function finishAppBoot" in app_js
+    assert "finishAppBoot();" in init_body
+    assert "document.body.classList.remove(\"app-booting\")" in app_js
+    assert "body.app-booting .validation-workspace:not(.is-empty) :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
+    assert "body.app-booting :is(.workspace-head, .workspace-body, .progress-rail)" in styles_css
+    assert "function enableAppAnimationsAfterBoot" in app_js
+    assert "document.body.classList.add(\"anim-ready\")" in _slice_function(app_js, "function enableAppAnimationsAfterBoot")
+    assert "enableAppAnimationsAfterBoot();" in _slice_function(app_js, "function finishAppBoot")
+    assert "requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add(\"anim-ready\")));" not in app_js
+
+    app_shell_rule = _css_rule(styles_css, ".app-shell")
+    assert "transition:" not in app_shell_rule
+
+    first_render = init_body.index("renderAll();")
+    message_load = init_body.index("await loadAgentMessages();")
+    restore_scroll = init_body.index("await restoreResultScrollPositionAfterRender(selectedTaskId);")
+    finish_boot = init_body.index("finishAppBoot();")
+    assert message_load < first_render
+    assert first_render < restore_scroll < finish_boot
+    assert "if (selectedTaskId) renderAll();" not in init_body
+
+
 def test_workspace_cards_float_on_one_background_with_top_step_rail():
     styles_css = _read_static("styles.css")
 
     assert ".validation-workspace {" in styles_css
-    assert "--workspace-main-gutter: 99px" in styles_css
-    assert "--workspace-rail-gap: 99px" in styles_css
+    assert "--workspace-main-gutter: 106px" in styles_css
+    assert "--workspace-collapsed-main-gutter: 180px" in styles_css
+    assert "--workspace-rail-gap: 70px" in styles_css
+    assert "--workspace-collapsed-rail-gap: 78px" in styles_css
+    assert "--pet-default-workspace-offset: -2px" in styles_css
+    assert "--pet-min-workspace-offset: -2px" in styles_css
+    assert "--pet-collapsed-workspace-offset: 72px" in styles_css
     assert "--progress-width: 314px" in styles_css
     assert "grid-template-columns: minmax(0, 1fr) var(--workspace-rail-gap) var(--progress-width)" in styles_css
     assert "grid-template-columns: minmax(340px, 1fr) var(--workspace-rail-gap) min(var(--progress-width), 340px)" in styles_css
@@ -1420,6 +2358,12 @@ def test_workspace_cards_float_on_one_background_with_top_step_rail():
     workspace_end = styles_css.index("}", workspace_start)
     workspace_rule = styles_css[workspace_start:workspace_end]
     assert "background: var(--surface)" in workspace_rule
+    collapsed_shell_rule = _css_rule(styles_css, ".app-shell.sidebar-collapsed")
+    assert "--sidebar-width: 0px" in collapsed_shell_rule
+    assert "--workspace-main-gutter: var(--workspace-collapsed-main-gutter)" in collapsed_shell_rule
+    assert "--workspace-rail-gap: var(--workspace-collapsed-rail-gap)" in collapsed_shell_rule
+    assert "--pet-default-workspace-offset: var(--pet-collapsed-workspace-offset)" in collapsed_shell_rule
+    assert "--pet-min-workspace-offset: var(--pet-collapsed-workspace-offset)" in collapsed_shell_rule
     assert ".workspace-body {" in styles_css
     assert "display: contents" in styles_css
     assert ".progress-rail {" in styles_css
@@ -1492,15 +2436,15 @@ def test_middle_result_sections_are_unframed():
 def test_right_step_rail_uses_subtle_shadow():
     styles_css = _read_static("styles.css")
 
-    rail_start = styles_css.index(".progress-rail {")
-    rail_end = styles_css.index("}", rail_start)
-    rail_rule = styles_css[rail_start:rail_end]
-    assert "box-shadow: 0 3px 12px rgba(0, 0, 0, 0.045)" in rail_rule
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    assert root_vars["--progress-rail-shadow"] == "0 3px 12px rgba(0, 0, 0, 0.045)"
+    assert dark_vars["--progress-rail-shadow"] == "0 4px 16px rgba(0, 0, 0, 0.22)"
+    rail_rule = _css_rule(styles_css, ".progress-rail")
+    assert "box-shadow: var(--progress-rail-shadow)" in rail_rule
 
-    dark_start = styles_css.index('body[data-theme="dark"] .progress-rail')
-    dark_end = styles_css.index("}", dark_start)
-    dark_rule = styles_css[dark_start:dark_end]
-    assert "box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22)" in dark_rule
+    dark_rule = _css_rule(styles_css, 'body[data-theme="dark"] .progress-rail')
+    assert "box-shadow:" not in dark_rule
 
 
 def test_dark_theme_tokens_keep_panels_and_muted_text_readable():
@@ -1597,7 +2541,7 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "background: var(--option-hover)" in settings_summary_rule
     assert "var(--accent" not in settings_summary_rule
 
-    settings_hover_start = styles_css.index(".settings-environment-button:hover,")
+    settings_hover_start = styles_css.index(".settings-system-row:hover,")
     settings_hover_end = styles_css.index("}", settings_hover_start)
     settings_hover_rule = styles_css[settings_hover_start:settings_hover_end]
     assert ".settings-select:focus-visible" in settings_hover_rule
@@ -1607,13 +2551,19 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     assert "#b9d7fb" not in settings_hover_rule
     assert "#f1f7ff" not in settings_hover_rule
     assert (
-        "\n\n.settings-environment-button:focus-visible,\n.settings-select:focus-visible {\n  outline:"
+        "\n\n.settings-system-row:focus-visible,\n.settings-select:focus-visible {\n  outline:"
         not in styles_css
     )
 
     model_card_hover_start = styles_css.index(".llm-engine-item:hover,")
     model_card_hover_end = styles_css.index("}", model_card_hover_start)
     model_card_hover_rule = styles_css[model_card_hover_start:model_card_hover_end]
+    model_card_rule = _css_rule(styles_css, ".llm-engine-item")
+    assert "border-radius: var(--radius-control)" in model_card_rule
+    engine_delete_rule = _css_rule(styles_css, ".engine-del-btn")
+    assert "border-radius: var(--radius-control)" in engine_delete_rule
+    engine_add_rule = _css_rule(styles_css, ".llm-engine-add")
+    assert "border-radius: var(--radius-control)" in engine_add_rule
     assert ".llm-engine-item:focus-visible" in model_card_hover_rule
     assert "border-color: var(--option-hover)" in model_card_hover_rule
     assert "background: var(--option-hover)" in model_card_hover_rule
@@ -1628,15 +2578,16 @@ def test_sidebar_task_and_settings_interactions_use_neutral_gray_states():
     task_hover_end = styles_css.index("}", task_hover_start)
     task_hover_rule = styles_css[task_hover_start:task_hover_end]
     assert ".task-row-shell:hover .task-row" in task_hover_rule
-    assert "border-color: var(--option-hover)" in task_hover_rule
+    assert "border-color" not in task_hover_rule
     assert "background: var(--option-hover)" in task_hover_rule
     assert "#9fbfe4" not in task_hover_rule
     assert "#fbfdff" not in task_hover_rule
 
     task_selected_rule = _css_rule(styles_css, ".task-row.selected")
-    assert "border-color: var(--option-selected)" in task_selected_rule
+    assert "border-color" not in task_selected_rule
     assert "background: var(--option-selected)" in task_selected_rule
-    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" in task_selected_rule
+    assert "box-shadow: none" in task_selected_rule
+    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" not in task_selected_rule
     assert "var(--accent" not in task_selected_rule
     assert "#f8fbff" not in task_selected_rule
 
@@ -1681,106 +2632,177 @@ def test_dark_theme_shell_columns_follow_reference_tones():
 def test_dark_workspace_masks_match_center_background():
     styles_css = _read_static("styles.css")
 
+    base_workspace_rule = _css_rule(styles_css, ".validation-workspace")
+    assert "--workspace-mask-bg: var(--surface)" in base_workspace_rule
+
     workspace_rule = _css_rule(styles_css, 'body[data-theme="dark"] .validation-workspace')
     assert "--workspace-mask-bg: var(--bg)" in workspace_rule
 
     head_rule = _css_rule(styles_css, ".workspace-head")
-    assert "var(--workspace-mask-bg, var(--surface)) 16.5px" in head_rule
+    assert "transparent calc(var(--radius) - 1px)" in head_rule
+    assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) - 0.5px)" in head_rule
+    assert "background-position: left -1px top -1px, right -1px top -1px" in head_rule
+    assert "background-size: calc(var(--radius) + 2px) calc(var(--radius) + 2px)" in head_rule
     assert "transparent 16px, var(--surface) 16.5px" not in head_rule
 
     composer_mask_rule = _css_rule(styles_css, ".agent-composer::before")
-    assert "var(--workspace-mask-bg, var(--surface)) 24.5px" in composer_mask_rule
+    composer_rule = _css_rule(styles_css, ".agent-composer")
+    assert "--agent-composer-mask-bg: var(--workspace-mask-bg, var(--surface))" in composer_rule
+    assert "--agent-composer-mask-bg: #ffffff" not in composer_rule
+    assert "--agent-composer-mask-bg: var(--bg)" not in composer_rule
+    dark_composer_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-composer')
+    assert "--agent-composer-mask-bg: var(--workspace-mask-bg, var(--surface))" in dark_composer_rule
+    assert "left: -1px" in composer_mask_rule
+    assert "right: -1px" in composer_mask_rule
+    assert "bottom: -1px" in composer_mask_rule
+    assert "height: calc(var(--radius) + 2px)" in composer_mask_rule
+    assert "background: var(--agent-composer-mask-bg, var(--workspace-mask-bg, var(--surface)))" in composer_mask_rule
+    assert "radial-gradient" not in composer_mask_rule
+    assert "var(--workspace-mask-bg, var(--surface)) calc(var(--radius) + 0.5px)" not in composer_mask_rule
     assert "transparent 24px, var(--surface) 24.5px" not in composer_mask_rule
 
 
 def test_primary_step_action_hover_keeps_button_text_readable():
     styles_css = _read_static("styles.css")
+    root_rule = _css_rule(styles_css, ":root")
+
+    assert "--button-solid-shadow:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.10)" in root_rule
+    assert "0 3px 6px rgba(0, 0, 0, 0.10)" in root_rule
+    assert "0 6px 10px rgba(0, 0, 0, 0.07)" in root_rule
+    assert "--button-solid-shadow-hover:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.12)" in root_rule
+    assert "0 4px 8px rgba(0, 0, 0, 0.12)" in root_rule
+    assert "0 7px 12px rgba(0, 0, 0, 0.08)" in root_rule
+    assert "--button-secondary-shadow:" in root_rule
+    assert "0 1px 1px rgba(0, 0, 0, 0.06)" in root_rule
+    assert "0 2px 4px rgba(0, 0, 0, 0.04)" in root_rule
+    assert "0 5px 8px rgba(0, 0, 0, 0.035)" in root_rule
+    assert "--button-secondary-shadow-hover:" in root_rule
+    assert "0 3px 6px rgba(0, 0, 0, 0.06)" in root_rule
+    assert "0 6px 10px rgba(0, 0, 0, 0.045)" in root_rule
+    assert "--button-primary-bg: var(--brand-primary)" in root_rule
+    assert "--button-primary-text: #ffffff" in root_rule
+    assert "--button-outline-border: var(--brand-primary)" in root_rule
+    assert "--button-outline-bg-hover: color-mix(in srgb, var(--brand-primary) 7%, transparent)" in root_rule
+
+    dark_theme_rule = _css_rule(styles_css, 'body[data-theme="dark"]')
+    assert "--button-primary-bg: #525258" in dark_theme_rule
+    assert "--button-primary-bg-hover: #5d5d64" in dark_theme_rule
+    assert "--button-primary-bg-active: #47474d" in dark_theme_rule
+    assert "--button-primary-text: #f2f2f2" in dark_theme_rule
+    assert "--button-outline-border: #96999f" in dark_theme_rule
+    assert "--button-outline-bg-hover: color-mix(in srgb, #96999f 12%, transparent)" in dark_theme_rule
+    assert "width:" not in dark_theme_rule
+    assert "height:" not in dark_theme_rule
+    assert "padding:" not in dark_theme_rule
+    assert "transform:" not in dark_theme_rule
+
+    primary_rule = _css_rule(styles_css, ".button.primary")
+    assert "color: var(--button-primary-text)" in primary_rule
+    assert "background: var(--button-primary-bg)" in primary_rule
+    assert "border-color: var(--button-primary-border)" in primary_rule
+    assert "box-shadow: var(--button-solid-shadow)" in primary_rule
 
     assert ".button.primary:hover:not(:disabled)" in styles_css
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
-    assert "color: #ffffff" in hover_rule
-    assert "background: #005ecb" in hover_rule
-    assert "border-color: #005ecb" in hover_rule
+    assert "color: var(--button-primary-text-hover)" in hover_rule
+    assert "background: var(--button-primary-bg-hover)" in hover_rule
+    assert "border-color: var(--button-primary-border-hover)" in hover_rule
+    assert "box-shadow: var(--button-solid-shadow-hover)" in hover_rule
+    assert "transform:" not in hover_rule
+
+    secondary_rule = _css_rule(styles_css, ".button.secondary")
+    assert "border-color: var(--border-strong)" in secondary_rule
+    assert "background: var(--surface)" in secondary_rule
+    assert "box-shadow: var(--button-secondary-shadow)" in secondary_rule
+
+    secondary_hover_rule = _css_rule(
+        styles_css, ".button.secondary:hover:not(:disabled),\n.button.secondary:focus-visible:not(:disabled)"
+    )
+    assert "border-color: var(--border-strong)" in secondary_hover_rule
+    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in secondary_hover_rule
+    assert "box-shadow: var(--button-secondary-shadow-hover)" in secondary_hover_rule
 
 
-def test_brand_primary_token_drives_create_environment_and_model_buttons():
+def test_theme_button_tokens_drive_create_environment_and_model_buttons():
+    index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
-    create_start = styles_css.index("#createTaskButton.button.primary,")
-    create_end = styles_css.index("}", create_start)
-    solid_brand_rule = styles_css[create_start:create_end]
+    # The execution-environment panel auto-saves on row click (radiogroup), so
+    # the #saveExecutionEnvironmentButton was retired and no longer carries the
+    # solid brand styling.
+    assert "#saveExecutionEnvironmentButton" not in styles_css
     for selector in [
         "#createTaskButton.button.primary",
-        "#saveExecutionEnvironmentButton.button.primary",
         "#saveLLMEngineEditButton.button.primary",
-    ]:
-        assert selector in solid_brand_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary" not in solid_brand_rule
-    assert "background: var(--brand-primary)" in solid_brand_rule
-    assert "border-color: var(--brand-primary)" in solid_brand_rule
-
-    solid_hover_start = styles_css.index(
-        "#createTaskButton.button.primary:hover:not(:disabled),"
-    )
-    solid_hover_end = styles_css.index("}", solid_hover_start)
-    solid_hover_rule = styles_css[solid_hover_start:solid_hover_end]
-    for selector in [
-        "#saveExecutionEnvironmentButton.button.primary:hover:not(:disabled)",
-        "#saveExecutionEnvironmentButton.button.primary:focus-visible:not(:disabled)",
+        "#createTaskButton.button.primary:hover:not(:disabled)",
         "#saveLLMEngineEditButton.button.primary:hover:not(:disabled)",
-        "#saveLLMEngineEditButton.button.primary:focus-visible:not(:disabled)",
     ]:
-        assert selector in solid_hover_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover" not in solid_hover_rule
-    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible" not in solid_hover_rule
-    assert "background: var(--brand-primary-hover)" in solid_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in solid_hover_rule
+        assert selector not in styles_css
 
     nav_start = styles_css.index(".nav-action {")
     nav_end = styles_css.index("}", nav_start)
     nav_rule = styles_css[nav_start:nav_end]
-    assert "background: var(--brand-primary)" in nav_rule
-    assert "border: 1px solid var(--brand-primary)" in nav_rule
+    assert "color: var(--button-primary-text)" in nav_rule
+    assert "background: var(--button-primary-bg)" in nav_rule
+    assert "border: 0" in nav_rule
+    assert "box-shadow: var(--button-solid-shadow)" in nav_rule
+    assert "0 7px 10px" not in nav_rule
+    assert "0 5px 10px" not in nav_rule
+    assert "0 10px 14px" not in nav_rule
+    assert "linear-gradient" not in nav_rule
+    assert "inset" not in nav_rule
 
     send_start = styles_css.index(".agent-send {")
     send_end = styles_css.index("}", send_start)
     send_rule = styles_css[send_start:send_end]
-    assert "background: var(--brand-primary)" in send_rule
+    assert "color: var(--button-primary-text)" in send_rule
+    assert "background: var(--button-primary-bg)" in send_rule
+
+    assert 'id="refreshExecutionEnvironmentOptionsButton" class="button primary"' in index_html
+    assert 'id="addLLMModelButton" class="button primary"' in index_html
+    assert 'id="refreshExecutionEnvironmentOptionsButton" class="button secondary"' not in index_html
+    assert 'id="addLLMModelButton" class="button secondary"' not in index_html
 
     llm_add_rule = _css_rule(styles_css, ".llm-engine-add")
-    assert "color: var(--brand-primary)" in llm_add_rule
-    assert "border: 1px dashed var(--brand-primary)" in llm_add_rule
+    assert "color: var(--button-outline-text)" in llm_add_rule
+    assert "border: 1px dashed var(--button-outline-border)" in llm_add_rule
 
     llm_add_hover_rule = _css_rule(styles_css, ".llm-engine-add:hover")
-    assert "color: var(--brand-primary-hover)" in llm_add_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in llm_add_hover_rule
-    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in llm_add_hover_rule
+    assert "color: var(--button-outline-text-hover)" in llm_add_hover_rule
+    assert "border-color: var(--button-outline-border-hover)" in llm_add_hover_rule
+    assert "background: var(--button-outline-bg-hover)" in llm_add_hover_rule
 
-    scan_environment_rule = _css_rule(styles_css, "#refreshExecutionEnvironmentOptionsButton.button.secondary")
-    assert "color: var(--brand-primary)" in scan_environment_rule
-    assert "border: 1px dashed var(--brand-primary)" in scan_environment_rule
-    assert "background: transparent" in scan_environment_rule
+    settings_action_width_start = styles_css.index(
+        "#refreshExecutionEnvironmentOptionsButton.button.primary,"
+    )
+    settings_action_width_end = styles_css.index("}", settings_action_width_start)
+    settings_action_width_rule = styles_css[settings_action_width_start:settings_action_width_end]
+    assert "#addLLMModelButton.button.primary" in settings_action_width_rule
+    assert "width: 84px" in settings_action_width_rule
+    assert "min-height: 34px" in settings_action_width_rule
+    assert "padding: 6px 12px" in settings_action_width_rule
+    assert "font-size: 13px" in settings_action_width_rule
+    assert "font-weight: 600" in settings_action_width_rule
 
-    scan_environment_hover_start = styles_css.index(
-        "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled),"
-    )
-    scan_environment_hover_end = styles_css.index("}", scan_environment_hover_start)
-    scan_environment_hover_rule = styles_css[scan_environment_hover_start:scan_environment_hover_end]
-    assert (
-        "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)"
-        in scan_environment_hover_rule
-    )
-    assert "color: var(--brand-primary-hover)" in scan_environment_hover_rule
-    assert "border-color: var(--brand-primary-hover)" in scan_environment_hover_rule
-    assert "color-mix(in srgb, var(--brand-primary) 7%, transparent)" in scan_environment_hover_rule
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary {\n" not in styles_css
+    assert "#addLLMModelButton.button.secondary {\n" not in styles_css
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:hover:not(:disabled)" not in styles_css
+    assert "#addLLMModelButton.button.secondary:hover:not(:disabled)" not in styles_css
+    assert "#refreshExecutionEnvironmentOptionsButton.button.secondary:focus-visible:not(:disabled)" not in styles_css
+    assert "#addLLMModelButton.button.secondary:focus-visible:not(:disabled)" not in styles_css
+    assert 'body[data-theme="dark"] #refreshExecutionEnvironmentOptionsButton.button.secondary' not in styles_css
+    assert 'body[data-theme="dark"] #addLLMModelButton.button.secondary' not in styles_css
+    assert "border: 1px dashed var(--brand-primary)" not in settings_action_width_rule
 
     hover_start = styles_css.index(".button.primary:hover:not(:disabled)")
     hover_end = styles_css.index("}", hover_start)
     hover_rule = styles_css[hover_start:hover_end]
-    assert "background: #005ecb" in hover_rule
-    assert "border-color: #005ecb" in hover_rule
+    assert "background: var(--button-primary-bg-hover)" in hover_rule
+    assert "border-color: var(--button-primary-border-hover)" in hover_rule
 
 
 def test_sidebar_task_card_is_two_line_compact_without_icon():
@@ -1803,6 +2825,10 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     assert "delete-task-button" in append_renderer
     assert "formatDate(task.updated_at)" in append_renderer
     assert 'const validatorName = escapeHtml(task.validator || "-");' in append_renderer
+    delete_hover_rule = _css_rule(
+        styles_css, ".delete-task-button:hover,\n.delete-task-button:focus-visible"
+    )
+    assert "border-color: var(--danger-border)" in delete_hover_rule
 
     tone_start = app_js.index("function statusTone")
     tone_end = app_js.index("function notebookReproducibilityComplete", tone_start)
@@ -1823,6 +2849,7 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     row_rule = styles_css[row_start:row_end]
     assert "--task-card-action-space: 36px" in row_rule
     assert "padding: 11px 12px" in row_rule
+    assert "border: 1px solid transparent" in row_rule
     assert "padding: 11px 42px" not in row_rule
 
     top_start = styles_css.index(".task-row-top {")
@@ -1872,6 +2899,7 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     date_start = styles_css.index(".task-row .task-row-date {")
     date_end = styles_css.index("}", date_start)
     date_rule = styles_css[date_start:date_end]
+    assert "font-size: 12px" in date_rule
     assert "white-space: nowrap" in date_rule
 
     pill_start = styles_css.index(".task-row-top .pill {")
@@ -1887,9 +2915,26 @@ def test_sidebar_task_card_is_two_line_compact_without_icon():
     assert "background: var(--accent-soft)" in run_pill_rule
 
 
+def test_task_list_selected_card_has_no_visible_border_or_outline():
+    styles_css = _read_static("styles.css")
+
+    task_list_start = styles_css.index("\n.task-list {\n  display: grid")
+    task_list_end = styles_css.index("}", task_list_start)
+    task_list_rule = styles_css[task_list_start:task_list_end]
+    assert "overflow-y: auto" in task_list_rule
+    assert "padding: 3px 10px 14px" in task_list_rule
+
+    selected_rule = _css_rule(styles_css, ".task-row.selected")
+    assert "border-color" not in selected_rule
+    assert "background: var(--option-selected)" in selected_rule
+    assert "box-shadow: none" in selected_rule
+    assert "box-shadow: 0 0 0 2px var(--option-focus-ring)" not in selected_rule
+
+
 def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
     styles_css = _read_static("styles.css")
 
     head_start = index_html.index('<header class="workspace-head"')
@@ -1899,9 +2944,9 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     result_workspace_end = index_html.index('id="scanSection"', result_workspace_start)
     result_workspace_markup = index_html[result_workspace_start:result_workspace_end]
 
-    snapshot_start = app_js.index("function renderTaskSnapshot")
-    snapshot_end = app_js.index("function renderTaskList", snapshot_start)
-    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+    snapshot_start = workspace_view_js.index("function snapshotItem")
+    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
+    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
 
     # status lives in the header hero, in order: name+pill, description, meta
     assert head_markup.index('id="actionStatus"') < head_markup.index('id="actionErrorDetail"')
@@ -1932,6 +2977,12 @@ def test_header_task_meta_is_compact_and_not_duplicate_status_or_source():
     assert "验证人员" not in snapshot_renderer
     assert "执行模式" in snapshot_renderer
     assert "材料目录" in snapshot_renderer
+    assert 'snapshotItem("folder", "材料目录", selectedTask.source_dir, null, {' in snapshot_renderer
+    assert "copy: selectedTask.source_dir" in snapshot_renderer
+    assert 'class="task-snapshot-copy"' in snapshot_renderer
+    assert 'data-copy="${escapeHtml(options.copy)}"' in snapshot_renderer
+    assert 'aria-label="复制${escapeHtml(label)}路径"' in snapshot_renderer
+    assert "copyText(copyButton.dataset.copy)" in app_js
 
 
 def test_header_task_meta_values_stay_on_one_line():
@@ -1981,6 +3032,18 @@ def test_header_task_meta_values_stay_on_one_line():
     assert "overflow: hidden" in value_rule
     assert "text-overflow: ellipsis" in value_rule
     assert "white-space: nowrap" in value_rule
+
+    copy_rule = _css_rule(styles_css, ".task-snapshot-copy")
+    assert "display: inline-flex" in copy_rule
+    assert "max-width: 360px" in copy_rule
+    assert "background: transparent" in copy_rule
+    assert "cursor: copy" in copy_rule
+    assert "appearance: none" in copy_rule
+
+    copy_value_rule = _css_rule(styles_css, ".task-snapshot-copy strong")
+    assert "max-width: inherit" in copy_value_rule
+    last_copy_rule = _css_rule(styles_css, ".workspace-task-meta .task-snapshot-item:last-child .task-snapshot-copy")
+    assert "max-width: 460px" in last_copy_rule
 
 
 def test_step_rail_embeds_notebook_steps_inside_notebook_action_card():
@@ -2205,6 +3268,8 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     server_busy_end = app_js.index("function selectedTaskIsBusy", server_busy_start)
     server_busy = app_js[server_busy_start:server_busy_end]
     assert server_busy.index('kind === "agent"') < server_busy.index("taskStopped(task)")
+    assert 'kind === "plan"' in server_busy
+    assert 'kind === "join"' in server_busy
 
     renderer_start = app_js.index("function stepActionButtonHtml")
     renderer_end = app_js.index("function notebookStepTone", renderer_start)
@@ -2218,6 +3283,14 @@ def test_busy_state_is_scoped_to_selected_task_for_parallel_tasks():
     downloads_ready = app_js[downloads_ready_start:downloads_ready_end]
     assert "const selectedBusyAction = taskBusyAction();" in downloads_ready
     assert "selectedTask?.report_available === true" in downloads_ready
+
+    status_start = app_js.index("function taskActionStatusSnapshot")
+    status_end = app_js.index("function clearStatus", status_start)
+    status_snapshot = app_js[status_start:status_end]
+    assert 'task.active_job_kind === "join"' in status_snapshot
+    assert "数据拼接进行中。" in status_snapshot
+    assert 'task.active_job_kind === "plan"' in status_snapshot
+    assert "计划执行进行中。" in status_snapshot
 
     action_start = app_js.index("async function runAction")
     action_end = app_js.index("function handleTaskListKeydown", action_start)
@@ -2288,11 +3361,187 @@ def test_workflow_step_status_separates_next_action_from_running_action():
     assert "if (index === activeIndex) return \"running\";" not in status_renderer
 
 
-def test_algorithm_selector_was_removed_from_create_dialog():
+def test_modeling_create_dialog_has_algorithm_selector():
+    """The create dialog exposes a manual-mode modeling algorithm multi-select
+    (G2: 算法可选), gated to modeling tasks via the algorithmField flag, and
+    posted as `payload.recipes` + `payload.target_type`."""
     index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
 
-    assert 'id="modelAlgorithm"' not in index_html
-    assert "模型算法" not in index_html
+    assert 'id="createTaskAlgorithmField"' in index_html
+    assert 'id="modelAlgorithmChoices"' in index_html
+    assert 'name="modelAlgorithm"' in index_html
+    for recipe in ('value="lgb"', 'value="xgb"', 'value="catboost"', 'value="lr"', 'value="scorecard"', 'value="mlp"'):
+        assert recipe in index_html
+    assert 'id="modelSampleWeightCol"' in index_html
+    assert 'data-recipe-family="binary"' in index_html
+    # regression + multiclass target types are exposed too, so the UI can drive
+    # §8.2/§8.3 tasks, not only binary
+    assert 'value="lgb_regressor"' in index_html
+    assert 'value="lgb_multiclass"' in index_html
+    assert 'data-recipe-family="continuous"' in index_html
+    assert 'data-recipe-family="multiclass"' in index_html
+    assert 'id="modelSampleWeightPolicy"' in index_html
+    assert 'value="none">不使用样本权重' in index_html
+    assert 'value="explicit">指定权重列' in index_html
+    assert "updateSampleWeightCreateState" in create_dialog_js
+    assert "algorithmField: true" in task_types_js
+    assert 'payload.recipes = [...document.querySelectorAll(\'input[name="modelAlgorithm"]:checked\')].map((box) => box.value);' in create_dialog_js
+    assert 'payload.target_type = [...families][0] || "binary";' in create_dialog_js
+    assert 'const sampleWeightPolicy = $("modelSampleWeightPolicy")?.value || "none";' in create_dialog_js
+    assert "请填写样本权重列，或改选不使用样本权重。" in create_dialog_js
+    assert "payload.sample_weight_col = sampleWeightCol;" in create_dialog_js
+    assert "normalizeModelAlgorithmFamilies" in create_dialog_js
+    assert "二分类、回归与多分类算法不能混选。" in create_dialog_js
+    assert "请至少选择一个建模算法。" in create_dialog_js
+    assert 'payload.algorithm = $("modelAlgorithm")' not in app_js
+
+
+def test_strategy_and_vintage_welcome_cards_are_enabled():
+    """风险分析(vintage) + 策略开发(strategy) are wired PlanDriver entries."""
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
+    toast_js = _read_static("js/toast.js")
+    for card_id in ("welcomeVintageAnalysisCard", "welcomeStrategyDevelopmentCard"):
+        start = index_html.index(f'id="{card_id}"')
+        tag_end = index_html.index(">", start)
+        tag = index_html[start:tag_end]
+        assert "data-coming-soon" not in tag, card_id
+        assert 'class="welcome-task-card available"' in tag, card_id
+        assert 'aria-describedby="welcomeComingSoonHint"' not in tag, card_id
+    definitions = task_types_js[
+        task_types_js.index("export const taskTypeDefinitions = {"):
+        task_types_js.index("export const taskTypeDisplayOrder")
+    ]
+    assert 'available: false' not in definitions
+    assert 'manualEnabled: false' not in definitions
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    assert 'export const PLAN_RAIL_TASK_TYPES = new Set(["data_join", "feature_analysis", "modeling", "strategy", "vintage"]);' in plan_js
+    # The toast path remains available for future explicitly unavailable task definitions.
+    assert "card.dataset.comingSoon" not in app_js
+    assert "definition.available === false" in create_dialog_js
+    assert "unavailableMessage" in create_dialog_js
+    assert "export function createComingSoonToastController" in toast_js
+    assert 'from "./js/toast.js"' in app_js
+    assert "function showComingSoonToast" not in app_js
+    assert "const { showComingSoonToast } = createComingSoonToastController" in app_js
+    assert 'setActionStatus(message, "info"' in app_js
+    assert "新功能开发中，敬请期待" in create_dialog_js
+
+
+def test_coming_soon_toast_controller_reuses_node_and_resets_timer():
+    script = """
+import assert from "node:assert/strict";
+import { createComingSoonToastController } from "./marvis/static/js/toast.js";
+
+const elements = {};
+const appended = [];
+const timers = [];
+const cleared = [];
+function createElement(tagName) {
+  assert.equal(tagName, "div");
+  return {
+    id: "",
+    className: "",
+    attributes: {},
+    classList: {
+      values: new Set(),
+      add(value) {
+        this.values.add(value);
+      },
+      remove(value) {
+        this.values.delete(value);
+      },
+      contains(value) {
+        return this.values.has(value);
+      },
+    },
+    setAttribute(name, value) {
+      this.attributes[name] = value;
+    },
+    textContent: "",
+  };
+}
+
+const controller = createComingSoonToastController({
+  body: {
+    appendChild(node) {
+      appended.push(node);
+      elements[node.id] = node;
+    },
+  },
+  clearTimeoutFn: (timer) => cleared.push(timer),
+  createElement,
+  getElementById: (id) => elements[id] || null,
+  setTimeoutFn: (fn, delay) => {
+    const timer = { fn, delay };
+    timers.push(timer);
+    return timer;
+  },
+  visibleDurationMs: 1200,
+});
+
+controller.showComingSoonToast("敬请期待");
+const toast = elements.comingSoonToast;
+assert.equal(appended.length, 1);
+assert.equal(toast.className, "coming-soon-toast");
+assert.equal(toast.attributes.role, "status");
+assert.equal(toast.attributes["aria-live"], "polite");
+assert.equal(toast.textContent, "敬请期待");
+assert.equal(toast.classList.contains("is-visible"), true);
+assert.equal(timers[0].delay, 1200);
+
+controller.showComingSoonToast("开发中");
+assert.equal(appended.length, 1);
+assert.equal(cleared.length, 1);
+assert.equal(toast.textContent, "开发中");
+timers[1].fn();
+assert.equal(toast.classList.contains("is-visible"), false);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
+
+
+def test_acceptance_chip_relabels_auto_accept_per_task_type():
+    """The auto-accept chip label tracks the task type (自动拼接/分析/建模), not always
+    自动审查 (ACCEPT-RELABEL)."""
+    app_js = _read_static("app.js")
+    assert "function autoAcceptLabel" in app_js
+    for label in ("自动拼接", "自动分析", "自动建模", "自动审查"):
+        assert label in app_js
+    assert "autoOption.textContent = autoAcceptLabel(selectedTask?.task_type)" in app_js
+
+
+def test_feature_create_dialog_has_optional_metric_selector():
+    """The feature-analysis create dialog exposes a manual-mode optional-metric
+    multi-select (spec §2: 选了才算), gated via the metricField flag and posted as
+    `payload.metrics`. VIF is the first wired optional metric; empty is valid."""
+    index_html = _read_static("index.html")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    task_types_js = _read_static("js/task-types.js")
+
+    assert 'id="createTaskMetricField"' in index_html
+    assert 'id="featureMetricChoices"' in index_html
+    assert 'name="featureMetric" value="vif"' in index_html
+    assert 'name="featureMetric" value="head_tail_lift"' in index_html
+    assert 'name="featureMetric" value="importance"' in index_html
+    # no optional metric is pre-checked (base metrics always compute, optional opt-in)
+    assert 'name="featureMetric" value="vif" checked' not in index_html
+    assert 'name="featureMetric" value="head_tail_lift" checked' not in index_html
+    assert 'name="featureMetric" value="importance" checked' not in index_html
+    assert "metricField: true" in task_types_js
+    assert 'payload.metrics = [...document.querySelectorAll(\'input[name="featureMetric"]:checked\')].map((box) => box.value);' in create_dialog_js
 
 
 def test_stage_failures_keep_completed_previous_steps_green():
@@ -2410,21 +3659,47 @@ def test_workflow_stepper_preserves_scroll_position_during_poll_rerender():
 
 def test_result_workspace_preserves_scroll_position_per_task_switch():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
 
     assert "const resultScrollPositionsByTask = new Map();" in app_js
+    assert "let resultScrollPersistFrame = null;" in app_js
     assert "function rememberResultScrollPosition" in app_js
+    assert "function loadResultScrollPositions" in app_js
+    assert "function persistResultScrollPositions" in app_js
     assert "function prepareResultScrollRestoreForTask" in app_js
     assert "function applyResultScrollPosition" in app_js
-    assert "function scheduleResultScrollRestore" in app_js
+    assert "function restoreResultScrollPositionAfterRender" in app_js
+    assert "function beginTaskContentLoad" in app_js
+    assert "function finishTaskContentLoad" in app_js
     assert 'addEventListener("scroll", handleResultScroll' in app_js
+    assert "scheduleResultScrollPositionsPersist();" in _slice_function(app_js, "function rememberResultScrollPosition")
+    assert "persistResultScrollPositions();" in _slice_function(app_js, "async function deleteTask")
+    assert "await restoreResultScrollPositionAfterRender(selectedTaskId);" in _slice_function(app_js, "async function initializeApp")
 
     select_start = app_js.index("function selectTask")
     select_end = app_js.index("function deselectCurrentTask", select_start)
     select_renderer = app_js[select_start:select_end]
     assert "rememberResultScrollPosition();" in select_renderer
+    assert "beginTaskContentLoad(task.id);" in select_renderer
     assert "prepareResultScrollRestoreForTask(task.id);" in select_renderer
-    assert "applyResultScrollPosition(task.id);" in select_renderer
-    assert "scheduleResultScrollRestore(task.id);" in select_renderer
+    assert "applyResultScrollPosition(task.id);" not in select_renderer
+    assert "scheduleResultScrollRestore(task.id);" not in select_renderer
+    assert "renderAll();" in select_renderer
+    assert "await restoreResultScrollPositionAfterRender(task.id);" in select_renderer
+    assert "finishTaskContentLoad(task.id);" in select_renderer
+    assert "}, { renderAfter: false });" in select_renderer
+
+    run_action = _slice_function(app_js, "async function runAction")
+    assert "let shouldRenderAfter = options.renderAfter !== false;" in run_action
+    assert "shouldRenderAfter = true;" in run_action
+    assert "if (shouldRenderAfter) renderAll();" in run_action
+
+    assert ".validation-workspace.is-task-content-loading :is(.workspace-head, .result-scroll-content, .agent-composer, .progress-rail)" in styles_css
+    assert ".validation-workspace.is-task-content-loading :is(.result-workspace, .progress-rail)" not in styles_css
+    assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.workspace-head)" in styles_css
+    assert "body.anim-ready .validation-workspace:not(.is-task-content-loading) :is(.result-scroll-content)" in styles_css
+    assert "transition: opacity 150ms ease 90ms;" in styles_css
+    assert ".validation-workspace.is-task-content-settling :is(.task-hero)" in styles_css
 
     agent_scroll_start = app_js.index("function requestAgentConversationScrollToLatest")
     agent_scroll_end = app_js.index("function renderAgentConversation", agent_scroll_start)
@@ -2482,6 +3757,8 @@ def test_create_task_auto_scans_materials_after_creation():
 
 def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    index_html = _read_static("index.html")
 
     click_start = app_js.index('$("createTaskButton").onclick')
     click_end = app_js.index('$("workflowStepper").onclick', click_start)
@@ -2494,6 +3771,219 @@ def test_create_task_submit_keeps_create_errors_in_dialog_before_task_exists():
     keydown_handler = app_js[keydown_start:keydown_end]
     assert 'runAction(createTaskAndScan);' in keydown_handler
     assert 'actionId: "scan"' not in keydown_handler
+    assert 'id="statusMessage" class="status" role="status" aria-live="polite"' in index_html
+    assert 'setCreateStatus("请选择执行模式。", "error")' in create_dialog_js
+    assert 'setCreateStatus("请先选择要上传的材料文件。", "error")' in create_dialog_js
+    assert 'setCreateStatus(\n        definition.reportFields ? "请先填写模型名称、验证人员和材料目录。"' in create_dialog_js
+
+
+def test_dialogs_close_when_clicking_backdrop():
+    app_js = _read_static("app.js")
+    dialogs_js = _read_static("js/dialogs.js")
+    index_html = _read_static("index.html")
+
+    for dialog_id in [
+        "taskDialog",
+        "llmEngineEditDialog",
+        "governanceSettingsDialog",
+        "wordPreviewDialog",
+    ]:
+        assert f'<dialog id="{dialog_id}"' in index_html
+
+    assert "export function closeDialogOnBackdropClick" in dialogs_js
+    assert "export function bindDialogBackdropDismissal" in dialogs_js
+    assert 'root.querySelectorAll("dialog").forEach((dialog) =>' in dialogs_js
+    assert 'dialog.addEventListener("click", closeDialogOnBackdropClick);' in dialogs_js
+    assert "event.target !== dialog || !dialog.open" in dialogs_js
+    assert 'from "./js/dialogs.js"' in app_js
+    assert "function closeDialogOnBackdropClick" not in app_js
+    assert "function bindDialogBackdropDismissal" not in app_js
+    assert "bindDialogBackdropDismissal();" in app_js
+
+
+def test_dialog_backdrop_dismissal_closes_only_open_backdrop_clicks():
+    script = """
+import assert from "node:assert/strict";
+import {
+  bindDialogBackdropDismissal,
+  closeDialogOnBackdropClick,
+} from "./marvis/static/js/dialogs.js";
+
+function makeDialog(open = true) {
+  return {
+    open,
+    closeCalls: 0,
+    listeners: {},
+    close() {
+      this.closeCalls += 1;
+      this.open = false;
+    },
+    addEventListener(name, fn) {
+      this.listeners[name] = fn;
+    },
+  };
+}
+
+const dialog = makeDialog(true);
+closeDialogOnBackdropClick({ currentTarget: dialog, target: dialog });
+assert.equal(dialog.closeCalls, 1);
+assert.equal(dialog.open, false);
+
+const innerClickDialog = makeDialog(true);
+closeDialogOnBackdropClick({ currentTarget: innerClickDialog, target: { role: "button" } });
+assert.equal(innerClickDialog.closeCalls, 0);
+assert.equal(innerClickDialog.open, true);
+
+const closedDialog = makeDialog(false);
+closeDialogOnBackdropClick({ currentTarget: closedDialog, target: closedDialog });
+assert.equal(closedDialog.closeCalls, 0);
+
+const boundDialog = makeDialog(true);
+bindDialogBackdropDismissal({
+  root: {
+    querySelectorAll(selector) {
+      assert.equal(selector, "dialog");
+      return [boundDialog];
+    },
+  },
+});
+boundDialog.listeners.click({ currentTarget: boundDialog, target: boundDialog });
+assert.equal(boundDialog.closeCalls, 1);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
+
+
+def test_dialog_close_buttons_render_as_x_controls():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
+
+    for button_id in [
+        "closeTaskDialogButton",
+        "closeLLMEngineEditButton",
+        "closeGovernanceSettingsButton",
+        "closeWordPreviewButton",
+    ]:
+        button_start = index_html.index(f'id="{button_id}"')
+        button_start = index_html.rfind("<button", 0, button_start)
+        button_end = index_html.index("</button>", button_start)
+        button_markup = index_html[button_start:button_end]
+        assert "dialog-close-button" in button_markup
+        assert 'aria-label="关闭"' in button_markup
+        assert 'title="关闭"' in button_markup
+        assert "<span aria-hidden=\"true\">&times;</span>" in button_markup
+        assert ">关闭" not in button_markup
+
+    close_button_rule = _css_rule(styles_css, ".button.dialog-close-button")
+    assert "width: 30px" in close_button_rule
+    assert "min-width: 30px" in close_button_rule
+    assert "height: 30px" in close_button_rule
+    assert "min-height: 30px" in close_button_rule
+    assert "padding: 0" in close_button_rule
+    assert "border: 0" in close_button_rule
+    assert "background: transparent" in close_button_rule
+    assert "color: var(--text-secondary)" in close_button_rule
+    assert "font-size: 18px" in close_button_rule
+
+    close_button_hover_rule = _css_rule(
+        styles_css,
+        ".button.dialog-close-button:hover:not(:disabled),\n.button.dialog-close-button:focus-visible:not(:disabled),\n.button.dialog-close-button:active:not(:disabled)",
+    )
+    assert "outline: none" in close_button_hover_rule
+    assert "border-color: transparent" in close_button_hover_rule
+    assert "background: var(--option-hover)" in close_button_hover_rule
+    assert "box-shadow: none" in close_button_hover_rule
+    assert "#f8fbff" not in close_button_hover_rule
+    assert "#9fbfe4" not in close_button_hover_rule
+
+    dark_close_button_rule = _css_rule(styles_css, 'body[data-theme="dark"] .button.dialog-close-button')
+    assert "border-color: transparent" in dark_close_button_rule
+    assert "background: transparent" in dark_close_button_rule
+    assert "box-shadow: none" in dark_close_button_rule
+
+    dark_close_button_hover_rule = _css_rule(
+        styles_css,
+        'body[data-theme="dark"] .button.dialog-close-button:hover:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:focus-visible:not(:disabled),\nbody[data-theme="dark"] .button.dialog-close-button:active:not(:disabled)',
+    )
+    assert "background: var(--option-hover)" in dark_close_button_hover_rule
+    assert "box-shadow: none" in dark_close_button_hover_rule
+
+    assert 'id="governanceRefreshButton" class="governance-icon-button is-unavailable"' in index_html
+    assert 'aria-hidden="true" disabled' in index_html
+    assert 'button.hidden = !governanceRefreshActions[navKey]' not in app_js
+    assert 'button.classList.toggle("is-unavailable", unavailable);' in app_js
+    assert "button.disabled = unavailable;" in app_js
+    assert 'button.setAttribute("aria-hidden", unavailable ? "true" : "false");' in app_js
+
+    head_rule = _css_rule(styles_css, ".governance-settings-head")
+    assert "position: relative" in head_rule
+    assert "grid-template-columns: minmax(0, 1fr)" in head_rule
+    assert "padding: 20px 96px 16px 24px" in head_rule
+
+    actions_rule = _css_rule(styles_css, ".governance-head-actions")
+    assert "position: absolute" in actions_rule
+    assert "top: 20px" in actions_rule
+    assert "right: 24px" in actions_rule
+    assert "justify-content: flex-end" in actions_rule
+    assert "width: 68px" in actions_rule
+
+    shared_start = styles_css.index(".governance-head-actions .governance-icon-button {")
+    shared_end = styles_css.index("}", shared_start)
+    shared_rule = styles_css[shared_start:shared_end]
+    assert "width: 30px" in shared_rule
+    assert "min-width: 30px" in shared_rule
+    assert "height: 30px" in shared_rule
+    assert "min-height: 30px" in shared_rule
+    assert "border: 0" in shared_rule
+    assert "background: transparent" in shared_rule
+    assert "box-shadow: none" in shared_rule
+    assert ".governance-head-actions .dialog-close-button {" not in styles_css
+    unavailable_rule = _css_rule(styles_css, ".governance-icon-button.is-unavailable")
+    assert "visibility: hidden" in unavailable_rule
+    assert "pointer-events: none" in unavailable_rule
+
+    shared_hover_start = styles_css.index(
+        ".governance-head-actions .governance-icon-button:hover:not(:disabled),"
+    )
+    shared_hover_end = styles_css.index("}", shared_hover_start)
+    shared_hover_rule = styles_css[shared_hover_start:shared_hover_end]
+    assert ".governance-head-actions .dialog-close-button" not in shared_hover_rule
+    assert "outline: none" in shared_hover_rule
+    assert "border-color: transparent" in shared_hover_rule
+    assert "background: var(--option-hover)" in shared_hover_rule
+    assert "box-shadow: none" in shared_hover_rule
+    assert ".governance-head-actions .governance-icon-button:active:not(:disabled)" in shared_hover_rule
+    assert "#f8fbff" not in shared_hover_rule
+    assert "#9fbfe4" not in shared_hover_rule
+
+    dark_shared_start = styles_css.index('body[data-theme="dark"] .governance-head-actions .governance-icon-button {')
+    dark_shared_end = styles_css.index("}", dark_shared_start)
+    dark_shared_rule = styles_css[dark_shared_start:dark_shared_end]
+    assert "border-color: transparent" in dark_shared_rule
+    assert "background: transparent" in dark_shared_rule
+
+    dark_hover_start = styles_css.index(
+        'body[data-theme="dark"] .governance-head-actions .governance-icon-button:hover:not(:disabled),'
+    )
+    dark_hover_end = styles_css.index("}", dark_hover_start)
+    dark_hover_rule = styles_css[dark_hover_start:dark_hover_end]
+    assert 'body[data-theme="dark"] .governance-head-actions .dialog-close-button' not in dark_hover_rule
+    assert "background: var(--option-hover)" in dark_hover_rule
+    assert "box-shadow: none" in dark_hover_rule
+    assert 'body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:not(:disabled)' in dark_hover_rule
+
+    refresh_icon_rule = _css_rule(styles_css, ".governance-icon-button svg")
+    assert "width: 15px" in refresh_icon_rule
+    assert "height: 15px" in refresh_icon_rule
+    assert "stroke-width: 2.25" in refresh_icon_rule
 
 
 def test_initial_load_restores_task_evidence_for_selected_task():
@@ -2513,7 +4003,7 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
-    for row in ["sort", "group", "appearance", "environment"]:
+    for row in ["sort", "group", "appearance", "pet", "system"]:
         assert f'data-settings-row="{row}"' in settings_markup
 
     assert 'id="settingsSortSelect"' in settings_markup
@@ -2523,14 +4013,22 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     for sort_value in ["created_desc", "created_asc", "name_asc", "name_desc"]:
         assert f'value="{sort_value}"' in settings_markup
 
-    for group_value in ["none", "validator", "created_month"]:
+    for group_value in ["none", "task_type", "validator", "created_month"]:
         assert f'value="{group_value}"' in settings_markup
 
     for theme_value in ["light", "dark", "system"]:
         assert f'value="{theme_value}"' in settings_markup
 
-    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
-    assert 'class="settings-environment-button"' in settings_markup
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert 'class="settings-system-value"' not in settings_markup
+    assert 'class="settings-system-row"' in settings_markup
+    assert 'class="settings-environment-button"' not in settings_markup
+    assert 'aria-label="系统设置"' not in settings_markup
+    assert 'class="settings-section-label">系统设置' not in settings_markup
+    assert 'data-settings-row="environment"' not in settings_markup
+    assert 'data-settings-row="llm"' not in settings_markup
+    assert 'data-settings-row="governance"' not in settings_markup
 
     assert 'id="taskSortSelect"' not in settings_markup
     assert 'id="taskGroupSelect"' not in settings_markup
@@ -2542,7 +4040,7 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert 'class="task-controls"' not in index_html
 
     assert 'const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);' in app_js
-    assert 'const taskGroupModes = new Set(["none", "validator", "created_month"]);' in app_js
+    assert 'const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);' in app_js
     assert "function restoreTaskListSettings" in app_js
     assert "function saveTaskListSettings" in app_js
     assert 'localStorage.getItem("marvis_task_list_settings")' in app_js
@@ -2561,15 +4059,21 @@ def test_sort_group_and_theme_live_in_sidebar_settings():
     assert bootstrap.index("restoreTaskListSettings();") < bootstrap.index("await refreshTasks();")
 
 
-def test_task_group_setting_supports_created_month():
+def test_task_group_setting_supports_created_month_and_task_type():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
+    assert '<option value="task_type">按任务类型</option>' in settings_markup
     assert '<option value="created_month">按创建月份</option>' in settings_markup
+    assert 'taskGroupMode === "task_type"' in app_js
     assert 'taskGroupMode === "created_month"' in app_js
+    assert 'export const taskTypeDisplayOrder = ["data_join", "feature_analysis", "vintage", "modeling", "validation", "strategy"];' in task_types_js
+    assert "sortTaskTypeGroups" in app_js
+    assert "appendTaskGroup(list, taskTypeLabel(taskType), groupTasks)" in app_js
     assert "function taskCreatedMonth" in app_js
     assert "task.created_at || task.updated_at" in app_js
     assert "未知创建月份" in app_js
@@ -2587,21 +4091,95 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert 'class="settings-row"' in index_html
     assert 'class="settings-row-title"' in index_html
     assert 'class="settings-select"' in index_html
+    assert 'class="settings-system-row"' in index_html
+    for row in ["sort", "group", "appearance", "pet"]:
+        row_start = index_html.index(f'data-settings-row="{row}"')
+        row_start = index_html.rfind('<div class="settings-row"', 0, row_start)
+        row_end = index_html.index("</div>", index_html.index("</select>", row_start))
+        row_markup = index_html[row_start:row_end]
+        assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in row_markup
+    system_row_start = index_html.index('id="openGovernanceSettingsButton"')
+    system_row_start = index_html.rfind("<button", 0, system_row_start)
+    system_row_end = index_html.index("</button>", system_row_start)
+    system_row_markup = index_html[system_row_start:system_row_end]
+    assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in system_row_markup
+    assert 'class="settings-governance-card"' not in index_html
+    assert 'class="settings-governance-description"' not in index_html
     assert 'class="settings-option"' not in index_html
 
     assert ".settings-menu {" in styles_css
     menu_start = styles_css.index(".settings-menu {")
     menu_end = styles_css.index("}", menu_start)
     menu_rule = styles_css[menu_start:menu_end]
-    assert "width: 100%" in menu_rule
-    assert "max-width: 100%" in menu_rule
+    assert "left: 0" in menu_rule
     assert "right: 0" in menu_rule
+    assert "gap: 12px" in menu_rule
+    assert "width: auto" in menu_rule
+    assert "max-width: 100%" in menu_rule
+    assert "padding: 14px 16px 16px" in menu_rule
+    assert "box-shadow: var(--settings-menu-shadow)" in menu_rule
     assert "width: min(520px" not in menu_rule
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    assert root_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
+    assert dark_vars["--settings-menu-shadow"] == "0 10px 24px rgba(0, 0, 0, 0.10)"
+    section_rule = _css_rule(styles_css, ".settings-menu-section")
+    assert "padding: 0" in section_rule
+    assert "border: 0" in section_rule
+    assert "background: transparent" in section_rule
+    assert "border-radius" not in section_rule
+    assert "gap: 12px" in section_rule
+    label_rule = _css_rule(styles_css, ".settings-section-label")
+    assert "padding: 0 2px" in label_rule
     assert ".settings-row {" in styles_css
     row_start = styles_css.index(".settings-row {")
     row_end = styles_css.index("}", row_start)
     row_rule = styles_css[row_start:row_end]
     assert "grid-template-columns: 72px minmax(0, 1fr)" in row_rule
+    assert "gap: 8px" in row_rule
+    row_title_rule = _css_rule(styles_css, ".settings-row-title")
+    assert "display: inline-flex" in row_title_rule
+    assert "align-self: center" in row_title_rule
+    assert "height: 34px" in row_title_rule
+    assert "gap: 7px" in row_title_rule
+    assert "margin: 0" in row_title_rule
+    assert "font-size: 14px" in row_title_rule
+    assert "line-height: 20px" in row_title_rule
+    assert "pointer-events: none" in row_title_rule
+    shared_icon_start = styles_css.index(".settings-row-title svg,")
+    shared_icon_end = styles_css.index("}", shared_icon_start)
+    shared_icon_rule = styles_css[shared_icon_start:shared_icon_end]
+    assert ".settings-system-row > svg" in shared_icon_rule
+    assert "width: 18px" in shared_icon_rule
+    assert "height: 18px" in shared_icon_rule
+    assert "stroke: currentColor" in shared_icon_rule
+    settings_control_start = styles_css.index(".settings-select,\n.settings-system-row {")
+    settings_control_end = styles_css.index("}", settings_control_start)
+    settings_control_rule = styles_css[settings_control_start:settings_control_end]
+    assert "border-radius: var(--radius-control)" in settings_control_rule
+    assert "min-height: 34px" in settings_control_rule
+    assert "font-size: 14px" in settings_control_rule
+    assert "line-height: 20px" in settings_control_rule
+    settings_select_rule = _css_rule(styles_css, ".settings-select")
+    assert "min-width: 0" in settings_select_rule
+    assert "padding: 6px 30px 6px 12px" in settings_select_rule
+    assert "text-overflow: ellipsis" in settings_select_rule
+    assert "font-size: 14px" in settings_select_rule
+    settings_select_option_rule = _css_rule(styles_css, ".settings-select option")
+    assert "font-size: 14px" in settings_select_option_rule
+    assert ".settings-row:hover" not in styles_css
+    system_row_start = styles_css.index(".settings-system-row {\n  display: flex")
+    system_row_end = styles_css.index("}", system_row_start)
+    system_row_rule = styles_css[system_row_start:system_row_end]
+    assert "display: flex" in system_row_rule
+    assert "justify-content: center" in system_row_rule
+    assert "gap: 7px" in system_row_rule
+    assert "height: 34px" in system_row_rule
+    assert "min-height: 34px" in system_row_rule
+    assert "padding: 6px 12px" in system_row_rule
+    assert "text-align: center" in system_row_rule
+    system_title_rule = _css_rule(styles_css, ".settings-system-row .settings-row-title")
+    assert "height: 20px" in system_title_rule
     assert ".task-sidebar {" in styles_css
     sidebar_start = styles_css.index(".task-sidebar {\n  display: flex")
     sidebar_end = styles_css.index("}", sidebar_start)
@@ -2621,6 +4199,12 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
     assert "left: var(--collapsed-popover-left)" in collapsed_menu_rule
     assert "right: auto" in collapsed_menu_rule
     assert "bottom: 12px" in collapsed_menu_rule
+    assert (
+        "width: min(calc(var(--rail-content-width, 314px) - 24px), "
+        "calc(100vw - var(--collapsed-popover-left) - 16px))"
+    ) in collapsed_menu_rule
+    assert "max-width: none" in collapsed_menu_rule
+    assert "width: 268px" not in collapsed_menu_rule
 
     assert "function renderSettingsState" in app_js
     assert "function handleSettingsMenuChange" in app_js
@@ -2633,21 +4217,48 @@ def test_sidebar_settings_uses_dropdowns_and_stays_inside_sidebar():
 
 def test_appearance_setting_supports_light_dark_and_system_modes():
     app_js = _read_static("app.js")
+    theme_js = _read_static("js/theme.js")
+    index_html = _read_static("index.html")
 
-    assert 'let themePreference = "light"' in app_js
-    assert "function systemTheme" in app_js
-    assert "function watchSystemTheme" in app_js
-    assert 'themePreference === "system"' in app_js
-    assert 'localStorage.setItem("marvis_theme", themePreference)' in app_js
-    assert 'id="settingsThemeSelect"' in _read_static("index.html")
-    assert 'value="system"' in _read_static("index.html")
-    assert "跟随系统" in _read_static("index.html")
+    assert 'from "./js/theme.js"' in app_js
+    assert "const themeController = createThemeController" in app_js
+    assert "function systemTheme" in theme_js
+    assert "const watchSystemTheme = () =>" in theme_js
+    assert "function syncBrowserChromeTheme" in theme_js
+    assert 'const browserChromeThemeColors = {' in theme_js
+    assert 'light: "#ffffff"' in theme_js
+    assert 'dark: "#181818"' in theme_js
+    assert '$("brandFaviconDark")?.setAttribute("media", isDark ? "all" : "not all");' in theme_js
+    assert 'preference === "system"' in theme_js
+    assert 'localStorage.setItem("marvis_theme", preference)' in theme_js
+    assert 'id="settingsThemeSelect"' in index_html
+    assert 'value="system"' in index_html
+    assert "跟随系统" in index_html
+    assert 'id="appThemeColor"' in index_html
+    assert 'id="brandFaviconDark"' in index_html
+    assert 'id="brandAppleTouchIconDark"' in index_html
+    assert 'const syncBrowserChrome = (resolvedTheme) => {' in index_html
+    appearance_start = index_html.index('data-settings-row="appearance"')
+    appearance_start = index_html.rfind('<div class="settings-row"', 0, appearance_start)
+    appearance_end = index_html.index("</div>", index_html.index("</select>", appearance_start))
+    appearance_markup = index_html[appearance_start:appearance_end]
+    assert '<circle cx="12" cy="12" r="3.4"></circle>' in appearance_markup
+    assert '<path d="m18.4 5.6-1.55 1.55"></path>' in appearance_markup
+    assert '<path d="m7.15 16.85-1.55 1.55"></path>' in appearance_markup
+    assert 'localStorage.getItem("marvis_theme") || "light"' in index_html
+    assert 'document.body.dataset.theme = resolvedTheme;' in index_html
+    assert '<meta id="appThemeColor" name="theme-color" content="#ffffff" />' in index_html
+    assert 'document.getElementById("appThemeColor")?.setAttribute("content", isDark ? "#181818" : "#ffffff");' in index_html
+    assert index_html.index('<body class="app-booting" data-theme="light"') < index_html.index('localStorage.getItem("marvis_theme")')
+    assert index_html.index('localStorage.getItem("marvis_theme")') < index_html.index('id="taskDialog"')
 
 
 def test_sidebar_settings_closes_on_outside_click_only():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
 
     assert "function closeSidebarSettingsOnOutsideClick" in app_js
+    assert "function openGovernanceSettingsFromSidebar" in app_js
     assert 'document.addEventListener("click", closeSidebarSettingsOnOutsideClick)' in app_js
 
     handler_start = app_js.index("function closeSidebarSettingsOnOutsideClick")
@@ -2657,29 +4268,78 @@ def test_sidebar_settings_closes_on_outside_click_only():
     assert "settings.open" in handler
     assert 'target.closest("#sidebarSettings")' in handler
     assert "settings.open = false" in handler
+    assert "function closeSidebarSettingsMenu" in app_js
+    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
+    assert "function handleGovernanceSettingsPointerDown" in app_js
+    assert "window.requestAnimationFrame" in app_js
+    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
+    assert "function setSidebarSettingsSuppressed" not in app_js
+    assert "modal-suppressed" not in app_js
+    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
+
+    assert ".sidebar-settings.modal-suppressed" not in styles_css
+    closed_menu_rule = _css_rule(styles_css, ".sidebar-settings:not([open]) .settings-menu")
+    assert "display: none" in closed_menu_rule
 
 
-def test_sidebar_settings_exposes_execution_environment_dialog():
+def test_system_settings_exposes_execution_environment_panel():
     index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
     settings_start = index_html.index('id="sidebarSettings"')
     settings_end = index_html.index("</details>", settings_start)
     settings_markup = index_html[settings_start:settings_end]
 
-    assert 'id="openExecutionEnvironmentButton"' in settings_markup
-    assert 'id="settingsExecutionEnvironmentValue"' in settings_markup
-    assert "执行环境" in settings_markup
-    assert 'id="executionEnvironmentDialog"' in index_html
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert "系统设置" in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert 'id="openExecutionEnvironmentButton"' not in settings_markup
+    assert 'id="settingsExecutionEnvironmentValue"' not in settings_markup
+    assert 'id="executionEnvironmentDialog"' not in index_html
+    assert 'data-governance-nav="execution-environment"' in index_html
+    assert 'data-governance-panel-content="execution-environment"' in index_html
 
     for element_id in [
-        "executionEnvironmentSelect",
+        "executionEnvironmentList",
         "refreshExecutionEnvironmentOptionsButton",
         "executionEnvironmentStatus",
-        "saveExecutionEnvironmentButton",
     ]:
         assert f'id="{element_id}"' in index_html
+    # The panel is now a click-to-select radiogroup that persists on click, so
+    # the old <select> + explicit save button were retired.
+    assert 'id="executionEnvironmentSelect"' not in index_html
+    assert 'id="saveExecutionEnvironmentButton"' not in index_html
+
+    env_settings_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group'
+    )
+    assert "border: 0" in env_settings_group_rule
+    assert "background: transparent" in env_settings_group_rule
+    assert "overflow: visible" in env_settings_group_rule
+    env_settings_row_rule = _css_rule(
+        styles_css,
+        '.governance-panel[data-governance-panel-content="execution-environment"] > .settings-group > .settings-row',
+    )
+    assert "padding: 0 2px 2px" in env_settings_row_rule
+
+    env_list_rule = _css_rule(styles_css, ".exec-env-list")
+    assert "display: flex" in env_list_rule
+    assert "gap: 8px" in env_list_rule
+    assert "border: 0" in env_list_rule
+    assert "background: transparent" in env_list_rule
+    env_row_rule = _css_rule(styles_css, ".exec-env-row")
+    llm_card_rule = _css_rule(styles_css, ".llm-engine-item")
+    assert "background: var(--surface-soft)" in env_row_rule
+    assert "background: var(--surface-soft)" in llm_card_rule
+    assert "border: 1px solid var(--border)" in env_row_rule
+    assert "border: 1px solid var(--border)" in llm_card_rule
+    assert "border-radius: var(--radius-control)" in env_row_rule
+    assert "border-radius: var(--radius-control)" in llm_card_rule
+    env_row_hover_rule = _css_rule(styles_css, ".exec-env-row:hover")
+    assert "border-color: var(--option-hover)" in env_row_hover_rule
+    assert "background: var(--option-hover)" in env_row_hover_rule
 
 
-def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
+def test_pet_setting_includes_naitang_xiaojiu_auditbots_and_none():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
@@ -2693,9 +4353,45 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '<option value="none">不显示</option>' in settings_markup
     assert '<option value="naitang">蛋黄</option>' in settings_markup
     assert '<option value="xiaojiu">小九</option>' in settings_markup
+    expected_auditbot_pets = {
+        "auditbot": ("MARVIS", "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机"),
+        "auditbot-pro": ("MARVIS Pro", "专业风格 3D 审计机器人"),
+        "auditbot-poly": ("MARVIS Poly", "低多边形硬表面审计机器人"),
+        "auditbot-ink": ("MARVIS Ink", "技术线稿风格审计机器人"),
+        "auditbot-clay": ("MARVIS Clay", "黏土与乙烯基质感审计机器人"),
+        "auditbot-comic": ("MARVIS Comic", "漫画描边风格审计机器人"),
+        "auditbot-pixel": ("MARVIS Pixel", "像素风审计机器人"),
+    }
+    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
+        assert f'<option value="{pet_id}">{display_name}</option>' in settings_markup
+        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
+        assert key in index_html
+        assert f'name: "{display_name}"' in index_html
+        assert f'label: "{pet_label}"' in index_html
+        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in index_html
+    pet_row_start = settings_markup.index('data-settings-row="pet"')
+    pet_row_start = settings_markup.rfind('<div class="settings-row"', 0, pet_row_start)
+    pet_row_end = settings_markup.index("</div>", settings_markup.index("</select>", pet_row_start))
+    pet_row_markup = settings_markup[pet_row_start:pet_row_end]
+    assert "M8.2 10.4C8.7 6.7 10.2 3.8 12 3.8s3.3 2.9 3.8 6.6" in pet_row_markup
+    assert "M6.4 12.2 8.2 10.4l1.65 2.05 2-2.75" in pet_row_markup
+    assert "M6.8 12.4c-1 4.35 1.35 7.25 5.2 7.25" in pet_row_markup
+    assert "M9.7 13.4c.4-1.15 1.18-1.78 2.3-1.78" in pet_row_markup
+    assert '<circle cx="7.2" cy="9.2" r="1.65"></circle>' not in pet_row_markup
     assert 'id="petCompanion"' in index_html
-    assert 'class="pet-companion hidden"' in index_html
+    assert 'class="pet-companion"' in index_html
+    assert 'data-pet-id="auditbot"' in index_html
     assert 'id="petSticker"' in index_html
+    assert 'class="pet-sprite"' in index_html
+    assert 'background-image: url("static/pets/auditbot/spritesheet.webp")' in index_html
+    assert 'localStorage.getItem("marvis_pet")' in index_html
+    assert 'localStorage.getItem("marvis_pet_none_explicit") === "1"' in index_html
+    assert 'localStorage.getItem("marvis_pet_position")' in index_html
+    assert 'pet.classList.add("hidden");' in index_html
+    assert 'Number.isFinite(storedPosition.workspaceOffsetLeft)' in index_html
+    assert 'const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);' in index_html
+    assert 'pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);' in index_html
+    assert 'pet.style.left = "";' in index_html
     assert 'id="petCompanionLabel"' not in index_html
     assert 'class="pet-companion-label"' not in index_html
     assert 'aria-live="polite"' in index_html
@@ -2731,7 +4427,7 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     ]:
         assert removed_asset not in app_js
 
-    assert 'export const defaultPetPreference = "naitang";' in state_js
+    assert 'export const defaultPetPreference = "auditbot";' in state_js
     assert "let petPreference = defaultPetPreference" in app_js
     assert 'naitang: {' in app_js
     assert 'name: "蛋黄"' in app_js
@@ -2740,6 +4436,12 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert 'xiaojiu: {' in app_js
     assert 'name: "小九"' in app_js
     assert 'asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f"' in app_js
+    for pet_id, (display_name, pet_label) in expected_auditbot_pets.items():
+        key = f'"{pet_id}": {{' if "-" in pet_id else f"{pet_id}: {{"
+        assert key in app_js
+        assert f'name: "{display_name}"' in app_js
+        assert f'label: "{pet_label}"' in app_js
+        assert f'asset: "static/pets/{pet_id}/spritesheet.webp"' in app_js
     assert 'pet-sprite' in app_js
     assert "sprite.style.backgroundImage" in app_js
     assert "petCompanionLabel" not in app_js
@@ -2757,6 +4459,21 @@ def test_pet_setting_includes_only_naitang_xiaojiu_and_none():
     assert '$("settingsPetSelect").value = petPreference' in app_js
 
     assert ".pet-companion {" in styles_css
+    pet_rule = _css_rule(styles_css, ".pet-companion")
+    assert "left: calc(var(--sidebar-width) + var(--pet-offset-left, var(--pet-default-workspace-offset)))" in pet_rule
+    assert "right: auto" in pet_rule
+    assert "bottom: 28px" in pet_rule
+    pet_follow_rule = _css_rule(styles_css, "body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging)")
+    assert "transition: left 300ms cubic-bezier(0.4, 0, 0.2, 1)" in pet_follow_rule
+    pet_dragging_rule = _css_rule(styles_css, ".pet-companion.dragging")
+    assert "transition: none" in pet_dragging_rule
+    mobile_start = styles_css.index("@media (max-width: 860px)")
+    mobile_pet_start = styles_css.index(".pet-companion {", mobile_start)
+    mobile_pet_end = styles_css.index("}", mobile_pet_start)
+    mobile_pet_rule = styles_css[mobile_pet_start:mobile_pet_end]
+    assert "left: 16px" in mobile_pet_rule
+    assert "right: auto" in mobile_pet_rule
+    assert "bottom: 16px" in mobile_pet_rule
     assert ".pet-image" in styles_css
     assert ".pet-sprite" in styles_css
     assert "--pet-sheet-y" in styles_css
@@ -2794,7 +4511,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
     normalize_end = app_js.index("function persistPetPreference", normalize_start)
     script = "\n".join(
         [
-            'const defaultPetPreference = "naitang";',
+            'const defaultPetPreference = "auditbot";',
             app_js[preference_start:preference_end],
             app_js[normalize_start:normalize_end],
             "const values = ['danhuang', 'buou', 'ragdoll-cat', 'unknown', 'none'].map(normalizePetPreference);",
@@ -2807,7 +4524,7 @@ def test_pet_preference_restores_legacy_local_storage_ids():
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "naitang", "none"]
+    assert json.loads(result.stdout) == ["naitang", "xiaojiu", "xiaojiu", "auditbot", "none"]
 
     restore_start = app_js.index("function restorePetPreference")
     restore_end = app_js.index("function applyPetPosition", restore_start)
@@ -2821,7 +4538,7 @@ def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     app_js = _read_static("app.js")
     state_js = _read_static("js/state.js")
 
-    assert 'export const defaultPetPreference = "naitang";' in state_js
+    assert 'export const defaultPetPreference = "auditbot";' in state_js
     assert 'export const explicitPetNoneStorageKey = "marvis_pet_none_explicit";' in state_js
     assert "function persistPetPreference" in app_js
     assert 'if (value === "none" && explicitNone) {' in app_js
@@ -2843,19 +4560,130 @@ def test_pet_preference_defaults_visible_and_preserves_explicit_hide():
     assert 'applyPetPreference(target.value, { explicit: true });' in settings_renderer
 
 
+def test_task_search_controller_toggles_search_state_and_resets_query():
+    module_url = (STATIC_DIR / "js" / "task-search.js").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ createTaskSearchController }} from {json.dumps(module_url)};
+
+const bodyClasses = new Set();
+const elements = {{
+  taskSearchToggle: {{
+    attrs: {{}},
+    focused: false,
+    setAttribute(name, value) {{ this.attrs[name] = value; }},
+    focus() {{ this.focused = true; }},
+  }},
+  taskSearchInput: {{
+    value: "risk",
+    focused: false,
+    selected: false,
+    focus() {{ this.focused = true; }},
+    select() {{ this.selected = true; }},
+  }},
+}};
+let query = "risk";
+let renderCount = 0;
+let frameCount = 0;
+const controller = createTaskSearchController({{
+  getElementById: (id) => elements[id],
+  documentRef: {{
+    body: {{
+      classList: {{
+        add: (name) => bodyClasses.add(name),
+        remove: (name) => bodyClasses.delete(name),
+        contains: (name) => bodyClasses.has(name),
+      }},
+    }},
+  }},
+  windowRef: {{
+    requestAnimationFrame(callback) {{
+      frameCount += 1;
+      callback();
+    }},
+  }},
+  getQuery: () => query,
+  setQuery: (value) => {{ query = value; }},
+  renderTaskList: () => {{ renderCount += 1; }},
+}});
+
+assert.equal(controller.isActive(), false);
+controller.openTaskSearch();
+assert.equal(controller.isActive(), true);
+assert.equal(bodyClasses.has("search-active"), true);
+assert.equal(elements.taskSearchToggle.attrs["aria-expanded"], "true");
+assert.equal(elements.taskSearchInput.focused, true);
+assert.equal(elements.taskSearchInput.selected, true);
+assert.equal(frameCount, 1);
+
+controller.closeTaskSearch({{ focusToggle: true }});
+assert.equal(controller.isActive(), false);
+assert.equal(bodyClasses.has("search-active"), false);
+assert.equal(elements.taskSearchToggle.attrs["aria-expanded"], "false");
+assert.equal(elements.taskSearchToggle.focused, true);
+assert.equal(elements.taskSearchInput.value, "");
+assert.equal(query, "");
+assert.equal(renderCount, 1);
+
+controller.toggleTaskSearch();
+assert.equal(controller.isActive(), true);
+controller.toggleTaskSearch();
+assert.equal(controller.isActive(), false);
+"""
+    subprocess.run(["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True)
+
+
 def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
     app_js = _read_static("app.js")
 
     assert "function clampPetPosition" in app_js
     assert "function ensurePetWithinViewport" in app_js
     assert "ensurePetWithinViewport({ persist });" in app_js
+    assert "function petCssPx" in app_js
+    assert "function petIsPinnedToWorkspaceLeftEdge" in app_js
+    assert "function pinPetToWorkspaceLeftEdge" in app_js
+    sidebar_renderer = _slice_function(app_js, "function applySidebarCollapsed")
+    assert "const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();" in sidebar_renderer
+    assert "pinPetToWorkspaceLeftEdge({ persist: true });" in sidebar_renderer
 
     restore_start = app_js.index("function restorePetPosition")
     restore_end = app_js.index("function petDragBounds", restore_start)
     restore_renderer = app_js[restore_start:restore_end]
-    assert "const next = clampPetPosition(stored.left, stored.top);" in restore_renderer
+    assert "Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
+    assert "workspace.left + stored.workspaceOffsetLeft" in restore_renderer
+    assert "const next = clampPetPosition(storedLeft, stored.top);" in restore_renderer
     assert "applyPetPosition(next.left, next.top);" in restore_renderer
+    assert "!Number.isFinite(stored.workspaceOffsetLeft)" in restore_renderer
     assert "savePetPosition(next.left, next.top);" in restore_renderer
+
+    apply_start = app_js.index("function applyPetPosition")
+    apply_end = app_js.index("function savePetPosition", apply_start)
+    apply_renderer = app_js[apply_start:apply_end]
+    assert 'pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);' in apply_renderer
+    assert 'pet.style.left = "";' in apply_renderer
+
+    save_start = app_js.index("function savePetPosition")
+    save_end = app_js.index("function restorePetPosition", save_start)
+    save_renderer = app_js[save_start:save_end]
+    assert "payload.workspaceOffsetLeft = left - workspace.left;" in save_renderer
+
+    bounds_start = app_js.index("function petDragBounds")
+    bounds_end = app_js.index("function clampPetPosition", bounds_start)
+    bounds_renderer = app_js[bounds_start:bounds_end]
+    assert 'petCssPx("--pet-min-workspace-offset", padding)' in bounds_renderer
+    assert "workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset" in bounds_renderer
+
+    pinned_start = app_js.index("function petIsPinnedToWorkspaceLeftEdge")
+    pinned_end = app_js.index("function pinPetToWorkspaceLeftEdge", pinned_start)
+    pinned_renderer = app_js[pinned_start:pinned_end]
+    assert "Math.abs(offset - minWorkspaceOffset) <= 2" in pinned_renderer
+
+    pin_start = app_js.index("function pinPetToWorkspaceLeftEdge")
+    pin_end = app_js.index("function clampPetPosition", pin_start)
+    pin_renderer = app_js[pin_start:pin_end]
+    assert "workspace.left + minWorkspaceOffset" in pin_renderer
+    assert "applyPetPosition(next.left, next.top);" in pin_renderer
+    assert "if (persist) savePetPosition(next.left, next.top);" in pin_renderer
 
     drag_start = app_js.index("function startPetDrag")
     drag_end = app_js.index("function renderSettingsState", drag_start)
@@ -2866,20 +4694,27 @@ def test_pet_position_restore_clamps_stale_coordinates_to_viewport():
 
 def test_only_selected_pet_assets_are_bundled():
     pets_dir = STATIC_DIR / "pets"
-    assert (pets_dir / "naitang" / "pet.json").exists()
-    assert (pets_dir / "naitang" / "spritesheet.webp").exists()
-    assert '"displayName": "蛋黄"' in (pets_dir / "naitang" / "pet.json").read_text(encoding="utf-8")
-    assert (pets_dir / "xiaojiu" / "pet.json").exists()
-    assert (pets_dir / "xiaojiu" / "spritesheet.webp").exists()
-    assert '"displayName": "小九"' in (pets_dir / "xiaojiu" / "pet.json").read_text(encoding="utf-8")
+    expected_pets = {
+        "naitang": "蛋黄",
+        "xiaojiu": "小九",
+        "auditbot": "MARVIS",
+        "auditbot-pro": "MARVIS Pro",
+        "auditbot-poly": "MARVIS Poly",
+        "auditbot-ink": "MARVIS Ink",
+        "auditbot-clay": "MARVIS Clay",
+        "auditbot-comic": "MARVIS Comic",
+        "auditbot-pixel": "MARVIS Pixel",
+    }
+    for pet_id, display_name in expected_pets.items():
+        assert (pets_dir / pet_id / "pet.json").exists()
+        assert (pets_dir / pet_id / "spritesheet.webp").exists()
+        assert f'"displayName": "{display_name}"' in (pets_dir / pet_id / "pet.json").read_text(encoding="utf-8")
     assert not (pets_dir / "ragdoll-cat").exists()
     bundled_files = sorted(path.relative_to(pets_dir).as_posix() for path in pets_dir.rglob("*") if path.is_file())
-    assert bundled_files == [
-        "naitang/pet.json",
-        "naitang/spritesheet.webp",
-        "xiaojiu/pet.json",
-        "xiaojiu/spritesheet.webp",
-    ]
+    assert bundled_files == sorted(
+        [f"{pet_id}/pet.json" for pet_id in expected_pets]
+        + [f"{pet_id}/spritesheet.webp" for pet_id in expected_pets]
+    )
 
 
 def test_naitang_uses_pet_atlas_rows_and_drag_directions():
@@ -2889,6 +4724,16 @@ def test_naitang_uses_pet_atlas_rows_and_drag_directions():
 
     assert 'static/pets/naitang/*' in pyproject
     assert 'static/pets/xiaojiu/*' in pyproject
+    for pet_id in [
+        "auditbot",
+        "auditbot-pro",
+        "auditbot-poly",
+        "auditbot-ink",
+        "auditbot-clay",
+        "auditbot-comic",
+        "auditbot-pixel",
+    ]:
+        assert f"static/pets/{pet_id}/*" in pyproject
     assert 'static/pets/ragdoll-cat/*' not in pyproject
 
     assert 'return "success";' in app_js
@@ -3024,23 +4869,23 @@ def test_pet_companion_is_draggable_and_reacts_to_task_status():
         assert f'id="{removed_element_id}"' not in index_html
 
 
-def test_execution_environment_summary_and_dialog_are_compact():
+def test_execution_environment_panel_is_in_system_settings():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
+    index_html = _read_static("index.html")
 
     assert "executionEnvironmentSettingsLabel" in app_js
     assert "renderExecutionEnvironmentSummary" in app_js
-    assert "settingsExecutionEnvironmentValue" in app_js
-
-    dialog_start = styles_css.index(".environment-dialog {")
-    dialog_end = styles_css.index("}", dialog_start)
-    dialog_rule = styles_css[dialog_start:dialog_end]
-    assert "width: min(520px, calc(100vw - 32px))" in dialog_rule
+    assert "settingsExecutionEnvironmentValue" not in app_js
+    assert 'data-governance-nav="execution-environment"' in index_html
+    assert 'data-governance-panel-content="execution-environment"' in index_html
 
     section_start = styles_css.index(".environment-dialog .execution-environment-section {")
     section_end = styles_css.index("}", section_start)
     section_rule = styles_css[section_start:section_end]
     assert "grid-template-columns: 1fr" in section_rule
+    assert ".settings-panel-form" in styles_css
+    assert ".governance-panel-actions" in styles_css
 
 
 def test_execution_environment_api_fields_are_wired():
@@ -3101,6 +4946,12 @@ def test_reproducibility_panel_renders_score_rows_and_diff_visuals():
     assert '"<strong>分数一致性</strong>"' not in renderer
     assert ".score-compare-list" in styles_css
     assert ".score-diff-bar" in styles_css
+    assert "border-color: var(--danger-border)" in _css_rule(
+        styles_css, ".result-summary.error"
+    )
+    assert "border-color: var(--danger-border)" in _css_rule(
+        styles_css, ".score-compare-row.mismatched"
+    )
 
 
 def test_reproducibility_summary_omits_six_decimal_match_count_and_keeps_status_tone():
@@ -3124,14 +4975,19 @@ def test_reproducibility_panel_renders_precision_consistency_chart():
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
+    precision_js = _read_static("js/precision-consistency.js")
+
     renderer_start = app_js.index("function renderReproducibilityEvidence")
     renderer_end = app_js.index("function renderEvidence", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
 
-    assert "function buildPrecisionConsistencyBars" in app_js
-    assert "function renderPrecisionConsistencyChart" in app_js
-    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in app_js
-    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in app_js
+    assert "export function buildPrecisionConsistencyBars" in precision_js
+    assert "export function renderPrecisionConsistencyChart" in precision_js
+    assert "for (let decimals = 1; decimals <= 6; decimals += 1)" in precision_js
+    assert "roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)" in precision_js
+    assert 'from "./js/precision-consistency.js"' in app_js
+    assert "function buildPrecisionConsistencyBars" not in app_js
+    assert "function renderPrecisionConsistencyChart" not in app_js
     assert "renderPrecisionConsistencyChart(rows, {" in renderer
     assert ".score-precision-chart" in styles_css
     assert ".score-precision-bars" in styles_css
@@ -3203,23 +5059,23 @@ def test_metric_card_is_hidden_until_metric_validation_success():
 
 
 def test_metric_sparkline_html_requires_local_spec_marker():
-    app_js = _read_static("app.js")
-    renderer_start = app_js.index("function renderCellByKind")
-    renderer_end = app_js.index("function renderMetricTable", renderer_start)
-    renderer = app_js[renderer_start:renderer_end]
-    trend_start = app_js.index("function renderTrendTable")
-    trend_end = app_js.index("function renderSparklineSvg", trend_start)
-    trend_renderer = app_js[trend_start:trend_end]
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_start = metric_tables_js.index("export function renderCellByKind")
+    renderer_end = metric_tables_js.index("export function metricHeaderShouldRightAlign", renderer_start)
+    renderer = metric_tables_js[renderer_start:renderer_end]
+    trend_start = metric_tables_js.index("export function renderTrendTable")
+    trend_end = metric_tables_js.index("export function renderSparklineSvg", trend_start)
+    trend_renderer = metric_tables_js[trend_start:trend_end]
 
     assert 'kind === "trend-spark" && spec && spec.__localHtml === true' in renderer
     assert 'trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });' in trend_renderer
 
 
 def test_metric_tooltip_uses_document_delegation_for_rebuilt_preview():
-    app_js = _read_static("app.js")
-    tooltip_start = app_js.index("function attachMetricTooltip")
-    tooltip_end = app_js.index("function renderEnhancedTable", tooltip_start)
-    tooltip = app_js[tooltip_start:tooltip_end]
+    metric_tables_js = _read_static("js/metric-tables.js")
+    tooltip_start = metric_tables_js.index("export function attachMetricTooltip")
+    tooltip_end = metric_tables_js.index("export function renderEnhancedTable", tooltip_start)
+    tooltip = metric_tables_js[tooltip_start:tooltip_end]
 
     assert 'document.addEventListener("mouseover"' in tooltip
     assert 'event.target.closest("#metricPreview [data-tip]")' in tooltip
@@ -3237,22 +5093,130 @@ def test_metric_kpi_footer_values_are_centered_in_each_column():
     assert "text-align: center" in cell_rule
 
 
+def test_metric_tables_use_tabular_right_aligned_numeric_cells():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+
+    table_start = styles_css.index(".metric-table-section .metric-table {")
+    table_end = styles_css.index("}", table_start)
+    table_rule = styles_css[table_start:table_end]
+    number_start = styles_css.index(".metric-table-section .metric-table td.cell-number {")
+    number_end = styles_css.index("}", number_start)
+    number_rule = styles_css[number_start:number_end]
+
+    assert "font-variant-numeric: tabular-nums" in table_rule
+    assert "text-align: right" in number_rule
+    assert "font-variant-numeric: tabular-nums" in number_rule
+    assert 'return { cls: "cell-number"' in app_js
+
+
+def test_metric_overview_uses_semantic_visual_tokens():
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    metric_section = styles_css[styles_css.index("/* ====== Metric overview redesign ====== */") :]
+
+    required_tokens = [
+        "--report-tone-cool-blue",
+        "--report-tone-cool-blue-soft",
+        "--report-tone-warm-orange",
+        "--report-tone-warm-orange-soft",
+        "--report-tone-deep-purple",
+        "--report-tone-deep-purple-soft",
+        "--report-tone-warning-red",
+        "--report-tone-warning-red-soft",
+        "--report-tone-heatmap",
+        "--report-tone-heatmap-soft",
+        "--metric-border",
+        "--metric-surface",
+        "--metric-surface-soft",
+        "--metric-control-surface",
+        "--metric-text",
+        "--metric-text-strong",
+        "--metric-text-muted",
+        "--metric-databar-accent",
+        "--metric-psi-stable",
+        "--metric-psi-warn",
+        "--metric-psi-critical",
+        "--chart-axis",
+        "--chart-grid",
+        "--chart-muted",
+        "--chart-roc-tpr",
+        "--chart-roc-baseline",
+        "--chart-roc-ks",
+    ]
+    for token in required_tokens:
+        assert token in root_vars
+        assert token in dark_vars
+
+    assert "--accent: var(--report-tone-cool-blue)" in _css_rule(styles_css, ".metric-table-section")
+    assert "--accent-soft: var(--report-tone-warm-orange-soft)" in _css_rule(
+        styles_css,
+        '.metric-table-section[data-theme="warm-orange"]',
+    )
+    assert "background: var(--metric-control-surface)" in metric_section
+    assert "stroke: var(--chart-roc-ks)" in metric_section
+    for legacy_color in [
+        "#3A6EA5",
+        "#E4ECF6",
+        "#0EA5E9",
+        "#16A34A",
+        "#DC2626",
+        "#3B82F6",
+        "#F3F4F6",
+        "#E5E7EB",
+        "#1F2937",
+        "#6B7280",
+    ]:
+        assert legacy_color not in metric_section
+    metric_tables_js = _read_static("js/metric-tables.js")
+    assert "#0EA5E9" not in app_js
+    assert "#0EA5E9" not in metric_tables_js
+    assert 'var(--metric-databar-accent)' in metric_tables_js
+
+
 def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
     dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
 
-    for selector in [
-        'body[data-theme="dark"] .metric-table-section',
-        'body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="warning-red"]',
-        'body[data-theme="dark"] .metric-table-section[data-theme="heatmap"]',
+    for selector, accent_token, soft_token in [
+        (
+            'body[data-theme="dark"] .metric-table-section',
+            "--report-tone-cool-blue",
+            "--report-tone-cool-blue-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="cool-blue"]',
+            "--report-tone-cool-blue",
+            "--report-tone-cool-blue-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="warm-orange"]',
+            "--report-tone-warm-orange",
+            "--report-tone-warm-orange-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="deep-purple"]',
+            "--report-tone-deep-purple",
+            "--report-tone-deep-purple-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="warning-red"]',
+            "--report-tone-warning-red",
+            "--report-tone-warning-red-soft",
+        ),
+        (
+            'body[data-theme="dark"] .metric-table-section[data-theme="heatmap"]',
+            "--report-tone-heatmap",
+            "--report-tone-heatmap-soft",
+        ),
     ]:
         rule_vars = _css_vars(_css_rule(styles_css, selector))
-        assert "--accent-soft" in rule_vars
-        assert _contrast_ratio(rule_vars["--accent-soft"], dark_vars["--surface"]) >= 1.12
+        assert rule_vars["--accent"] == f"var({accent_token})"
+        assert rule_vars["--accent-soft"] == f"var({soft_token})"
+        assert _contrast_ratio(dark_vars[soft_token], dark_vars["--surface"]) >= 1.12
 
     hover_rule = _css_rule(
         styles_css,
@@ -3265,9 +5229,11 @@ def test_metric_overview_dark_theme_keeps_hover_and_chart_text_readable():
         'body[data-theme="dark"] .metric-table.metric-table-hoverable tbody:has(tr:hover) '
         "tr:hover :is(.databar-label, .period-text, .psi-value)"
     ) in styles_css
+    metric_tables_js = _read_static("js/metric-tables.js")
     assert 'body[data-theme="dark"] .roc-axis-label' in styles_css
-    assert 'class="roc-axis-label"' in app_js
+    assert 'class="roc-axis-label"' in metric_tables_js
     assert 'fill="#6B7280"' not in app_js
+    assert 'fill="#6B7280"' not in metric_tables_js
 
 
 def test_agent_progress_refreshes_metric_preview_before_streaming_analysis_messages():
@@ -3293,6 +5259,7 @@ def test_evidence_restore_renders_persisted_scan_result():
 
 def test_scan_result_renders_structured_preflight_checks():
     app_js = _read_static("app.js")
+    styles_css = _read_static("styles.css")
     renderer_start = app_js.index("function renderScanResult")
     renderer_end = app_js.index("function renderValidationResult", renderer_start)
     renderer = app_js[renderer_start:renderer_end]
@@ -3302,6 +5269,12 @@ def test_scan_result_renders_structured_preflight_checks():
     assert "notebook_contract" in app_js
     assert "file-list" not in renderer
     assert "ambiguity-list" not in renderer
+    for selector, token in [
+        (".preflight-check-item.danger", "--danger-border"),
+        (".preflight-check-item.warning", "--warning-border"),
+        (".preflight-check-item.success", "--success-border"),
+    ]:
+        assert f"border-color: var({token})" in _css_rule(styles_css, selector)
 
 
 def test_validate_action_polls_task_status_and_evidence_until_terminal():
@@ -3406,15 +5379,16 @@ def test_notebook_step_renderer_uses_latest_retried_system_cell_status():
 
 def test_failed_task_error_detail_moves_to_current_status_only():
     app_js = _read_static("app.js")
+    workspace_view_js = _read_static("js/task-workspace-view.js")
 
     append_start = app_js.index("function appendTaskRow")
     append_end = app_js.index("function renderTaskSnapshot", append_start)
     append_renderer = app_js[append_start:append_end]
     assert "task.status_message" not in append_renderer
 
-    snapshot_start = app_js.index("function renderTaskSnapshot")
-    snapshot_end = app_js.index("function snapshotItem", snapshot_start)
-    snapshot_renderer = app_js[snapshot_start:snapshot_end]
+    snapshot_start = workspace_view_js.index("export function renderTaskSnapshot")
+    snapshot_end = workspace_view_js.index("export function renderCurrentTaskWorkspace", snapshot_start)
+    snapshot_renderer = workspace_view_js[snapshot_start:snapshot_end]
     assert "selectedTask.status_message" not in snapshot_renderer
 
     step_start = app_js.index("function renderWorkflowStepper")
@@ -3528,10 +5502,8 @@ def test_stopped_agent_task_does_not_spin_running_substeps():
 
 
 def test_stopped_step_checker_has_no_stop_square_mark():
-    app_js = _read_static("app.js")
-    start = app_js.index("function stepCheckerHtml")
-    end = app_js.index("function notebookStepTone", start)
-    source = app_js[start:end]
+    step_checker_js = _read_static("js/step-checker.js")
+    source = step_checker_js[step_checker_js.index("export function stepCheckerHtml"):]
     stopped_start = source.index('if (state === "stopped")')
     stopped_end = source.index('if (state === "review")', stopped_start)
     stopped_branch = source[stopped_start:stopped_end]
@@ -3635,6 +5607,8 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     hero_rule = styles_css[hero_start:hero_end]
     assert "overflow: hidden;" in hero_rule
     assert "isolation: isolate;" in hero_rule
+    assert "border: 1px solid color-mix(in srgb, var(--border) 54%, transparent);" in hero_rule
+    assert "border: 1px solid transparent;" not in hero_rule
     assert "transform: translateZ(0);" in hero_rule
     assert "contain: paint;" in hero_rule
     assert "will-change: transform;" in hero_rule
@@ -3659,6 +5633,8 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     active_start = styles_css.index(".task-hero.is-glass-active {")
     active_end = styles_css.index("}", active_start)
     active_rule = styles_css[active_start:active_end]
+    assert "border-color: color-mix(in srgb, var(--border) 62%, transparent);" in active_rule
+    assert "border-color: transparent;" not in active_rule
     assert "var(--accent)" not in active_rule
     assert "rgba(0, 113, 227" not in active_rule
     assert "0 18px" not in active_rule
@@ -3667,9 +5643,14 @@ def test_center_workspace_scroll_locks_status_card_and_lateral_overscroll():
     dark_hero_start = styles_css.index('body[data-theme="dark"] .task-hero {')
     dark_hero_end = styles_css.index("}", dark_hero_start)
     dark_hero_rule = styles_css[dark_hero_start:dark_hero_end]
+    assert "border-color: color-mix(in srgb, var(--border) 58%, transparent);" in dark_hero_rule
+    assert "border-color: transparent;" not in dark_hero_rule
     assert "0 16px 42px" not in dark_hero_rule
-    assert "rgba(0, 0, 0" not in dark_hero_rule
-    assert "inset 0 1px 0 rgba(255, 255, 255, 0.08)" in dark_hero_rule
+    # VD-8: the dark task-hero now sources its glass edge from the shared
+    # --glass-edge token (raised into the 0.14-0.18 highlight range with an
+    # added bottom inner shadow for real depth) instead of a hardcoded
+    # near-invisible 0.08 highlight.
+    assert "box-shadow: var(--glass-edge);" in dark_hero_rule
 
     assert 'id="resultScrollContent"' in index_html
     assert "static/styles.css?v=__MARVIS_STATIC_VERSION__" in index_html
@@ -3753,19 +5734,32 @@ def test_validation_failure_writes_error_detail_to_global_action_status():
 
 def test_agent_mode_creation_and_stepper_hide_manual_buttons():
     app_js = _read_static("app.js")
+    create_dialog_js = _read_static("js/create-task-dialog.js")
+    driver_confirm_js = _read_static("js/v2/driver_gate_confirm.js")
 
     create_start = app_js.index("async function createTask")
     create_end = app_js.index("async function refreshTasks", create_start)
     create_body = app_js[create_start:create_end]
     assert "Agent 模式当前暂不支持创建任务" not in create_body
-    assert "run_mode: selectedRunMode" in create_body
+    assert "const task = await createTaskDialog.createTask();" in create_body
+    assert "run_mode: selectedRunMode" in create_dialog_js
 
     assert "function selectedTaskIsAgentMode" in app_js
-    assert "if (selectedTaskIsAgentMode()) return \"\";" in app_js
+    # UX-2: the plain gate confirm button now renders in BOTH modes (it used to
+    # short-circuit on isAgentMode, forcing agent-mode gates with no structured
+    # widget through free-text routing only); it still steps aside whenever the
+    # gate carries a structured widget, since that widget owns the primary
+    # confirm action.
+    # UX-10: the button also resolves the gate step's own tool_ref (via
+    # planRailController.planStep) so its copy can state the consequence
+    # (确认并执行拼接/确认所选特征/...) instead of a bare "确认" for every gate.
+    assert "renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || \"\" })" in app_js
+    assert 'if (message?.metadata?.kind !== "gate") return "";' in driver_confirm_js
+    assert "if (gateHasStructuredWidget(message)) return" in driver_confirm_js
     assert "startAgentValidation" in app_js
 
 
-def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
+def test_agent_mode_creation_routes_non_validation_tasks_to_conversation_composer():
     app_js = _read_static("app.js")
 
     create_scan_start = app_js.index("async function createTaskAndScan")
@@ -3775,7 +5769,18 @@ def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
     agent_branch_end = create_scan_body.index('setBusy(null, "", null);', agent_branch_start)
     agent_branch = create_scan_body[agent_branch_start:agent_branch_end]
 
+    assert "const activeDialogTaskType = createTaskDialog.activeTaskType();" in agent_branch
+    assert "const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);" in agent_branch
+    assert 'const isValidationTask = (task.task_type || activeDialogTaskType || defaultTaskType) === "validation";' in agent_branch
+    # Non-validation agent tasks route to the inline conversation composer:
+    # createTask() already seeded it via prefillAgentTaskInstruction, so the
+    # branch only focuses the composer (the V2 plan dialog is retired).
+    assert "if (!isValidationTask && definition.initialGoal)" in agent_branch
+    assert '$("agentComposerInput")?.focus?.();' in agent_branch
+    assert "已填入建议目标，确认后发送即可。" in agent_branch
     assert 'setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");' in agent_branch
+    assert "openV2WorkspaceWithGoal(" not in agent_branch
+    assert "已打开 V2 Workflow 计划面板" not in agent_branch
     assert "await dispatchAgentValidation(taskId);" not in agent_branch
     assert "await scanCurrentTask();" not in agent_branch
     assert "正在自动识别材料" not in agent_branch
@@ -3784,6 +5789,70 @@ def test_agent_mode_creation_waits_for_user_instruction_before_material_scan():
 
     assert "async function dispatchAgentValidation" in app_js
     assert 'api(`/api/tasks/${normalizedTaskId}/agent/start`' in app_js
+
+
+def test_welcome_task_cards_share_the_same_visual_treatment():
+    index_html = _read_static("index.html")
+    welcome_css = _read_static("css/welcome.css")
+
+    cards_start = index_html.index('id="welcomeTaskCards"')
+    cards_end = index_html.index("</div>", cards_start)
+    cards_markup = index_html[cards_start:cards_end]
+
+    assert 'class="welcome-task-card available primary-task"' not in cards_markup
+    assert ".welcome-task-card.primary-task" not in welcome_css
+    for task_kind in [
+        "feature_analysis",
+        "data_join",
+        "vintage",
+        "modeling",
+        "validation",
+        "strategy",
+    ]:
+        task_index = cards_markup.index(f'data-task-kind="{task_kind}"')
+        class_start = cards_markup.rfind('class="', 0, task_index)
+        class_end = cards_markup.index('"', class_start + len('class="'))
+        assert cards_markup[class_start:class_end + 1] == 'class="welcome-task-card available"'
+
+
+def test_agent_task_creation_prefills_conversation_composer_with_goal():
+    app_js = _read_static("app.js")
+    task_types_js = _read_static("js/task-types.js")
+
+    # The V2 plan-composer dialog is retired; agent tasks now prefill the inline
+    # conversation composer with the task type's suggested goal.
+    helper_start = app_js.index("function prefillAgentTaskInstruction")
+    helper_end = app_js.index("async function createTask", helper_start)
+    helper_body = app_js[helper_start:helper_end]
+
+    assert 'if (task?.run_mode !== "agent") return;' in helper_body
+    assert 'const input = $("agentComposerInput");' in helper_body
+    # Only seed when the composer is empty, so a user's draft is never clobbered.
+    assert "if (!input || input.value.trim()) return;" in helper_body
+    assert "const definition = taskTypeDefinition(task.task_type || createTaskDialog.activeTaskType());" in helper_body
+    assert "input.value = definition.initialGoal;" in helper_body
+    assert "autoGrowComposerInput();" in helper_body
+    assert "updateAgentSendDisabled();" in helper_body
+    assert "上传资产Vintage&滚动率分析、FPD、入催回收率分析数据" in task_types_js
+    assert "先识别 cohort、MOB 和坏账标签字段" in task_types_js
+    assert "计算资产 Vintage 曲线并给出风险观察" in task_types_js
+    assert "营利性测算" not in app_js
+
+    # createTask() invokes the prefill once the task is created.
+    assert "prefillAgentTaskInstruction(task);" in app_js
+    # The retired V2 workspace composer helpers are gone.
+    assert "function seedV2GoalComposer" not in app_js
+    assert "function openV2WorkspaceWithGoal" not in app_js
+    assert "function showV2WorkspaceDialog" not in app_js
+
+
+def test_driver_manual_analysis_omits_plan_overview_messages():
+    app_js = _read_static("app.js")
+    module_js = _read_static("js/v2/driver_manual_analysis.js")
+    body = _slice_function(module_js, "export function driverManualAnalysisHtml")
+
+    assert 'meta.kind === "overview" || meta.kind === "plan_overview"' in body
+    assert "driverManualAnalysisHtmlController(messages" in app_js
 
 
 def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
@@ -3813,6 +5882,17 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "function $(id) { return elements[id] || null; }",
             "const document = { querySelector(selector) { return selector === 'input[name=\"runMode\"]:checked' ? checkedRunMode : null; } };",
             "const materialSourceController = { mode() { return 'path'; }, selectedFiles() { return []; } };",
+            "const createTaskDialog = {",
+            "  activeTaskType() { return 'modeling'; },",
+            "  async createTask() {",
+            "    createApiCalls += 1;",
+            "    await new Promise((resolve) => setTimeout(resolve, 20));",
+            "    return { id: `task-${createApiCalls}`, run_mode: 'agent' };",
+            "  },",
+            "};",
+            "function taskTypeDefinition() { return { initialGoal: '', label: '建模' }; }",
+            "const defaultTaskType = 'modeling';",
+            "function prefillAgentTaskInstruction() {}",
             "function setCreateStatus(message, kind = '') { statuses.push({ message, kind }); }",
             "function collectCreateTaskReportValues() { return {}; }",
             "async function uploadMaterialFiles() { throw new Error('upload should not run'); }",
@@ -3828,10 +5908,7 @@ def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
             "async function scanCurrentTask() { throw new Error('agent mode should not scan'); }",
             "async function loadTaskEvidence() {}",
             "async function api(endpoint) {",
-            "  if (endpoint !== 'api/tasks') throw new Error(`unexpected endpoint ${endpoint}`);",
-            "  createApiCalls += 1;",
-            "  await new Promise((resolve) => setTimeout(resolve, 20));",
-            "  return { id: `task-${createApiCalls}`, run_mode: 'agent' };",
+            "  throw new Error(`unexpected endpoint ${endpoint}`);",
             "}",
             app_js[create_submit_start:create_submit_end],
             app_js[create_start:create_end],
@@ -3885,6 +5962,173 @@ def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
     assert 'task.status === "running"' not in delete_body
 
 
+def test_delete_task_uses_platform_confirm_dialog_instead_of_browser_confirm():
+    index_html = _read_static("index.html")
+    styles_css = _read_static("styles.css")
+    app_js = _read_static("app.js")
+    platform_confirm_js = _read_static("js/platform-confirm.js")
+
+    assert 'id="platformConfirmDialog"' in index_html
+    assert 'id="platformConfirmTitle"' in index_html
+    assert 'id="platformConfirmMessage"' in index_html
+    assert 'id="platformConfirmCancelButton"' in index_html
+    assert 'id="platformConfirmConfirmButton"' in index_html
+    assert '<svg viewBox="0 0 32 32" focusable="false">' in index_html
+    assert 'class="platform-confirm-icon-plate"' in index_html
+    assert 'class="platform-confirm-icon-triangle"' in index_html
+    assert 'class="platform-confirm-icon-mark"' in index_html
+    assert 'class="platform-confirm-icon-dot"' in index_html
+    assert 'M10.35 4.8 2.9 17.6' not in index_html
+    assert ".platform-confirm-dialog" in styles_css
+    assert ".platform-confirm-panel" in styles_css
+    confirm_icon_rule = _css_rule(styles_css, ".platform-confirm-icon")
+    assert "border-radius: 50%" not in confirm_icon_rule
+    assert "background: transparent" in confirm_icon_rule
+    assert "box-shadow: none" in confirm_icon_rule
+    confirm_icon_svg_rule = _css_rule(styles_css, ".platform-confirm-icon svg")
+    assert "display: block" in confirm_icon_svg_rule
+    assert "width: 32px" in confirm_icon_svg_rule
+    assert "height: 32px" in confirm_icon_svg_rule
+    assert "stroke-width: 1.8" in confirm_icon_svg_rule
+    confirm_icon_plate_rule = _css_rule(styles_css, ".platform-confirm-icon-plate")
+    assert "fill: color-mix(in srgb, currentColor 8%, transparent)" in confirm_icon_plate_rule
+    assert "stroke: color-mix(in srgb, currentColor 28%, transparent)" in confirm_icon_plate_rule
+    assert "stroke-width: 1.2" in confirm_icon_plate_rule
+    confirm_icon_triangle_rule = _css_rule(styles_css, ".platform-confirm-icon-triangle")
+    assert "fill: color-mix(in srgb, currentColor 7%, transparent)" in confirm_icon_triangle_rule
+    assert "stroke-width: 1.7" in confirm_icon_triangle_rule
+    confirm_icon_mark_rule = _css_rule(styles_css, ".platform-confirm-icon-mark")
+    assert "stroke-width: 2.1" in confirm_icon_mark_rule
+    confirm_icon_dot_rule = _css_rule(styles_css, ".platform-confirm-icon-dot")
+    assert "stroke-width: 2.4" in confirm_icon_dot_rule
+    confirm_icon_danger_rule = _css_rule(
+        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-icon'
+    )
+    assert "color: var(--danger)" in confirm_icon_danger_rule
+    assert "background:" not in confirm_icon_danger_rule
+    assert "box-shadow:" not in confirm_icon_danger_rule
+    assert "export function createPlatformConfirmController" in platform_confirm_js
+    assert 'from "./js/platform-confirm.js"' in app_js
+    assert "const platformConfirm = createPlatformConfirmController({ getElementById: $ });" in app_js
+    assert "const showPlatformConfirm = platformConfirm.showPlatformConfirm;" in app_js
+    assert "const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;" in app_js
+    assert "function showPlatformConfirm" not in app_js
+    assert "function bindPlatformConfirmDialog" not in app_js
+    assert "bindPlatformConfirmDialog();" in app_js
+    assert "window.confirm" not in app_js
+
+    delete_start = app_js.index("async function deleteTask")
+    delete_end = app_js.index("async function runAction", delete_start)
+    delete_body = app_js[delete_start:delete_end]
+
+    assert "await showPlatformConfirm({" in delete_body
+    assert "window.confirm" not in delete_body
+    assert 'title: "删除任务"' in delete_body
+    assert 'confirmText: "删除"' in delete_body
+    assert 'cancelText: "取消"' in delete_body
+    assert 'tone: "danger"' in delete_body
+
+    confirm_action_rule = _css_rule(
+        styles_css, '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative'
+    )
+    assert "background: var(--danger)" in confirm_action_rule
+    assert "border-color: var(--danger)" in confirm_action_rule
+    assert "box-shadow: var(--button-solid-shadow)" in confirm_action_rule
+
+    confirm_action_hover_rule = _css_rule(
+        styles_css,
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative:hover:not(:disabled),\n'
+        '.platform-confirm-dialog[data-tone="danger"] .platform-confirm-affirmative:focus-visible:not(:disabled)',
+    )
+    assert "box-shadow: var(--button-solid-shadow-hover)" in confirm_action_hover_rule
+
+
+def test_platform_confirm_controller_resolves_confirm_and_cancel():
+    script = """
+import assert from "node:assert/strict";
+import { createPlatformConfirmController } from "./marvis/static/js/platform-confirm.js";
+
+const elements = {};
+function button() {
+  return {
+    textContent: "",
+    onclick: null,
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  };
+}
+const dialog = {
+  open: false,
+  dataset: {},
+  listeners: {},
+  closeValue: "",
+  showModal() {
+    this.open = true;
+  },
+  close(value) {
+    this.open = false;
+    this.closeValue = value;
+    this.listeners.close?.({ type: "close" });
+  },
+  addEventListener(name, fn) {
+    this.listeners[name] = fn;
+  },
+};
+elements.platformConfirmDialog = dialog;
+elements.platformConfirmTitle = { textContent: "" };
+elements.platformConfirmMessage = { textContent: "" };
+elements.platformConfirmConfirmButton = button();
+elements.platformConfirmCancelButton = button();
+
+const controller = createPlatformConfirmController({ getElementById: (id) => elements[id] });
+controller.bindPlatformConfirmDialog();
+
+const confirmedPromise = controller.showPlatformConfirm({
+  title: "删除任务",
+  message: "确认删除?",
+  confirmText: "删除",
+  cancelText: "取消",
+  tone: "danger",
+});
+assert.equal(dialog.open, true);
+assert.equal(elements.platformConfirmTitle.textContent, "删除任务");
+assert.equal(elements.platformConfirmMessage.textContent, "确认删除?");
+assert.equal(elements.platformConfirmConfirmButton.textContent, "删除");
+assert.equal(elements.platformConfirmCancelButton.textContent, "取消");
+assert.equal(elements.platformConfirmCancelButton.focusCalls, 1);
+assert.equal(dialog.dataset.tone, "danger");
+elements.platformConfirmConfirmButton.onclick();
+assert.equal(await confirmedPromise, true);
+assert.equal(dialog.closeValue, "confirm");
+
+const cancelledPromise = controller.showPlatformConfirm({ title: "二次确认" });
+elements.platformConfirmCancelButton.onclick();
+assert.equal(await cancelledPromise, false);
+assert.equal(dialog.closeValue, "cancel");
+
+const escapePromise = controller.showPlatformConfirm({ title: "ESC" });
+let prevented = false;
+dialog.listeners.cancel({
+  preventDefault() {
+    prevented = true;
+  },
+});
+assert.equal(prevented, true);
+assert.equal(await escapePromise, false);
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "ok"
+
+
 def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
     app_js = _read_static("app.js")
 
@@ -3923,6 +6167,9 @@ def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
             "function renderStoredStateSummaries() {}",
             "async function loadReportFields() {}",
             "function renderAll() {}",
+            "async function loadTaskPurgeSummaryText() { return \"\"; }",
+            "function showPlatformConfirm() { return true; }",
+            "function persistResultScrollPositions() {}",
             "async function api(endpoint, options = {}) {",
             "  apiCalls.push({ endpoint, method: options.method || 'GET' });",
             "  if (endpoint === 'api/tasks') {",
@@ -3983,6 +6230,7 @@ def test_agent_stop_response_polls_until_active_agent_job_finishes():
 
 def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     app_js = _read_static("app.js")
+    mount_js = _read_static("js/agent-conversation-mount.js")
 
     stored_start = app_js.index("function renderStoredStateSummaries")
     stored_end = app_js.index("function renderAll", stored_start)
@@ -4008,7 +6256,10 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     timeline_end = app_js.index("function resetAgentTypingState", timeline_start)
     timeline_body = app_js[timeline_start:timeline_end]
     assert "agentTimelineVisibleStages()" in timeline_body
-    assert "agentTimelineItems(messages, visibleStages)" in timeline_body
+    assert "renderAgentTimelineDom(messages, {" in timeline_body
+    assert "taskFrozenSectionSnapshots" in timeline_body
+    assert "agentTimelineItems(messages, deps.visibleStages || [], {" in mount_js
+    assert "snapshotsByTrigger: deps.snapshotsByTrigger || agentFrozenSnapshotsByTriggerId({" in mount_js
 
     report_visibility_start = app_js.index("function updateAgentReportSectionVisibility")
     report_visibility_end = app_js.index(
@@ -4025,17 +6276,19 @@ def test_agent_mode_hides_empty_scan_section_until_evidence_or_messages():
     assert 'reportSection.setAttribute("aria-hidden", hasReportMessages ? "false" : "true");' in report_visibility_body
 
 
-def test_llm_settings_dialog_and_agent_model_selector_exist():
+def test_llm_settings_panel_and_agent_model_selector_exist():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
     styles_css = _read_static("styles.css")
 
-    assert 'id="llmSettingsDialog"' in index_html
     assert "模型引擎" in index_html
-    assert 'id="openLLMSettingsButton"' in index_html
+    assert 'id="llmSettingsDialog"' not in index_html
+    assert 'id="openLLMSettingsButton"' not in index_html
+    assert 'data-governance-nav="llm"' in index_html
+    assert 'data-governance-panel-content="llm"' in index_html
     assert 'id="llmModelProfiles"' in index_html
     assert 'class="llm-model-profiles llm-engine-list"' in index_html
-    assert 'id="settingsLLMValue"' in index_html
+    assert 'id="settingsLLMValue"' not in index_html
     assert 'id="agentModelSelect"' in index_html
 
     # Connection details (incl. API key) are edited in a focused dialog; the
@@ -4055,19 +6308,397 @@ def test_llm_settings_dialog_and_agent_model_selector_exist():
     assert "renderAgentModelOptions" in app_js
     assert "openLLMEngineEdit" in app_js
     assert "saveLLMEngineEdit" in app_js
+    assert 'openGovernanceSettingsCenter("llm")' in app_js
     assert "enabled: model.enabled !== false" in app_js
     assert "enable_thinking: Boolean(model.enable_thinking)" in app_js
     assert "$(\"llmEngineEnableThinking\").checked = Boolean(model.enable_thinking)" in app_js
     assert "llm-engine-item" in app_js
     assert ".llm-engine-item" in styles_css
-    assert ".llm-engine-add" in styles_css
     assert ".checkbox-field" in styles_css
+
+    llm_settings_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group'
+    )
+    assert "border: 0" in llm_settings_group_rule
+    assert "background: transparent" in llm_settings_group_rule
+    assert "overflow: visible" in llm_settings_group_rule
+    llm_settings_row_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] > .settings-group > .settings-row'
+    )
+    assert "padding: 0 2px 2px" in llm_settings_row_rule
+    llm_settings_head_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="llm"] .settings-row-head'
+    )
+    assert "align-items: center" in llm_settings_head_rule
+
+    llm_edit_actions_rule = _css_rule(styles_css, ".llm-engine-edit-actions")
+    assert "justify-content: flex-end" in llm_edit_actions_rule
+
+    llm_edit_button_rule = _css_rule(styles_css, ".llm-engine-edit-actions .button")
+    assert "min-width: 76px" in llm_edit_button_rule
+    assert "min-height: 34px" in llm_edit_button_rule
+    assert "padding: 6px 15px" in llm_edit_button_rule
+    assert "font-size: 13px" in llm_edit_button_rule
+    assert "font-weight: 600" in llm_edit_button_rule
+
+    assert ".llm-engine-edit-actions .button.secondary" not in styles_css
+    assert ".llm-engine-edit-actions .button.secondary:hover" not in styles_css
+
+    llm_cancel_rule = _css_rule(styles_css, ".button.secondary")
+    assert "border-color: var(--border-strong)" in llm_cancel_rule
+    assert "background: var(--surface)" in llm_cancel_rule
+    assert "box-shadow: var(--button-secondary-shadow)" in llm_cancel_rule
+
+    llm_cancel_hover_rule = _css_rule(
+        styles_css, ".button.secondary:hover:not(:disabled),\n.button.secondary:focus-visible:not(:disabled)"
+    )
+    assert "#9fbfe4" not in llm_cancel_hover_rule
+    assert "#f8fbff" not in llm_cancel_hover_rule
+    assert "color-mix(in srgb, var(--surface) 88%, var(--text) 12%)" in llm_cancel_hover_rule
+
+
+
+# --- GAP-8: LLM connection preflight (test-connection button) ---------------
+
+
+def test_llm_engine_edit_dialog_has_test_connection_button():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="testLLMEngineConnectionButton"' in index_html
+    assert 'id="llmEngineTestResult"' in index_html
+
+    assert "async function testLLMEngineConnection()" in app_js
+    assert '$("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;' in app_js
+    assert "/api/settings/llm/test" in app_js
+    assert "setLLMEngineTestResult" in app_js
+
+
+def test_system_settings_center_keeps_extensions_without_runtime_workbench():
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    draft_tools_panel_js = _read_static("js/draft-tools-panel.js")
+    styles_css = _read_static("styles.css")
+    v2_css = _read_static("css/v2-workbench.css")
+
+    settings_start = index_html.index('id="sidebarSettings"')
+    settings_end = index_html.index("</details>", settings_start)
+    settings_markup = index_html[settings_start:settings_end]
+
+    assert 'data-settings-row="system"' in settings_markup
+    assert 'id="openGovernanceSettingsButton"' in settings_markup
+    assert 'class="settings-system-row"' in settings_markup
+    assert "环境、模型、记忆与 Runtime" not in settings_markup
+    assert "系统设置" in settings_markup
+    assert "运行配置" not in settings_markup
+    assert "治理与扩展" not in settings_markup
+    assert "治理中心" not in settings_markup
+    assert 'id="openExecutionEnvironmentButton"' not in settings_markup
+    assert 'id="openLLMSettingsButton"' not in settings_markup
+    assert 'id="openDraftToolsButton"' not in settings_markup
+    assert 'id="openV2WorkspaceButton"' not in settings_markup
+    assert 'id="openAgentMemoryButton"' not in settings_markup
+    assert 'class="settings-governance-card"' not in settings_markup
+
+    assert 'id="governanceSettingsDialog"' in index_html
+    assert 'id="governanceSettingsNav"' in index_html
+    assert 'id="governanceSettingsSearch"' in index_html
+    search_field_start = index_html.index('class="governance-search-field"')
+    search_field_end = index_html.index("</label>", search_field_start)
+    search_field_markup = index_html[search_field_start:search_field_end]
+    assert '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' in search_field_markup
+    assert '<circle cx="10.5" cy="10.5" r="6"></circle>' in search_field_markup
+    assert '<path d="m14.85 14.85 4.15 4.15"></path>' in search_field_markup
+    assert 'id="closeGovernanceSettingsButton"' in index_html
+    # The IA refactor consolidated 11 nav items into 6: memory records /
+    # distillations moved inside the memory-policy panel, while the old
+    # plan/audit runtime workbench was retired from settings.
+    for nav in [
+        "execution-environment",
+        "llm",
+        "capabilities",
+        "memory-policy",
+        "plugins",
+        "workflows",
+    ]:
+        assert f'data-governance-nav="{nav}"' in index_html
+    for retired_nav in [
+        "memory-records",
+        "memory-distillations",
+        "drafts",
+        "runtime-plan",
+        "audit",
+    ]:
+        assert f'data-governance-nav="{retired_nav}"' not in index_html
+
+    assert 'data-governance-panel-content="execution-environment"' in index_html
+    assert 'data-governance-panel-content="llm"' in index_html
+    assert 'id="executionEnvironmentList"' in index_html
+    assert 'id="refreshExecutionEnvironmentOptionsButton"' in index_html
+    # Click-to-select radiogroup auto-saves; the <select> + save button are gone.
+    assert 'id="executionEnvironmentSelect"' not in index_html
+    assert 'id="saveExecutionEnvironmentButton"' not in index_html
+    assert 'id="llmModelProfiles"' in index_html
+    assert 'id="addLLMModelButton"' in index_html
+    assert "Notebook 和工具运行使用的 Python 环境" in index_html
+    assert "配置本地会话可调用的大模型连接信息" in index_html
+    assert "控制 Agent 记忆的引用范围" in app_js
+    # Memory policies are checkbox switches now; only the platform-forced
+    # (sensitive-material) row still renders a status badge.
+    assert 'class="memory-policy-switch" data-memory-policy="reference_cross_task"' in index_html
+    assert 'class="memory-policy-switch" data-memory-policy="auto_distill"' in index_html
+    assert 'class="governance-status-badge required">平台强制</span>' in index_html
+    assert 'class="governance-toggle"' not in index_html
+    assert "复核 Agent 产出的工具草稿" in index_html
+    assert "管理可调用工具包" in app_js
+    assert 'id="draftToolsDialog"' not in index_html
+    assert 'id="v2WorkspaceDialog"' not in index_html
+    assert 'id="agentMemoryDialog"' not in index_html
+    assert 'id="executionEnvironmentDialog"' not in index_html
+    assert 'id="llmSettingsDialog"' not in index_html
+
+    assert 'id="draftToolsList"' in index_html
+    assert 'id="draftToolDetail"' in index_html
+    assert 'id="draftStatusFilter"' in index_html
+    # Drafts live in a collapsible <details> that lazy-loads on toggle; the
+    # standalone refresh button was retired.
+    assert 'id="draftManageDetails"' in index_html
+    assert 'id="refreshDraftToolsButton"' not in index_html
+    assert 'id="draftRunInputs"' in index_html
+    assert 'id="draftPromotionTestCases"' in index_html
+    assert 'id="runDraftButton"' in index_html
+    assert 'id="promoteDraftButton"' in index_html
+    assert 'id="rejectDraftButton"' in index_html
+    assert "无网时请在外部产出工具后通过插件上传导入" in index_html
+    assert 'class="draft-tools-sidebar"' in index_html
+    assert 'class="draft-tool-overview-card"' in index_html
+    assert 'class="draft-tool-section"' in index_html
+    assert "工具代码" in index_html
+    assert "输入 / 输出契约" in index_html
+    assert "试运行" in index_html
+    assert "转正闸门" in index_html
+
+    assert 'id="agentMemoryList"' in index_html
+    assert 'id="agentMemoryStatusFilter"' in index_html
+    assert 'data-agent-memory-view="raw"' in index_html
+    assert 'data-agent-memory-view="distillation"' in index_html
+    assert 'data-agent-memory-mode=' not in index_html
+    assert 'id="governanceExtensionMount"' in index_html
+    assert 'id="v2RuntimeMount"' not in index_html
+    assert '计划与执行' not in index_html
+    assert 'data-governance-panel-content="extensions"' in index_html
+    # Plugins / workflows / capabilities share the extension panel and are
+    # selected via data-extension-view; their controls are rendered into the
+    # extension mount by the settings modules rather than baked into index.html.
+    assert 'data-governance-panel="extensions" data-extension-view="plugins"' in index_html
+    assert 'data-governance-panel="extensions" data-extension-view="workflows"' in index_html
+    assert 'data-governance-panel="extensions" data-extension-view="capabilities"' in index_html
+    assert 'data-governance-panel="runtime"' not in index_html
+    assert 'data-v2-view=' not in index_html
+    capabilities_nav_start = index_html.index('data-governance-nav="capabilities"')
+    capabilities_nav_end = index_html.index("</button>", capabilities_nav_start)
+    capabilities_nav_markup = index_html[capabilities_nav_start:capabilities_nav_end]
+    assert '<path d="M3.34 19a10 10 0 1 1 17.32 0"></path>' in capabilities_nav_markup
+    assert '<path d="M12 14l4-4"></path>' in capabilities_nav_markup
+    assert '<circle cx="12" cy="18" r="1.5"></circle>' not in capabilities_nav_markup
+    memory_nav_start = index_html.index('data-governance-nav="memory-policy"')
+    memory_nav_end = index_html.index("</button>", memory_nav_start)
+    memory_nav_markup = index_html[memory_nav_start:memory_nav_end]
+    assert '<circle cx="14" cy="6" r="2"></circle>' in memory_nav_markup
+    assert '<circle cx="16" cy="18" r="2"></circle>' in memory_nav_markup
+
+    assert "function openGovernanceSettingsCenter" in app_js
+    assert "function openGovernanceSettingsFromSidebar" in app_js
+    assert "function closeSidebarSettingsMenu" in app_js
+    assert "function scheduleGovernanceSettingsFromSidebar" in app_js
+    assert "function handleGovernanceSettingsPointerDown" in app_js
+    assert "function setSidebarSettingsSuppressed" not in app_js
+    assert "function handleGovernanceSettingsDialogClose" not in app_js
+    assert "function setGovernanceSettingsPanel" in app_js
+    assert "handleGovernanceSettingsSearch" in app_js
+    assert '$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;' in app_js
+    assert '$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);' in app_js
+    assert 'openGovernanceSettingsCenter("execution-environment")' in app_js
+    assert 'openGovernanceSettingsCenter("llm")' in app_js
+    assert '$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);' in app_js
+    assert 'import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";' in app_js
+    assert "const draftToolsPanel = createDraftToolsPanelController" in app_js
+    assert "let draftTools = [];" not in app_js
+    assert "let draftTools = [];" in draft_tools_panel_js
+    # Drafts open via the plugins extension <details> toggle (lazy load) and the
+    # status filter, not a dedicated dialog or nav key.
+    assert '$("draftManageDetails").addEventListener("toggle"' in app_js
+    assert "!draftToolsPanel.hasLoaded()" in app_js
+    assert 'runAction(loadDraftTools, { actionId: "draftTools"' in app_js
+    assert "function openDraftToolsDialog" not in app_js
+    assert 'openGovernanceSettingsCenter("drafts")' not in app_js
+    assert "async function loadDraftTools" in app_js
+    assert "async function inspectDraftTool" in app_js
+    assert "async function runDraftTool" in app_js
+    assert "async function promoteDraftTool" in app_js
+    assert "async function rejectDraftTool" in app_js
+    assert "return draftToolsPanel.load({ preserveSelection });" in app_js
+    assert "return draftToolsPanel.run();" in app_js
+    assert "return draftToolsPanel.promote();" in app_js
+    assert "return draftToolsPanel.reject();" in app_js
+    assert 'api("/api/drafts' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/run`' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/promote`' in draft_tools_panel_js
+    assert 'api(`/api/drafts/${encodeURIComponent(draftId)}/reject`' in draft_tools_panel_js
+    assert '"X-MARVIS-Plugin-Admin": pluginAdminToken()' in draft_tools_panel_js
+    # The hardcoded magic-header *value* is gone (a mention in an explanatory
+    # comment is fine); the header is now sourced from the injected token.
+    assert '"X-MARVIS-Plugin-Admin": "local-dev"' not in draft_tools_panel_js
+    assert "document.body?.dataset?.marvisPluginAdminToken" in draft_tools_panel_js
+    assert "function governanceExtensionActions" in app_js
+    assert "pluginActions:" in app_js
+    assert "skillActions:" in app_js
+    assert "draftActions:" not in app_js
+    assert "memoryActions:" not in app_js
+    assert "function mountV2Runtime" not in app_js
+    assert "function mountGovernanceExtensions" in app_js
+    assert "function runV2WorkspaceAction" not in app_js
+    assert "function runGovernanceExtensionAction" in app_js
+    assert 'title: "移除插件"' in app_js
+    assert "showError: showExtensionError" in app_js
+    assert "confirmRemove: (name) => showPlatformConfirm({" in app_js
+    assert "await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions)" in app_js
+    assert "await renderSkillManager(mounted.panels.skillPanel, actions.skillActions)" in app_js
+    assert "await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions)" in app_js
+    assert "请填写转正测试用例。" in draft_tools_panel_js
+    assert "转正后该工具会进入正式工具库并可被 Planner 选用，确定转正？" in draft_tools_panel_js
+
+    assert "dialog.governance-settings-dialog" in styles_css
+    assert ".governance-settings-dialog" in styles_css
+    assert ".governance-settings-shell" in styles_css
+    assert ".governance-nav-item.selected" in styles_css
+    for selector in [
+        ".governance-search-field input",
+        ".governance-nav-item",
+    ]:
+        assert "border-radius: var(--radius-control)" in _css_rule(styles_css, selector)
+    nav_icon_rule = _css_rule(styles_css, ".governance-nav-icon")
+    assert "width: 20px" in nav_icon_rule
+    assert "height: 20px" in nav_icon_rule
+    nav_icon_svg_rule = _css_rule(styles_css, ".governance-nav-icon svg")
+    assert "display: block" in nav_icon_svg_rule
+    assert "width: 18px" in nav_icon_svg_rule
+    assert "height: 18px" in nav_icon_svg_rule
+    assert "stroke-width: 1.8" in nav_icon_svg_rule
+    nav_label_rule = _css_rule(styles_css, ".governance-nav-item strong")
+    assert "line-height: 20px" in nav_label_rule
+    search_field_rule = _css_rule(styles_css, ".governance-search-field")
+    assert "position: relative" in search_field_rule
+    search_icon_rule = _css_rule(styles_css, ".governance-search-field svg")
+    assert "left: 11px" in search_icon_rule
+    assert "width: var(--sidebar-control-icon-size)" in search_icon_rule
+    assert "stroke: currentColor" in search_icon_rule
+    search_input_rule = _css_rule(styles_css, ".governance-search-field input")
+    assert "padding: 0 12px 0 36px" in search_input_rule
+    nav_hover_rule = _css_rule(styles_css, ".governance-nav-item:hover")
+    assert "background: var(--option-hover)" in nav_hover_rule
+    assert "background: var(--surface)" not in nav_hover_rule
+    nav_focus_rule = _css_rule(styles_css, ".governance-nav-item:focus-visible")
+    assert "background: var(--option-hover)" in nav_focus_rule
+    assert "outline: 3px solid var(--option-focus-ring)" in nav_focus_rule
+    assert "var(--accent" not in nav_focus_rule
+    nav_selected_rule = _css_rule(styles_css, ".governance-nav-item.selected")
+    assert "background: var(--option-selected)" in nav_selected_rule
+    assert "box-shadow: none" in nav_selected_rule
+    assert "border-color" not in nav_selected_rule
+    assert "background: var(--surface)" not in nav_selected_rule
+    governance_icon_button_rule = _css_rule(styles_css, ".governance-head-actions .governance-icon-button")
+    assert "border-radius: var(--radius-control)" in governance_icon_button_rule
+    assert ".governance-setting-row .governance-status-badge" in styles_css
+    assert ".hidden,\n[hidden]" in styles_css
+    assert "display: none !important;" in styles_css
+    assert ".draft-tools-layout" in styles_css
+    assert ".draft-tools-sidebar" in styles_css
+    assert ".draft-tool-section" in styles_css
+    assert ".draft-tool-detail" in styles_css
+    assert ".draft-code-block" in styles_css
+
+    assert ".v2-workspace-summary" in v2_css
+    assert "grid-template-areas:" not in v2_css
+    for selector in [
+        ".v2-plugin-panel",
+        ".v2-skill-panel",
+        ".v2-capability-panel",
+    ]:
+        assert selector in v2_css
+    for retired_selector in [
+        ".v2-goal-panel",
+        ".v2-plan-panel",
+        ".v2-join-panel",
+        ".v2-subagent-panel",
+        ".v2-draft-panel",
+        ".v2-memory-panel",
+        ".v2-loop-panel",
+        ".v2-artifact-panel",
+    ]:
+        assert retired_selector not in v2_css
+    assert '.governance-settings-dialog .plugin-row input[type="checkbox"]' in v2_css
+    assert '.governance-settings-dialog[data-extension-view="plugins"] .v2-plugin-panel' in v2_css
+    assert '.governance-settings-dialog[data-extension-view="capabilities"] .v2-capability-panel' in v2_css
+    runtime_panel_rule = _css_rule(v2_css, ".governance-settings-dialog .v2-panel")
+    assert "padding: 0" in runtime_panel_rule
+    assert "border: 0" in runtime_panel_rule
+    assert "background: transparent" in runtime_panel_rule
+    plugin_upload_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload")
+    assert "grid-template-columns: minmax(0, 1fr) auto" in plugin_upload_rule
+    plugin_upload_action_rule = _css_rule(v2_css, ".governance-settings-dialog .plugin-upload::after")
+    assert 'content: "选择文件"' in plugin_upload_action_rule
+    assert "border: 1px dashed var(--button-outline-border)" in plugin_upload_action_rule
+    assert "color: var(--button-outline-text)" in plugin_upload_action_rule
+    skill_reload_rule = _css_rule(v2_css, ".governance-settings-dialog .skill-manager > button")
+    assert "background: var(--button-primary-bg)" in skill_reload_rule
+    assert "color: var(--button-primary-text)" in skill_reload_rule
+    assert "box-shadow: var(--button-solid-shadow)" in skill_reload_rule
+    memory_toolbar_rule = _css_rule(v2_css, ".governance-settings-dialog .memory-manager-toolbar")
+    assert "padding: 0 2px 2px" in memory_toolbar_rule
+    memory_row_rule = _css_rule(
+        v2_css,
+        ".governance-settings-dialog .tier-row,\n"
+        ".governance-settings-dialog .plugin-row,\n"
+        ".governance-settings-dialog .skill,\n"
+        ".governance-settings-dialog .memory-distillation-row,\n"
+        ".governance-settings-dialog .memory-distillation-detail-inner",
+    )
+    assert "border: 1px solid var(--border)" in memory_row_rule
+    assert "border-radius: var(--radius-control)" in memory_row_rule
+    memory_rollback_rule = _css_rule(
+        v2_css, ".governance-settings-dialog .memory-distillation-row button[data-rollback-memory-distillation]"
+    )
+    assert "color: var(--danger)" in memory_rollback_rule
+
+    memory_policy_group_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group'
+    )
+    assert "border: 0" in memory_policy_group_rule
+    assert "background: transparent" in memory_policy_group_rule
+    memory_policy_row_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] > .settings-group > .settings-row'
+    )
+    assert "border-radius: var(--radius-control)" in memory_policy_row_rule
+    assert "background: var(--surface-soft)" in memory_policy_row_rule
+    memory_policy_row_gap_rule = _css_rule(
+        styles_css, '.governance-panel[data-governance-panel-content="memory-policy"] .settings-row + .settings-row'
+    )
+    assert "border-top: 0" in memory_policy_row_gap_rule
+    memory_manage_rule = _css_rule(styles_css, ".memory-manage")
+    assert "border: 0" in memory_manage_rule
+    assert "background: transparent" in memory_manage_rule
+    memory_manage_summary_rule = _css_rule(styles_css, ".memory-manage-summary")
+    assert "border-radius: var(--radius-control)" in memory_manage_summary_rule
+    assert "background: var(--surface-soft)" in memory_manage_summary_rule
 
 
 def test_agent_conversation_panel_layout_and_message_shapes():
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
     app_js = _read_static("app.js")
+    conversation_js = _read_static("js/agent-conversation-view.js")
+    mount_js = _read_static("js/agent-conversation-mount.js")
 
     assert 'id="agentConversationPanel"' in index_html
     assert 'id="agentScanLeadMessages"' in index_html
@@ -4113,12 +6744,24 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     send_start = styles_css.index(".agent-send {")
     send_end = styles_css.index("}", send_start)
     send_rule = styles_css[send_start:send_end]
-    assert "background: var(--brand-primary);" in send_rule
+    assert "color: var(--button-primary-text);" in send_rule
+    assert "background: var(--button-primary-bg);" in send_rule
+    assert "0 3px 10px rgba(0, 0, 0, 0.18)" in send_rule
     send_hover_start = styles_css.index(".agent-send:hover:not(:disabled) {")
     send_hover_end = styles_css.index("}", send_hover_start)
     send_hover_rule = styles_css[send_hover_start:send_hover_end]
-    assert "background: var(--brand-primary-hover);" in send_hover_rule
+    assert "color: var(--button-primary-text-hover);" in send_hover_rule
+    assert "background: var(--button-primary-bg-hover);" in send_hover_rule
+    assert "transform:" not in send_hover_rule
     assert "background: #a91017;" not in send_hover_rule
+    send_active_rule = _css_rule(styles_css, ".agent-send:active:not(:disabled)")
+    assert "background: var(--button-primary-bg-active);" in send_active_rule
+
+    dark_send_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send')
+    assert "background:" not in dark_send_rule
+    assert 'body[data-theme="dark"] .agent-send:hover:not(:disabled)' not in styles_css
+    dark_send_active_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send:active:not(:disabled)')
+    assert "background: var(--button-primary-bg-active);" in dark_send_active_rule
 
     disabled_start = styles_css.index(".agent-send:disabled {")
     disabled_end = styles_css.index("}", disabled_start)
@@ -4130,7 +6773,12 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     conversation_end = styles_css.index("}", conversation_start)
     conversation_rule = styles_css[conversation_start:conversation_end]
     assert "margin-top: 0;" in conversation_rule
+    assert "padding: 8px 0 0;" in conversation_rule
     assert "min-height:" not in conversation_rule
+    assert "border:" not in conversation_rule
+    assert "background:" not in conversation_rule
+    assert "box-shadow:" not in conversation_rule
+    assert 'body[data-theme="dark"] .agent-conversation' not in styles_css
 
     messages_start = styles_css.index(".agent-messages {", styles_css.index(".agent-stage-messages.hidden"))
     messages_end = styles_css.index("}", messages_start)
@@ -4197,6 +6845,33 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert ".agent-message.user" in styles_css
     assert ".agent-message.user .agent-message-content" in styles_css
     assert "margin-left: auto;" in styles_css
+    user_start = styles_css.index(".agent-message.user .agent-message-content")
+    user_end = styles_css.index("}", user_start)
+    user_rule = styles_css[user_start:user_end]
+    assert "max-width: min(300px, 86%)" in user_rule
+    assert "background: var(--agent-user-message-bg)" in user_rule
+    assert "box-shadow: var(--agent-user-message-shadow)" in user_rule
+    assert "font-size: 14px" in user_rule
+    assert "line-height: 1.58" in user_rule
+    assert "border:" not in user_rule
+    assert "backdrop-filter" not in user_rule
+    assert "rgba(255, 255, 255, 0.62)" not in user_rule
+    assert "rgba(255, 255, 255, 0.16) 34%" not in user_rule
+    assert "0 8px 24px" not in user_rule
+    assert "var(--accent)" not in user_rule
+
+    dark_user_start = styles_css.index('body[data-theme="dark"] .agent-message.user .agent-message-content')
+    dark_user_end = styles_css.index("}", dark_user_start)
+    dark_user_rule = styles_css[dark_user_start:dark_user_end]
+    assert "background: var(--agent-user-message-bg)" in dark_user_rule
+    assert "box-shadow: var(--agent-user-message-shadow)" in dark_user_rule
+    assert "border" not in dark_user_rule
+    assert "backdrop-filter" not in dark_user_rule
+    assert "rgba(255, 255, 255, 0.12)" not in dark_user_rule
+    assert "rgba(255, 255, 255, 0.04) 36%" not in dark_user_rule
+    assert "0 8px 24px" not in dark_user_rule
+    assert "var(--accent)" not in dark_user_rule
+
     assert ".agent-message.assistant .agent-message-content" in styles_css
     assert ".agent-message:last-child" not in styles_css
     assert "agent-message-rise" not in styles_css
@@ -4242,20 +6917,21 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "agent-message assistant" in app_js
     assert "renderAgentTimeline" in app_js
     render_start = app_js.index("function renderAgentConversation")
-    render_end = app_js.index("function agentTimelineStageDefinitions", render_start)
+    render_end = app_js.index("function agentStructuralSignature", render_start)
     render_body = app_js[render_start:render_end]
     # v2 wiring: renderAgentTimeline must be fed via agentReportMessagesForDisplay.
     assert "agentReportMessagesForDisplay(agentMessages)" in render_body
     assert "renderAgentTimeline(" in render_body
     assert "agentMessages.filter((message, index) => !agentMessageTargetId(message, index, agentMessages))" not in render_body
     assert "requestAgentConversationScrollToLatest();" in render_body
-    assert "function agentTimelineItems" in app_js
-    assert "function agentTimelineInsertionIndex" in app_js
-    assert "function agentReportMessagesForDisplay" in app_js
-    assert "function agentMessagesHtml" in app_js
+    assert "function agentTimelineItems" in conversation_js
+    assert "function agentTimelineInsertionIndex" in conversation_js
+    assert "function agentReportMessagesForDisplay" in conversation_js
+    assert "function agentMessagesHtml" in conversation_js
     assert "function agentMessageHtml(message, labelStage = message?.stage, options = {})" in app_js
-    assert "agentMessagesHtml(item.messages)" in app_js
-    assert "agentStageLabel(labelStage)" in app_js
+    assert "agentMessagesHtml(item.messages, undefined, {" in mount_js
+    assert "export function renderAgentTimeline" in mount_js
+    assert "agentMessageMetaLabel(message, labelStage)" in app_js
     alias_start = app_js.index("function agentValidatorAlias")
     stage_label_start = app_js.index("function agentStageLabel", alias_start)
     stage_label_end = app_js.index("function formatAgentMessageContent", stage_label_start)
@@ -4271,13 +6947,29 @@ def test_agent_conversation_panel_layout_and_message_shapes():
     assert "材料完备性" not in stage_label_body
     assert "分数一致性" not in stage_label_body
     assert "效果与稳定性" not in stage_label_body
-    assert 'metadata.tool_call?.name === "scan_materials"' in app_js
-    assert "function agentMessageIsAdvanceIntent" in app_js
-    assert 'metadata.intent === "advance"' in app_js
+    assert 'metadata.tool_call?.name === "scan_materials"' in conversation_js
+    assert "function agentMessageIsAdvanceIntent" in conversation_js
+    assert 'metadata.intent === "advance"' in conversation_js
     assert "agentTimelineVisibleStages" in app_js
     assert "restoreResultScrollDefaultOrder" in app_js
     assert 'if (message.role === "user" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
     assert 'if (message.stage === "chat" && nextStage) return agentTargetIdForStage(nextStage);' not in app_js
+
+
+def test_agent_message_meta_label_includes_plan_step_context():
+    app_js = _read_static("app.js")
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+    meta_start = app_js.index("function agentMessageMetaLabel")
+    meta_end = app_js.index("function formatAgentMessageContent", meta_start)
+    meta_body = app_js[meta_start:meta_end]
+
+    assert "function agentMessagePlanStep" in meta_body
+    assert "planRailController.planStep(metadata, selectedTaskId)" in meta_body
+    assert "metadata.step_id" in plan_js
+    assert "metadata.step_title || step?.title" in meta_body
+    assert "metadata.phase || step?.phase" in meta_body
+    assert "metadata.run_seq" in meta_body
+    assert "第 ${runSeq} 轮" in meta_body
 
 
 def test_agent_memory_has_no_permanent_task_top_block():
@@ -4304,7 +6996,7 @@ def test_agent_memory_has_no_permanent_task_top_block():
         assert f".{name}" not in styles_css
         assert f'$("${name}")' not in app_js
 
-    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="governanceSettingsDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
 
 
@@ -4346,14 +7038,49 @@ def test_agent_message_renderer_outputs_inline_memory_references():
     assert "沿用坏样本字段口径" in html
 
 
+def test_agent_message_renderer_outputs_distillation_reference_audit_fields():
+    app_js = _read_static("app.js")
+    references_start = app_js.index("function agentMemoryReferencesHtml")
+    references_end = app_js.index("function agentMessageHtml", references_start)
+    script = "\n".join(
+        [
+            "function escapeHtml(value) {",
+            "  return String(value || '').replace(/[&<>\"']/g, (char) => ({",
+            "    '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;',",
+            "  }[char]));",
+            "}",
+            "function formatMemoryConfidence(value) { return String(value); }",
+            app_js[references_start:references_end],
+            "const html = agentMemoryReferencesHtml([{",
+            "  kind: 'distillation',",
+            "  id: 'dist-1',",
+            "  memory_type: 'field_convention',",
+            "  confidence: 'high',",
+            "  support_count: 4,",
+            "  source_memory_ids: ['mem-1', 'mem-2'],",
+            "}]);",
+            "process.stdout.write(html);",
+        ]
+    )
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    html = result.stdout
+    assert "进化沉淀" in html
+    assert "支持 4" in html
+    assert "来源记忆 2" in html
+    assert 'data-agent-memory-inline-kind="distillation"' in html
+
+
 def test_agent_memory_management_view_wires_actions_and_api_paths():
     app_js = _read_static("app.js")
+    memory_panel_js = _read_static("js/agent-memory-panel.js")
     index_html = _read_static("index.html")
     styles_css = _read_static("styles.css")
 
-    assert 'id="openAgentMemoryButton"' in index_html
-    assert 'id="agentMemoryDialog"' in index_html
+    assert 'id="openGovernanceSettingsButton"' in index_html
+    assert 'id="governanceSettingsDialog"' in index_html
     assert 'id="agentMemoryList"' in index_html
+    assert 'data-agent-memory-view="raw"' in index_html
+    assert 'data-agent-memory-view="distillation"' in index_html
     status_filter_start = index_html.index('id="agentMemoryStatusFilter"')
     status_filter_end = index_html.index("</select>", status_filter_start)
     status_filter = index_html[status_filter_start:status_filter_end]
@@ -4361,31 +7088,55 @@ def test_agent_memory_management_view_wires_actions_and_api_paths():
     assert '<option value="active">启用</option>' in status_filter
     assert '<option value="deleted">已删除</option>' in index_html
     assert '<option value="rejected">已拒绝</option>' in index_html
-    assert 'data-agent-memory-action="inspect"' in app_js
-    assert 'data-agent-memory-action="disable"' in app_js
-    assert 'data-agent-memory-action="enable"' in app_js
-    assert 'data-agent-memory-action="delete"' in app_js
+    assert 'data-agent-memory-action="inspect"' in memory_panel_js
+    assert 'data-agent-memory-action="disable"' in memory_panel_js
+    assert 'data-agent-memory-action="enable"' in memory_panel_js
+    assert 'data-agent-memory-action="not_useful"' in memory_panel_js
+    assert 'data-agent-memory-action="delete"' in memory_panel_js
+    assert 'data-agent-memory-action="rollback"' in memory_panel_js
+    assert 'data-agent-memory-action="load_more"' in memory_panel_js
+    assert 'params.set("limit", String(pageLimit));' in memory_panel_js
+    assert 'params.set("offset", String(offset));' in memory_panel_js
+    assert "hasMoreItems = Boolean(payload?.has_more)" in memory_panel_js
+    assert ".agent-memory-load-more" in styles_css
+    assert 'memoryStatus === "active" && !memory.superseded_by' in memory_panel_js
 
-    assert 'api("api/agent-memory' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`)' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in app_js
-    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in app_js
+    assert '"api/agent-memory"' in memory_panel_js
+    assert '"api/agent-memory/distillations"' in memory_panel_js
+    assert '`api/agent-memory/distillations/${encodeURIComponent(memoryId)}`' in memory_panel_js
+    assert 'api(`api/agent-memory/distillations/${encodeURIComponent(memoryId)}/rollback`, { method: "POST" })' in memory_panel_js
+    assert '`api/agent-memory/${encodeURIComponent(memoryId)}`' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" })' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" })' in memory_panel_js
+    assert '`api/agent-memory/${encodeURIComponent(memoryId)}/negative-feedback`' in memory_panel_js
+    assert 'async function reportNotUseful' in memory_panel_js
+    assert 'api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" })' in memory_panel_js
     assert 'api(`api/tasks/${encodeURIComponent(taskId)}/agent/messages/${encodeURIComponent(messageId)}/memory-references`)' in app_js
     assert 'if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");' in app_js
-    assert ".agent-memory-dialog" in styles_css
+    assert "function syncAgentMemoryViewControls" in app_js
+    assert "function setAgentMemoryViewMode" in app_js
+    assert "dialog.agent-memory-dialog" in styles_css
+    assert ".governance-settings-dialog" in styles_css
+    assert ".governance-settings-shell" in styles_css
+    assert ".agent-memory-filter-card" in styles_css
+    assert ".agent-memory-workspace" in styles_css
+    assert ".agent-memory-detail:empty::before" in styles_css
     assert ".agent-memory-references" in styles_css
+    memory_switch_rule = _css_rule(styles_css, ".agent-memory-view-switch")
+    assert "border-radius: var(--radius-control)" in memory_switch_rule
+    memory_tab_rule = _css_rule(styles_css, ".agent-memory-view-tab")
+    assert "border-radius: var(--radius-control)" in memory_tab_rule
 
 
 def test_agent_memory_delete_keeps_audit_detail_visible():
-    app_js = _read_static("app.js")
-    delete_start = app_js.index("async function deleteAgentMemory")
-    delete_end = app_js.index("async function loadAgentMessageMemoryReferences", delete_start)
-    delete_body = app_js[delete_start:delete_end]
+    memory_panel_js = _read_static("js/agent-memory-panel.js")
+    delete_start = memory_panel_js.index("async function remove")
+    delete_end = memory_panel_js.index("async function rollbackDistillation", delete_start)
+    delete_body = memory_panel_js[delete_start:delete_end]
 
-    assert "renderAgentMemoryDetail(payload?.memory || null, payload?.events || [])" in delete_body
-    assert "await loadAgentMemoryItems()" not in delete_body
-    assert "renderAgentMemoryItems()" in delete_body
+    assert "renderDetail(payload?.memory || null, payload?.events || [])" in delete_body
+    assert "await loadItems()" not in delete_body
+    assert "renderItems()" in delete_body
 
 
 def test_agent_timeline_keeps_messages_in_occurrence_order_around_stage_outputs():
@@ -4850,6 +7601,8 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     script = "\n".join(
         [
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let llmSettings = { enabled_models: [] };",
             "let apiCalls = 0;",
             "let focusedModel = false;",
@@ -4891,6 +7644,22 @@ def test_agent_send_without_enabled_model_shows_inline_guidance_before_post():
     assert "配置并启用大模型" in payload["status"]["message"]
 
 
+def test_agent_send_always_requires_llm():
+    """Agent mode IS "manual mode whose operator decisions are made by an LLM", so
+    it always requires a configured model — no task type bypasses the gate, and
+    there is no canned/default agent conversation. The deterministic no-LLM path is
+    the separate manual mode."""
+    app_js = _read_static("app.js")
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    body = app_js[send_start:send_end]
+    assert "const unavailableModelMessage = agentModelUnavailableMessage();" in body
+    assert "showAgentModelGuidance(unavailableModelMessage)" in body
+    # no task-type bypass of the model-availability gate
+    assert "requiresLlm" not in body
+    assert "taskUsesPlanRail(selectedTask)" not in body
+
+
 def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     index_html = _read_static("index.html")
     app_js = _read_static("app.js")
@@ -4924,6 +7693,16 @@ def test_agent_send_button_switches_to_stop_control_while_agent_is_executing():
     assert '.agent-send[data-agent-send-state="stop"]' in styles_css
     assert ".agent-send-icon-stop" in styles_css
     assert ".agent-send[data-agent-send-state=\"stop\"] svg" in styles_css
+    stop_rule = _css_rule(styles_css, '.agent-send[data-agent-send-state="stop"]')
+    assert "background: var(--agent-send-stop-bg)" in stop_rule
+    assert "box-shadow: var(--agent-send-stop-shadow)" in stop_rule
+    dark_stop_rule = _css_rule(styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]')
+    assert "background: var(--agent-send-stop-bg)" in dark_stop_rule
+    assert "box-shadow: var(--agent-send-stop-shadow)" in dark_stop_rule
+    dark_stop_hover_rule = _css_rule(
+        styles_css, 'body[data-theme="dark"] .agent-send[data-agent-send-state="stop"]:hover:not(:disabled)'
+    )
+    assert "background: var(--agent-send-stop-bg-hover)" in dark_stop_hover_rule
 
 
 def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status_is_mid_stage():
@@ -4939,13 +7718,17 @@ def test_agent_stop_polling_finishes_when_server_job_is_cancelled_even_if_status
 
 def test_agent_send_shows_thinking_message_before_network_wait():
     app_js = _read_static("app.js")
-    helpers_start = app_js.index("function agentMessageContent")
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
+    helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
     helpers_end = app_js.index("function renderAgentTimeline", helpers_start)
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     script = "\n".join(
         [
+            f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -4996,16 +7779,20 @@ def test_agent_send_shows_thinking_message_before_network_wait():
 
 def test_agent_send_polls_streaming_messages_before_network_response_finishes():
     app_js = _read_static("app.js")
+    module_url = (STATIC_DIR / "js" / "agent-conversation-view.js").as_uri()
     helpers_start = app_js.index("async function pollAgentMessagesUntilSettled")
     helpers_end = app_js.index("async function startAgentValidation", helpers_start)
-    message_helpers_start = app_js.index("function agentMessageContent")
+    message_helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
     message_helpers_end = app_js.index("function renderAgentTimeline", message_helpers_start)
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     script = "\n".join(
         [
+            f"import {{ agentMessageIsAdvanceIntent }} from {json.dumps(module_url)};",
             "const AGENT_STREAM_POLL_INTERVAL_MS = 1;",
             "let selectedTaskId = 'task-1';",
+            "let selectedTask = { task_type: 'validation' };",
+            "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
             "const agentRequestAbortControllers = new Map();",
@@ -5054,8 +7841,8 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
 
 def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state():
     app_js = _read_static("app.js")
-    message_helpers_start = app_js.index("function agentMessageContent")
-    message_helpers_end = app_js.index("function renderAgentTimeline", message_helpers_start)
+    message_helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
+    message_helpers_end = app_js.index("function clearAgentStageMessages", message_helpers_start)
     send_start = app_js.index("async function startAgentValidation")
     send_end = app_js.index("async function dispatchAgentValidation", send_start)
     stop_start = app_js.index("async function stopAgentValidation")
@@ -5076,6 +7863,7 @@ def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state
             "function updateAgentSendDisabled() {}",
             "function setActionStatus(message, kind = '') { statuses.push({ message, kind }); }",
             "function renderAgentConversation() {}",
+            "function agentMessageIsAdvanceIntent() { return false; }",
             "function agentModelUnavailableMessage() { return ''; }",
             "function showAgentModelGuidance() { return false; }",
             "function setAgentComposerNotice() {}",
@@ -5150,10 +7938,10 @@ def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_
     assert "renderAgentEffortPreference()" in app_js
 
     conversation_start = app_js.index("function renderAgentConversation")
-    conversation_end = app_js.index("function agentTimelineStageDefinitions", conversation_start)
+    conversation_end = app_js.index("function agentStructuralSignature", conversation_start)
     conversation = app_js[conversation_start:conversation_end]
-    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!isAgent)")
-    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!isAgent)")
+    assert conversation.index("renderAgentModelOptions();") < conversation.index("if (!showConversation)")
+    assert conversation.index("renderAgentEffortPreference();") < conversation.index("if (!showConversation)")
 
     model_change_start = app_js.index('$("agentModelSelect").onchange')
     model_change_end = app_js.index('$("sendAgentMessageButton").onclick', model_change_start)
@@ -5389,11 +8177,29 @@ def test_agent_markdown_renders_highlighted_code_blocks():
     assert '<span class="agent-code-token string">&quot;prob&quot;</span>' in html
     assert '<span class="agent-code-token comment"># pass</span>' in html
     assert "&gt; threshold" in html
-    assert ".agent-code-token.keyword" in styles_css
-    assert ".agent-code-token.string" in styles_css
-    assert ".agent-code-token.comment" in styles_css
-    assert ".agent-code-token.number" in styles_css
-    assert ".agent-code-token.function" in styles_css
+    root_vars = _css_vars(_css_rule(styles_css, ":root"))
+    dark_vars = _css_vars(_css_rule(styles_css, 'body[data-theme="dark"]'))
+    for token in [
+        "--agent-code-token-keyword",
+        "--agent-code-token-function",
+        "--agent-code-token-string",
+        "--agent-code-token-number",
+    ]:
+        assert token in root_vars
+        assert token in dark_vars
+    assert "color: var(--agent-code-token-keyword)" in _css_rule(
+        styles_css, ".agent-code-token.keyword"
+    )
+    assert "color: var(--agent-code-token-function)" in _css_rule(
+        styles_css, ".agent-code-token.function"
+    )
+    assert "color: var(--agent-code-token-string)" in _css_rule(
+        styles_css, ".agent-code-token.string"
+    )
+    assert "color: var(--agent-code-token-number)" in _css_rule(
+        styles_css, ".agent-code-token.number"
+    )
+    assert "color: var(--text-muted)" in _css_rule(styles_css, ".agent-code-token.comment")
 
 
 def test_agent_markdown_preserves_ordered_section_numbers_after_blank_lines():
@@ -5468,10 +8274,11 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
             "  data: isSafeAssetUrl('data:text/html,x'),",
             "};",
             "const fallback = normalizeBranding({ logoUrl: 'javascript:alert(1)', "
-            "faviconUrl: '//evil.test/f.ico' });",
+            "workspaceLogoUrl: 'data:image/png,x', faviconUrl: '//evil.test/f.ico' });",
             "const aliases = normalizeValidatorAliases({ '  A  ': '  a  ', B: '', C: 5, D: 'd' });",
             "process.stdout.write(JSON.stringify({ probes, logoUrl: fallback.logoUrl, "
-            "faviconUrl: fallback.faviconUrl, aliases, brandingAliases: fallback.validatorAliases }));",
+            "workspaceLogoUrl: fallback.workspaceLogoUrl, faviconUrl: fallback.faviconUrl, "
+            "aliases, brandingAliases: fallback.validatorAliases }));",
         ]
     )
     result = subprocess.run(
@@ -5492,6 +8299,7 @@ def test_branding_normalizer_rejects_unsafe_asset_urls():
     }
     # Unsafe URLs are dropped and the safe defaults are kept (never the injection).
     assert "javascript:" not in data["logoUrl"]
+    assert "data:" not in data["workspaceLogoUrl"]
     assert "evil.test" not in data["faviconUrl"]
     # Validator aliases are trimmed; empty / non-string entries are dropped.
     assert data["aliases"] == {"A": "a", "D": "d"}
@@ -5637,8 +8445,11 @@ def test_reproducibility_animation_replays_only_on_first_render_per_task():
 
 
 def _run_node_capture_json(script: str) -> dict:
+    # These harnesses inline the whole app.js source, which exceeds Linux's
+    # 128KB per-argument limit (MAX_ARG_STRLEN) — feed the program via stdin
+    # instead of `-e` so the script size is unbounded on every platform.
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+        ["node", "--input-type=module"], input=script, check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
 
@@ -6239,6 +9050,169 @@ def test_scroll_to_manual_workflow_section_captures_task_id():
     assert "if (selectedTaskId !== targetTaskId) return;" in body
 
 
+def test_gate_controller_context_factories_capture_task_id_before_write_back():
+    """UX-3: a driver turn is a synchronous long request; the user can switch
+    to a different task while task A's confirmation POST is still pending. If
+    A's response resolves after the switch, its setAgentMessages callback
+    must not overwrite the globals now backing task B's panel. Each of the
+    four *ControllerContext() factories must capture selectedTaskId at
+    creation time and compare against the live value before writing back.
+    """
+    app_js = _read_static("app.js")
+    for factory in (
+        "function modelingSetupControllerContext",
+        "function joinGateControllerContext",
+        "function screenGateControllerContext",
+        "function driverConfirmControllerContext",
+    ):
+        body = _slice_function(app_js, factory)
+        assert "const capturedTaskId = selectedTaskId;" in body, (
+            f"{factory} must capture selectedTaskId at creation time so a "
+            "later write-back can detect a task switch."
+        )
+        assert "if (selectedTaskId !== capturedTaskId) return;" in body, (
+            f"{factory}'s setAgentMessages must guard against writing a "
+            "finished task's messages into a different task's panel."
+        )
+
+
+def test_gate_controller_context_setter_drops_stale_task_messages_behaviorally():
+    """Behavioral counterpart to the static guard check above: simulate
+    creating a controller context while task A is selected, switching to
+    task B, then having task A's pending request resolve. The resulting
+    setAgentMessages(...) call must be a no-op against the live globals.
+    """
+    app_js = _read_static("app.js")
+    context_bodies = "\n".join(
+        _slice_function(app_js, factory)
+        for factory in (
+            "function modelingSetupControllerContext",
+            "function joinGateControllerContext",
+            "function screenGateControllerContext",
+            "function driverConfirmControllerContext",
+        )
+    )
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-A';",
+            "let agentMessages = [];",
+            "function api() {}",
+            "function agentAcceptanceModeValue() { return 'manual'; }",
+            "function setActionStatus() {}",
+            "function renderAgentConversation() {}",
+            # UX-1: the context factories now also carry busy-state plumbing
+            # (REL-1 job-wrapped driver turns) — stub it so the sliced source
+            # executes; this test's own scope is only the stale-message guard.
+            "function pollAgentMessagesUntilSettled() { return Promise.resolve(); }",
+            "function renderWorkflowStepper() {}",
+            "const planRailController = { resetFetchThrottle() {} };",
+            context_bodies,
+            "const results = {};",
+            "for (const [name, factory] of Object.entries({"
+            " modelingSetupControllerContext,"
+            " joinGateControllerContext,"
+            " screenGateControllerContext,"
+            " driverConfirmControllerContext,"
+            "})) {",
+            "  selectedTaskId = 'task-A';",
+            "  agentMessages = ['seed'];",
+            "  const ctx = factory();",
+            "  selectedTaskId = 'task-B';",
+            "  ctx.setAgentMessages(['A-turn-finished-late']);",
+            "  results[name] = agentMessages.slice();",
+            "}",
+            "process.stdout.write(JSON.stringify(results));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    results = json.loads(result.stdout)
+    for name, agent_messages in results.items():
+        assert agent_messages == ["seed"], (
+            f"{name}: a task-A response resolving after switching to task B "
+            f"must not overwrite agentMessages (got {agent_messages!r})."
+        )
+
+
+def test_submit_driver_confirm_shows_busy_state_and_polls_before_response_resolves():
+    """UX-1 step 1: clicking a driver gate's confirm button must show the busy
+    pill and start polling agent messages *immediately* (before the POST
+    resolves), since the backend now runs the whole turn inside a job (REL-1)
+    and can take minutes. Also guards that the pre-existing "task switched
+    while pending" no-op guard on setAgentMessages (UX-3) still holds once the
+    busy-state polling plumbing is wired through the same context.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ submitDriverConfirm }} from {json.dumps(module_url)};",
+            "const statusCalls = [];",
+            "function setActionStatus(message, kind) { statusCalls.push({ message, kind }); }",
+            "const pollCalls = [];",
+            "function pollAgentMessagesUntilSettled(taskId, pendingPromise) {",
+            "  pollCalls.push(taskId);",
+            "  return pendingPromise.then(() => {}, () => {});",
+            "}",
+            "const railTicks = [];",
+            "function resetFetchThrottle(taskId) { railTicks.push(['reset', taskId]); }",
+            "function renderWorkflowStepper(opts) { railTicks.push(['render', opts && opts.force]); }",
+            "let selectedTaskId = 'task-A';",
+            "let agentMessages = ['seed'];",
+            "let resolveApi;",
+            "function api() { return new Promise((resolve) => { resolveApi = resolve; }); }",
+            "const button = { disabled: false, getAttribute: () => '' };",
+            "const context = {",
+            "  getSelectedTaskId: () => selectedTaskId,",
+            "  api,",
+            "  setActionStatus,",
+            "  setAgentMessages: (messages) => {",
+            "    if (selectedTaskId !== 'task-A') return;",
+            "    agentMessages = messages || agentMessages;",
+            "  },",
+            "  renderAgentConversation: () => {},",
+            "  pollAgentMessagesUntilSettled,",
+            "  resetFetchThrottle,",
+            "  renderWorkflowStepper,",
+            "};",
+            "const confirmPromise = submitDriverConfirm(button, context);",
+            "await new Promise((resolve) => setTimeout(resolve, 0));",
+            "const busyCallBeforeResolve = statusCalls[0];",
+            "const buttonDisabledDuring = button.disabled;",
+            "const polledBeforeResolve = pollCalls.slice();",
+            # Simulate switching to task B while the confirm's turn is still
+            # running server-side, then the (stale) request finally resolving.
+            "selectedTaskId = 'task-B';",
+            "resolveApi({ messages: ['A-turn-finished-late'] });",
+            "await confirmPromise;",
+            "process.stdout.write(JSON.stringify({",
+            "  busyCallBeforeResolve, buttonDisabledDuring, polledBeforeResolve,",
+            "  railTicks, agentMessagesAfter: agentMessages,",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["busyCallBeforeResolve"] == {"message": "正在执行下一步…", "kind": "busy"}
+    assert payload["buttonDisabledDuring"] is True
+    assert payload["polledBeforeResolve"] == ["task-A"]
+    # the plan-rail ticker fired at least once while the request was pending,
+    # and the final finally-block tick still runs after the response resolves.
+    assert ["render", True] in payload["railTicks"]
+    # UX-3: task switched away before the stale response resolved, so the
+    # setAgentMessages guard inside this call's own context must still drop it.
+    assert payload["agentMessagesAfter"] == ["seed"]
+
+
 def test_recompute_agent_auto_scroll_follow_toggles_on_position():
     """Any wheel that leaves the bottom must drop follow-mode to false, even
     if the user only nudged up by a few pixels. Returning to the bottom (or
@@ -6478,3 +9452,950 @@ def test_base_pet_mood_writing_artifacts_idle_is_complete():
         "writing_artifacts without an active job must fall into the same "
         "complete bucket as scanned and executed."
     )
+
+
+
+def test_driver_gate_tables_render_databar_psi_and_champion_row():
+    """VD-1: agentMessageTablesHtml (the generic plan-driver inline table
+    renderer used by JOIN diagnostics / feature metrics / model comparison
+    gate tables) must sink the same rich-cell language the validation metric
+    preview already has — databar for match/hit-rate columns, PSI three-band
+    cells, tabular-nums right-aligned numeric columns, and a highlighted
+    champion row for backend-flagged (" \u2605" suffixed) winning candidates —
+    instead of leaving every cell as bare escaped text.
+    """
+    app_js = _read_static("app.js")
+    metric_tables_js = _read_static("js/metric-tables.js")
+    kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
+    cell_body = _slice_function(app_js, "function driverTableCellHtml")
+    align_body = _slice_function(metric_tables_js, "export function metricHeaderShouldRightAlign")
+    chart_html_body = _slice_function(app_js, "function driverTableChartHtml")
+    tables_body = _slice_function(app_js, "function agentMessageTablesHtml")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "import {"
+            " columnFractions, parseNumeric, psiTier, psiTooltipText,"
+            f" }} from {json.dumps(render_metrics_url)};",
+            kind_body,
+            cell_body,
+            align_body,
+            chart_html_body,
+            tables_body,
+            "const message = {",
+            "  metadata: {",
+            "    tables: [",
+            "      {",
+            "        title: '拼接诊断(逐特征表)',",
+            "        columns: ['特征表', '匹配键', '命中率', '键唯一'],",
+            "        rows: [",
+            "          ['features.parquet', 'id=id', '92.30%', '是'],",
+            "          ['bureau.parquet', 'id=id', '41.10%', '否'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '特征指标',",
+            "        columns: ['特征', 'IV', 'KS', 'PSI', '样本量'],",
+            "        rows: [",
+            "          ['age', '0.31', '0.42', '0.015', '12000'],",
+            "          ['income', '0.12', '0.20', '0.25', '12000'],",
+            "        ],",
+            "      },",
+            "      {",
+            "        title: '候选模型对比',",
+            "        columns: ['算法', 'train_ks', 'test_ks', 'oot_ks'],",
+            "        rows: [",
+            "          ['lightgbm ★', '0.55', '0.50', '0.48'],",
+            "          ['xgboost', '0.50', '0.45', '0.40'],",
+            "        ],",
+            "      },",
+            "    ],",
+            "  },",
+            "};",
+            "const html = agentMessageTablesHtml(message);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = json.loads(result.stdout)["html"]
+
+    # 命中率 (match/hit-rate) gets a databar, not a bare cell.
+    assert 'class="databar"' in html
+    assert 'data-tip="命中率 92.30%"' in html
+    # PSI gets the three-band tiered cell, not a bare 4-decimal string.
+    assert 'class="psi-cell"' in html
+    assert 'data-tier=' in html
+    # 样本量 (row count) is tabular-nums right-aligned, not left-aligned text.
+    assert '<td class="cell-number">12000</td>' in html
+    # The backend's " ★"-flagged champion candidate renders as a highlighted
+    # badge, not a literal star character glued onto plain text.
+    assert 'class="champion-badge"' in html
+    assert "lightgbm ★" not in html
+    assert ">lightgbm<" in html
+
+
+
+def test_driver_gate_card_renders_distinct_shell_with_redflags_and_consequence():
+    """VD-2: needs_confirmation gate messages must render as a distinct "gate
+    card" (tone bar + header pill + red-flag checklist + consequence line)
+    rather than an ordinary chat bubble with one extra button. Red flags are
+    read from the backend's already-emitted "\u26a0\ufe0f" markers in both the
+    message text and inline-table cells (no new backend data — INV-1).
+    """
+    app_js = _read_static("app.js")
+
+    def slice_fn(signature: str) -> str:
+        start = app_js.index(signature)
+        end = app_js.index("\n}", start)
+        return app_js[start : end + 2]
+
+    src = "\n\n".join(
+        [
+            slice_fn("function shieldGateIconHtml"),
+            slice_fn("function driverGateRedFlags(message)"),
+            slice_fn("function driverGateRedFlagsHtml"),
+            slice_fn("function driverGateConsequenceHtml"),
+            slice_fn("function driverGateCardHeaderHtml"),
+            slice_fn("function driverGateCardHtml"),
+            slice_fn("function agentMessagePlanStep"),
+        ]
+    )
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "const planRailController = {",
+            "  planStep: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's2', title: '拼接执行' } : null),",
+            "  nextStepAfter: (metadata) => (metadata.step_id === 's2'"
+            " ? { id: 's3', title: '训练模型' } : null),",
+            "};",
+            "const selectedTaskId = 'task-A';",
+            src,
+            "const withFlags = {",
+            "  content: '**拼接诊断完成**。\\n\\n⚠️ 检测到**同键值冲突**,请先确认去重策略。',",
+            "  metadata: {",
+            "    kind: 'gate',",
+            "    step_id: 's2',",
+            "    tables: [{ title: '拼接诊断', columns: ['特征表', '膨胀'],"
+            " rows: [['bureau.parquet', '⚠️是']] }],",
+            "  },",
+            "};",
+            "const bodyHtml = '<div class=\"agent-message-content\">body</div>';",
+            "const withFlagsHtml = driverGateCardHtml(withFlags, bodyHtml);",
+            "const cleanHtml = driverGateCardHtml("
+            " { content: '上一步已完成。', metadata: { kind: 'gate', step_id: 's2' } },"
+            " bodyHtml,",
+            ");",
+            "process.stdout.write(JSON.stringify({ withFlagsHtml, cleanHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    with_flags_html = payload["withFlagsHtml"]
+    clean_html = payload["cleanHtml"]
+
+    # Distinct card shell, not a plain chat bubble.
+    assert 'class="gate-card"' in with_flags_html
+    assert 'data-gate-tone="warn"' in with_flags_html
+    # Header pill + step title, so the gate is locatable at a glance.
+    assert "⏸ 等待确认" in with_flags_html
+    assert "待确认：拼接执行" in with_flags_html
+    # Red-flag checklist section rendered from the "⚠️" markers already in the
+    # message text and table cells.
+    assert "gate-card-redflags" in with_flags_html
+    assert "gate-card-redflags-list" in with_flags_html
+    # Consequence line names the next plan step from plan-rail topology.
+    assert "确认后将执行：训练模型" in with_flags_html
+    # The original message content still renders nested inside the card.
+    assert "agent-message-content" in with_flags_html
+
+    # No red flags in the message/tables -> review tone, no redflags section.
+    assert 'data-gate-tone="review"' in clean_html
+    assert "gate-card-redflags" not in clean_html
+
+
+def test_agent_mode_gate_mounts_structured_controls_matching_manual_mode():
+    """UX-2: the agent-mode chat timeline must mount the SAME structured gate
+    widgets manual mode uses (screening table / dedup picker / modeling setup
+    panel / C1 role form) instead of a bare text bubble + confirm button.
+
+    This drives the real agentMessageHtml() (via the full app.js module, same
+    harness as the reproducibility tests) so the assertions exercise actual
+    production wiring, not a hand-rolled stand-in. Three things are pinned:
+    1. The latest gate's widget renders WITH interactive controls (checkboxes /
+       selects not disabled), using the exact same class names/attributes the
+       manual-mode screen table renders (screen_gate_controller.js authors
+       them; this just confirms agent mode reaches the same renderer).
+    2. An OLDER (non-latest) gate message's widget renders read-only
+       (disabled inputs, data-screen-readonly="true") — the stale-gate guard.
+    3. The free-text composer contract is untouched: agentMessageHtml keeps
+       rendering the message content bubble regardless of the widget, so free
+       text remains a second channel alongside the structured controls.
+    """
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+
+    messages = [
+        {
+            "id": "old-screen",
+            "role": "assistant",
+            "stage": "chat",
+            "content": "第一次筛选完成。",
+            "metadata": {
+                "kind": "gate",
+                "step_id": "gate-old",
+                "screen": {"selected": ["x1"], "thresholds": {"leakage_ks": 0.4, "max_missing_rate": 0.95}},
+            },
+        },
+        {
+            "id": "latest-screen",
+            "role": "assistant",
+            "stage": "chat",
+            "content": "阈值调整后重新筛选完成。",
+            "metadata": {
+                "kind": "gate",
+                "step_id": "gate-new",
+                "screen": {"selected": ["x2"], "thresholds": {"leakage_ks": 0.35, "max_missing_rate": 0.9}},
+            },
+        },
+    ]
+
+    test_driver = "\n".join(
+        [
+            f"const messages = {json.dumps(messages)};",
+            "const oldHtml = agentMessageHtml(messages[0], 'chat', { isLatestGate: false });",
+            "const latestHtml = agentMessageHtml(messages[1], 'chat', { isLatestGate: true });",
+            "process.stdout.write(JSON.stringify({ oldHtml, latestHtml }));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    payload = _run_node_capture_json(script)
+    old_html = payload["oldHtml"]
+    latest_html = payload["latestHtml"]
+
+    # Both render the SAME structured screen-table control classes manual mode
+    # uses (screen_gate_controller.js) — no separate agent-only markup.
+    assert 'class="screen-table-wrap"' in old_html
+    assert 'class="screen-table-wrap"' in latest_html
+    assert 'class="screen-pick"' in old_html
+    assert 'class="screen-pick"' in latest_html
+
+    # The free-text bubble is still rendered alongside the widget in both
+    # cases — agent mode's free-text channel is not replaced by the widget.
+    assert "agent-message-content" in old_html
+    assert "agent-message-content" in latest_html
+    assert "第一次筛选完成" in old_html
+    assert "阈值调整后重新筛选完成" in latest_html
+
+    # Stale guard: only the LATEST gate is interactive; the older gate's
+    # widget renders as a disabled, read-only snapshot.
+    assert 'data-screen-readonly="true"' in old_html
+    assert 'data-screen-readonly="true"' not in latest_html
+    assert old_html.count(" disabled") > 0
+    assert 'data-screen-step-id="gate-new"' in latest_html
+    assert "screen-confirm" in latest_html
+    assert "历史结果" in old_html
+
+    # Gates with a structured widget do NOT also render the plain
+    # driver-gate-actions confirm button (the widget owns the primary action).
+    assert "driver-gate-actions" not in old_html
+    assert "driver-gate-actions" not in latest_html
+
+
+def test_agent_mode_gate_without_widget_still_renders_plain_confirm_button():
+    """UX-2: a gate message with no structured payload (no screen/dedup/
+    modeling_setup/join_c1 — e.g. a plain "上一步已完成，确认继续" step) must
+    still offer SOME one-click affordance in agent mode, not force free text
+    for what used to be the isAgentMode early-return case.
+    """
+    app_js = _read_static("app.js")
+    boot_marker = 'document.addEventListener(\n  "mousedown"'
+    app_js = app_js[: app_js.index(boot_marker)].replace('from "./js/', 'from "./marvis/static/js/')
+
+    message = {
+        "id": "plain-gate",
+        "role": "assistant",
+        "stage": "chat",
+        "content": "上一步已完成。",
+        "metadata": {"kind": "gate", "step_id": "gate-plain"},
+    }
+    test_driver = "\n".join(
+        [
+            f"const message = {json.dumps(message)};",
+            "const html = agentMessageHtml(message, 'chat', { isLatestGate: true });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    script = _BROWSER_STUBS + "\n" + app_js + "\n" + test_driver
+    html = _run_node_capture_json(script)["html"]
+
+    assert "driver-gate-actions" in html
+    assert 'data-driver-confirm="1"' in html
+    assert 'data-expected-step-id="gate-plain"' in html
+
+
+def test_agent_mode_widget_submit_payload_matches_manual_mode_controller():
+    """UX-2: the agent-mode-mounted widget must post through the exact same
+    controller function manual mode uses (screenGateControllerContext /
+    submitScreenSelection), so the request payload shape (selection +
+    expected_step_id, mode-independent /agent/messages POST) is identical
+    regardless of which mode mounted the control — there is no agent-only
+    branch that could drift from the manual-mode contract.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "screen_gate_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderScreenGateTable, submitScreenSelection }} from {json.dumps(module_url)};",
+            "const message = {",
+            "  id: 'agent-screen-msg',",
+            "  metadata: {",
+            "    kind: 'gate',",
+            "    step_id: 'gate-agent',",
+            "    screen: { selected: ['x1', 'x2'], thresholds: { leakage_ks: 0.35, max_missing_rate: 0.9 } },",
+            "  },",
+            "};",
+            # This is the exact renderer app.js's agentMessageGateBodyHtml calls
+            # for a screen gate — proves the DOM the widget produces is postable
+            # through the same submit function manual mode uses.
+            "const html = renderScreenGateTable(message, { interactive: true });",
+            "const calls = [];",
+            "const wrap = {",
+            "  dataset: { screenReadonly: 'false', screenStepId: 'gate-agent' },",
+            "  querySelectorAll: (selector) => selector === '.screen-pick:checked' ? [",
+            "    { value: 'x1', disabled: false, closest: () => ({ classList: { contains: () => false } }) },",
+            "  ] : [],",
+            "};",
+            "const button = { disabled: false, closest: () => wrap };",
+            "const context = {",
+            "  selectedTaskId: 'task-agent',",
+            "  agentAcceptanceModeValue: () => 'manual',",
+            "  setActionStatus: () => {},",
+            "  setAgentMessages: () => {},",
+            "  renderAgentConversation: () => {},",
+            "  api: async (url, options) => { calls.push([url, JSON.parse(options.body)]); return { messages: [] }; },",
+            "};",
+            "await submitScreenSelection(button, context);",
+            "process.stdout.write(JSON.stringify({ html, calls }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'class="screen-table-wrap"' in payload["html"]
+    assert payload["calls"], "submitScreenSelection did not POST"
+    url, body = payload["calls"][0]
+    assert url == "/api/tasks/task-agent/agent/messages"
+    # Same structured fields the review's fix step 2 calls out: selection +
+    # expected_step_id (the mode-independent contract validation_agent.py and
+    # gate_response_adapter.py already accept).
+    assert body["selection"] == ["x1"]
+    assert body["expected_step_id"] == "gate-agent"
+    assert "content" in body
+
+
+def test_skeleton_templates_render_block_rows_and_table_shapes():
+    """VD-3: the shared skeleton.js template helpers must emit the three
+    documented shapes (block / rows / table), each using the generic
+    `.skeleton` shimmer primitive so a single CSS rule drives all of them.
+    """
+    module_url = (STATIC_DIR / "js" / "skeleton.js").as_uri()
+    script = "\n".join(
+        [
+            "import {"
+            " skeletonBlockHtml, skeletonRowsHtml, skeletonTableHtml,"
+            f" }} from {json.dumps(module_url)};",
+            "process.stdout.write(JSON.stringify({",
+            "  block: skeletonBlockHtml(),",
+            "  rows: skeletonRowsHtml({ rows: 3 }),",
+            "  table: skeletonTableHtml({ rows: 2, columns: 3 }),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'class="skeleton skeleton-block"' in payload["block"]
+    assert payload["rows"].count('class="skeleton skeleton-row"') == 3
+    assert payload["table"].count("skeleton-table-cell-head") == 3  # header row, 3 columns
+    assert payload["table"].count('class="skeleton-table-row"') == 2  # 2 data rows
+    assert payload["table"].count('class="skeleton skeleton-table-cell"') == 3 * 2  # 2 rows x 3 cols
+
+
+def test_plan_rail_shows_skeleton_only_on_genuine_first_load():
+    """VD-3: the plan rail's first fetch for a task (nothing cached yet) must
+    render a table/row skeleton instead of the old blank-then-"计划生成中…"
+    text, matching the busy-pill coexistence requirement (different DOM
+    region, no visual fight). Once a response has landed at least once, later
+    still-empty renders fall back to the plain text — the skeleton must not
+    re-flash on every poll tick.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "const renderSignatures = {};",
+            "controller.render({ force: true, renderSignatures });",
+            "const firstHtml = elements.workflowStepper.innerHTML;",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures });",
+            "const secondHtml = elements.workflowStepper.innerHTML;",
+            "process.stdout.write(JSON.stringify({ firstHtml, secondHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert 'data-skeleton="plan-rail"' in payload["firstHtml"]
+    assert "skeleton-row" in payload["firstHtml"]
+    assert "计划生成中" not in payload["firstHtml"]
+
+    assert 'data-skeleton="plan-rail"' not in payload["secondHtml"]
+    assert "计划生成中" in payload["secondHtml"]
+
+
+def test_artifact_panel_loading_state_uses_table_skeleton():
+    """VD-3: the gate-table artifact preview's loading placeholder (shown
+    while a JOIN diagnostics / feature metrics / model compare table fetches)
+    must be a table skeleton, not the old plain-text "正在加载输出..." string.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "正在加载输出..." not in plan_js
+    assert "skeletonTableHtml" in plan_js
+    assert 'data-skeleton="artifact"' in plan_js
+
+
+
+def test_plan_rail_renders_replan_badge_loop_events_and_subagent_rows():
+    """UX-5: replan/no_progress/sub_agents were fully persisted in the plan
+    payload but the plan rail rendered none of it — verify the rail now shows
+    a "已重规划 N 次" badge, the last-3 loop_events (with an intervene button
+    on no_progress rows), and a "子任务运行中" badge for active sub-agents.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "const plan = {",
+            "  id: 'plan-1',",
+            "  status: 'running',",
+            "  replan_count: 2,",
+            "  loop_events: [",
+            "    { type: 'replan', reason: 'failure', at: 't1', trigger_step_id: 'step-1', tool_ref: 'data_ops.propose_join' },",
+            "    { type: 'no_progress', reason: 'failure', at: 't2', trigger_step_id: 'step-2' },",
+            "  ],",
+            "  sub_agents: [",
+            "    { id: 'sub-1', scope: 'feature <scan>', status: 'running', granted_tools: [] },",
+            "    { id: 'sub-2', scope: 'done scope', status: 'returned', granted_tools: [] },",
+            "  ],",
+            "  steps: [",
+            "    { id: 'step-1', index: 0, title: 'Propose join', status: 'done', tool_ref: { plugin: 'data_ops', tool: 'propose_join' }, depends_on: [] },",
+            "  ],",
+            "};",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [plan] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "已重规划 2 次" in html
+    assert "已重规划：步骤执行失败" in html
+    assert "暂无进展：步骤执行失败" in html
+    assert 'data-plan-rail-intervene="1"' in html
+    assert "发消息介入" in html
+    assert "子任务运行中" in html
+    assert "feature &lt;scan&gt;" in html
+    # returned sub-agent is not "active" — only running/spawned rows render.
+    assert "done scope" not in html
+
+
+def test_plan_rail_omits_event_chrome_when_plan_has_no_events():
+    """UX-5: the common uneventful plan (no replans, no active sub-agents)
+    must not grow any of the new chrome — quiet by default per the review's
+    "克制不喧宾" instruction.
+    """
+    plan_js = _read_static("js/v2/plan_rail_controller.js")
+
+    assert "function loopEventStripHtml(plan)" in plan_js
+    assert "function replanBadgeHtml(plan)" in plan_js
+    assert "function subAgentRowsHtml(plan)" in plan_js
+
+
+def test_plan_rail_shows_waiting_for_confirmation_not_generating():
+    """UX-10: at the C1 role-assignment gate (no plan built yet by design), the
+    rail must say "等待确认：<步骤名>" — the system is waiting on the USER, not
+    generating a plan. The old unconditional "计划生成中…" text misattributed
+    the wait for this exact scenario.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const gateMessage = { role: 'assistant', metadata: { join_c1: { target_col: 'bad' } } };",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [gateMessage],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "等待确认：文件角色与目标列" in html
+    assert "计划生成中" not in html
+
+
+def test_plan_rail_falls_back_to_generating_when_no_open_gate():
+    """UX-10: a genuine still-generating wait (no plan yet, no open gate message)
+    must keep showing "计划生成中…" — only the gate-waiting case changes.
+    """
+    module_url = (STATIC_DIR / "js" / "v2" / "plan_rail_controller.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ createPlanRailController }} from {json.dumps(module_url)};",
+            "const elements = {",
+            "  progressRail: { setAttribute() {} },",
+            "  workflowStepper: { innerHTML: '' },",
+            "};",
+            "function $(id) { return elements[id] || null; }",
+            "globalThis.document = { querySelector() { return { textContent: '' }; } };",
+            "globalThis.fetch = () => Promise.resolve({ ok: true, json: async () => ({ plans: [] }) });",
+            "const controller = createPlanRailController({",
+            "  $,",
+            "  getSelectedTask: () => ({ task_type: 'data_join' }),",
+            "  getSelectedTaskId: () => 'task-A',",
+            "  getAgentMessages: () => [],",
+            "  isAgentMode: () => false,",
+            "  renderWorkflowStepper: () => {},",
+            "  setActionStatus: () => {},",
+            "});",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "await new Promise((resolve) => setTimeout(resolve, 20));",
+            "controller.render({ force: true, renderSignatures: {} });",
+            "process.stdout.write(elements.workflowStepper.innerHTML);",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    html = result.stdout
+
+    assert "计划生成中" in html
+    assert "等待确认" not in html
+
+
+def test_gate_confirm_button_states_consequence_by_tool():
+    """UX-10: gate confirm-button copy maps to the gate step's own tool
+    (execute_join/screen_features/train_model/...) instead of a bare "确认"
+    for every gate — the button looks identical today whether it just accepts
+    a read-only screening result or writes artifacts to disk.
+    """
+    driver_gate_js = _read_static("js/v2/driver_gate_confirm.js")
+
+    assert "export function gateConfirmLabel(toolName)" in driver_gate_js
+    assert 'execute_join: "确认并执行拼接"' in driver_gate_js
+    assert 'screen_features: "确认所选特征"' in driver_gate_js
+    assert 'train_model: "确认并开始训练"' in driver_gate_js
+
+    module_url = (STATIC_DIR / "js" / "v2" / "driver_gate_confirm.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ renderDriverGateButton }} from {json.dumps(module_url)};",
+            "const message = { metadata: { kind: 'gate', step_id: 'gate-1' } };",
+            "const joinHtml = renderDriverGateButton(message, { gateStepTool: 'execute_join' });",
+            "const genericHtml = renderDriverGateButton(message, {});",
+            "process.stdout.write(JSON.stringify({ joinHtml, genericHtml }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert "确认并执行拼接" in payload["joinHtml"]
+    assert ">确认<" in payload["genericHtml"]
+
+
+def test_acceptance_mode_chip_explains_auto_mode_scope():
+    """UX-10: the acceptance-mode chip/select must explain, on hover, that auto
+    mode confirms every gate (including destructive ones) on the user's
+    behalf — previously there was no title/tooltip at all.
+    """
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+
+    assert 'id="agentAcceptanceModeSelect"' in index_html
+    assert "自动模式下 Agent 将替你确认全部关键节点" in index_html
+    # fires the composer notice once on switching INTO auto mode.
+    assert 'agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept"' in app_js
+    assert "setAgentComposerNotice(\"自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。\", \"info\")" in app_js
+
+
+def test_welcome_sample_data_entry_is_wired_end_to_end():
+    """UX-9: the "用示例数据试跑" welcome-page entry must exist as a real button
+    (not just copy), be bound to a click handler that calls the sample-data +
+    task-creation endpoints, and use a task-name prefix that survives the
+    backend's model_name validator (MODEL_ID_RE has no full-width bracket
+    support, so a naive "【示例】" prefix would 422 at creation time)."""
+    index_html = _read_static("index.html")
+    app_js = _read_static("app.js")
+    welcome_css = _read_static("css/welcome.css")
+
+    assert 'id="welcomeSampleDataButton"' in index_html
+    assert "用示例数据试跑" in index_html
+
+    assert 'const sampleDataTaskNamePrefix = "示例-";' in app_js
+    assert "示例-" in app_js
+    assert "【" not in app_js.split("sampleDataTaskNamePrefix")[1][:40]
+    assert "async function createSampleDataTask" in app_js
+    assert 'api("api/sample-data", { method: "POST" })' in app_js
+    assert '$("welcomeSampleDataButton").onclick = handleWelcomeSampleDataClick;' in app_js
+    # Reuses the same manual-mode driver-start path as a real task creation
+    # (createTaskAndScan's taskUsesPlanRail branch), not a bespoke flow.
+    assert "await dispatchDriverStart(task.id);" in app_js
+
+    assert ".welcome-sample-data-link" in welcome_css
+
+
+
+def test_calibration_and_score_band_chart_functions_exist_in_metric_tables():
+    """VD-4: metric-tables.js must export the two new chart renderers and
+    interaction attacher, mirroring the existing ROC card export shape."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    assert "export function renderCalibrationCard(chart)" in metric_tables_js
+    assert "export function renderScoreBandCard(chart)" in metric_tables_js
+    assert "export function attachCalibrationInteractions(rootEl)" in metric_tables_js
+    node_check = subprocess.run(
+        ["node", "--check", str(STATIC_DIR / "js" / "metric-tables.js")],
+        capture_output=True,
+        text=True,
+    )
+    assert node_check.returncode == 0, node_check.stderr
+
+
+def test_app_js_wires_calibration_and_score_band_charts_into_driver_tables():
+    """VD-4: app.js must import the new renderers and mount them above their
+    driver table via driverTableChartHtml, keyed off table.chart.kind (see
+    marvis/agent/renderers.py::_calibration_table / _score_band_table)."""
+    app_js = _read_static("app.js")
+    assert "renderCalibrationCard," in app_js
+    assert "renderScoreBandCard," in app_js
+    assert "attachCalibrationInteractions," in app_js
+    chart_fn = _slice_function(app_js, "function driverTableChartHtml")
+    assert 'chart.kind === "calibration_curve"' in chart_fn
+    assert 'chart.kind === "score_band_bars"' in chart_fn
+    tables_fn = _slice_function(app_js, "function agentMessageTablesHtml")
+    assert "driverTableChartHtml(table?.chart)" in tables_fn
+    node_check = subprocess.run(
+        ["node", "--check", str(STATIC_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+    )
+    assert node_check.returncode == 0, node_check.stderr
+
+
+def test_calibration_reliability_curve_renders_diagonal_and_tiered_points():
+    """VD-4 acceptance: the calibration chart must draw a diagonal reference
+    (perfect-calibration) line plus one point per reliability-curve bin, with
+    points that deviate from the diagonal tagged into the warn/critical PSI
+    tier so they read as visually distinct from well-calibrated points."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            renderer_body,
+            "const chart = {",
+            "  kind: 'calibration_curve',",
+            "  points: [",
+            "    { avg_predicted_pd: 0.05, observed_bad_rate: 0.04, sample_count: 120, bin: 1 },",
+            "    { avg_predicted_pd: 0.20, observed_bad_rate: 0.50, sample_count: 80, bin: 2 },",
+            "    { avg_predicted_pd: 0.60, observed_bad_rate: 0.58, sample_count: 40, bin: 3 },",
+            "  ],",
+            "  brier_raw: 0.1234,",
+            "  ece_raw: 0.0567,",
+            "};",
+            "const html = renderCalibrationCard(chart);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+
+    # Diagonal perfect-calibration reference line is present.
+    assert 'class="roc-curve roc-curve-baseline"' in html
+    # One scatter point per reliability-curve bin.
+    assert html.count('class="calibration-point"') == 3
+    # The far-off-diagonal bin (0.20 predicted vs 0.50 actual, gap=0.30) is
+    # tagged critical; the near-diagonal bins are not.
+    assert 'data-tier="critical"' in html
+    assert 'data-tier="stable"' in html
+    # Brier/ECE summary surfaces in the header, not silently dropped.
+    assert "0.1234" in html
+    assert "0.0567" in html
+    # Hover tip carries predicted/actual/sample count, matching the ROC card's
+    # data-tip convention (no separate tooltip system needed on this path).
+    assert "预测 20.0%" in html
+    assert "实际 50.0%" in html
+    assert "n=80" in html
+
+
+def test_calibration_reliability_curve_renders_nothing_for_empty_points():
+    """Empty/missing calibration data must not crash or draw an empty frame —
+    driverTableChartHtml skips the chart entirely when points is empty."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+    script = "\n".join(
+        [
+            renderer_body,
+            "const html = renderCalibrationCard({ kind: 'calibration_curve', points: [] });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+    assert "暂无校准数据" in html
+    assert 'class="calibration-point"' not in html
+
+    app_js = _read_static("app.js")
+    chart_fn = _slice_function(app_js, "function driverTableChartHtml")
+    assert "chart.points.length === 0) return" in chart_fn
+
+
+def test_score_band_chart_renders_bars_and_bad_rate_line():
+    """VD-4 acceptance: the score-band chart must draw one sample-count bar
+    plus one bad-rate line point per band, labelled with the bin index on the
+    x-axis, matching the payload's data_field mapping (bin/score bounds/
+    sample_count/bad_rate — see marvis/agent/renderers.py::_score_band_table)."""
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            renderer_body,
+            "const chart = {",
+            "  kind: 'score_band_bars',",
+            "  split: 'oot',",
+            "  bands: [",
+            "    { bin: 1, score_lower: 0.0, score_upper: 0.1, sample_count: 500, bad_rate: 0.02 },",
+            "    { bin: 2, score_lower: 0.1, score_upper: 0.2, sample_count: 480, bad_rate: 0.05 },",
+            "    { bin: 3, score_lower: 0.2, score_upper: 0.3, sample_count: 300, bad_rate: 0.12 },",
+            "  ],",
+            "};",
+            "const html = renderScoreBandCard(chart);",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+
+    assert html.count('class="score-band-bar"') == 3
+    assert html.count('class="score-band-rate-point"') == 3
+    assert 'data-split="oot"' in html
+    assert "oot 分段分布" in html
+    # Bin index labels on the x-axis (Chinese axis labelling requirement).
+    for bin_label in [">1<", ">2<", ">3<"]:
+        assert bin_label in html
+    assert "样本量" in html
+    assert "坏率" in html
+    assert "分箱1 · 样本量 500 · 坏率 2.00%" in html
+    assert "分箱3 · 样本量 300 · 坏率 12.00%" in html
+
+
+def test_score_band_chart_renders_nothing_for_empty_bands():
+    metric_tables_js = _read_static("js/metric-tables.js")
+    renderer_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+    script = "\n".join(
+        [
+            renderer_body,
+            "const html = renderScoreBandCard({ kind: 'score_band_bars', split: 'oot', bands: [] });",
+            "process.stdout.write(JSON.stringify({ html }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    html = json.loads(result.stdout)["html"]
+    assert "暂无分段数据" in html
+    assert 'class="score-band-bar"' not in html
+
+
+def test_driver_table_chart_html_mounts_above_table_and_skips_when_absent():
+    """Mounting-point contract: driverTableChartHtml must be called with
+    table.chart and its output placed before the table markup (chart is an
+    enhancement above the table, not a replacement — the table always stays),
+    and calling agentMessageTablesHtml with no chart field on a table must
+    not error or inject an empty chart wrapper."""
+    app_js = _read_static("app.js")
+    metric_tables_js = _read_static("js/metric-tables.js")
+    tables_fn = _slice_function(app_js, "function agentMessageTablesHtml")
+    chart_before_table = tables_fn.index("chartHtml") < tables_fn.index("agent-inline-table-scroll")
+    assert chart_before_table
+
+    kind_body = _slice_function(app_js, "function driverColumnKindFromHeader")
+    cell_body = _slice_function(app_js, "function driverTableCellHtml")
+    align_body = _slice_function(metric_tables_js, "export function metricHeaderShouldRightAlign")
+    chart_html_body = _slice_function(app_js, "function driverTableChartHtml")
+    cal_body = _slice_function(metric_tables_js, "export function renderCalibrationCard(chart)")
+    band_body = _slice_function(metric_tables_js, "export function renderScoreBandCard(chart)")
+    tables_body = tables_fn
+
+    ui_utils_url = (STATIC_DIR / "js" / "ui-utils.js").as_uri()
+    render_metrics_url = (STATIC_DIR / "js" / "render-metrics.js").as_uri()
+
+    script = "\n".join(
+        [
+            f"import {{ escapeHtml }} from {json.dumps(ui_utils_url)};",
+            "import {"
+            " columnFractions, parseNumeric, psiTier, psiTooltipText,"
+            f" }} from {json.dumps(render_metrics_url)};",
+            kind_body,
+            cell_body,
+            align_body,
+            cal_body,
+            band_body,
+            chart_html_body,
+            tables_body,
+            "const messageNoChart = {",
+            "  metadata: { tables: [ { title: '报告章节状态', columns: ['章节', '状态'], rows: [['汇总', '可生成']] } ] },",
+            "};",
+            "const messageWithChart = {",
+            "  metadata: { tables: [ {",
+            "    title: '概率校准（可靠性曲线）',",
+            "    columns: ['类型', '分箱'],",
+            "    rows: [['原始', '1']],",
+            "    chart: { kind: 'calibration_curve', points: [",
+            "      { avg_predicted_pd: 0.1, observed_bad_rate: 0.1, sample_count: 10, bin: 1 },",
+            "    ] },",
+            "  } ] },",
+            "};",
+            "process.stdout.write(JSON.stringify({",
+            "  noChartHtml: agentMessageTablesHtml(messageNoChart),",
+            "  withChartHtml: agentMessageTablesHtml(messageWithChart),",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script], check=True, capture_output=True, text=True
+    )
+    parsed = json.loads(result.stdout)
+
+    # No chart field -> no chart wrapper injected, table still renders.
+    assert "agent-inline-table-chart" not in parsed["noChartHtml"]
+    assert "报告章节状态" in parsed["noChartHtml"]
+
+    # Chart present -> chart wrapper appears before the table's own <table>.
+    with_chart = parsed["withChartHtml"]
+    assert "agent-inline-table-chart" in with_chart
+    assert 'class="calibration-point"' in with_chart
+    assert with_chart.index("agent-inline-table-chart") < with_chart.index("<table>")

@@ -1,11 +1,31 @@
+import sqlite3
+
 import pytest
 
-from marvis.db import TaskRepository, _ensure_column, connect, init_db
+import marvis.db as db_module
+import marvis.db_schema as db_schema_module
+import marvis.repositories.tasks as task_repo_module
+from marvis.db import (
+    DatasetRepository,
+    ModelingRepository,
+    PlanRepository,
+    StrategyRepository,
+    TaskRepository,
+    _ensure_column,
+    _list_audit_rows,
+    connect,
+    init_db,
+)
+from marvis.data.contracts import ColumnFingerprint, ColumnProfile, Dataset, JoinPlan
 from marvis.domain import (
     TASK_STATUS_REASON_USER_CANCELLED,
     TaskCreate,
     TaskStatus,
 )
+from marvis.orchestrator.contracts import Plan, PlanStatus, PlanStep
+from marvis.packs.modeling import Experiment, ModelArtifact, ModelMetrics, TrainConfig
+from marvis.packs.strategy import build_strategy
+from marvis.plugins.manifest import ToolRef
 from marvis.state_machine import ConflictError, IllegalTransition
 
 
@@ -32,6 +52,10 @@ def _task_create(model_name: str = "模型", **overrides) -> TaskCreate:
     return TaskCreate(**values)
 
 
+def test_task_repository_is_reexported_from_db_for_compatibility():
+    assert TaskRepository is task_repo_module.TaskRepository
+
+
 def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -49,6 +73,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
             split_col="sample_type",
             time_col="month",
             feature_columns=["x1", "x2"],
+            sample_weight_col="sample_weight",
             notebook_path="/tmp/source/model.ipynb",
             sample_path="/tmp/source/sample.csv",
             pmml_path="/tmp/source/model.pmml",
@@ -69,6 +94,7 @@ def test_create_and_get_task_round_trips_v2_fields(tmp_path):
     assert loaded.split_col == "sample_type"
     assert loaded.time_col == "month"
     assert loaded.feature_columns == ["x1", "x2"]
+    assert loaded.sample_weight_col == "sample_weight"
     assert loaded.notebook_path == "/tmp/source/model.ipynb"
     assert loaded.sample_path == "/tmp/source/sample.csv"
     assert loaded.pmml_path == "/tmp/source/model.pmml"
@@ -169,6 +195,44 @@ def test_start_job_allows_only_one_active_job_per_task(tmp_path):
     assert repo.get_active_job_kind(task.id) == "metrics"
 
 
+def test_get_latest_job_returns_filtered_status_and_error(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create())
+
+    first_job_id = repo.start_job(task.id, "join")
+    repo.mark_job_running(first_job_id)
+    repo.finish_job(
+        first_job_id,
+        status="failed",
+        error_name="FanOutError",
+        error_value="join produced 12 > anchor 10 rows",
+        traceback="hidden traceback",
+    )
+    second_job_id = repo.start_job(task.id, "metrics")
+
+    latest_metrics = repo.get_latest_job(task.id, kind="metrics")
+    latest_join = repo.get_latest_job(task.id, kind="join")
+
+    assert latest_metrics["id"] == second_job_id
+    assert latest_metrics["kind"] == "metrics"
+    assert latest_join == {
+        "id": first_job_id,
+        "task_id": task.id,
+        "kind": "join",
+        "status": "failed",
+        "progress_message": "",
+        "error_name": "FanOutError",
+        "error_value": "join produced 12 > anchor 10 rows",
+        "created_at": latest_join["created_at"],
+        "started_at": latest_join["started_at"],
+        "finished_at": latest_join["finished_at"],
+        "log_path": None,
+    }
+    assert "traceback" not in latest_join
+
+
 def test_list_tasks_returns_created_tasks(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -180,6 +244,8 @@ def test_list_tasks_returns_created_tasks(tmp_path):
 
     assert {task.id for task in tasks} == {first.id, second.id}
     assert {task.model_name for task in tasks} == {"模型A", "模型B"}
+    assert repo.list_tasks(limit=1)[0].id == tasks[0].id
+    assert [task.id for task in repo.list_tasks(limit=1, offset=1)] == [tasks[1].id]
 
 
 def test_update_report_values_merges_and_increments_revision(tmp_path):
@@ -207,6 +273,60 @@ def test_update_report_values_merges_and_increments_revision(tmp_path):
         1,
     )
     assert repo.get_task(task.id).report_values_revision == 1
+
+
+def test_update_report_values_with_audit_records_changed_keys(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+
+    revision = repo.update_report_values_with_audit(
+        task.id,
+        {"TEXT:report_title": "新标题"},
+        expected_revision=0,
+        audit={
+            "kind": "report.values.update",
+            "target_ref": task.id,
+            "outcome": "succeeded",
+            "detail": {"keys": ["TEXT:report_title"], "expected_revision": 0},
+        },
+    )
+
+    assert revision == 1
+    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "新标题"}, 1)
+    audit = db_module.PluginRepository(db_path).list_audit(kind="report.values.update")[0]
+    assert audit["target_ref"] == task.id
+    assert audit["detail"]["keys"] == ["TEXT:report_title"]
+
+
+def test_update_report_values_with_audit_rolls_back_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(report_values={"TEXT:report_title": "旧标题"}))
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.update_report_values_with_audit(
+            task.id,
+            {"TEXT:report_title": "新标题"},
+            expected_revision=0,
+            audit={
+                "kind": "report.values.update",
+                "target_ref": task.id,
+                "outcome": "succeeded",
+            },
+        )
+
+    assert repo.get_report_values(task.id) == ({"TEXT:report_title": "旧标题"}, 0)
 
 
 def test_update_report_values_rejects_conflict(tmp_path):
@@ -290,6 +410,40 @@ def test_update_agent_report_conclusions_allows_only_final_three_keys(tmp_path):
         )
 
 
+def test_update_agent_report_conclusions_with_audit_rolls_back_when_audit_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(run_mode="agent"))
+    values = {
+        "TEXT:pressure_test_summary": "压力测试显示整体稳定。",
+        "TEXT:pressure_impact_recommendation": "建议持续监控关键数据源。",
+        "TEXT:final_validation_conclusion": "从当前验证结果看，模型可复现性、区分效果和稳定性整体满足验证要求。",
+    }
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr(task_repo_module, "_write_audit_row", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit down"):
+        repo.update_agent_report_conclusions_with_audit(
+            task.id,
+            values,
+            expected_revision=0,
+            audit={
+                "kind": "report.agent_conclusions.confirm",
+                "target_ref": task.id,
+                "outcome": "succeeded",
+            },
+        )
+
+    assert repo.get_report_values(task.id) == ({}, 0)
+
+
 def test_agent_messages_round_trip_with_metadata(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -316,6 +470,27 @@ def test_agent_messages_round_trip_with_metadata(tmp_path):
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["metadata"]["model_id"] == "m1"
     assert messages[1]["metadata"]["checks"] == 4
+
+
+def test_agent_messages_can_list_after_cursor(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create(run_mode="agent"))
+
+    first = repo.add_agent_message(task.id, role="user", stage="chat", content="first")
+    second = repo.add_agent_message(task.id, role="assistant", stage="scan", content="second")
+    third = repo.add_agent_message(task.id, role="assistant", stage="scan", content="third")
+
+    messages = repo.list_agent_messages(task.id, after_id=first["id"])
+
+    assert [message["id"] for message in messages] == [second["id"], third["id"]]
+    limited_messages = repo.list_agent_messages(task.id, after_id=first["id"], limit=1)
+    assert [message["id"] for message in limited_messages] == [second["id"]]
+    first_page = repo.list_agent_messages(task.id, limit=2)
+    assert [message["id"] for message in first_page] == [first["id"], second["id"]]
+    assert repo.has_agent_message(task.id, first["id"]) is True
+    assert repo.has_agent_message(task.id, "missing-message") is False
 
 
 def test_agent_message_can_be_updated_for_streaming_chunks(tmp_path):
@@ -455,6 +630,89 @@ def test_update_task_status_missing_raises_key_error(tmp_path):
         )
 
 
+def test_update_status_on_connection_reads_current_status_inside_write_lock(tmp_path):
+    """The expected-status SELECT must run inside the write transaction, not in
+    autocommit, so the read-validate-UPDATE window cannot be raced by a
+    concurrent writer. Even with begin_immediate left at its default, calling on
+    a fresh (not-in-transaction) connection self-promotes to BEGIN IMMEDIATE
+    before the SELECT -- verified by snapshotting conn.in_transaction at the
+    moment the status SELECT runs."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    task = repo.create_task(_task_create())
+    repo.update_status(task.id, TaskStatus.SCANNED, "ok", expected=TaskStatus.CREATED)
+
+    in_txn_at_select: list[bool] = []
+    with connect(db_path) as conn:
+        real_execute = conn.execute
+
+        class _Probe:
+            def execute(self, sql, *args, **kwargs):
+                if sql.strip().startswith("SELECT status FROM tasks"):
+                    in_txn_at_select.append(conn.in_transaction)
+                return real_execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(conn, name)
+
+        # Default begin_immediate=False + a fresh (autocommit) connection: the
+        # self-guard must still open the write lock before the SELECT.
+        repo.update_status_on_connection(
+            _Probe(),
+            task.id,
+            TaskStatus.RUNNING,
+            "running",
+            expected=TaskStatus.SCANNED,
+        )
+
+    assert in_txn_at_select == [True]
+    assert repo.get_task(task.id).status == TaskStatus.RUNNING
+
+
+def test_init_db_migrates_pre_heartbeat_jobs_table(tmp_path):
+    # REL-5: simulate a database created before jobs.heartbeat_at existed —
+    # init_db must add the column via _ensure_column without touching existing
+    # rows, so an upgrade doesn't lose in-flight job state.
+    db_path = tmp_path / "app.sqlite"
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_message TEXT NOT NULL DEFAULT '',
+                error_name TEXT,
+                error_value TEXT,
+                traceback TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                log_path TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs(id, task_id, kind, status, created_at)
+            VALUES ('job-1', 'task-1', 'join', 'running', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        assert "heartbeat_at" in columns
+        row = conn.execute(
+            "SELECT status, heartbeat_at FROM jobs WHERE id = 'job-1'"
+        ).fetchone()
+    assert row["status"] == "running"
+    assert row["heartbeat_at"] is None
+
+
 def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
@@ -464,3 +722,568 @@ def test_ensure_column_rejects_unsafe_identifiers(tmp_path):
             _ensure_column(conn, "tasks;DROP", "safe_column", "TEXT")
         with pytest.raises(ValueError, match="unsafe SQL identifier"):
             _ensure_column(conn, "tasks", "bad-column", "TEXT")
+
+
+def test_init_db_stamps_schema_version_on_fresh_database(tmp_path):
+    # ARCH-10: a brand-new database should come up fully migrated and stamped
+    # at the current SCHEMA_VERSION via PRAGMA user_version.
+    db_path = tmp_path / "app.sqlite"
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    assert version == db_schema_module.SCHEMA_VERSION
+    # Spot-check a representative slice of tables from across the schema
+    # (base tables, plugin tables, S1a/S1b additions all land via the same
+    # baseline migration).
+    assert {"tasks", "jobs", "audit", "plugins", "tools", "model_artifacts", "agent_memory_entries"} <= tables
+
+
+def test_init_db_upgrades_pre_arch10_database_losslessly(tmp_path):
+    # ARCH-10: a database created before schema_version existed reports
+    # PRAGMA user_version == 0 (SQLite's untouched default). init_db must
+    # bring it up to SCHEMA_VERSION, adding every missing table/column/index
+    # while preserving existing data byte-for-byte -- the exact "old library
+    # opens new version, no loss" guarantee the task requires.
+    db_path = tmp_path / "legacy.sqlite"
+
+    # Simulate a pre-ARCH-10 jobs table (missing the heartbeat_at column that
+    # migration 1 adds) with a live row, and never touch PRAGMA user_version --
+    # this is exactly what a database predating this commit looks like.
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_message TEXT NOT NULL DEFAULT '',
+                error_name TEXT,
+                error_value TEXT,
+                traceback TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                log_path TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO jobs(id, task_id, kind, status, created_at)
+            VALUES ('job-1', 'task-1', 'join', 'running', '2026-01-01T00:00:00+00:00')
+            """
+        )
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        row = conn.execute("SELECT status, heartbeat_at FROM jobs WHERE id = 'job-1'").fetchone()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert "heartbeat_at" in columns
+    assert row["status"] == "running"
+    assert row["heartbeat_at"] is None
+    # Every other table the baseline migration owns must also now exist.
+    assert {"tasks", "audit", "plugins", "tools", "agent_memory_entries"} <= tables
+
+
+def test_init_db_migration_002_adds_strategy_versioning_to_version1_database(tmp_path):
+    # ARCH-10 + S2: a database stamped at version 1 (strategies table without the
+    # version/status lifecycle columns) must gain them and the strategy_artifacts
+    # table on the next init_db, defaulting an existing strategy row to
+    # version=1/status='draft' without touching its data.
+    db_path = tmp_path / "legacy_v1.sqlite"
+
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE strategies (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                rules_json TEXT NOT NULL,
+                score_col TEXT,
+                default_decision_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategies(
+                id, task_id, strategy_type, rules_json, score_col,
+                default_decision_json, description, created_at
+            )
+            VALUES ('s-1', 'task-1', 'approval', '[]', 'score', '\"approve\"',
+                    'legacy strategy', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        conn.execute("PRAGMA user_version = 1")
+
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()}
+        row = conn.execute(
+            "SELECT status, version, adopted_at, parent_strategy_id, description"
+            " FROM strategies WHERE id = 's-1'"
+        ).fetchone()
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+    assert version == db_schema_module.SCHEMA_VERSION
+    assert {"version", "status", "adopted_at", "adoption_reason", "parent_strategy_id"} <= columns
+    assert row["status"] == "draft"
+    assert row["version"] == 1
+    assert row["adopted_at"] is None
+    assert row["parent_strategy_id"] is None
+    assert row["description"] == "legacy strategy"
+    assert "strategy_artifacts" in tables
+
+
+def test_init_db_is_idempotent_across_repeated_calls(tmp_path):
+    # ARCH-10: calling init_db repeatedly (as app startup / eval runner / CLI
+    # scripts all do) must not re-run already-applied migrations or error.
+    db_path = tmp_path / "app.sqlite"
+
+    init_db(db_path)
+    init_db(db_path)
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == db_schema_module.SCHEMA_VERSION
+
+
+def test_init_db_rejects_database_with_newer_schema_version(tmp_path):
+    # ARCH-10: downgrade guard -- if a database's schema_version is ahead of
+    # what this code supports (an older marvis checkout opening a database a
+    # newer checkout already migrated), init_db must refuse with a clear typed
+    # error instead of silently proceeding and risking misinterpreting
+    # tables/columns a later migration added.
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    with connect(db_path) as conn:
+        conn.execute(f"PRAGMA user_version = {db_schema_module.SCHEMA_VERSION + 1}")
+
+    with pytest.raises(db_schema_module.SchemaDowngradeError, match="schema_version"):
+        init_db(db_path)
+
+
+def test_sqlite_health_reports_schema_version(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+
+    health = db_schema_module.sqlite_health(db_path)
+
+    assert health["schema_version"] == db_schema_module.SCHEMA_VERSION
+    assert health["schema_version_expected"] == db_schema_module.SCHEMA_VERSION
+    assert health["schema_version_stale"] is False
+
+
+def _profile(name: str) -> ColumnProfile:
+    return ColumnProfile(
+        name=name,
+        dtype="object",
+        semantic_role="id",
+        fingerprint=ColumnFingerprint("categorical", None, None, False, None, None, None),
+        null_rate=0.0,
+        cardinality=2,
+        sample_values=("a***", "b***"),
+    )
+
+
+def _dataset(dataset_id: str, *, task_id: str, source_path: str | None = None) -> Dataset:
+    return Dataset(
+        id=dataset_id,
+        task_id=task_id,
+        role="sample",
+        source_path=source_path or f"{task_id}/{dataset_id}.parquet",
+        format="parquet",
+        sheet=None,
+        row_count=2,
+        columns=(_profile("customer_id"),),
+        has_target=False,
+        target_col=None,
+        created_at="2026-06-19T00:00:00Z",
+    )
+
+
+def _plan(plan_id: str, task_id: str) -> Plan:
+    step = PlanStep(
+        id=f"{plan_id}-step-1",
+        plan_id=plan_id,
+        index=0,
+        title="step",
+        tool_ref=ToolRef("_sample", "echo"),
+        inputs={},
+        depends_on=[],
+        post_checks=[],
+        needs_confirmation=False,
+        decision_point=False,
+        sub_agent_scope=None,
+        granted_tools=[],
+    )
+    return Plan(
+        id=plan_id,
+        task_id=task_id,
+        goal="finish",
+        source="template",
+        template_id="test",
+        steps=[step],
+        autonomy_level=1,
+        status=PlanStatus.CONFIRMED,
+    )
+
+
+def _experiment(experiment_id: str, task_id: str) -> Experiment:
+    config = TrainConfig(
+        dataset_id="dataset-1",
+        features=("score",),
+        target_col="bad",
+        split_col="split",
+        split_values={"train": "train", "test": "test", "oot": "oot"},
+        params={},
+        seed=7,
+        early_stopping_rounds=10,
+    )
+    return Experiment(
+        id=experiment_id,
+        task_id=task_id,
+        recipe_id="lgb",
+        config=config,
+        metrics=ModelMetrics(
+            train_ks=0.4,
+            test_ks=0.37,
+            oot_ks=0.35,
+            train_auc=0.78,
+            test_auc=0.74,
+            oot_auc=0.72,
+            psi_test_vs_train=0.04,
+            psi_oot_vs_train=0.08,
+            overfit_train_test_gap=0.03,
+            overfit_train_oot_gap=0.05,
+            overfit_flag=False,
+        ),
+        artifact_id=None,
+        status="pending",
+        created_at="2026-06-19T00:00:00Z",
+    )
+
+
+def _seed_full_task_graph(db_path, task_id: str, *, shared_dataset_path: str | None = None):
+    task_repo = TaskRepository(db_path)
+    task = task_repo.create_task(_task_create(model_name=f"model-{task_id}"))
+    dataset_repo = DatasetRepository(db_path)
+    dataset = _dataset(f"ds-{task.id}", task_id=task.id, source_path=shared_dataset_path)
+    dataset_repo.create_dataset(dataset)
+    join_plan = JoinPlan(
+        id=f"join-{task.id}",
+        task_id=task.id,
+        anchor_dataset_id=dataset.id,
+        joins=[],
+        status="draft",
+    )
+    dataset_repo.create_join_plan(join_plan)
+    plan_repo = PlanRepository(db_path)
+    plan_repo.create_plan(_plan(f"plan-{task.id}", task.id))
+    modeling_repo = ModelingRepository(db_path)
+    experiment = _experiment(f"exp-{task.id}", task.id)
+    modeling_repo.create_experiment(experiment)
+    artifact = ModelArtifact(
+        id=f"artifact-{task.id}",
+        experiment_id=experiment.id,
+        algorithm="lgb",
+        model_path=f"{task.id}/model.pkl",
+        pmml_path=None,
+        feature_list=("score",),
+        params={},
+        woe_maps=None,
+        created_at="2026-06-19T00:00:00Z",
+    )
+    modeling_repo.create_model_artifact(artifact)
+    strategy_repo = StrategyRepository(db_path)
+    strategy = build_strategy(
+        "approval",
+        [{"condition": "score < 600", "decision": "reject"}],
+        score_col="score",
+        default_decision="approve",
+        description="baseline cutoff",
+    )
+    strategy_repo.create_strategy(task.id, strategy, created_at="2026-06-19T00:00:00Z")
+    return task, dataset
+
+
+def test_purge_task_removes_all_task_scoped_rows_and_writes_audit(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, dataset = _seed_full_task_graph(db_path, "task-a")
+    repo = TaskRepository(db_path)
+
+    summary = repo.purge_task(task.id, actor="tester")
+
+    assert summary["datasets"] == 1
+    assert summary["joins"] == 1
+    assert summary["plans"] == 1
+    assert summary["plan_steps"] == 1
+    assert summary["experiments"] == 1
+    assert summary["model_artifacts"] == 1
+    assert summary["strategies"] == 1
+    assert summary["datasets_shared_with_other_tasks"] == 0
+    assert summary["dataset_source_paths"] == [dataset.source_path]
+
+    with pytest.raises(KeyError):
+        repo.get_task(task.id)
+    with connect(db_path) as conn:
+        for table, column in (
+            ("datasets", "task_id"),
+            ("joins", "task_id"),
+            ("plans", "task_id"),
+            ("experiments", "task_id"),
+            ("strategies", "task_id"),
+            ("model_artifacts", "experiment_id"),
+            ("plan_steps", "plan_id"),
+        ):
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            assert remaining == 0, f"{table} still has rows after purge"
+
+    audit_rows = _list_audit_rows(db_path, kind="task.delete")
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["target_ref"] == task.id
+    assert audit_rows[0]["actor"] == "tester"
+    assert audit_rows[0]["detail"]["purge_summary"]["datasets"] == 1
+
+
+def test_purge_task_missing_raises_key_error(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    with pytest.raises(KeyError, match="Task not found: missing"):
+        repo.purge_task("missing")
+    with pytest.raises(KeyError, match="Task not found: missing"):
+        repo.purge_preview("missing")
+
+
+def test_purge_preview_matches_purge_task_summary_without_deleting(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    task, _dataset = _seed_full_task_graph(db_path, "task-b")
+    repo = TaskRepository(db_path)
+
+    preview = repo.purge_preview(task.id)
+
+    assert preview["datasets"] == 1
+    assert preview["plans"] == 1
+    assert "dataset_source_paths" not in preview
+    # dry-run must not touch any rows
+    assert repo.get_task(task.id).id == task.id
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 1
+
+
+def test_purge_task_does_not_report_dataset_file_shared_with_another_task(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    shared_path = "task-owner/shared.parquet"
+    owner_task, _owner_dataset = _seed_full_task_graph(
+        db_path, "task-owner", shared_dataset_path=shared_path
+    )
+    reuser_task_repo = TaskRepository(db_path)
+    reuser_task = reuser_task_repo.create_task(_task_create(model_name="reuser"))
+    DatasetRepository(db_path).create_dataset(
+        _dataset(f"ds-{reuser_task.id}", task_id=reuser_task.id, source_path=shared_path)
+    )
+
+    repo = TaskRepository(db_path)
+    reuser_summary = repo.purge_task(reuser_task.id)
+
+    # the reuser's own dataset row referenced the shared file, but the owner task
+    # still has a dataset row pointing at it -- the file must not be marked removable.
+    assert reuser_summary["datasets_shared_with_other_tasks"] == 1
+    assert reuser_summary["dataset_source_paths"] == []
+
+    with connect(db_path) as conn:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM datasets WHERE source_path = ?", (shared_path,)
+        ).fetchone()[0]
+    assert remaining == 1  # the owner task's dataset row survives
+
+
+
+
+def test_get_active_job_kinds_for_tasks_matches_per_task_lookup(tmp_path):
+    """PERF-6: the batched lookup used by the task-list polling endpoint must
+    return exactly what get_active_job_kind would return per task, including
+    tasks with no active job (absent from the dict, same as None from the
+    per-task method) and tasks with multiple historical jobs (only the most
+    recent queued/running one wins)."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    running_task = repo.create_task(_task_create(model_name="running"))
+    idle_task = repo.create_task(_task_create(model_name="idle"))
+    finished_task = repo.create_task(_task_create(model_name="finished"))
+
+    repo.start_job(running_task.id, "notebook")
+    old_job_id = repo.start_job(finished_task.id, "metrics")
+    repo.finish_job(old_job_id, status="succeeded")
+
+    expected = {
+        task.id: repo.get_active_job_kind(task.id)
+        for task in (running_task, idle_task, finished_task)
+    }
+    batched = repo.get_active_job_kinds_for_tasks(
+        [running_task.id, idle_task.id, finished_task.id]
+    )
+
+    assert expected[running_task.id] == "notebook"
+    assert expected[idle_task.id] is None
+    assert expected[finished_task.id] is None
+    # the batched dict omits tasks with no active job rather than mapping them to
+    # None -- .get(task_id) on the result reproduces get_active_job_kind's None.
+    assert batched.get(running_task.id) == expected[running_task.id]
+    assert batched.get(idle_task.id) == expected[idle_task.id]
+    assert batched.get(finished_task.id) == expected[finished_task.id]
+    assert running_task.id in batched
+    assert idle_task.id not in batched
+    assert finished_task.id not in batched
+
+
+def test_get_active_job_kinds_for_tasks_uses_single_connection(tmp_path):
+    """PERF-6: proves the N+1 fix at the sqlite3.connect level -- listing active
+    job kinds for many tasks must open exactly one connection, not one per task."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+    tasks = [repo.create_task(_task_create(model_name=f"m{i}")) for i in range(6)]
+    for task in tasks[:3]:
+        repo.start_job(task.id, "notebook")
+
+    connect_calls = {"n": 0}
+    original_connect = sqlite3.connect
+
+    def counting_connect(*args, **kwargs):
+        connect_calls["n"] += 1
+        return original_connect(*args, **kwargs)
+
+    original = sqlite3.connect
+    sqlite3.connect = counting_connect
+    try:
+        result = repo.get_active_job_kinds_for_tasks([task.id for task in tasks])
+    finally:
+        sqlite3.connect = original
+
+    assert connect_calls["n"] == 1
+    assert len(result) == 3
+
+
+def test_get_active_job_kinds_for_tasks_empty_input_opens_no_connection(tmp_path):
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = TaskRepository(db_path)
+
+    connect_calls = {"n": 0}
+    original_connect = sqlite3.connect
+
+    def counting_connect(*args, **kwargs):
+        connect_calls["n"] += 1
+        return original_connect(*args, **kwargs)
+
+    sqlite3.connect = counting_connect
+    try:
+        result = repo.get_active_job_kinds_for_tasks([])
+    finally:
+        sqlite3.connect = original_connect
+
+    assert result == {}
+    assert connect_calls["n"] == 0
+
+
+def test_connect_skips_redundant_journal_mode_pragma_after_first_confirmation(tmp_path):
+    """PERF-6: PRAGMA journal_mode=WAL is a database-file-level setting in SQLite
+    (persists across connections), unlike synchronous/busy_timeout/foreign_keys/
+    temp_store which reset to defaults per-connection. Once a db file's WAL mode
+    has been confirmed by one connect(), later connects to the same file must not
+    re-issue that pragma -- while still verifying the DB's actual runtime state
+    is unaffected (WAL still active, foreign keys still enforced)."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)  # first connect() already confirmed WAL for this path
+
+    traced_journal_mode_statements = []
+    original_connect = sqlite3.connect
+
+    def tracing_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: traced_journal_mode_statements.append(sql)
+            if "journal_mode" in sql
+            else None
+        )
+        return conn
+
+    sqlite3.connect = tracing_connect
+    try:
+        with connect(db_path) as conn:
+            conn.execute("SELECT 1")
+        with connect(db_path) as conn:
+            conn.execute("SELECT 1")
+    finally:
+        sqlite3.connect = original_connect
+
+    assert traced_journal_mode_statements == []
+
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_connect_reissues_journal_mode_pragma_for_a_fresh_db_path(tmp_path):
+    """The skip cache is keyed per db_path -- a different (unconfirmed) db file
+    must still get the pragma on its first connect()."""
+    db_schema_module._WAL_CONFIRMED_PATHS.discard(str((tmp_path / "fresh.sqlite").resolve()))
+    fresh_path = tmp_path / "fresh.sqlite"
+
+    traced_journal_mode_statements = []
+    original_connect = sqlite3.connect
+
+    def tracing_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(
+            lambda sql: traced_journal_mode_statements.append(sql)
+            if "journal_mode" in sql
+            else None
+        )
+        return conn
+
+    sqlite3.connect = tracing_connect
+    try:
+        init_db(fresh_path)
+    finally:
+        sqlite3.connect = original_connect
+
+    assert any("journal_mode=WAL" in sql for sql in traced_journal_mode_statements)

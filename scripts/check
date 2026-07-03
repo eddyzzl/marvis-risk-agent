@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT_DIR"
+
+PYTHON_BIN="${PYTHON:-python}"
+NODE_BIN="${NODE:-node}"
+RUFF_BIN="${RUFF:-}"
+RUN_PYTEST=1
+RUN_RUFF=1
+RUN_NODE=1
+RUN_DIFF=1
+RUN_AUDIT=0
+FAST=0
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/check [options] [-- pytest_args...]
+
+Runs the local verification gate used by CI.
+
+Options:
+  --skip-pytest   Skip pytest.
+  --skip-ruff     Skip ruff.
+  --skip-node     Skip JavaScript syntax checks.
+  --skip-diff     Skip git diff whitespace checks.
+  --fast          Run only the fast test tier (-m "not slow and not e2e").
+  --audit         Run pip-audit against the locked dependencies (skipped
+                   with a warning if pip-audit is not installed).
+  -h, --help      Show this help.
+
+Environment:
+  PYTHON          Python executable to use. Defaults to "python".
+  NODE            Node.js executable to use. Defaults to "node".
+  RUFF            Ruff executable to use. Defaults to "$PYTHON -m ruff".
+USAGE
+}
+
+PYTEST_ARGS=("-q")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-pytest)
+      RUN_PYTEST=0
+      shift
+      ;;
+    --skip-ruff)
+      RUN_RUFF=0
+      shift
+      ;;
+    --skip-node)
+      RUN_NODE=0
+      shift
+      ;;
+    --skip-diff)
+      RUN_DIFF=0
+      shift
+      ;;
+    --fast)
+      FAST=1
+      shift
+      ;;
+    --audit)
+      RUN_AUDIT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      PYTEST_ARGS=("$@")
+      break
+      ;;
+    *)
+      PYTEST_ARGS=("$@")
+      break
+      ;;
+  esac
+done
+
+if [[ "$FAST" -eq 1 && "${#PYTEST_ARGS[@]}" -eq 1 && "${PYTEST_ARGS[0]}" == "-q" ]]; then
+  PYTEST_ARGS=("-q" "-m" "not slow and not e2e")
+fi
+
+if [[ "$RUN_DIFF" -eq 1 ]]; then
+  echo "==> git diff --check"
+  if [[ -n "${CHECK_DIFF_RANGE:-}" ]]; then
+    DIFF_BASE="${CHECK_DIFF_RANGE%%...*}"
+    DIFF_BASE="${DIFF_BASE%%..*}"
+    if git rev-parse --verify --quiet "${DIFF_BASE}^{commit}" >/dev/null; then
+      git diff --check "$CHECK_DIFF_RANGE"
+    else
+      echo "warning: CHECK_DIFF_RANGE base not found ($CHECK_DIFF_RANGE); checking HEAD commit instead" >&2
+      git diff-tree --check --no-commit-id --root -r HEAD
+    fi
+  else
+    git diff --check
+  fi
+fi
+
+if [[ "$RUN_RUFF" -eq 1 ]]; then
+  echo "==> ruff"
+  if [[ -n "$RUFF_BIN" ]]; then
+    "$RUFF_BIN" check marvis tests --extend-exclude '*.ipynb'
+  else
+    "$PYTHON_BIN" -m ruff check marvis tests --extend-exclude '*.ipynb'
+  fi
+fi
+
+if [[ "$RUN_NODE" -eq 1 ]]; then
+  echo "==> node --check"
+  while IFS= read -r -d '' js_file; do
+    "$NODE_BIN" --check "$js_file"
+  done < <(find marvis/static -type f -name '*.js' -print0 | sort -z)
+fi
+
+if [[ "$RUN_PYTEST" -eq 1 ]]; then
+  echo "==> pytest ${PYTEST_ARGS[*]}"
+  "$PYTHON_BIN" -m pytest "${PYTEST_ARGS[@]}"
+fi
+
+if [[ "$RUN_AUDIT" -eq 1 ]]; then
+  echo "==> pip-audit"
+  if "$PYTHON_BIN" -m pip_audit --version >/dev/null 2>&1; then
+    "$PYTHON_BIN" -m pip_audit
+  else
+    echo "skipping pip-audit: not installed (pip install pip-audit to enable --audit)"
+  fi
+fi

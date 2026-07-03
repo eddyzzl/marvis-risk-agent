@@ -1,0 +1,2684 @@
+{
+  "name": "modeling",
+  "version": "0.4.6",
+  "display_name": "Modeling Pack",
+  "description": "Modeling readiness, frame preparation, feature selection, training, experiment comparison, probability calibration, PMML export, and V1 validation handoff tools.",
+  "module": "marvis.packs.modeling.tools",
+  "python_requires": ">=3.10,<3.14",
+  "tools": [
+    {
+      "name": "check_data_quality",
+      "summary": "Check modeling data quality issues without changing deterministic metrics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "issues"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_check_data_quality",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "modeling_readiness",
+      "summary": "Evaluate whether a dataset is ready for binary modeling.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stats": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "ready",
+          "blockers",
+          "warnings",
+          "stats"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_modeling_readiness",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "reject_inference",
+      "summary": "Create a reject-inference augmented modeling dataset using parceling or fuzzy augmentation with explicit assumptions and sample weights.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "decision_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "parceling",
+              "fuzzy_augmentation"
+            ]
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reject_bad_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "reject_weight": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "score_direction": {
+            "type": "string",
+            "enum": [
+              "higher_is_riskier",
+              "higher_is_better"
+            ]
+          },
+          "confirm_direction_conflict": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "decision_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "target_col": {
+            "type": "string"
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "diagnostics": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "target_col",
+          "sample_weight_col",
+          "diagnostics"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 180,
+      "failure_policy": "fail",
+      "entrypoint": "tool_reject_inference",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "prepare_modeling_frame",
+      "summary": "Create a derived modeling frame with selected columns and deterministic splits.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_config": {
+            "type": "object"
+          },
+          "passthrough_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "feature_cols"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "split_counts": {
+            "type": "object"
+          },
+          "split_col": {
+            "type": "string"
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "split_counts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_prepare_modeling_frame",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "make_split",
+      "summary": "MODELING G1 split gate: build a derived modeling frame from an arbitrary condition rule set plus the existing random/time fallback, and return per-split counts with a per-split x month/channel distribution table for confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          },
+          "split_config": {
+            "type": "object"
+          },
+          "passthrough_cols": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "split_col": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "target_col",
+          "feature_cols"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "sample_analysis": {
+            "type": "object",
+            "properties": {
+              "split_counts": {
+                "type": "object"
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "group_distributions": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "split_counts",
+              "total_rows",
+              "group_distributions"
+            ],
+            "additionalProperties": false
+          },
+          "split_col": {
+            "type": "string"
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "split_col",
+          "sample_analysis"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_make_split",
+      "side_effects": [
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "screen_features",
+      "summary": "Leakage-aware univariate KS/IV screen over a wide candidate set; flags suspected target leakage (very high single-feature KS) and model-output/score columns, and proposes a clean candidate set for user confirmation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leakage_ks": {
+            "type": "number"
+          },
+          "max_missing_rate": {
+            "type": "number"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batch_size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_ks_decay": {
+            "type": "number"
+          },
+          "max_feature_psi": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "ranked": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "leakage": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "suspected": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "unusable": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "scores": {
+            "type": "object"
+          },
+          "n_screened": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "excluded_categorical": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "column": {
+                  "type": "string"
+                },
+                "cardinality": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "column",
+                "cardinality"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "suspected_categorical": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "column": {
+                  "type": "string"
+                },
+                "cardinality": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "column",
+                "cardinality"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "sentinel_columns": {
+            "type": "object"
+          },
+          "sentinel_notice": {
+            "type": "string"
+          },
+          "dictionary": {
+            "type": "object"
+          },
+          "split_shift": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "leakage_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "ks_decay_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "psi_watch": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "selected",
+          "ranked",
+          "leakage",
+          "suspected",
+          "unusable",
+          "scores"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_screen_features",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "select_features",
+      "summary": "Select modeling features using raw or WOE-space IV, correlation, VIF, optional top-k filters, and WOE sign warnings.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "space": {
+            "type": "string",
+            "enum": [
+              "raw",
+              "woe"
+            ]
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_value": {},
+          "holdout_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "allow_full_fit": {
+            "type": "boolean"
+          },
+          "iv_min": {
+            "type": "number"
+          },
+          "corr_max": {
+            "type": "number"
+          },
+          "vif_max": {
+            "type": "number"
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          },
+          "scorecard_max_bins": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "enforce_monotonic": {
+            "type": "boolean"
+          },
+          "monotonic_direction": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "increasing",
+              "decreasing"
+            ]
+          },
+          "sign_check": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dropped": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "scores": {
+            "type": "object"
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fit_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fit_split": {
+            "type": "string",
+            "enum": [
+              "train",
+              "full"
+            ]
+          }
+        },
+        "required": [
+          "selected",
+          "dropped",
+          "scores",
+          "warnings"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_select_features",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "choose_modeling_spec",
+      "summary": "Normalize and validate the modeling target type, recipe family, sample-weight policy, tuning budget, and fixed params before feature screening.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target_col": {
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target_type": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "continuous",
+              "multiclass"
+            ]
+          },
+          "recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass",
+                "ensemble"
+              ]
+            },
+            "minItems": 1
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "sample_weight_candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sample_weight_diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
+          }
+        },
+        "required": [
+          "recipe",
+          "recipes",
+          "seed"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "target_type": {
+            "type": "string"
+          },
+          "recipe": {
+            "type": "string"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_cols": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "feature_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "sample_weight_candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sample_weight_diagnostics": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "params": {
+            "type": "object"
+          },
+          "metric_policy": {
+            "type": "string"
+          },
+          "eligible_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "disabled_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "pmml_supported_algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": "string"
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "cv_folds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 2
+          }
+        },
+        "required": [
+          "target_type",
+          "recipe",
+          "recipes",
+          "sample_weight_col",
+          "seed",
+          "n_trials",
+          "params",
+          "metric_policy",
+          "eligible_algorithms",
+          "disabled_algorithms",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_choose_modeling_spec",
+      "side_effects": [],
+      "memory_limit_mb": 512
+    },
+    {
+      "name": "configure_tuning",
+      "summary": "Prepare an explicit tuning configuration for one or more modeling recipes before hyperparameter search; each recipe gets its own trial budget (total = sum of per-recipe budgets).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "params": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass",
+                "ensemble"
+              ]
+            },
+            "minItems": 1
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
+          }
+        },
+        "required": [
+          "recipe",
+          "seed"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "recipe": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "tune_enabled": {
+            "type": "boolean"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "params": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "total_n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cv_folds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 2
+          }
+        },
+        "required": [
+          "recipe",
+          "tune_enabled",
+          "n_trials",
+          "seed",
+          "params",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 30,
+      "failure_policy": "fail",
+      "entrypoint": "tool_configure_tuning",
+      "side_effects": [],
+      "memory_limit_mb": 512
+    },
+    {
+      "name": "tune_hyperparameters",
+      "summary": "Two-stage random search (seeded) for one or more recipes (lgb/xgb/catboost/lr/scorecard/mlp), selecting by test KS minus train/test overfit penalty. OOT metrics are reported but not used for search selection. Single recipe returns a flat best_params/trials shape (back-compat); multiple recipes return per-recipe-keyed best_params/best_metrics plus a per_recipe detail map.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "recipe": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "early_stopping_rounds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_boost_round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "overfit_penalty": {
+            "type": "number"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass",
+                "ensemble"
+              ]
+            },
+            "minItems": 1
+          },
+          "n_trials_by_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "cv_folds": {
+            "type": "integer",
+            "minimum": 2
+          }
+        },
+        "required": [
+          "dataset_id",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "best_params": {
+            "type": "object"
+          },
+          "best_metrics": {
+            "type": "object"
+          },
+          "n_trials": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trials": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "per_recipe": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "best_params",
+          "best_metrics",
+          "n_trials"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 1800,
+      "failure_policy": "fail",
+      "entrypoint": "tool_tune_hyperparameters",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "train_model",
+      "summary": "Train one modeling recipe and persist experiment metrics plus model artifacts.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recipe": {
+            "type": "string",
+            "enum": [
+              "lgb",
+              "xgb",
+              "catboost",
+              "lr",
+              "scorecard",
+              "mlp",
+              "lgb_regressor",
+              "lgb_multiclass",
+              "ensemble"
+            ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "params": {
+            "type": "object"
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "monotone_constraints": {},
+          "seed": {
+            "type": "integer"
+          },
+          "scenario": {
+            "type": "string",
+            "minLength": 1
+          },
+          "early_stopping_rounds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dataset_id",
+          "recipe",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values",
+          "seed"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "feature_importance": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            }
+          },
+          "nan_labels_dropped": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "experiment_id",
+          "artifact_id",
+          "metrics",
+          "feature_importance"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 180,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_model",
+      "side_effects": [
+        "read:dataset",
+        "write:model",
+        "write:dataset",
+        "write:experiment"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "train_models",
+      "summary": "Train one or more recipes and return all experiments plus the best experiment using the target-aware selector: binary overfit-penalized test KS (OOT reported only, not used for selection), regression lower OOT RMSE (test RMSE fallback), and multiclass OOT macro-AUC (test macro-AUC fallback, then lower logloss). lgb uses tuned params when provided; other recipes train with their own defaults. The single-recipe case mirrors train_model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recipes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "lgb",
+                "xgb",
+                "catboost",
+                "lr",
+                "scorecard",
+                "mlp",
+                "lgb_regressor",
+                "lgb_multiclass",
+                "ensemble"
+              ]
+            },
+            "minItems": 1
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_values": {
+            "type": "object"
+          },
+          "params": {
+            "type": "object"
+          },
+          "sample_weight_col": {
+            "type": "string"
+          },
+          "monotone_constraints": {},
+          "seed": {
+            "type": "integer"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "drop_nan_labels": {
+            "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "recipes",
+          "features",
+          "target_col",
+          "split_col",
+          "split_values",
+          "seed"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "best_experiment_id": {
+            "type": "string"
+          },
+          "best_recipe": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "selection_metric": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "eval_metric": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "experiments",
+          "experiment_ids",
+          "best_experiment_id",
+          "best_recipe",
+          "target_type",
+          "selection_metric",
+          "eval_metric"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_train_models",
+      "side_effects": [
+        "read:dataset",
+        "write:model",
+        "write:dataset",
+        "write:experiment"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "compare_experiments",
+      "summary": "Compare persisted modeling experiments by deterministic metrics.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "experiment_ids"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "ks_ci_note": {
+            "type": "string"
+          },
+          "eval_metric": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "experiments"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_compare_experiments",
+      "side_effects": [
+        "read:experiment"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "select_experiment",
+      "summary": "Select the final modeling experiment from compared candidates using target-aware metrics or a user-specified experiment id, and mark it as selected for later Champion comparison.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "selected_experiment_id": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "selection_metric": {
+            "type": "string"
+          },
+          "selection_policy": {
+            "type": "object",
+            "properties": {
+              "require_pmml": {
+                "type": "boolean"
+              },
+              "require_handoff": {
+                "type": "boolean"
+              },
+              "require_scorecard": {
+                "type": "boolean"
+              },
+              "require_monotonicity": {
+                "type": "boolean"
+              },
+              "prefer_scorecard": {
+                "type": "boolean"
+              },
+              "max_feature_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_oot_psi": {
+                "type": "number",
+                "minimum": 0
+              },
+              "min_oot_ks": {
+                "type": "number"
+              },
+              "min_test_ks": {
+                "type": "number"
+              },
+              "min_oot_auc": {
+                "type": "number"
+              },
+              "min_test_auc": {
+                "type": "number"
+              },
+              "min_oot_macro_auc": {
+                "type": "number"
+              },
+              "min_test_macro_auc": {
+                "type": "number"
+              },
+              "max_oot_rmse": {
+                "type": "number"
+              },
+              "max_test_rmse": {
+                "type": "number"
+              },
+              "max_oot_logloss": {
+                "type": "number"
+              },
+              "max_test_logloss": {
+                "type": "number"
+              },
+              "metric_thresholds": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "min": {
+                      "type": "number"
+                    },
+                    "max": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "allow_policy_override": {
+                "type": "boolean"
+              },
+              "override_reason": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "refit_on_train_plus_test": {
+            "type": "boolean"
+          },
+          "eval_metric": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "experiment_ids"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "selected_experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "recipe": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          },
+          "selection_metric": {
+            "type": "string"
+          },
+          "selection_reason": {
+            "type": "string"
+          },
+          "metrics": {
+            "type": "object"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "policy_profile": {
+            "type": "object"
+          },
+          "policy_decision": {
+            "type": "object"
+          },
+          "scorecard_table": {
+            "type": "array"
+          },
+          "model_params": {
+            "type": "object"
+          },
+          "experiments": {
+            "type": "array"
+          },
+          "refit": {
+            "type": "object"
+          },
+          "ks_ci_note": {
+            "type": "string"
+          },
+          "eval_metric": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "selected_experiment_id",
+          "artifact_id",
+          "selection_metric",
+          "selection_reason",
+          "capabilities",
+          "policy_decision",
+          "eval_metric"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_select_experiment",
+      "side_effects": [
+        "read:experiment",
+        "read:model",
+        "write:experiment"
+      ],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "calibrate_model",
+      "summary": "Fit a post-training binary probability calibrator on a labeled holdout split and record raw vs calibrated Brier/ECE diagnostics on the model artifact.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_value": {},
+          "method": {
+            "type": "string",
+            "enum": [
+              "sigmoid",
+              "isotonic"
+            ]
+          },
+          "min_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "n_bins": {
+            "type": "integer",
+            "minimum": 2
+          },
+          "fit_split": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "artifact_id",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "calibration_path": {
+            "type": "string"
+          },
+          "split": {
+            "type": "string"
+          },
+          "split_value": {},
+          "sample_count": {
+            "type": "integer"
+          },
+          "brier_raw": {
+            "type": "number"
+          },
+          "brier_calibrated": {
+            "type": "number"
+          },
+          "ece_raw": {
+            "type": "number"
+          },
+          "ece_calibrated": {
+            "type": "number"
+          },
+          "pmml_includes_calibration": {
+            "type": "boolean"
+          },
+          "reliability_curve": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "fit_split": {
+            "type": "string"
+          },
+          "eval_split": {
+            "type": "string"
+          },
+          "evaluated_on": {
+            "type": "string"
+          },
+          "fit_sample_count": {
+            "type": "integer"
+          },
+          "per_split_metrics": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "sample_count": {
+                  "type": "integer"
+                },
+                "brier_raw": {
+                  "type": "number"
+                },
+                "brier_calibrated": {
+                  "type": "number"
+                },
+                "ece_raw": {
+                  "type": "number"
+                },
+                "ece_calibrated": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "sample_count",
+                "brier_raw",
+                "brier_calibrated",
+                "ece_raw",
+                "ece_calibrated"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "artifact_id",
+          "method",
+          "calibration_path",
+          "split",
+          "split_value",
+          "sample_count",
+          "brier_raw",
+          "brier_calibrated",
+          "ece_raw",
+          "ece_calibrated",
+          "pmml_includes_calibration",
+          "reliability_curve",
+          "fit_split",
+          "eval_split",
+          "evaluated_on",
+          "fit_sample_count",
+          "per_split_metrics"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_calibrate_model",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:model"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "segment_value_evaluation",
+      "summary": "Diagnose whether a candidate segment column looks worth building per-segment models for, by reporting an already-trained model's pooled vs per-segment KS/AUC breakdown (no new model is trained).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "segment_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split": {
+            "type": "string",
+            "minLength": 1
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "artifact_id",
+          "dataset_id",
+          "segment_col"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "segment_col": {
+            "type": "string"
+          },
+          "split": {
+            "type": "string"
+          },
+          "split_value": {},
+          "min_group_rows": {
+            "type": "integer"
+          },
+          "pooled": {
+            "type": "object"
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "segment_ks_spread": {
+            "type": "number"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "segment_col",
+          "split",
+          "split_value",
+          "min_group_rows",
+          "pooled",
+          "segments",
+          "segment_ks_spread",
+          "note"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_segment_value_evaluation",
+      "side_effects": [
+        "read:model",
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "export_pmml",
+      "summary": "Export an lr/lgb/xgb/scorecard modeling artifact to PMML for V1 validation handoff.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "artifact_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "pmml_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pmml_path"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_export_pmml",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:model"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "handoff_to_validation",
+      "summary": "Create a V1 validation task from a trained modeling experiment and sample dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sample_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "experiment_id",
+          "sample_dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "validation_task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "validation_task_id"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_handoff_to_validation",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:task",
+        "write:model"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "post_training_action",
+      "summary": "Finalize a selected modeling experiment with model-card, approval, monitoring, and Champion/Challenger comparison packages, native artifact status, optional PMML export, optional validation handoff, and optional challenger/backtest task creation.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sample_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "export_pmml",
+                "handoff_to_validation",
+                "create_challenger_backtest"
+              ]
+            }
+          },
+          "selection_policy_decision": {
+            "type": "object"
+          },
+          "monitoring_policy": {
+            "type": "object"
+          },
+          "champion_reference": {
+            "type": "object",
+            "description": "Optional prior champion or production model baseline. Provide experiment_id to resolve an existing modeling experiment, or explicit metrics/artifact metadata for an external champion."
+          }
+        },
+        "required": [
+          "experiment_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "native_model_path": {
+            "type": "string"
+          },
+          "pmml_path": {
+            "type": "string"
+          },
+          "validation_task_id": {
+            "type": "string"
+          },
+          "challenger_task_id": {
+            "type": "string"
+          },
+          "challenger_package_path": {
+            "type": "string"
+          },
+          "challenger_package_markdown_path": {
+            "type": "string"
+          },
+          "approval_package_path": {
+            "type": "string"
+          },
+          "approval_package_markdown_path": {
+            "type": "string"
+          },
+          "monitoring_policy_path": {
+            "type": "string"
+          },
+          "monitoring_policy_markdown_path": {
+            "type": "string"
+          },
+          "monitoring_policy": {
+            "type": "object"
+          },
+          "model_card_path": {
+            "type": "string"
+          },
+          "model_card_markdown_path": {
+            "type": "string"
+          },
+          "model_card": {
+            "type": "object"
+          },
+          "challenger_comparison_path": {
+            "type": "string"
+          },
+          "challenger_comparison_markdown_path": {
+            "type": "string"
+          },
+          "challenger_comparison": {
+            "type": "object"
+          },
+          "capabilities": {
+            "type": "object"
+          },
+          "actions": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "experiment_id",
+          "artifact_id",
+          "native_model_path",
+          "challenger_task_id",
+          "challenger_package_path",
+          "challenger_package_markdown_path",
+          "approval_package_path",
+          "approval_package_markdown_path",
+          "monitoring_policy_path",
+          "monitoring_policy_markdown_path",
+          "monitoring_policy",
+          "model_card_path",
+          "model_card_markdown_path",
+          "model_card",
+          "challenger_comparison_path",
+          "challenger_comparison_markdown_path",
+          "challenger_comparison",
+          "capabilities",
+          "actions"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_post_training_action",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:model",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "generate_model_report",
+      "summary": "Render a model development report from platform-computed modeling outputs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "business_columns": {
+            "type": "object"
+          },
+          "feature_dictionary_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "project_meta": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "experiment_id",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "report_path": {
+            "type": "string"
+          },
+          "section_status": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "scorecard_table": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "score_bands": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "calibration": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "report_path",
+          "section_status",
+          "scorecard_table",
+          "score_bands"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_model_report",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:report",
+        "llm"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "generate_model_reports",
+      "summary": "Fan out one model development report per experiment version, writing a version-specific xlsx for each requested experiment.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "business_columns": {
+            "type": "object"
+          },
+          "feature_dictionary_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "project_meta": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "experiment_ids",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "reports": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "experiment_id": {
+                  "type": "string"
+                },
+                "recipe": {
+                  "type": "string"
+                },
+                "report_path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "experiment_id",
+                "recipe",
+                "report_path"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "report_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reports",
+          "report_path"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "stochastic",
+      "timeout_seconds": 600,
+      "failure_policy": "fail",
+      "entrypoint": "tool_generate_model_reports",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:report",
+        "llm"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "score_dataset",
+      "summary": "Apply a trained model artifact to a new dataset, producing a PD (+ points, for scorecards) column and registering the result as a derived, direction-tagged dataset.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "points_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "seed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "experiment_id",
+          "dataset_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "result_dataset_id": {
+            "type": "string"
+          },
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "score_col": {
+            "type": "string"
+          },
+          "points_col": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "score_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "points_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "score_missing_rate": {
+            "type": "number"
+          },
+          "points_missing_rate": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "result_dataset_id",
+          "experiment_id",
+          "artifact_id",
+          "score_col",
+          "score_direction",
+          "row_count",
+          "score_missing_rate"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_score_dataset",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:dataset"
+      ],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "monitor_run",
+      "summary": "Execute one monitoring run against an artifact's training-time baseline snapshot: score PSI, per-feature CSI, and (when labels are available) KS/AUC vs the development period, judged into a green/amber/red verdict.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scored_dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "monitoring_policy": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "experiment_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {
+            "type": "string"
+          },
+          "artifact_id": {
+            "type": "string"
+          },
+          "dataset_id": {
+            "type": "string"
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "score_direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overall_level": {
+            "type": "string",
+            "enum": [
+              "green",
+              "amber",
+              "red"
+            ]
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "metric": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "green",
+                    "amber",
+                    "red",
+                    "n/a"
+                  ]
+                },
+                "status": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "metric",
+                "value",
+                "level",
+                "status"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "top_drifted_features": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "feature": {
+                  "type": "string"
+                },
+                "csi": {
+                  "type": "number"
+                },
+                "sample_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "feature",
+                "csi",
+                "sample_count"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "experiment_id",
+          "artifact_id",
+          "dataset_id",
+          "row_count",
+          "overall_level",
+          "recommendation",
+          "checks",
+          "top_drifted_features"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 300,
+      "failure_policy": "fail",
+      "entrypoint": "tool_monitor_run",
+      "side_effects": [
+        "read:model",
+        "read:dataset",
+        "write:task"
+      ],
+      "memory_limit_mb": 4096
+    }
+  ],
+  "hooks": [],
+  "permissions": [
+    "read:dataset",
+    "write:dataset",
+    "read:model",
+    "write:model",
+    "read:experiment",
+    "write:experiment",
+    "write:task",
+    "write:report",
+    "llm"
+  ]
+}

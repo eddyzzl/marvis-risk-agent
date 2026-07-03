@@ -1,8 +1,108 @@
 import { api, sleep } from "./js/api.js";
+import {
+  createAgentMemoryPanelController,
+  formatMemoryConfidence,
+} from "./js/agent-memory-panel.js";
+import { createDraftToolsPanelController } from "./js/draft-tools-panel.js";
+import {
+  agentMessageContent,
+  agentMessageIsAdvanceIntent,
+  agentMessageIsContinuePrompt,
+  agentReportMessagesForDisplay,
+  agentRerunMessageFingerprint,
+  agentTimelineStageDefinitions,
+} from "./js/agent-conversation-view.js";
+import {
+  removeAgentTimelineBuckets as removeAgentTimelineBucketsDom,
+  renderAgentTimeline as renderAgentTimelineDom,
+  restoreResultScrollDefaultOrder as restoreResultScrollDefaultOrderDom,
+  updateAgentMessageContentsInPlace as updateAgentMessageContentsInPlaceDom,
+} from "./js/agent-conversation-mount.js";
 import { applyBranding, normalizeBranding } from "./js/branding.js";
-import { createMaterialSourceController } from "./js/dialogs.js";
+import { createCreateTaskDialogController } from "./js/create-task-dialog.js";
+import {
+  bindDialogBackdropDismissal,
+  createMaterialSourceController,
+  renderMaterialUploadSelection,
+} from "./js/dialogs.js";
+import { installFormControlFocusRingGuard } from "./js/focus-ring.js";
+import { createLayoutResizeController } from "./js/layout-resize.js";
+import { createPlatformConfirmController } from "./js/platform-confirm.js";
 import { claimProgressPoll, createProgressPollRegistry, releaseProgressPoll } from "./js/polling.js";
 import { renderAgentMarkdown } from "./js/render-agent.js";
+import {
+  attachCalibrationInteractions,
+  attachMetricTooltip,
+  attachRocInteractions,
+  metricHeaderShouldRightAlign,
+  renderCalibrationCard,
+  renderMetricTableSection,
+  renderScoreBandCard,
+} from "./js/metric-tables.js";
+import { renderPrecisionConsistencyChart } from "./js/precision-consistency.js";
+import { stepCheckerHtml } from "./js/step-checker.js";
+import {
+  loadResultScrollPositions as loadStoredResultScrollPositions,
+  persistResultScrollPositions as persistStoredResultScrollPositions,
+  rememberSelectedTaskId as rememberStoredSelectedTaskId,
+  storedSelectedTaskId as readStoredSelectedTaskId,
+} from "./js/task-workspace-state.js";
+import {
+  renderCurrentTaskWorkspace,
+  renderTaskSnapshot as renderTaskSnapshotView,
+  updateWorkspaceGreeting as updateWorkspaceGreetingView,
+} from "./js/task-workspace-view.js";
+import { createTaskSearchController } from "./js/task-search.js";
+import { defaultTaskType, taskTypeDisplayOrder } from "./js/task-types.js";
+import { createThemeController } from "./js/theme.js";
+import { createComingSoonToastController } from "./js/toast.js";
+import { renderTierSettings, selectedTierStorageKey } from "./js/v2/capability.js";
+import {
+  driverGateBodyHtml as driverGateBodyHtmlController,
+  driverGateHasWidget as driverGateHasWidgetController,
+  driverManualAnalysisHtml as driverManualAnalysisHtmlController,
+  latestInteractiveScreenMessageId as latestInteractiveScreenMessageIdController,
+  stripChatInstructions as stripChatInstructionsController,
+} from "./js/v2/driver_manual_analysis.js";
+import {
+  handleDriverConfirmClick as handleDriverConfirmClickController,
+  renderDriverGateButton,
+  submitDriverConfirm as submitDriverConfirmController,
+} from "./js/v2/driver_gate_confirm.js";
+import { mountGovernanceExtensionPanels } from "./js/v2/governance_extensions.js";
+import {
+  handleC1ConfirmClick as handleC1ConfirmClickController,
+  handleDedupConfirmClick as handleDedupConfirmClickController,
+  handleDedupExcludeClick as handleDedupExcludeClickController,
+  renderDedupPicker,
+  renderJoinC1Form,
+  submitC1Assignment as submitC1AssignmentController,
+  submitDedupExclude as submitDedupExcludeController,
+  submitDedupStrategies as submitDedupStrategiesController,
+} from "./js/v2/join_gate_controller.js";
+import {
+  handleModelingWeightAdjustClick as handleModelingWeightAdjustClickController,
+  renderModelingSetupPanel,
+  submitModelingWeightAdjust as submitModelingWeightAdjustController,
+} from "./js/v2/modeling_setup_panel.js";
+import { renderModelDeliveryPanel } from "./js/v2/model_delivery_panel.js";
+import { createPlanRailController, taskUsesPlanRail } from "./js/v2/plan_rail_controller.js";
+import { renderPluginManager } from "./js/v2/plugin_manager.js";
+import {
+  handleScreenAdjustClick as handleScreenAdjustClickController,
+  handleScreenBulkClick as handleScreenBulkClickController,
+  handleScreenChipClick as handleScreenChipClickController,
+  handleScreenConfirmClick as handleScreenConfirmClickController,
+  handleScreenPageClick as handleScreenPageClickController,
+  handleScreenPickChange as handleScreenPickChangeController,
+  handleScreenSearchInput as handleScreenSearchInputController,
+  handleScreenSortClick as handleScreenSortClickController,
+  renderScreenGateTable,
+  submitScreenSelection as submitScreenSelectionController,
+  submitScreenThresholdAdjust as submitScreenThresholdAdjustController,
+} from "./js/v2/screen_gate_controller.js";
+import { renderSkillManager } from "./js/v2/skill_manager.js";
+import { getSelectedTier, onSelectedTierChange } from "./js/v2/state_v2.js";
 import {
   columnFractions,
   columnHeatColors,
@@ -23,6 +123,7 @@ import {
   metricOverviewCompleteStatuses,
   notebookReproducibilityCompleteStatuses,
   requiredMaterialRoles,
+  resultScrollPositionsStorageKey,
   roleLabels,
   scanFailurePrefix,
   selectedTaskStorageKey,
@@ -35,7 +136,6 @@ import {
   clamp,
   escapeHtml,
   fileName,
-  formatDateInput,
   signatureFromParts,
   splitListInput,
 } from "./js/ui-utils.js";
@@ -53,20 +153,17 @@ const progressPolls = createProgressPollRegistry();
 const resultScrollPositionsByTask = new Map();
 let globalBusyAction = null;
 let actionStatusOverride = null;
-let themePreference = "light";
-let currentTheme = "light";
+const themeController = createThemeController({
+  onChange: () => renderSettingsState(),
+});
 let taskSearchQuery = "";
 let taskSortMode = "created_desc";
 let taskGroupMode = "none";
-let lastPointerDownControl = null;
-let lastPointerDownAt = 0;
 let executionEnvironmentOptions = [];
 let executionEnvironmentSettings = null;
 let llmSettings = { default_model_id: "", models: [], enabled_models: [] };
 let llmEditingIndex = null;
 let agentMessages = [];
-let agentMemoryItems = [];
-let selectedAgentMemoryId = "";
 const agentComposerPreferences = restoreAgentComposerPreferences();
 let agentSelectedModelId = agentComposerPreferences.model_id || "";
 let agentSelectedEffort = agentComposerPreferences.effort || "high";
@@ -92,13 +189,18 @@ let agentAutoScrollFrame = null;
 const taskFrozenSectionSnapshots = new Map();
 let pendingResultScrollRestoreTaskId = null;
 let resultScrollRestoreFrame = null;
+let resultScrollPersistFrame = null;
 let suppressAgentAutoScrollTaskId = null;
+let pendingTaskContentLoadTaskId = null;
+let taskContentSettleTimer = null;
 let latestNotebookSteps = [];
 let sidebarCollapsed = false;
-let taskSearchActive = false;
 let sidebarSlideTimer = null;
 let scanAbortController = null;
 let petPreference = defaultPetPreference;
+// VD-5: real-logo glow overlay, default OFF pending user visual sign-off
+// (backlog note - flip the default once approved).
+let mascotGlowEnabled = false;
 let petDragState = null;
 let petReactionMood = null;
 let petReactionKey = "";
@@ -106,10 +208,70 @@ let petReactionTimer = null;
 let taskHeroGlassFrame = null;
 let taskHeroGlassActive = null;
 let taskHeroCanScroll = false;
+const platformConfirm = createPlatformConfirmController({ getElementById: $ });
+const showPlatformConfirm = platformConfirm.showPlatformConfirm;
+const bindPlatformConfirmDialog = platformConfirm.bindPlatformConfirmDialog;
+const { showComingSoonToast } = createComingSoonToastController({
+  body: document.body,
+  getElementById: $,
+});
 const materialSourceController = createMaterialSourceController({
   $,
-  onFilesChanged: renderMaterialUploadSelection,
+  onFilesChanged: (files) => renderMaterialUploadSelection({ files, getElementById: $ }),
 });
+const createTaskDialog = createCreateTaskDialogController({
+  $,
+  materialSourceController,
+  getSelectedTier,
+  selectedTierStorageKey,
+  onUnavailableTaskType: (message) => {
+    showComingSoonToast(message);
+    setActionStatus(message, "info", "这个入口会继续展示在任务启动页，但当前不会打开创建弹窗。");
+  },
+});
+const agentMemoryPanel = createAgentMemoryPanelController({
+  $,
+  api,
+  runAction,
+  showPlatformConfirm,
+  openMemorySettings: (navKey) => openGovernanceSettingsCenter(navKey),
+  openMemoryDetails: () => {
+    const details = $("memoryManageDetails");
+    if (details) details.open = true;
+  },
+});
+const draftToolsPanel = createDraftToolsPanelController({
+  $,
+  api,
+  runAction,
+  showPlatformConfirm,
+});
+const planRailController = createPlanRailController({
+  $,
+  stepCheckerHtml,
+  getSelectedTask: () => selectedTask,
+  getSelectedTaskId: () => selectedTaskId,
+  getAgentMessages: () => agentMessages,
+  isAgentMode: selectedTaskIsAgentMode,
+  renderWorkflowStepper,
+  setActionStatus,
+  refreshTasks,
+  loadAgentMessages,
+  renderAll,
+  fillComposer: focusAgentComposerForIntervene,
+});
+const taskSearchController = createTaskSearchController({
+  getElementById: $,
+  getQuery: () => taskSearchQuery,
+  setQuery: (value) => {
+    taskSearchQuery = value;
+  },
+  renderTaskList: () => renderTaskList(),
+});
+const openTaskSearch = taskSearchController.openTaskSearch;
+const closeTaskSearch = taskSearchController.closeTaskSearch;
+const toggleTaskSearch = taskSearchController.toggleTaskSearch;
+const taskSearchIsActive = taskSearchController.isActive;
 
 const PET_REACTION_DURATION_MS = 6500;
 const AGENT_STREAM_POLL_INTERVAL_MS = 180;
@@ -121,6 +283,10 @@ const AGENT_TYPEWRITER_CHARS_PER_TICK = 2;
 const AGENT_TYPEWRITER_CATCHUP_TICKS = 15;
 const AGENT_NO_ENABLED_MODEL_MESSAGE = "请先在设置中配置并启用大模型，再发送 Agent 消息。";
 const AGENT_NO_SELECTED_MODEL_MESSAGE = "请先选择一个可用大模型，再发送 Agent 消息。";
+// UX-9: must match marvis.sample_data.DEMO_TASK_NAME_PREFIX (kept as a plain string
+// here rather than fetched from the backend — it's a fixed display convention, not
+// runtime state).
+const sampleDataTaskNamePrefix = "示例-";
 // Follow-mode state machine: the typewriter only pulls the viewport to the
 // bottom while agentAutoScrollFollows is true. recomputeAgentAutoScrollFollow
 // runs on scroll events that arrive within AGENT_USER_SCROLL_INPUT_WINDOW_MS
@@ -131,12 +297,19 @@ const AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX = 2;
 const AGENT_USER_SCROLL_INPUT_WINDOW_MS = 250;
 let agentAutoScrollFollows = true;
 let lastUserScrollInputAt = 0;
-const SIDEBAR_WIDTH_MIN = 314;
-const SIDEBAR_WIDTH_MAX = 520;
-const PROGRESS_WIDTH_MIN = 314;
-const PROGRESS_WIDTH_MAX = 560;
+const layoutResizeController = createLayoutResizeController({
+  body: document.body,
+  clamp,
+  getComputedStyleFn: getComputedStyle,
+  root: document.documentElement,
+  storage: localStorage,
+  windowObj: window,
+});
+const startResizeDrag = layoutResizeController.startResizeDrag;
+const handleResizeKey = layoutResizeController.handleResizeKey;
+const restoreLayoutWidths = layoutResizeController.restoreLayoutWidths;
 const taskSortModes = new Set(["created_desc", "created_asc", "name_asc", "name_desc"]);
-const taskGroupModes = new Set(["none", "validator", "created_month"]);
+const taskGroupModes = new Set(["none", "task_type", "validator", "created_month"]);
 const petReactionMoods = new Set(["success", "failed", "complete", "review"]);
 
 const petDefinitions = {
@@ -151,6 +324,48 @@ const petDefinitions = {
     label: "贪吃、呆萌、胆小的小猫",
     kind: "spritesheet",
     asset: "static/pets/xiaojiu/spritesheet.webp?v=c078ec6f",
+  },
+  auditbot: {
+    name: "MARVIS",
+    label: "3D 玩具审计机器人，青色护目镜眼睛和铜色耳机",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot/spritesheet.webp",
+  },
+  "auditbot-pro": {
+    name: "MARVIS Pro",
+    label: "专业风格 3D 审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-pro/spritesheet.webp",
+  },
+  "auditbot-poly": {
+    name: "MARVIS Poly",
+    label: "低多边形硬表面审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-poly/spritesheet.webp",
+  },
+  "auditbot-ink": {
+    name: "MARVIS Ink",
+    label: "技术线稿风格审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-ink/spritesheet.webp",
+  },
+  "auditbot-clay": {
+    name: "MARVIS Clay",
+    label: "黏土与乙烯基质感审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-clay/spritesheet.webp",
+  },
+  "auditbot-comic": {
+    name: "MARVIS Comic",
+    label: "漫画描边风格审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-comic/spritesheet.webp",
+  },
+  "auditbot-pixel": {
+    name: "MARVIS Pixel",
+    label: "像素风审计机器人",
+    kind: "spritesheet",
+    asset: "static/pets/auditbot-pixel/spritesheet.webp",
   },
 };
 
@@ -177,6 +392,14 @@ function taskBusyAction(taskId = selectedTaskId) {
 function taskServerBusyAction(task = selectedTask) {
   const kind = task?.active_job_kind || "";
   if (kind === "agent") return "agent";
+  if (kind === "plan") return "agent";
+  // REL-1/UX-1: the V2 driver turn (JOIN/feature/modeling/strategy/vintage
+  // conversation confirm) now runs inside a task job of kind "driver" so this
+  // busy state is visible after a refresh or from any entry point, not just the
+  // tab that sent the confirm — and it claims the same 1s progress polling as
+  // every other long-running kind below.
+  if (kind === "driver") return "agent";
+  if (kind === "join") return "join";
   if (kind === "pipeline" || kind === "notebook") return "notebook";
   if (kind === "metrics") return "metrics";
   if (kind === "report") return "report";
@@ -254,6 +477,7 @@ function taskListSignature(tasks, totalTaskCount) {
     list.map((task) => [
       task.id || "",
       task.name || "",
+      task.task_type || "",
       task.status || "",
       task.updated_at || "",
       task.active_job_kind || "",
@@ -294,18 +518,25 @@ function resetValidationRenderSignatures() {
   resetMetricPreviewRenderSignature();
 }
 
-function openTaskDialog() {
-  document.querySelectorAll('input[name="runMode"]').forEach((input) => {
-    input.checked = false;
-  });
-  document.querySelectorAll(".run-mode-card").forEach((card) => {
-    delete card.dataset.wasChecked;
-  });
-  setCreateStatus("");
-  materialSourceController.reset();
-  prefillCreateTaskReportFields();
-  $("taskDialog").showModal();
-  $("modelName").focus();
+function taskTypeDefinition(taskType = createTaskDialog.activeTaskType()) {
+  return createTaskDialog.taskTypeDefinition(taskType);
+}
+
+function taskTypeLabel(taskOrType = selectedTask) {
+  const taskType = typeof taskOrType === "string" ? taskOrType : taskOrType?.task_type;
+  return taskTypeDefinition(taskType).label;
+}
+
+function syncCreateTaskTierDefault() {
+  createTaskDialog.syncCreateTaskTierDefault();
+}
+
+function openTaskDialog(taskType = defaultTaskType) {
+  createTaskDialog.openTaskDialog(taskType);
+}
+
+function openTaskDialogFromCard(event) {
+  createTaskDialog.openTaskDialogFromCard(event);
 }
 
 function openTaskTypeWelcome() {
@@ -322,85 +553,220 @@ function openTaskTypeWelcome() {
 }
 
 function closeTaskDialog() {
-  $("taskDialog").close();
-}
-
-function renderMaterialUploadSelection(files = materialSourceController.selectedFiles()) {
-  const status = $("materialUploadStatus");
-  if (!status) return;
-  if (files.length === 0) {
-    status.textContent = "请选择文件或文件夹。";
-    return;
-  }
-  const names = files
-    .slice(0, 3)
-    .map((file) => file.name)
-    .join("、");
-  const suffix = files.length > 3 ? ` 等 ${files.length} 个文件` : "";
-  const folderCount = new Set(
-    files
-      .map((file) => (file.relativePath || "").split("/").slice(0, -1).join("/"))
-      .filter(Boolean),
-  ).size;
-  const folderText = folderCount > 0 ? `，包含 ${folderCount} 个目录` : "";
-  status.textContent = `已选择 ${names}${suffix}${folderText}。`;
-}
-
-function handleRunModeCardPointerDown(event) {
-  const card = event.target.closest(".run-mode-card");
-  if (!card) return;
-  const input = card.querySelector('input[name="runMode"]');
-  if (!input) return;
-  card.dataset.wasChecked = input.checked ? "true" : "false";
-}
-
-function handleRunModeCardClick(event) {
-  const card = event.target.closest(".run-mode-card");
-  if (!card) return;
-  const input = card.querySelector('input[name="runMode"]');
-  if (!input) return;
-  if (card.dataset.wasChecked !== "true") return;
-  event.preventDefault();
-  input.checked = false;
-  card.dataset.wasChecked = "false";
-  input.dispatchEvent(new Event("change", { bubbles: true }));
+  createTaskDialog.closeTaskDialog();
 }
 
 function bindRunModeDeselectableCards() {
-  document.querySelectorAll(".run-mode-card").forEach((card) => {
-    card.addEventListener("pointerdown", handleRunModeCardPointerDown);
-    card.addEventListener("click", handleRunModeCardClick);
-  });
+  createTaskDialog.bindRunModeDeselectableCards();
 }
 
 function openExecutionEnvironmentDialog() {
   $("executionEnvironmentStatus").textContent = "正在读取执行环境...";
   $("executionEnvironmentStatus").className = "status";
-  $("executionEnvironmentDialog").showModal();
-  loadExecutionEnvironmentSettings();
+  openGovernanceSettingsCenter("execution-environment");
 }
 
 function closeExecutionEnvironmentDialog() {
-  $("executionEnvironmentDialog").close();
+  closeGovernanceSettingsDialog();
 }
 
 function openLLMSettingsDialog() {
   setLLMSettingsStatus("正在读取大模型配置...");
-  $("llmSettingsDialog").showModal();
-  runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置..." });
+  openGovernanceSettingsCenter("llm");
 }
 
 function closeLLMSettingsDialog() {
-  $("llmSettingsDialog").close();
+  closeGovernanceSettingsDialog();
 }
 
-function openAgentMemoryDialog() {
-  $("agentMemoryDialog").showModal();
-  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+const governanceSettingsCopy = {
+  "execution-environment": {
+    title: "执行环境",
+    subtitle: "选择 Notebook 和工具运行使用的 Python 环境。",
+  },
+  llm: {
+    title: "模型引擎",
+    subtitle: "配置 Agent 会话可调用的大模型连接信息。",
+  },
+  "memory-policy": {
+    title: "记忆",
+    subtitle: "控制 Agent 记忆的引用范围、沉淀规则；展开下方可查看与管理记忆。",
+  },
+  plugins: {
+    title: "插件",
+    subtitle: "管理可调用工具包，启停插件并查看插件暴露的工具。",
+    extensionTitle: "插件",
+    extensionDescription: "管理可调用工具包，启停插件并查看插件暴露的工具。",
+  },
+  workflows: {
+    title: "Workflow 模板",
+    subtitle: "加载、校验和复用用户可编写的 Workflow 模板。",
+    extensionTitle: "Workflow 模板",
+    extensionDescription: "加载、校验和复用用户可编写的 Workflow 模板。",
+  },
+  capabilities: {
+    title: "能力档位",
+    subtitle: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
+    extensionTitle: "能力档位",
+    extensionDescription: "选择 Agent 自治程度；证据、确认门和安全护栏保持不变。",
+  },
+};
+
+let activeGovernanceNav = "execution-environment";
+
+function governanceNavButton(navKey) {
+  return document.querySelector(`[data-governance-nav="${navKey}"]`);
 }
 
-function closeAgentMemoryDialog() {
-  $("agentMemoryDialog").close();
+function activeGovernanceButton(navKey = activeGovernanceNav) {
+  return governanceNavButton(navKey) || governanceNavButton("execution-environment");
+}
+
+function setGovernanceCopy(navKey, button) {
+  const copy = governanceSettingsCopy[navKey] || governanceSettingsCopy["execution-environment"];
+  $("governanceSettingsTitle").textContent = copy.title;
+  $("governanceSettingsSubtitle").textContent = copy.subtitle;
+  if (button?.dataset?.extensionView) {
+    $("governanceExtensionTitle").textContent = copy.extensionTitle || copy.title;
+    $("governanceExtensionDescription").textContent = copy.extensionDescription || copy.subtitle;
+  }
+}
+
+// Single, context-aware refresh for the dialog title bar. Only panels that load
+// remote data appear here; execution-environment keeps its own 扫描环境 action.
+const governanceRefreshActions = {
+  plugins: () => runGovernanceExtensionAction(refreshGovernancePlugins),
+  workflows: () => runGovernanceExtensionAction(refreshGovernanceSkills),
+  capabilities: () => runGovernanceExtensionAction(refreshGovernanceCapability),
+};
+
+function syncGovernanceRefreshButton(navKey = activeGovernanceNav) {
+  const button = $("governanceRefreshButton");
+  if (!button) return;
+  const unavailable = !governanceRefreshActions[navKey];
+  button.classList.toggle("is-unavailable", unavailable);
+  button.disabled = unavailable;
+  button.setAttribute("aria-hidden", unavailable ? "true" : "false");
+}
+
+function refreshActiveGovernancePanel() {
+  const action = governanceRefreshActions[activeGovernanceNav];
+  if (!action) return;
+  const button = $("governanceRefreshButton");
+  if (button) {
+    button.classList.add("is-spinning");
+    window.setTimeout(() => button.classList.remove("is-spinning"), 700);
+  }
+  action();
+}
+
+function setGovernanceSettingsPanel(navKey = "execution-environment", options = {}) {
+  const button = activeGovernanceButton(navKey);
+  const normalizedNav = button?.dataset?.governanceNav || "execution-environment";
+  const panel = button?.dataset?.governancePanel || "execution-environment";
+  activeGovernanceNav = normalizedNav;
+  syncGovernanceRefreshButton(normalizedNav);
+  for (const item of document.querySelectorAll("[data-governance-nav]")) {
+    const selected = item === button;
+    item.classList.toggle("selected", selected);
+    item.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+  for (const section of document.querySelectorAll("[data-governance-panel-content]")) {
+    section.classList.toggle("selected", section.dataset.governancePanelContent === panel);
+  }
+  const dialog = $("governanceSettingsDialog");
+  dialog.dataset.governanceActive = normalizedNav;
+  dialog.dataset.extensionView = button?.dataset?.extensionView || "";
+  setGovernanceCopy(normalizedNav, button);
+  if (panel === "extensions") {
+    mountGovernanceExtensions();
+    setGovernanceExtensionStatus("");
+  }
+}
+
+function refreshGovernancePanel(navKey = activeGovernanceNav, options = {}) {
+  const button = activeGovernanceButton(navKey);
+  if (button?.dataset?.governancePanel === "execution-environment" && options.load !== false) {
+    runAction(loadExecutionEnvironmentSettings, {
+      actionId: "executionEnvironment",
+      busyText: "正在读取执行环境...",
+    });
+  }
+  if (button?.dataset?.governancePanel === "llm" && options.load !== false) {
+    runAction(loadLLMSettings, { actionId: "llmSettings", busyText: "正在读取大模型配置..." });
+  }
+  if (button?.dataset?.governancePanel === "memory-policy" && options.load !== false) {
+    runAction(loadMemoryPolicySettings, { actionId: "memoryPolicy", busyText: "正在读取记忆策略..." });
+  }
+}
+
+function openGovernanceSettingsCenter(navKey = "execution-environment", options = {}) {
+  closeSidebarSettingsMenu();
+  setGovernanceSettingsPanel(navKey, { reloadMemory: false });
+  const dialog = $("governanceSettingsDialog");
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+  refreshGovernancePanel(navKey, options);
+}
+
+function closeGovernanceSettingsDialog() {
+  $("governanceSettingsDialog").close();
+}
+
+function closeSidebarSettingsMenu() {
+  const settings = $("sidebarSettings");
+  if (!settings) return;
+  settings.open = false;
+}
+
+let sidebarSettingsOpenFrame = 0;
+
+function scheduleGovernanceSettingsFromSidebar() {
+  if (sidebarSettingsOpenFrame || $("governanceSettingsDialog")?.open) return;
+  sidebarSettingsOpenFrame = window.requestAnimationFrame(() => {
+    sidebarSettingsOpenFrame = 0;
+    openGovernanceSettingsCenter("execution-environment");
+  });
+}
+
+function handleGovernanceSettingsNavClick(event) {
+  const viewTab = event.target.closest("[data-agent-memory-view]");
+  if (viewTab) {
+    setAgentMemoryViewMode(viewTab.dataset.agentMemoryView, { reload: true });
+    return;
+  }
+  const jump = event.target.closest("[data-governance-jump]");
+  const navKey = jump
+    ? jump.dataset.governanceJump
+    : event.target.closest("[data-governance-nav]")?.dataset.governanceNav;
+  if (!navKey) return;
+  setGovernanceSettingsPanel(navKey, { reloadMemory: false });
+  refreshGovernancePanel(navKey);
+}
+
+function handleGovernanceSettingsSearch(event) {
+  const query = String(event.target.value || "").trim().toLowerCase();
+  let visibleCount = 0;
+  for (const item of document.querySelectorAll("[data-governance-nav]")) {
+    const hidden = Boolean(query && !item.textContent.toLowerCase().includes(query));
+    item.classList.toggle("hidden", hidden);
+    if (!hidden) visibleCount += 1;
+  }
+  for (const group of document.querySelectorAll(".governance-nav-group")) {
+    const visibleItems = group.querySelectorAll("[data-governance-nav]:not(.hidden)");
+    group.classList.toggle("hidden", visibleItems.length === 0);
+  }
+  const empty = $("governanceSettingsNavEmpty");
+  if (empty) empty.hidden = visibleCount !== 0;
+}
+
+function syncAgentMemoryViewControls() {
+  agentMemoryPanel.syncViewControls();
+}
+
+function setAgentMemoryViewMode(mode, { reload = true } = {}) {
+  agentMemoryPanel.setViewMode(mode, { reload });
 }
 
 function openWordPreviewDialog() {
@@ -418,111 +784,8 @@ function closeWordPreviewDialog() {
   $("wordPreviewFrame").src = "about:blank";
 }
 
-function systemTheme() {
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function applyTheme(theme) {
-  themePreference = ["light", "dark", "system"].includes(theme) ? theme : "light";
-  currentTheme = themePreference === "system" ? systemTheme() : themePreference;
-  document.body.dataset.theme = currentTheme;
-  $("themeModeLabel").textContent = "设置";
-  try {
-    localStorage.setItem("marvis_theme", themePreference);
-  } catch (_) {
-    // Local storage can be unavailable in restricted notebook browsers.
-  }
-  renderSettingsState();
-}
-
-function setCssNumber(name, value) {
-  document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
-}
-
-function formControlFocusTarget(target) {
-  return target?.closest?.("input, textarea, select") || null;
-}
-
-function installFormControlFocusRingGuard() {
-  function handleFormControlPointerDown(event) {
-    const control = formControlFocusTarget(event.target);
-    lastPointerDownControl = control;
-    lastPointerDownAt = performance.now();
-    if (control) control.classList.remove("suppress-pointer-focus-ring");
-  }
-
-  function handleFormControlFocusIn(event) {
-    const control = formControlFocusTarget(event.target);
-    if (!control) return;
-    const pointerFocusPending = performance.now() - lastPointerDownAt < 750;
-    control.classList.toggle(
-      "suppress-pointer-focus-ring",
-      pointerFocusPending && lastPointerDownControl !== control
-    );
-    lastPointerDownControl = null;
-    lastPointerDownAt = 0;
-  }
-
-  function handleFormControlFocusOut(event) {
-    const control = formControlFocusTarget(event.target);
-    if (control) control.classList.remove("suppress-pointer-focus-ring");
-  }
-
-  function handleFormControlLabelClick(event) {
-    const clickedControl = formControlFocusTarget(event.target);
-    if (clickedControl) {
-      clickedControl.classList.remove("suppress-pointer-focus-ring");
-      return;
-    }
-    const label = event.target.closest?.("label");
-    if (!label) return;
-    setTimeout(() => {
-      const focused = formControlFocusTarget(document.activeElement);
-      if (!focused) return;
-      const labelTargetsFocusedControl =
-        label.contains(focused) || Boolean(label.htmlFor && focused.id === label.htmlFor);
-      if (labelTargetsFocusedControl) focused.classList.add("suppress-pointer-focus-ring");
-    }, 0);
-  }
-
-  document.addEventListener("pointerdown", handleFormControlPointerDown, true);
-  document.addEventListener("mousedown", handleFormControlPointerDown, true);
-  document.addEventListener("touchstart", handleFormControlPointerDown, true);
-  document.addEventListener("click", handleFormControlLabelClick, true);
-  document.addEventListener("focusin", handleFormControlFocusIn, true);
-  document.addEventListener("focusout", handleFormControlFocusOut, true);
-}
-
-function saveLayoutWidths() {
-  try {
-    localStorage.setItem(
-      "marvis_layout",
-      JSON.stringify({
-        sidebar: parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"), 10),
-        progress: parseInt(getComputedStyle(document.documentElement).getPropertyValue("--progress-width"), 10),
-      })
-    );
-  } catch (_) {
-    // Layout persistence is optional in restricted notebook browsers.
-  }
-}
-
-function restoreLayoutWidths() {
-  try {
-    const stored = JSON.parse(localStorage.getItem("marvis_layout") || "{}");
-    if (stored.sidebar) {
-      setCssNumber(
-        "--sidebar-width",
-        clamp(stored.sidebar === 320 ? SIDEBAR_WIDTH_MIN : stored.sidebar, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
-      );
-    }
-    if (stored.progress) setCssNumber("--progress-width", clamp(stored.progress, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-  } catch (_) {
-    // Keep CSS defaults when storage is unavailable or invalid.
-  }
-}
-
 function applySidebarCollapsed(collapsed) {
+  const shouldKeepPetOnLeftEdge = petIsPinnedToWorkspaceLeftEdge();
   sidebarCollapsed = Boolean(collapsed);
   const shell = $("appShell");
   // Keep expanded text laid out at the expanded width while the grid column slides away.
@@ -535,6 +798,22 @@ function applySidebarCollapsed(collapsed) {
     sidebarSlideTimer = setTimeout(() => document.body.classList.remove("sidebar-sliding"), 340);
   }
   shell.classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  window.requestAnimationFrame(() => {
+    if (shouldKeepPetOnLeftEdge) {
+      pinPetToWorkspaceLeftEdge({ persist: true });
+    } else {
+      ensurePetWithinViewport({ persist: true });
+    }
+    if (document.body.classList.contains("anim-ready")) {
+      window.setTimeout(() => {
+        if (shouldKeepPetOnLeftEdge) {
+          pinPetToWorkspaceLeftEdge({ persist: true });
+        } else {
+          ensurePetWithinViewport({ persist: true });
+        }
+      }, 340);
+    }
+  });
   const button = $("sidebarCollapseButton");
   button.setAttribute("aria-expanded", String(!sidebarCollapsed));
   button.setAttribute("aria-label", sidebarCollapsed ? "展开侧栏" : "收起侧栏");
@@ -581,103 +860,32 @@ function handleSidebarBrandKeydown(event) {
   expandSidebarFromBrand(event);
 }
 
-function startResizeDrag(side, event) {
-  event.preventDefault();
-  const rootStyle = getComputedStyle(document.documentElement);
-  const startX = event.clientX;
-  const startSidebar = parseInt(rootStyle.getPropertyValue("--sidebar-width"), 10);
-  const startProgress = parseInt(rootStyle.getPropertyValue("--progress-width"), 10);
-
-  function onPointerMove(moveEvent) {
-    const deltaX = moveEvent.clientX - startX;
-    if (side === "left") {
-      setCssNumber("--sidebar-width", clamp(startSidebar + deltaX, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX));
-    } else {
-      setCssNumber("--progress-width", clamp(startProgress - deltaX, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-    }
+// VD-5: V2 driver (plan-rail) tasks never reach the V1-only "review_required"
+// task status while a gate sits open awaiting confirmation - the task record
+// itself typically stays at "running", so without this the mascot kept
+// spinning its busy mood while the system was actually idle, waiting on the
+// human. This is a pure read of already-polled state (agentMessages / the
+// gate's own red-flag metadata) - no new backend calls, upholding INV-4.
+function latestOpenGateMessage() {
+  for (let index = agentMessages.length - 1; index >= 0; index--) {
+    const message = agentMessages[index];
+    if (message?.role !== "assistant") continue;
+    const meta = message?.metadata || {};
+    if (meta.kind === "gate" || meta.join_c1) return message;
+    return null;
   }
-
-  function onPointerUp() {
-    document.body.classList.remove("is-resizing");
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
-    saveLayoutWidths();
-  }
-
-  document.body.classList.add("is-resizing");
-  window.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", onPointerUp);
-}
-
-function handleResizeKey(side, event) {
-  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
-  event.preventDefault();
-  const rootStyle = getComputedStyle(document.documentElement);
-  const step = event.shiftKey ? 32 : 12;
-  const direction = event.key === "ArrowRight" ? 1 : -1;
-  if (side === "left") {
-    const current = parseInt(rootStyle.getPropertyValue("--sidebar-width"), 10);
-    setCssNumber("--sidebar-width", clamp(current + direction * step, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX));
-  } else {
-    const current = parseInt(rootStyle.getPropertyValue("--progress-width"), 10);
-    setCssNumber("--progress-width", clamp(current - direction * step, PROGRESS_WIDTH_MIN, PROGRESS_WIDTH_MAX));
-  }
-  saveLayoutWidths();
-}
-
-function openTaskSearch() {
-  if (taskSearchActive) return;
-  taskSearchActive = true;
-  document.body.classList.add("search-active");
-  $("taskSearchToggle").setAttribute("aria-expanded", "true");
-  const input = $("taskSearchInput");
-  window.requestAnimationFrame(() => {
-    input.focus();
-    input.select();
-  });
-}
-
-function closeTaskSearch({ focusToggle = false } = {}) {
-  if (!taskSearchActive) return;
-  taskSearchActive = false;
-  document.body.classList.remove("search-active");
-  $("taskSearchToggle").setAttribute("aria-expanded", "false");
-  const input = $("taskSearchInput");
-  if (input.value) {
-    input.value = "";
-    taskSearchQuery = "";
-    renderTaskList();
-  }
-  if (focusToggle) $("taskSearchToggle").focus();
-}
-
-function toggleTaskSearch() {
-  if (taskSearchActive) {
-    closeTaskSearch({ focusToggle: true });
-  } else {
-    openTaskSearch();
-  }
-}
-
-function restoreTheme() {
-  try {
-    applyTheme(localStorage.getItem("marvis_theme") || "light");
-  } catch (_) {
-    applyTheme("light");
-  }
-}
-
-function watchSystemTheme() {
-  const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-  if (!media?.addEventListener) return;
-  media.addEventListener("change", () => {
-    if (themePreference === "system") applyTheme("system");
-  });
+  return null;
 }
 
 function basePetMoodFromTask() {
   const status = selectedTask?.status || "";
   if (taskStopped(selectedTask)) return "idle";
+  if (taskUsesPlanRail(selectedTask) && !selectedTaskIsBusy()) {
+    const openGate = latestOpenGateMessage();
+    if (openGate) {
+      return driverGateRedFlags(openGate).length ? "failed" : "review";
+    }
+  }
   if (selectedTaskIsBusy()) return "running";
   if (status === "succeeded") return "success";
   if (status === "failed") return "failed";
@@ -763,6 +971,33 @@ function applyPetPreference(value, options = {}) {
   ensurePetWithinViewport({ persist });
 }
 
+function persistMascotGlowPreference(value) {
+  try {
+    localStorage.setItem("marvis_mascot_glow", value ? "on" : "off");
+  } catch (_) {
+    // Mascot glow preference is optional in restricted notebook browsers.
+  }
+}
+
+function applyMascotGlowPreference(value, options = {}) {
+  const { persist = true } = options;
+  mascotGlowEnabled = Boolean(value);
+  if ($("settingsMascotGlowSelect")) {
+    $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
+  }
+  if (persist) persistMascotGlowPreference(mascotGlowEnabled);
+  renderPetState();
+}
+
+function restoreMascotGlowPreference() {
+  try {
+    const stored = localStorage.getItem("marvis_mascot_glow");
+    applyMascotGlowPreference(stored === "on", { persist: false });
+  } catch (_) {
+    applyMascotGlowPreference(false, { persist: false });
+  }
+}
+
 function restorePetPreference() {
   try {
     const stored = localStorage.getItem("marvis_pet");
@@ -785,7 +1020,10 @@ function restorePetPreference() {
 function applyPetPosition(left, top) {
   const pet = $("petCompanion");
   if (!pet) return;
-  pet.style.left = `${Math.round(left)}px`;
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  const offsetLeft = workspace ? left - workspace.left : left;
+  pet.style.setProperty("--pet-offset-left", `${Math.round(offsetLeft)}px`);
+  pet.style.left = "";
   pet.style.top = `${Math.round(top)}px`;
   pet.style.right = "auto";
   pet.style.bottom = "auto";
@@ -793,7 +1031,10 @@ function applyPetPosition(left, top) {
 
 function savePetPosition(left, top) {
   try {
-    localStorage.setItem("marvis_pet_position", JSON.stringify({ left, top }));
+    const workspace = $("validationWorkspace")?.getBoundingClientRect();
+    const payload = { left, top };
+    if (workspace) payload.workspaceOffsetLeft = left - workspace.left;
+    localStorage.setItem("marvis_pet_position", JSON.stringify(payload));
   } catch (_) {
     // Drag position persistence is optional in restricted notebook browsers.
   }
@@ -802,27 +1043,76 @@ function savePetPosition(left, top) {
 function restorePetPosition() {
   try {
     const stored = JSON.parse(localStorage.getItem("marvis_pet_position") || "{}");
-    if (Number.isFinite(stored.left) && Number.isFinite(stored.top)) {
-      const next = clampPetPosition(stored.left, stored.top);
+    const workspace = $("validationWorkspace")?.getBoundingClientRect();
+    const storedLeft =
+      workspace && Number.isFinite(stored.workspaceOffsetLeft)
+        ? workspace.left + stored.workspaceOffsetLeft
+        : stored.left;
+    if (Number.isFinite(storedLeft) && Number.isFinite(stored.top)) {
+      const next = clampPetPosition(storedLeft, stored.top);
       applyPetPosition(next.left, next.top);
-      if (next.left !== stored.left || next.top !== stored.top) {
+      if (
+        next.left !== stored.left ||
+        next.top !== stored.top ||
+        !Number.isFinite(stored.workspaceOffsetLeft)
+      ) {
         savePetPosition(next.left, next.top);
       }
     }
   } catch (_) {
-    // Keep the default fixed bottom-right position.
+    // Keep the default fixed bottom-left workspace position.
   }
+}
+
+function petCssPx(name, fallback) {
+  const pet = $("petCompanion");
+  const host = pet || $("appShell") || document.documentElement;
+  const value = getComputedStyle(host).getPropertyValue(name);
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function petDragBounds() {
   const pet = $("petCompanion");
   const workspace = $("validationWorkspace")?.getBoundingClientRect();
   const padding = 14;
-  const minLeft = Math.max(padding, workspace ? workspace.left + padding : padding);
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", padding);
+  const minLeft = Math.max(
+    padding,
+    workspace ? workspace.left + minWorkspaceOffset : minWorkspaceOffset,
+  );
   const minTop = Math.max(padding, workspace ? workspace.top + padding : padding);
   const maxLeft = Math.max(minLeft, window.innerWidth - (pet?.offsetWidth || 104) - padding);
   const maxTop = Math.max(minTop, window.innerHeight - (pet?.offsetHeight || 116) - padding);
   return { minLeft, minTop, maxLeft, maxTop };
+}
+
+function petWorkspaceOffset() {
+  const pet = $("petCompanion");
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  if (!pet || !workspace) return null;
+  return pet.getBoundingClientRect().left - workspace.left;
+}
+
+function petIsPinnedToWorkspaceLeftEdge() {
+  const pet = $("petCompanion");
+  if (!pet || pet.classList.contains("hidden")) return false;
+  const offset = petWorkspaceOffset();
+  if (!Number.isFinite(offset)) return false;
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
+  return Math.abs(offset - minWorkspaceOffset) <= 2;
+}
+
+function pinPetToWorkspaceLeftEdge(options = {}) {
+  const { persist = false } = options;
+  const pet = $("petCompanion");
+  const workspace = $("validationWorkspace")?.getBoundingClientRect();
+  if (!pet || !workspace || pet.classList.contains("hidden")) return;
+  const minWorkspaceOffset = petCssPx("--pet-min-workspace-offset", 14);
+  const rect = pet.getBoundingClientRect();
+  const next = clampPetPosition(workspace.left + minWorkspaceOffset, rect.top);
+  applyPetPosition(next.left, next.top);
+  if (persist) savePetPosition(next.left, next.top);
 }
 
 function clampPetPosition(left, top) {
@@ -881,6 +1171,7 @@ function renderPetState() {
   }
   const mood = petMoodFromTask();
   pet.dataset.petMood = mood;
+  pet.dataset.mascotGlow = mascotGlowEnabled ? "on" : "off";
   pet.setAttribute("aria-label", `${definition.name}，${definition.label}，当前状态：${mood}`);
   ensurePetWithinViewport({ persist: false });
 }
@@ -922,8 +1213,9 @@ function startPetDrag(event) {
 function renderSettingsState() {
   if ($("settingsSortSelect")) $("settingsSortSelect").value = taskSortMode;
   if ($("settingsGroupSelect")) $("settingsGroupSelect").value = taskGroupMode;
-  if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themePreference;
+  if ($("settingsThemeSelect")) $("settingsThemeSelect").value = themeController.preference;
   if ($("settingsPetSelect")) $("settingsPetSelect").value = petPreference;
+  if ($("settingsMascotGlowSelect")) $("settingsMascotGlowSelect").value = mascotGlowEnabled ? "on" : "off";
   renderExecutionEnvironmentSummary();
   renderLLMSettingsSummary();
 }
@@ -975,10 +1267,13 @@ function handleSettingsMenuChange(event) {
     return;
   }
   if (target.id === "settingsThemeSelect") {
-    applyTheme(target.value);
+    themeController.applyTheme(target.value);
   }
   if (target.id === "settingsPetSelect") {
     applyPetPreference(target.value, { explicit: true });
+  }
+  if (target.id === "settingsMascotGlowSelect") {
+    applyMascotGlowPreference(target.value === "on");
   }
 }
 
@@ -994,57 +1289,8 @@ function reportTitleForTask(task) {
   return displayName ? `${displayName}模型验证文档` : "未选择任务";
 }
 
-function taskTextSeed() {
-  const modelName = $("modelName").value.trim() || "本模型";
-  const validator = $("validator").value.trim();
-  return {
-    modelName,
-    validator,
-    reportTitle: `${modelName}模型验证文档`,
-  };
-}
-
-function defaultCreateReportValues() {
-  const seed = taskTextSeed();
-  const today = formatDateInput();
-  return {
-    "TEXT:report_title": seed.reportTitle,
-    "TEXT:drafter": seed.validator,
-    "TEXT:draft_date": today,
-    "TEXT:revision_version": "V1",
-    "TEXT:revision_date": today,
-    "TEXT:revision_author": seed.validator,
-    "TEXT:revision_description": "初稿",
-    "TEXT:model_overview": `为了更好的对xx用户进行授信环节风险管控，现开发${seed.modelName}模型，对xx客群做前置风险拦截，从授信申请阶段做好风险防范。`,
-    "TEXT:model_scope": "本模型适用于xx渠道用户。",
-    "TEXT:bad_sample_definition": "xx逾期 >= xx天",
-    "TEXT:good_sample_definition": "xx未逾期",
-  };
-}
-
-function prefillCreateTaskReportFields() {
-  const defaults = defaultCreateReportValues();
-  for (const input of document.querySelectorAll("[data-create-report-key]")) {
-    const key = input.dataset.createReportKey;
-    if (!input.value.trim() && defaults[key]) input.value = defaults[key];
-  }
-}
-
-function collectCreateTaskReportValues() {
-  const values = defaultCreateReportValues();
-  for (const input of document.querySelectorAll("[data-create-report-key]")) {
-    values[input.dataset.createReportKey] = input.value.trim();
-  }
-  values["TEXT:report_title"] = values["TEXT:report_title"] || taskTextSeed().reportTitle;
-  values["TEXT:drafter"] = values["TEXT:drafter"] || $("validator").value.trim();
-  values["TEXT:revision_author"] = values["TEXT:revision_author"] || $("validator").value.trim();
-  return values;
-}
-
 function setCreateStatus(message, kind = "info") {
-  const status = $("statusMessage");
-  status.textContent = message;
-  status.className = `status ${kind}`;
+  createTaskDialog.setCreateStatus(message, kind);
 }
 
 function setExecutionEnvironmentStatus(message, kind = "info") {
@@ -1195,6 +1441,8 @@ function actionFailureStatusTitle(actionId) {
   switch (actionId) {
     case "agent":
       return "Agent 执行失败。";
+    case "join":
+      return "数据拼接失败。";
     case "scan":
       return "材料识别失败。";
     case "notebook":
@@ -1231,6 +1479,13 @@ function actionCancelledStatusTitle(actionId) {
 function taskActionStatusSnapshot(task = selectedTask) {
   if (!task) return { message: "", kind: "info" };
   if (taskStopped(task)) return { message: "已停止当前动作。", kind: "stopped" };
+  if (task.active_job_kind === "join") return { message: "数据拼接进行中。", kind: "busy" };
+  if (task.active_job_kind === "plan") return { message: "计划执行进行中。", kind: "busy" };
+  // REL-1/UX-1: V2 driver-turn task (data_join/feature_analysis/modeling/
+  // strategy/vintage) job — these task types don't carry the V1.1 validation
+  // task.status values the switch below keys on, so without this the busy pill
+  // would go blank for the whole turn instead of showing "正在执行下一步…".
+  if (task.active_job_kind === "driver") return { message: "正在执行下一步…", kind: "busy" };
   switch (task.status) {
     case "created":
       return { message: "任务已创建。", kind: "info" };
@@ -1304,6 +1559,12 @@ function shouldShowReproducibilitySection() {
 }
 
 function renderReproducibilitySectionVisibility() {
+  // Driver tasks (data_join / feature / modeling) have no validation notebook
+  // section — they run through the conversation + plan rail.
+  if (taskUsesPlanRail(selectedTask)) {
+    $("notebookSection")?.classList.add("hidden");
+    return;
+  }
   $("notebookSection")?.classList.toggle("hidden", !shouldShowReproducibilitySection());
 }
 
@@ -1320,6 +1581,12 @@ function shouldShowMetricSection() {
 }
 
 function renderMetricSectionVisibility() {
+  // Driver tasks render metrics inline in the conversation, not in the validation
+  // metric section.
+  if (taskUsesPlanRail(selectedTask)) {
+    $("metricSection")?.classList.add("hidden");
+    return;
+  }
   $("metricSection")?.classList.toggle("hidden", !shouldShowMetricSection());
 }
 
@@ -1400,152 +1667,108 @@ function setBusy(actionId, message = "", taskId = selectedTaskId) {
 }
 
 function setAgentMemoryStatus(message = "", kind = "") {
-  const status = $("agentMemoryStatus");
+  agentMemoryPanel.setStatus(message, kind);
+}
+
+function setGovernanceExtensionStatus(message = "", kind = "") {
+  const status = $("governanceExtensionStatus");
   if (!status) return;
   status.textContent = message;
   status.className = ["status", kind].filter(Boolean).join(" ");
 }
 
-function agentMemoryFilterParams() {
-  const params = new URLSearchParams();
-  const filters = [
-    ["memory_type", $("agentMemoryTypeFilter")?.value],
-    ["status", $("agentMemoryStatusFilter")?.value],
-    ["source_task_id", $("agentMemorySourceTaskFilter")?.value],
-    ["model_name", $("agentMemoryModelFilter")?.value],
-  ];
-  for (const [key, value] of filters) {
-    const normalized = String(value || "").trim();
-    if (normalized) params.set(key, normalized);
-  }
-  return params.toString();
+function governanceExtensionActions() {
+  const showExtensionError = (message) => {
+    setGovernanceExtensionStatus(message || "操作失败", "error");
+  };
+  return {
+    pluginActions: {
+      showError: showExtensionError,
+      confirmRemove: (name) => showPlatformConfirm({
+        title: "移除插件",
+        message: `确定移除插件「${name}」？移除后该插件提供的工具将不可用。`,
+        confirmText: "移除",
+        cancelText: "取消",
+        tone: "danger",
+      }),
+    },
+    skillActions: {
+      showError: showExtensionError,
+    },
+    capabilityActions: {
+      showError: showExtensionError,
+    },
+  };
 }
 
-function agentMemoryTitle(memory = {}) {
-  return memory.title || memory.summary || memory.key || memory.memory_type || memory.id || "未命名记忆";
+function mountGovernanceExtensions() {
+  const root = $("governanceExtensionMount");
+  return root ? mountGovernanceExtensionPanels(root, governanceExtensionActions()) : null;
 }
 
-function agentMemorySummary(memory = {}) {
-  return memory.summary || memory.content || memory.value || memory.use_reason || "";
+async function refreshGovernancePlugins() {
+  const mounted = mountGovernanceExtensions();
+  if (!mounted) return;
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取插件...");
+  await renderPluginManager(mounted.panels.pluginPanel, actions.pluginActions);
+  setGovernanceExtensionStatus("插件已更新。", "success");
 }
 
-function agentMemoryMetaParts(memory = {}) {
-  return [
-    memory.memory_type,
-    memory.status,
-    memory.source_task_id ? `来源 ${memory.source_task_id}` : "",
-    memory.model_name,
-    memory.confidence !== undefined ? `置信度 ${formatMemoryConfidence(memory.confidence)}` : "",
-  ].filter(Boolean);
+async function refreshGovernanceSkills() {
+  const mounted = mountGovernanceExtensions();
+  if (!mounted) return;
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取 Workflow 模板...");
+  await renderSkillManager(mounted.panels.skillPanel, actions.skillActions);
+  setGovernanceExtensionStatus("Workflow 模板已更新。", "success");
 }
 
-function formatMemoryConfidence(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return String(value ?? "");
-  if (number <= 1) return `${Math.round(number * 100)}%`;
-  return `${Math.round(number)}%`;
+async function refreshGovernanceCapability() {
+  const mounted = mountGovernanceExtensions();
+  if (!mounted) return;
+  const actions = governanceExtensionActions();
+  setGovernanceExtensionStatus("正在读取能力档位...");
+  await renderTierSettings(mounted.panels.capabilityPanel, actions.capabilityActions);
+  setGovernanceExtensionStatus("能力档位已更新。", "success");
+}
+
+function runGovernanceExtensionAction(action) {
+  action().catch((error) => {
+    setGovernanceExtensionStatus(error?.message || "扩展设置操作失败", "error");
+  });
 }
 
 function renderAgentMemoryItems() {
-  const list = $("agentMemoryList");
-  if (!list) return;
-  if (!agentMemoryItems.length) {
-    list.innerHTML = '<div class="agent-memory-empty">暂无匹配记忆。</div>';
-    return;
-  }
-  list.innerHTML = agentMemoryItems.map((memory) => {
-    const memoryId = String(memory.id || memory.memory_id || "");
-    const memoryStatus = String(memory.status || "").toLowerCase();
-    const isDisabled = memoryStatus === "disabled";
-    const isTerminal = memoryStatus === "deleted" || memoryStatus === "rejected";
-    const title = agentMemoryTitle(memory);
-    const summary = agentMemorySummary(memory);
-    const meta = agentMemoryMetaParts(memory).map(escapeHtml).join(" · ");
-    return [
-      `<article class="agent-memory-item" data-agent-memory-id="${escapeHtml(memoryId)}">`,
-      '<div class="agent-memory-item-main">',
-      `<strong>${escapeHtml(title)}</strong>`,
-      meta ? `<span>${meta}</span>` : "",
-      summary ? `<p>${escapeHtml(summary)}</p>` : "",
-      "</div>",
-      '<div class="agent-memory-actions">',
-      `<button class="button compact secondary" type="button" data-agent-memory-action="inspect" data-agent-memory-id="${escapeHtml(memoryId)}">查看</button>`,
-      isTerminal
-        ? ""
-        : isDisabled
-          ? `<button class="button compact secondary" type="button" data-agent-memory-action="enable" data-agent-memory-id="${escapeHtml(memoryId)}">启用</button>`
-          : `<button class="button compact secondary" type="button" data-agent-memory-action="disable" data-agent-memory-id="${escapeHtml(memoryId)}">停用</button>`,
-      isTerminal
-        ? ""
-        : `<button class="button compact secondary danger" type="button" data-agent-memory-action="delete" data-agent-memory-id="${escapeHtml(memoryId)}">删除</button>`,
-      "</div>",
-      "</article>",
-    ].join("");
-  }).join("");
+  agentMemoryPanel.renderItems();
 }
 
-function renderAgentMemoryDetail(memory = null, events = []) {
-  const detail = $("agentMemoryDetail");
-  if (!detail) return;
-  if (!memory) {
-    detail.innerHTML = "";
-    selectedAgentMemoryId = "";
-    return;
-  }
-  selectedAgentMemoryId = String(memory.id || memory.memory_id || "");
-  const meta = agentMemoryMetaParts(memory).map(escapeHtml).join(" · ");
-  const eventList = Array.isArray(events) ? events : [];
-  detail.innerHTML = [
-    '<section class="agent-memory-detail-inner">',
-    `<h3>${escapeHtml(agentMemoryTitle(memory))}</h3>`,
-    meta ? `<div class="agent-memory-detail-meta">${meta}</div>` : "",
-    agentMemorySummary(memory) ? `<p>${escapeHtml(agentMemorySummary(memory))}</p>` : "",
-    eventList.length
-      ? `<ol>${eventList.map((event) => `<li>${escapeHtml(event.action || event.event_type || "event")} ${escapeHtml(event.created_at || "")}</li>`).join("")}</ol>`
-      : '<div class="agent-memory-empty">暂无审计事件。</div>',
-    "</section>",
-  ].join("");
+function renderAgentMemoryDetail(memory = null, events = [], detailOptions = {}) {
+  agentMemoryPanel.renderDetail(memory, events, detailOptions);
 }
 
 async function loadAgentMemoryItems() {
-  const query = agentMemoryFilterParams();
-  setAgentMemoryStatus("正在读取记忆...");
-  const payload = await api("api/agent-memory" + (query ? `?${query}` : ""));
-  agentMemoryItems = Array.isArray(payload?.items) ? payload.items : [];
-  renderAgentMemoryItems();
-  renderAgentMemoryDetail(null);
-  setAgentMemoryStatus(`已读取 ${agentMemoryItems.length} 条记忆。`, "success");
+  return agentMemoryPanel.loadItems();
 }
 
 async function inspectAgentMemory(memoryId) {
-  if (!memoryId) return;
-  setAgentMemoryStatus("正在读取记忆详情...");
-  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`);
-  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
-  setAgentMemoryStatus("记忆详情已更新。", "success");
+  return agentMemoryPanel.inspect(memoryId);
 }
 
 async function disableAgentMemory(memoryId) {
-  if (!memoryId) return;
-  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}/disable`, { method: "POST" });
-  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
-  await loadAgentMemoryItems();
+  return agentMemoryPanel.disable(memoryId);
 }
 
 async function enableAgentMemory(memoryId) {
-  if (!memoryId) return;
-  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}/enable`, { method: "POST" });
-  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
-  await loadAgentMemoryItems();
+  return agentMemoryPanel.enable(memoryId);
 }
 
 async function deleteAgentMemory(memoryId) {
-  if (!memoryId) return;
-  if (!window.confirm("删除后将从 Agent 记忆库移除，确定删除？")) return;
-  const payload = await api(`api/agent-memory/${encodeURIComponent(memoryId)}`, { method: "DELETE" });
-  agentMemoryItems = agentMemoryItems.filter((memory) => String(memory.id || memory.memory_id || "") !== memoryId);
-  renderAgentMemoryItems();
-  renderAgentMemoryDetail(payload?.memory || null, payload?.events || []);
+  return agentMemoryPanel.remove(memoryId);
+}
+
+async function rollbackAgentMemoryDistillation(memoryId) {
+  return agentMemoryPanel.rollbackDistillation(memoryId);
 }
 
 async function loadAgentMessageMemoryReferences(taskId, messageId) {
@@ -1555,31 +1778,51 @@ async function loadAgentMessageMemoryReferences(taskId, messageId) {
 }
 
 function handleAgentMemoryListClick(event) {
-  const button = event.target.closest("[data-agent-memory-action]");
-  if (!button) return;
-  event.preventDefault();
-  const memoryId = button.dataset.agentMemoryId || selectedAgentMemoryId;
-  const action = button.dataset.agentMemoryAction;
-  const actions = {
-    inspect: inspectAgentMemory,
-    disable: disableAgentMemory,
-    enable: enableAgentMemory,
-    delete: deleteAgentMemory,
-  };
-  const handler = actions[action];
-  if (handler) {
-    runAction(() => handler(memoryId), { actionId: "agentMemory", busyText: "正在更新 Agent 记忆..." });
-  }
+  agentMemoryPanel.handleListClick(event);
 }
 
 function handleAgentMemoryInlineInspect(event) {
-  const button = event.target.closest("[data-agent-memory-inline-inspect]");
-  if (!button) return;
-  event.preventDefault();
-  const memoryId = button.dataset.agentMemoryInlineInspect || "";
-  if (!memoryId) return;
-  $("agentMemoryDialog").showModal();
-  runAction(() => inspectAgentMemory(memoryId), { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+  agentMemoryPanel.handleInlineInspect(event);
+}
+
+function setDraftToolsStatus(message = "", kind = "") {
+  draftToolsPanel.setStatus(message, kind);
+}
+
+function renderDraftToolsList() {
+  draftToolsPanel.renderList();
+}
+
+function renderDraftToolDetail(payload = null) {
+  draftToolsPanel.renderDetail(payload);
+}
+
+async function loadDraftTools({ preserveSelection = false } = {}) {
+  return draftToolsPanel.load({ preserveSelection });
+}
+
+async function inspectDraftTool(draftId) {
+  return draftToolsPanel.inspect(draftId);
+}
+
+async function runDraftTool() {
+  return draftToolsPanel.run();
+}
+
+async function promoteDraftTool() {
+  return draftToolsPanel.promote();
+}
+
+async function rejectDraftTool() {
+  return draftToolsPanel.reject();
+}
+
+function handleDraftToolsListClick(event) {
+  draftToolsPanel.handleListClick(event);
+}
+
+function handleDraftToolsListKeydown(event) {
+  draftToolsPanel.handleListKeydown(event);
 }
 
 function requireTaskId(taskId, actionName = "当前操作") {
@@ -1619,13 +1862,6 @@ function executionEnvironmentSettingsMatch(option = {}, settings = {}) {
   return true;
 }
 
-function executionEnvironmentOptionText(option = {}) {
-  const suffixes = [];
-  if (option.note) suffixes.push(option.note);
-  if (option.available === false) suffixes.push("不可用");
-  return [option.label || option.id || "未命名环境", ...suffixes].join(" · ");
-}
-
 function executionEnvironmentSettingsLabel(settings = executionEnvironmentSettings, options = executionEnvironmentOptions) {
   const normalized = normalizeExecutionEnvironment(settings);
   const matchedOption = (options || []).find((option) => executionEnvironmentSettingsMatch(option, normalized));
@@ -1640,65 +1876,103 @@ function executionEnvironmentSettingsLabel(settings = executionEnvironmentSettin
 }
 
 function renderExecutionEnvironmentSummary() {
-  const summary = $("settingsExecutionEnvironmentValue");
-  if (!summary) return;
   const label = executionEnvironmentSettingsLabel();
-  summary.textContent = label;
-  $("openExecutionEnvironmentButton").title = `配置执行环境：${label}`;
+  const systemButton = $("openGovernanceSettingsButton");
+  if (systemButton) systemButton.title = `打开系统设置，当前执行环境：${label}`;
 }
 
-function addExecutionEnvironmentOption(select, option, settings, selected) {
-  const item = document.createElement("option");
-  item.value = option.id || JSON.stringify(executionEnvironmentSettingsFromOption(option));
-  item.textContent = executionEnvironmentOptionText(option);
-  item.disabled = option.available === false;
-  item.dataset.settings = JSON.stringify(executionEnvironmentSettingsFromOption(option));
-  if (selected) item.selected = true;
-  select.appendChild(item);
+function addExecutionEnvironmentRow(list, option, selected) {
+  const settings = executionEnvironmentSettingsFromOption(option);
+  const unavailable = option.available === false;
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "exec-env-row" + (selected ? " selected" : "");
+  row.setAttribute("role", "radio");
+  row.setAttribute("aria-checked", selected ? "true" : "false");
+  row.tabIndex = -1; // roving tabindex; the active row is promoted after render
+  row.disabled = unavailable;
+  row.dataset.settings = JSON.stringify(settings);
+  const title = option.label || option.id || "未命名环境";
+  const subParts = [];
+  if (option.note) subParts.push(option.note);
+  if (unavailable) subParts.push("不可用");
+  const sub = subParts.join(" · ");
+  row.innerHTML =
+    '<span class="exec-env-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"></path></svg></span>' +
+    '<span class="exec-env-row-text">' +
+    `<span class="exec-env-row-title">${escapeHtml(title)}</span>` +
+    (sub ? `<span class="exec-env-row-sub">${escapeHtml(sub)}</span>` : "") +
+    "</span>";
+  list.appendChild(row);
 }
 
 function renderExecutionEnvironmentOptions(options = [], settings = {}) {
   executionEnvironmentOptions = Array.isArray(options) ? options : [];
-  const select = $("executionEnvironmentSelect");
+  const list = $("executionEnvironmentList");
+  if (!list) return;
   const normalized = normalizeExecutionEnvironment(settings);
-  select.innerHTML = "";
-  select.disabled = false;
+  list.innerHTML = "";
 
+  const rows = [];
   let selected = false;
   for (const option of executionEnvironmentOptions) {
-    const matches = executionEnvironmentSettingsMatch(option, normalized);
-    addExecutionEnvironmentOption(select, option, normalized, matches);
+    // Only the first match is marked selected, so at most one row is checked.
+    const matches = !selected && executionEnvironmentSettingsMatch(option, normalized);
+    rows.push({ option, selected: matches });
     selected = selected || matches;
   }
 
   if (!selected && (normalized.kernel_name || normalized.conda_env_name || normalized.python_executable)) {
-    addExecutionEnvironmentOption(
-      select,
-      {
+    rows.push({
+      option: {
         id: "saved-current",
         label: "当前保存配置",
         ...normalized,
         note: "未在本次扫描结果中匹配",
+        available: true,
       },
-      normalized,
-      true
-    );
+      selected: true,
+    });
     selected = true;
   }
 
-  if (select.options.length === 0) {
-    const item = document.createElement("option");
-    item.value = "";
-    item.textContent = "未扫描到可用 Python 环境";
-    select.appendChild(item);
-    select.disabled = true;
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "exec-env-empty";
+    empty.textContent = "未扫描到可用 Python 环境";
+    list.appendChild(empty);
     return;
   }
 
   if (!selected) {
-    const firstAvailable = Array.from(select.options).find((option) => !option.disabled);
+    const firstAvailable = rows.find((row) => row.option.available !== false);
     if (firstAvailable) firstAvailable.selected = true;
   }
+
+  for (const row of rows) addExecutionEnvironmentRow(list, row.option, row.selected);
+
+  // Promote one row to the group's tab stop (roving tabindex): the selected
+  // row, else the first selectable row.
+  const focusTarget =
+    list.querySelector(".exec-env-row.selected:not(:disabled)") ||
+    list.querySelector(".exec-env-row:not(:disabled)");
+  if (focusTarget) focusTarget.tabIndex = 0;
+}
+
+function handleExecutionEnvironmentListKeydown(event) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const rows = [...$("executionEnvironmentList").querySelectorAll(".exec-env-row:not(:disabled)")];
+  if (!rows.length) return;
+  event.preventDefault();
+  const current = event.target.closest(".exec-env-row");
+  let idx = rows.indexOf(current);
+  if (event.key === "Home") idx = 0;
+  else if (event.key === "End") idx = rows.length - 1;
+  else if (event.key === "ArrowDown") idx = idx < 0 ? 0 : (idx + 1) % rows.length;
+  else idx = idx < 0 ? rows.length - 1 : (idx - 1 + rows.length) % rows.length;
+  const next = rows[idx];
+  for (const row of rows) row.tabIndex = row === next ? 0 : -1;
+  next.focus();
 }
 
 function populateExecutionEnvironmentForm(settings = {}, options = executionEnvironmentOptions) {
@@ -1708,22 +1982,23 @@ function populateExecutionEnvironmentForm(settings = {}, options = executionEnvi
   renderExecutionEnvironmentSummary();
 }
 
-function collectExecutionEnvironmentSettings() {
-  const selected = $("executionEnvironmentSelect").selectedOptions[0];
-  if (!selected || !selected.dataset.settings) {
-    throw new Error("请先扫描并选择一个可用 Python 环境。");
-  }
-  if (selected.disabled) {
-    throw new Error("当前环境不可用，请选择已注册 Jupyter Kernel 的 Python 环境。");
-  }
+function handleExecutionEnvironmentListClick(event) {
+  const row = event.target.closest(".exec-env-row");
+  if (!row || row.disabled) return;
+  let settings;
   try {
-    return {
-      ...defaultExecutionEnvironment,
-      ...JSON.parse(selected.dataset.settings),
-    };
+    settings = { ...defaultExecutionEnvironment, ...JSON.parse(row.dataset.settings || "{}") };
   } catch (_) {
-    throw new Error("执行环境配置解析失败，请重新扫描后再保存。");
+    setExecutionEnvironmentStatus("执行环境配置解析失败，请重新扫描后再选择。", "error");
+    return;
   }
+  // Optimistically move the checkmark; saveExecutionEnvironmentSettings reverts on failure.
+  for (const item of $("executionEnvironmentList").querySelectorAll(".exec-env-row")) {
+    const on = item === row;
+    item.classList.toggle("selected", on);
+    item.setAttribute("aria-checked", on ? "true" : "false");
+  }
+  saveExecutionEnvironmentSettings(settings);
 }
 
 function renderExecutionEnvironmentValidation(validation = {}) {
@@ -1755,18 +2030,24 @@ async function refreshExecutionEnvironmentOptions() {
   await loadExecutionEnvironmentSettings();
 }
 
-async function saveExecutionEnvironmentSettings() {
+async function saveExecutionEnvironmentSettings(settings) {
+  const list = $("executionEnvironmentList");
   try {
-    setExecutionEnvironmentStatus("正在保存执行环境...");
+    setExecutionEnvironmentStatus("正在验证并保存环境...");
+    if (list) list.classList.add("is-saving");
     const payload = await api("/api/settings/execution-environment", {
       method: "PUT",
-      body: JSON.stringify(collectExecutionEnvironmentSettings()),
+      body: JSON.stringify({ ...defaultExecutionEnvironment, ...(settings || {}) }),
     });
     populateExecutionEnvironmentForm(payload.settings, executionEnvironmentOptions);
     renderExecutionEnvironmentValidation(payload.validation);
     if (!payload.validation) setExecutionEnvironmentStatus("执行环境已保存。", "success");
   } catch (error) {
+    // Revert the optimistic checkmark to the last known-good selection.
+    populateExecutionEnvironmentForm(executionEnvironmentSettings, executionEnvironmentOptions);
     setExecutionEnvironmentStatus(error.message || "执行环境保存失败。", "error");
+  } finally {
+    if (list) list.classList.remove("is-saving");
   }
 }
 
@@ -1782,6 +2063,53 @@ function setLLMEngineEditStatus(message, kind = "info") {
   if (!status) return;
   status.textContent = message;
   status.className = `status ${kind}`.trim();
+}
+
+// GAP-8: LLM configuration preflight -- lets the user confirm base_url/model
+// name/api_key actually connect before saving, instead of only discovering a
+// typo once the agent silently degrades mid-conversation.
+function setLLMEngineTestResult(message, kind = "info") {
+  const status = $("llmEngineTestResult");
+  if (!status) return;
+  status.textContent = message;
+  status.className = `status ${kind}`.trim();
+}
+
+async function testLLMEngineConnection() {
+  const editing = llmEditingIndex !== null ? (llmSettings.models[llmEditingIndex] || {}) : null;
+  const apiKey = $("llmEngineApiKey").value.trim();
+  const payload = {
+    api_base_url: $("llmEngineBaseUrl").value.trim(),
+    model_name: $("llmEngineModelName").value.trim(),
+    api_key: apiKey,
+  };
+  if (!payload.api_base_url || !payload.model_name) {
+    return setLLMEngineTestResult("请先填写 API 地址与模型名称。", "error");
+  }
+  if (!apiKey && editing && editing.has_api_key && editing.model_id) {
+    // Key left blank on an edit -- test the already-saved model_id so the
+    // stored (masked) api_key is used instead of an empty string.
+    payload.model_id = editing.model_id;
+  } else if (!apiKey) {
+    return setLLMEngineTestResult("请先填写 API 密钥。", "error");
+  }
+  setLLMEngineTestResult("正在测试连接...");
+  try {
+    const result = await api("/api/settings/llm/test", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (result.ok) {
+      setLLMEngineTestResult(
+        `连接成功（${result.latency_ms}ms，模型：${result.model_echo || "-"}）。`,
+        "success",
+      );
+    } else {
+      setLLMEngineTestResult(result.error_detail || "连接失败。", "error");
+    }
+  } catch (error) {
+    setLLMEngineTestResult(error.message || "连接测试失败。", "error");
+  }
 }
 
 function normalizeLLMSettings(payload = {}) {
@@ -1895,18 +2223,17 @@ function resetAgentComposerToGlobalDefaults() {
 }
 
 function renderLLMSettingsSummary() {
-  const summary = $("settingsLLMValue");
-  if (!summary) return;
   const models = llmSettings.models || [];
+  const systemButton = $("openGovernanceSettingsButton");
   if (models.length === 0) {
-    summary.textContent = "未配置";
-    $("openLLMSettingsButton").title = "配置大模型";
+    if (systemButton) systemButton.dataset.llmSummary = "未配置";
     return;
   }
   const primary = models.find((model) => model.model_id === llmSettings.default_model_id) || models[0];
   const name = llmModelDisplayName(primary);
-  summary.textContent = models.length > 1 ? `${name} 等 ${models.length} 个` : name;
-  $("openLLMSettingsButton").title = `配置大模型：${summary.textContent}`;
+  if (systemButton) {
+    systemButton.dataset.llmSummary = models.length > 1 ? `${name} 等 ${models.length} 个` : name;
+  }
 }
 
 function llmModelDisplayName(model = {}) {
@@ -1990,6 +2317,57 @@ async function saveLLMSettings() {
   renderAgentModelOptions();
 }
 
+function setMemoryPolicyStatus(message, kind = "info") {
+  const status = $("memoryPolicyStatus");
+  if (!status) return;
+  status.textContent = message || "";
+  status.className = `status ${kind}`;
+}
+
+function applyMemoryPolicy(settings = {}) {
+  for (const input of document.querySelectorAll(".memory-policy-switch")) {
+    const key = input.dataset.memoryPolicy;
+    if (key && key in settings) input.checked = Boolean(settings[key]);
+  }
+}
+
+function collectMemoryPolicy() {
+  const out = {};
+  for (const input of document.querySelectorAll(".memory-policy-switch")) {
+    if (input.dataset.memoryPolicy) out[input.dataset.memoryPolicy] = Boolean(input.checked);
+  }
+  return out;
+}
+
+async function loadMemoryPolicySettings({ silent = false } = {}) {
+  try {
+    const payload = await api("/api/settings/memory-policy");
+    applyMemoryPolicy(payload.settings || {});
+    if (!silent) setMemoryPolicyStatus("");
+  } catch (error) {
+    if (!silent) setMemoryPolicyStatus(error.message || "记忆策略读取失败。", "error");
+  }
+}
+
+async function saveMemoryPolicySettings() {
+  try {
+    setMemoryPolicyStatus("正在保存记忆策略...");
+    const payload = await api("/api/settings/memory-policy", {
+      method: "PUT",
+      body: JSON.stringify(collectMemoryPolicy()),
+    });
+    applyMemoryPolicy(payload.settings || {});
+    setMemoryPolicyStatus("记忆策略已保存。", "success");
+  } catch (error) {
+    setMemoryPolicyStatus(error.message || "记忆策略保存失败。", "error");
+    loadMemoryPolicySettings({ silent: true });
+  }
+}
+
+function handleMemoryPolicyChange(event) {
+  if (event.target.closest(".memory-policy-switch")) saveMemoryPolicySettings();
+}
+
 function addLLMModelProfile() {
   openLLMEngineEdit(null);
 }
@@ -2020,6 +2398,7 @@ function openLLMEngineEdit(index) {
   keyInput.value = "";
   keyInput.placeholder = model.has_api_key ? "留空保持不变" : "sk-...";
   setLLMEngineEditStatus("");
+  setLLMEngineTestResult("");
   $("llmEngineEditDialog").showModal();
   $("llmEngineDisplayName").focus();
 }
@@ -2072,23 +2451,35 @@ async function saveLLMEngineEdit() {
 }
 
 function rememberSelectedTaskId(taskId) {
-  try {
-    if (taskId) {
-      localStorage.setItem(selectedTaskStorageKey, taskId);
-    } else {
-      localStorage.removeItem(selectedTaskStorageKey);
-    }
-  } catch (_) {
-    // Browser storage can be unavailable in private or embedded contexts.
-  }
+  rememberStoredSelectedTaskId(selectedTaskStorageKey, taskId);
 }
 
 function storedSelectedTaskId() {
-  try {
-    return localStorage.getItem(selectedTaskStorageKey) || "";
-  } catch (_) {
-    return "";
-  }
+  return readStoredSelectedTaskId(selectedTaskStorageKey);
+}
+
+function loadResultScrollPositions() {
+  loadStoredResultScrollPositions(resultScrollPositionsStorageKey, resultScrollPositionsByTask);
+}
+
+function persistResultScrollPositions() {
+  persistStoredResultScrollPositions(resultScrollPositionsStorageKey, resultScrollPositionsByTask);
+}
+
+function scheduleResultScrollPositionsPersist() {
+  if (resultScrollPersistFrame !== null) return;
+  resultScrollPersistFrame = window.requestAnimationFrame(() => {
+    resultScrollPersistFrame = null;
+    persistResultScrollPositions();
+  });
+}
+
+function restoreSelectedTaskPlaceholder() {
+  if (selectedTaskId) return;
+  const storedTaskId = storedSelectedTaskId();
+  if (!storedTaskId) return;
+  selectedTaskId = storedTaskId;
+  selectedTask = null;
 }
 
 function syncSelectedTaskFromCache() {
@@ -2110,8 +2501,13 @@ function syncSelectedTaskFromCache() {
   }
   const current = taskCache.find((task) => task.id === selectedTaskId);
   if (current) {
+    const wasPlaceholder = !selectedTask;
     selectedTask = current;
     rememberSelectedTaskId(current.id);
+    if (wasPlaceholder) {
+      applyAgentTaskComposerPreferences(current.id);
+      prepareResultScrollRestoreForTask(current.id);
+    }
     return;
   }
   selectedTaskId = null;
@@ -2138,16 +2534,8 @@ function selectedTaskIsAgentMode(task = selectedTask) {
   return task?.run_mode === "agent";
 }
 
-function workspaceGreetingForHour(hour) {
-  if (hour >= 5 && hour < 9) return "早上好，开启活力一天";
-  if (hour >= 9 && hour < 12) return "上午好，记得多补充水份";
-  if (hour >= 12 && hour < 18) return "下午好，记得起来活动一下";
-  return "晚上好，工作辛苦了";
-}
-
 function updateWorkspaceGreeting(now = new Date()) {
-  const greeting = workspaceGreetingForHour(now.getHours());
-  $("workspaceGreetingText").textContent = greeting;
+  updateWorkspaceGreetingView({ now, getElementById: $ });
 }
 
 function setTaskHeroGlassActive(hero, workspace, glassActive) {
@@ -2169,10 +2557,50 @@ function updateTaskHeroGlassState({ measureScroll = false } = {}) {
   setTaskHeroGlassActive(hero, workspace, glassActive);
 }
 
+function beginTaskContentLoad(taskId) {
+  if (taskContentSettleTimer !== null) {
+    window.clearTimeout(taskContentSettleTimer);
+    taskContentSettleTimer = null;
+  }
+  pendingTaskContentLoadTaskId = taskId || null;
+  const workspace = $("validationWorkspace");
+  workspace?.classList.remove("is-task-content-settling");
+  workspace?.classList.toggle("is-task-content-loading", Boolean(taskId));
+}
+
+function finishTaskContentLoad(taskId = pendingTaskContentLoadTaskId) {
+  if (taskId && pendingTaskContentLoadTaskId !== taskId) return;
+  pendingTaskContentLoadTaskId = null;
+  const workspace = $("validationWorkspace");
+  if (!workspace) return;
+  workspace.classList.remove("is-task-content-loading");
+  if (!taskId) {
+    workspace.classList.remove("is-task-content-settling");
+    return;
+  }
+  workspace.classList.add("is-task-content-settling");
+  taskContentSettleTimer = window.setTimeout(() => {
+    taskContentSettleTimer = null;
+    workspace.classList.remove("is-task-content-settling");
+  }, 220);
+}
+
+function clearTaskContentLoad() {
+  if (taskContentSettleTimer !== null) {
+    window.clearTimeout(taskContentSettleTimer);
+    taskContentSettleTimer = null;
+  }
+  pendingTaskContentLoadTaskId = null;
+  const workspace = $("validationWorkspace");
+  workspace?.classList.remove("is-task-content-loading");
+  workspace?.classList.remove("is-task-content-settling");
+}
+
 function rememberResultScrollPosition(taskId = selectedTaskId) {
   const scrollContent = $("resultScrollContent");
   if (!scrollContent || !taskId) return;
   resultScrollPositionsByTask.set(taskId, scrollContent.scrollTop);
+  scheduleResultScrollPositionsPersist();
 }
 
 function cancelResultScrollRestoreFrame() {
@@ -2203,6 +2631,37 @@ function applyResultScrollPosition(taskId = selectedTaskId) {
   updateTaskHeroGlassState({ measureScroll: true });
 }
 
+function syncAgentAutoScrollFollowFromCurrentPosition(taskId = selectedTaskId) {
+  if (taskId !== selectedTaskId || !selectedTaskIsAgentMode()) return;
+  const scrollContent = $("resultScrollContent");
+  if (!scrollContent) return;
+  if (scrollContent.scrollHeight <= scrollContent.clientHeight) {
+    agentAutoScrollFollows = true;
+    return;
+  }
+  const distance = scrollContent.scrollHeight - scrollContent.scrollTop - scrollContent.clientHeight;
+  agentAutoScrollFollows = distance <= AGENT_AUTO_SCROLL_BOTTOM_TOLERANCE_PX;
+}
+
+function nextAnimationFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame(resolve));
+}
+
+async function restoreResultScrollPositionAfterRender(taskId = selectedTaskId) {
+  if (!taskId) return;
+  cancelResultScrollRestoreFrame();
+  await nextAnimationFrame();
+  await nextAnimationFrame();
+  if (selectedTaskId !== taskId) {
+    if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+    return;
+  }
+  applyResultScrollPosition(taskId);
+  if (pendingResultScrollRestoreTaskId === taskId) pendingResultScrollRestoreTaskId = null;
+  if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+  syncAgentAutoScrollFollowFromCurrentPosition(taskId);
+}
+
 function scheduleResultScrollRestore(taskId = selectedTaskId) {
   if (!taskId) return;
   prepareResultScrollRestoreForTask(taskId);
@@ -2217,6 +2676,7 @@ function scheduleResultScrollRestore(taskId = selectedTaskId) {
       applyResultScrollPosition(taskId);
       pendingResultScrollRestoreTaskId = null;
       if (suppressAgentAutoScrollTaskId === taskId) suppressAgentAutoScrollTaskId = null;
+      syncAgentAutoScrollFollowFromCurrentPosition(taskId);
     });
   });
 }
@@ -2307,29 +2767,19 @@ function renderCurrentTask({ force = false } = {}) {
   if (!force && renderSignatures.currentTask === nextSignature) return;
   renderSignatures.currentTask = nextSignature;
 
-  $("validationWorkspace").classList.toggle("is-empty", !selectedTask);
-  const title = $("currentTaskTitle");
-  const subtitle = $("currentTaskSubtitle");
-  if (!selectedTask) {
-    updateWorkspaceGreeting();
-    title.textContent = "验证任务";
-    subtitle.textContent = "创建任务或从左侧选择已有任务";
-    renderTaskSnapshot();
-    setActionStatus("");
-    requestAnimationFrame(syncTaskHeroGlassLayout);
-    return;
-  }
-  title.textContent = taskDisplayName(selectedTask);
-  subtitle.textContent = "";
-  renderTaskSnapshot();
-  const statusOverride = actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null;
-  if (statusOverride) {
-    setActionStatus(statusOverride.message, statusOverride.kind, statusOverride.detail);
-  } else if (!setTaskFailureActionStatus(selectedTask)) {
-    const snapshot = taskActionStatusSnapshot(selectedTask);
-    setActionStatus(snapshot.message, snapshot.kind);
-  }
-  requestAnimationFrame(syncTaskHeroGlassLayout);
+  renderCurrentTaskWorkspace({
+    selectedTask,
+    selectedTaskId,
+    getElementById: $,
+    taskDisplayName,
+    renderTaskSnapshot,
+    setActionStatus,
+    updateGreeting: updateWorkspaceGreetingView,
+    statusOverride: actionStatusOverride?.taskId === selectedTaskId ? actionStatusOverride : null,
+    setTaskFailureActionStatus,
+    taskActionStatusSnapshot,
+    syncTaskHeroGlassLayout,
+  });
 }
 
 function workflowStepStatus(index, activeIndex) {
@@ -2401,7 +2851,7 @@ function stepDownloadActionsHtml(step) {
     '<button class="button compact step-action-button secondary" type="button" data-step-action="previewWordReport">',
     "预览",
     "</button>",
-    '<button class="button compact step-action-button primary" type="button" data-step-action="downloadWordReport">',
+    '<button class="button compact step-action-button primary word" type="button" data-step-action="downloadWordReport">',
     "下载Word",
     "</button>",
     '<button class="button compact step-action-button excel" type="button" data-step-action="downloadExcelAnalysis">',
@@ -2437,45 +2887,6 @@ function stepActionButtonHtml(step) {
     escapeHtml(label),
     "</button>",
   ].join("");
-}
-
-// Status checker shown before every step / sub-step: a hollow ring (pending),
-// a spinning arc (running), a filled green tick (succeeded), or a red cross
-// (failed). SVG marks use currentColor so CSS controls the glyph color.
-function stepCheckerHtml(state) {
-  if (state === "succeeded") {
-    return (
-      '<span class="check-icon succeeded" aria-hidden="true">' +
-      '<svg viewBox="0 0 16 16" width="11" height="11"><path d="M3 8.4l3 3 7-7" fill="none" ' +
-      'stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-      "</span>"
-    );
-  }
-  if (state === "failed") {
-    return (
-      '<span class="check-icon failed" aria-hidden="true">' +
-      '<svg viewBox="0 0 16 16" width="10" height="10"><path d="M4 4l8 8M12 4l-8 8" fill="none" ' +
-      'stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>' +
-      "</span>"
-    );
-  }
-  if (state === "stopped") {
-    return '<span class="check-icon stopped" aria-hidden="true"></span>';
-  }
-  if (state === "review") {
-    return (
-      '<span class="check-icon review" aria-hidden="true">' +
-      '<svg viewBox="0 0 16 16" width="10" height="10"><path d="M8 3v6M8 12.5h.01" fill="none" ' +
-      'stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>' +
-      "</span>"
-    );
-  }
-  if (state === "running") {
-    // Sync the spin phase to a global clock so the ring keeps rotating smoothly
-    // even though the stepper is rebuilt from scratch on every poll tick.
-    return `<span class="check-icon running" aria-hidden="true" style="animation-delay: -${Date.now() % 800}ms"></span>`;
-  }
-  return '<span class="check-icon pending" aria-hidden="true"></span>';
 }
 
 function notebookStepTone(status) {
@@ -2759,6 +3170,14 @@ function refreshWorkflowStepperElapsedTimes() {
 }
 
 function renderWorkflowStepper({ force = false } = {}) {
+  const progressRail = $("progressRail");
+  const railTitle = document.querySelector("#progressRail .step-rail-head h3");
+  if (planRailController.render({ force, renderSignatures })) {
+    return;
+  }
+  progressRail?.setAttribute("aria-label", "验证步骤");
+  planRailController.clearArtifactPanel();
+  if (railTitle) railTitle.textContent = "验证步骤";
   const nextSignature = workflowStepperSignature(selectedTask);
   if (!force && renderSignatures.workflowStepper === nextSignature) {
     // Structure unchanged; still tick elapsed-seconds spans so running steps
@@ -2846,6 +3265,17 @@ function sortMonthGroups([left], [right]) {
   return left.localeCompare(right, "zh-CN") * direction;
 }
 
+function sortTaskTypeGroups([left], [right]) {
+  const leftType = left || defaultTaskType;
+  const rightType = right || defaultTaskType;
+  const leftRank = taskTypeDisplayOrder.indexOf(leftType);
+  const rightRank = taskTypeDisplayOrder.indexOf(rightType);
+  if (leftRank >= 0 && rightRank >= 0) return leftRank - rightRank;
+  if (leftRank >= 0) return -1;
+  if (rightRank >= 0) return 1;
+  return taskTypeLabel(leftType).localeCompare(taskTypeLabel(rightType), "zh-CN");
+}
+
 function compareTasks(left, right) {
   if (taskSortMode === "name_asc") {
     return left.model_name.localeCompare(right.model_name, "zh-CN");
@@ -2874,6 +3304,31 @@ function applyTaskFilters(tasks = taskCache) {
     .sort(compareTasks);
 }
 
+// Layered, multi-tone glyphs for the six task kinds — one shared source used by
+// the sidebar rows and the task-hero snapshot. Mirrors the welcome-card icons
+// in index.html; classes (back/mid/cut/cs/cst/ln) are themed in styles.css.
+const TASK_KIND_GLYPHS = {
+  data_join:
+    '<rect class="back" x="3" y="8" width="10.5" height="10.5" rx="3"></rect><rect class="mid" x="6.75" y="6.75" width="10.5" height="10.5" rx="3"></rect><rect x="10.5" y="5.5" width="10.5" height="10.5" rx="3"></rect><rect class="cut" x="13" y="8.7" width="5.5" height="1.3" rx="0.65"></rect><rect class="cut" x="13" y="11.2" width="3.8" height="1.3" rx="0.65"></rect>',
+  feature_analysis:
+    '<rect class="back" x="4.4" y="16.6" width="17" height="3.4" rx="1.6"></rect><rect x="5" y="10.5" width="3.2" height="6.6" rx="1"></rect><rect x="9.2" y="7.5" width="3.2" height="9.6" rx="1"></rect><rect x="13.4" y="5" width="3.2" height="12.1" rx="1"></rect><rect x="17.6" y="9" width="3.2" height="8.1" rx="1"></rect>',
+  vintage:
+    '<rect class="back" x="3.5" y="6" width="17" height="12.5" rx="2"></rect><path class="ln vintage-calendar-binding" d="M7.2 4.8v2.8M16.8 4.8v2.8"></path><path class="ln" d="M6.3 15.5 9.6 12.7 13 14.1 17.8 10"></path>',
+  modeling:
+    '<rect x="2.6" y="4.6" width="18.8" height="14.8" rx="2.6"></rect><path class="mid" d="M2.6 8 V7 Q2.6 4.6 5 4.6 H19 Q21.4 4.6 21.4 7 V8 Z"></path><circle class="cut" cx="5.5" cy="6.2" r="0.82"></circle><circle class="cut" cx="7.7" cy="6.2" r="0.82"></circle><circle class="cut" cx="9.9" cy="6.2" r="0.82"></circle><path class="cs" d="M8.2 11.2 11 13.8 8.2 16.4"></path><rect class="cut" x="12" y="14.9" width="4" height="1.5" rx="0.75"></rect>',
+  validation:
+    '<rect class="back" x="7" y="3.5" width="11.5" height="16" rx="2.2"></rect><rect x="5" y="5" width="11.5" height="15.5" rx="2.2"></rect><rect class="mid" x="7.75" y="3.7" width="6" height="2.2" rx="1.1"></rect><rect class="cut" x="7.4" y="9" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="12" width="6.6" height="1.2" rx="0.6"></rect><rect class="cut" x="7.4" y="15" width="4.4" height="1.2" rx="0.6"></rect><circle class="cut" cx="16.6" cy="17.6" r="4.9"></circle><circle cx="16.6" cy="17.6" r="4"></circle><path class="cst" d="M14.8 17.7 16 18.9 18.4 16.4"></path>',
+  strategy:
+    '<rect class="back" x="4" y="13.8" width="16" height="4.6" rx="1.8"></rect><rect class="mid" x="4" y="9.6" width="16" height="4.6" rx="1.8"></rect><rect x="4" y="5" width="16" height="5.6" rx="1.8"></rect><rect class="cut" x="6.6" y="6.2" width="7.2" height="1.3" rx="0.65"></rect><rect class="cut" x="6.6" y="8.1" width="4.6" height="1.3" rx="0.65"></rect>',
+};
+
+function taskKindIconHtml(taskOrType = selectedTask, extraClass = "") {
+  const kind = typeof taskOrType === "string" ? taskOrType : taskOrType?.task_type;
+  const safeKind = TASK_KIND_GLYPHS[kind] ? kind : defaultTaskType;
+  const cls = "task-kind-icon" + (extraClass ? ` ${extraClass}` : "");
+  return `<svg class="${cls}" data-kind="${escapeHtml(safeKind)}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${TASK_KIND_GLYPHS[safeKind] || ""}</svg>`;
+}
+
 function appendTaskRow(list, task) {
   const item = document.createElement("div");
   item.className = "task-row-shell";
@@ -2887,8 +3342,11 @@ function appendTaskRow(list, task) {
   const validatorName = escapeHtml(task.validator || "-");
   row.innerHTML = [
     '<span class="task-row-top">',
+    '<span class="task-row-title">',
+    taskKindIconHtml(task),
     `<strong class="task-row-name">${escapeHtml(task.model_name)}</strong>`,
-    `<span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span>`,
+    "</span>",
+    `<span class="task-row-badges"><span class="pill ${tone}">${escapeHtml(taskStatusLabel(task))}</span></span>`,
     "</span>",
     '<span class="task-row-meta">',
     `<small class="task-row-validator" aria-label="验证人员：${validatorName}">`,
@@ -2936,41 +3394,13 @@ function appendTaskGroup(list, groupName, groupTasks) {
 }
 
 function renderTaskSnapshot() {
-  const snapshot = $("taskSnapshot");
-  if (!snapshot) return;
-  if (!selectedTask) {
-    snapshot.className = "workspace-task-meta empty";
-    snapshot.textContent = "核心任务信息";
-    return;
-  }
-  snapshot.className = "workspace-task-meta";
-  snapshot.innerHTML = [
-    '<div class="task-snapshot-list">',
-    snapshotItem("mode", "执行模式", runModeLabel(selectedTask.run_mode)),
-    snapshotItem("folder", "材料目录", selectedTask.source_dir),
-    "</div>",
-  ].join("");
-}
-
-function metaIcon(name) {
-  const paths = {
-    person: '<circle cx="12" cy="8" r="3.4"/><path d="M5.5 19a6.5 6.5 0 0 1 13 0"/>',
-    mode: '<path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/>',
-    folder: '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2h8A1.5 1.5 0 0 1 20 9.7V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  };
-  return `<svg class="meta-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || ""}</svg>`;
-}
-
-function snapshotItem(icon, label, value) {
-  return [
-    '<div class="task-snapshot-item task-meta-tile">',
-    metaIcon(icon),
-    '<div class="task-snapshot-text">',
-    `<span>${escapeHtml(label)}</span>`,
-    `<strong>${escapeHtml(value)}</strong>`,
-    "</div>",
-    "</div>",
-  ].join("");
+  renderTaskSnapshotView({
+    selectedTask,
+    getElementById: $,
+    taskTypeLabel,
+    taskKindIconHtml,
+    runModeLabel,
+  });
 }
 
 function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } = {}) {
@@ -3002,6 +3432,19 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
     return;
   }
 
+  if (taskGroupMode === "task_type") {
+    const groups = new Map();
+    for (const task of tasks) {
+      const key = task.task_type || defaultTaskType;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(task);
+    }
+    [...groups.entries()]
+      .sort(sortTaskTypeGroups)
+      .forEach(([taskType, groupTasks]) => appendTaskGroup(list, taskTypeLabel(taskType), groupTasks));
+    return;
+  }
+
   if (taskGroupMode === "created_month") {
     const groups = new Map();
     for (const task of tasks) {
@@ -3020,8 +3463,11 @@ function renderTaskList(tasks = applyTaskFilters(taskCache), { force = false } =
 
 function selectTask(task) {
   rememberResultScrollPosition();
-  if (selectedTaskId === task.id) {
-    deselectCurrentTask();
+  if (selectedTaskId === task.id && selectedTask) {
+    selectedTask = task;
+    rememberSelectedTaskId(task.id);
+    renderCurrentTask();
+    renderTaskList();
     return;
   }
   // Task identity is changing — drop any in-flight typewriter state so a
@@ -3032,8 +3478,8 @@ function selectTask(task) {
   selectedTask = task;
   rememberSelectedTaskId(task.id);
   applyAgentTaskComposerPreferences(task.id);
+  beginTaskContentLoad(task.id);
   prepareResultScrollRestoreForTask(task.id);
-  applyResultScrollPosition(task.id);
   ensureActiveTaskProgressPolling(task);
   renderMetricPreview({});
   renderStoredStateSummaries();
@@ -3044,13 +3490,16 @@ function selectTask(task) {
       await loadReportFields();
       await loadAgentMessages(task.id);
     } finally {
-      scheduleResultScrollRestore(task.id);
+      renderAll();
+      await restoreResultScrollPositionAfterRender(task.id);
+      finishTaskContentLoad(task.id);
     }
-  });
+  }, { renderAfter: false });
 }
 
 function deselectCurrentTask() {
   rememberResultScrollPosition();
+  clearTaskContentLoad();
   selectedTaskId = null;
   selectedTask = null;
   rememberSelectedTaskId(null);
@@ -3091,6 +3540,12 @@ function renderMetricPreview(
   renderSignatures.metricPreviewTaskId = previewTaskId;
   renderSignatures.metricPreview = nextSignature;
 
+  // VD-9: play the databar/KPI-bar entry animation only on the first
+  // populated metric render for this task - later rebuilds triggered by
+  // real data drift (polling) still rebuild the DOM but skip the replay,
+  // mirroring the reproducibility precision-bar animation policy above.
+  const shouldAnimateMetricBars = renderSignatures.metricPreviewAnimatedTaskId !== previewTaskId;
+
   // Extract the standalone ROC&KS section so each curve can sit beneath
   // its matching KPI card. The original section is dropped from the
   // visible list (we render 6 sections, not 7).
@@ -3113,576 +3568,14 @@ function renderMetricPreview(
     return;
   }
   const sectionHtml = visibleSections
-    .map((section, index) => renderMetricTableSection(section, index, { rocCurves }))
+    .map((section, index) => renderMetricTableSection(section, index, { rocCurves, animate: shouldAnimateMetricBars }))
     .join("");
   $("metricPreview").innerHTML = sectionHtml;
   attachRocInteractions($("metricPreview"));
   attachMetricTooltip($("metricPreview"));
-}
-
-function renderMetricTableSection(section = {}, index = 0, options = {}) {
-  const tables = Array.isArray(section.tables) ? section.tables : [];
-  const theme = section.section_theme || "cool-blue";
-  const isOverallEffect =
-    (tables[0] && tables[0].layout === "kpi_cards")
-    || section.title === "整体效果&稳定性";
-  const sectionIndex = String(index + 1).padStart(2, "0");
-  const title = section.title || "";
-  return [
-    `<section class="metric-table-section" data-theme="${escapeHtml(theme)}" data-section-index="${escapeHtml(sectionIndex)}">`,
-    `<h4 class="metric-section-title">${escapeHtml(title)}</h4>`,
-    '<div class="metric-table-stack">',
-    ...tables.map((table) => {
-      if (isOverallEffect && table.layout === "kpi_cards") {
-        return renderKpiCards(table, { curves: options.rocCurves || null });
-      }
-      return renderMetricTable(table);
-    }),
-    "</div>",
-    "</section>",
-  ].join("");
-}
-
-// ====== Metric overview cell helpers ======
-
-function renderCellByKind(spec, value, context) {
-  const kind = (spec && spec.kind) || "text";
-  if (kind === "trend-spark" && spec && spec.__localHtml === true) {
-    return { cls: "cell-sparkline", html: String(value ?? "") };  // value is raw <svg>
+  if (shouldAnimateMetricBars) {
+    renderSignatures.metricPreviewAnimatedTaskId = previewTaskId;
   }
-  const headerLabel = context.headerLabel ?? "";
-  switch (kind) {
-    case "split-badge":
-      return {
-        cls: "cell-split",
-        html: `<span class="split-badge">${escapeHtml(String(value ?? "").toUpperCase())}</span>`,
-      };
-    case "period":
-      return {
-        cls: "cell-period",
-        html: `<span class="period-text">${escapeHtml(String(value ?? ""))}</span>`,
-      };
-    case "databar":
-    case "databar-primary": {
-      const fraction = context.fractions.get(context.rowIndex);
-      if (fraction === undefined) {
-        return { cls: "cell-text", html: escapeHtml(String(value ?? "")) };
-      }
-      const color = (spec && spec.color) || "primary";
-      const emphasize = kind === "databar-primary" ? "primary" : "normal";
-      const rank = context.ranks.get(context.rowIndex) ?? "";
-      const tip = `${headerLabel} ${value} · ${rank}`;
-      return {
-        cls: "cell-databar",
-        html: `<span class="databar" data-color="${color}" data-emphasize="${emphasize}" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)}">`
-          + `<span class="databar-fill"></span>`
-          + `<span class="databar-label">${escapeHtml(String(value ?? ""))}</span>`
-          + `</span>`,
-      };
-    }
-    case "percent-heat": {
-      const heat = context.heatColors.get(context.rowIndex);
-      if (heat === undefined) {
-        return { cls: "cell-text", html: escapeHtml(String(value ?? "")) };
-      }
-      const tip = `${headerLabel} ${value}`;
-      return {
-        cls: "cell-heat",
-        html: `<span class="heat-chip" data-tip="${escapeHtml(tip)}" style="--heat:${heat}">${escapeHtml(String(value ?? ""))}</span>`,
-      };
-    }
-    case "psi": {
-      const numeric = parseNumeric(value);
-      const thresholds = (spec && spec.thresholds) || [0.02, 0.10];
-      const tier = psiTier(numeric, thresholds);
-      const displayText = value === "BASE" || value === "-" || numeric === null
-        ? String(value ?? "")
-        : String(value);
-      const stripMarker = numeric === null
-        ? ""
-        : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`;
-      const tip = psiTooltipText(numeric, thresholds);
-      return {
-        cls: "cell-psi",
-        html: `<span class="psi-cell" data-tip="${escapeHtml(tip)}">`
-          + `<span class="psi-value" data-tier="${tier}">${escapeHtml(displayText)}</span>`
-          + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
-          + `</span>`,
-      };
-    }
-    case "text":
-    default:
-      return { cls: "cell-text", html: escapeHtml(String(value ?? "")) };
-  }
-}
-
-function renderMetricTable(table = {}) {
-  const layout = table.layout || "table";
-  switch (layout) {
-    case "kpi_cards":
-      return renderKpiCards(table);
-    case "trend_table":
-      return renderTrendTable(table);
-    case "roc_ks_curve":
-      return renderRocKsCurve(table);
-    case "table":
-    default:
-      return renderEnhancedTable(table);
-  }
-}
-
-function renderKpiCards(table = {}, options = {}) {
-  const headers = Array.isArray(table.headers) ? table.headers : [];
-  const rows = Array.isArray(table.rows) ? table.rows : [];
-  const specs = Array.isArray(table.column_specs) ? table.column_specs : [];
-  const curves = (options && options.curves) || null;
-
-  const idx = (label) => headers.indexOf(label);
-  const idxAny = (...labels) => labels.map(idx).find((index) => index >= 0) ?? -1;
-  const splitIdx = idx("数据集");
-  const periodIdx = idx("时间范围");
-  const ksIdx = idxAny("KS(%)", "KS");
-  const aucIdx = idxAny("AUC(%)", "AUC");
-  const headLiftIdx = idx("5%头部lift");
-  const tailLiftIdx = idx("5%尾部lift");
-  const psiIdx = idx("PSI");
-  const sampleIdx = idx("样本量");
-  const badRateIdx = idx("逾期率");
-  const badCountIdx = idx("坏样本量");
-
-  const ksFractions = columnFractions(rows, ksIdx);
-  const aucFractions = columnFractions(rows, aucIdx);
-  const headLiftFractions = columnFractions(rows, headLiftIdx);
-  const tailLiftFractions = columnFractions(rows, tailLiftIdx);
-
-  const psiThresholds = (specs[psiIdx] && specs[psiIdx].thresholds) || [0.02, 0.10];
-
-  const cardHtml = rows.map((row, rowIndex) => {
-    const cell = (i) => Array.isArray(row) ? row[i] : "";
-    const psiNumeric = parseNumeric(cell(psiIdx));
-    const psiDisplay = cell(psiIdx);
-    const splitName = String(cell(splitIdx) || "").toLowerCase();
-    const curveForSplit = curves ? curves[splitName] : null;
-    const rocHtml = curveForSplit
-      ? renderRocCard(splitName, curveForSplit)
-      : "";
-    return [
-      `<div class="kpi-card-column">`,
-      `<article class="kpi-card">`,
-      `  <header class="kpi-card-header">`,
-      `    <span class="kpi-card-split">${escapeHtml(String(cell(splitIdx) || "").toUpperCase())}</span>`,
-      `    <span class="kpi-card-period">${escapeHtml(String(cell(periodIdx) ?? ""))}</span>`,
-      `  </header>`,
-      `  <div class="kpi-card-primary" data-tip="${escapeHtml(`KS ${cell(ksIdx)} · ${columnRanks(rows, ksIdx).get(rowIndex) || ""}`)}">`,
-      `    <span class="kpi-card-primary-label">KS</span>`,
-      `    <span class="kpi-card-primary-value">${escapeHtml(String(cell(ksIdx) ?? ""))}</span>`,
-      `    <span class="kpi-card-primary-bar" style="--fraction:${(ksFractions.get(rowIndex) ?? 0).toFixed(4)}"><i></i></span>`,
-      `  </div>`,
-      `  <div class="kpi-card-rule"></div>`,
-      kpiCardRow("AUC", cell(aucIdx), aucFractions.get(rowIndex), rowIndex, aucIdx, rows, "var(--accent)"),
-      kpiCardRow("5%头部lift", cell(headLiftIdx), headLiftFractions.get(rowIndex), rowIndex, headLiftIdx, rows, "#0EA5E9"),
-      kpiCardRow("5%尾部lift", cell(tailLiftIdx), tailLiftFractions.get(rowIndex), rowIndex, tailLiftIdx, rows, "#0EA5E9"),
-      kpiPsiRow(psiDisplay, psiNumeric, psiThresholds),
-      `  <footer class="kpi-card-footer">`,
-      `    <span class="kpi-card-footer-cell"><span class="kpi-card-footer-label">样本量</span><span class="kpi-card-footer-value">${escapeHtml(String(cell(sampleIdx) ?? ""))}</span></span>`,
-      `    <span class="kpi-card-footer-cell"><span class="kpi-card-footer-label">逾期率</span><span class="kpi-card-footer-value">${escapeHtml(String(cell(badRateIdx) ?? ""))}</span></span>`,
-      `    <span class="kpi-card-footer-cell"><span class="kpi-card-footer-label">坏样本</span><span class="kpi-card-footer-value">${escapeHtml(String(cell(badCountIdx) ?? ""))}</span></span>`,
-      `  </footer>`,
-      `</article>`,
-      rocHtml,
-      `</div>`,
-    ].join("\n");
-  }).join("");
-
-  return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "")}">`,
-    `<div class="kpi-cards" style="--kpi-count:${rows.length}">`,
-    cardHtml,
-    `</div>`,
-    `</div>`,
-  ].join("");
-}
-
-function kpiCardRow(label, displayValue, fraction, rowIndex, columnIndex, rows, color) {
-  const tip = `${label} ${displayValue} · ${columnRanks(rows, columnIndex).get(rowIndex) || ""}`;
-  return [
-    `<div class="kpi-card-row" data-tip="${escapeHtml(tip)}">`,
-    `  <span class="kpi-card-row-label">${escapeHtml(label)}</span>`,
-    `  <span class="kpi-card-row-bar" style="--fraction:${(fraction ?? 0).toFixed(4)};--bar-color:${color}"><i></i></span>`,
-    `  <span class="kpi-card-row-value">${escapeHtml(String(displayValue ?? ""))}</span>`,
-    `</div>`,
-  ].join("");
-}
-
-function kpiPsiRow(displayValue, numeric, thresholds) {
-  const tier = psiTier(numeric, thresholds);
-  const tip = psiTooltipText(numeric, thresholds);
-  return [
-    `<div class="kpi-card-row" data-tip="${escapeHtml(tip)}">`,
-    `  <span class="kpi-card-row-label">PSI</span>`,
-    `  <span class="psi-strip"><span></span><span></span><span></span>`,
-    numeric === null ? "" : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`,
-    `  </span>`,
-    `  <span class="psi-value kpi-card-row-value" data-tier="${tier}">${escapeHtml(String(displayValue ?? ""))}</span>`,
-    `</div>`,
-  ].join("");
-}
-
-function renderTrendTable(table = {}) {
-  const baseHeaders = Array.isArray(table.headers) ? [...table.headers] : [];
-  const baseRows = Array.isArray(table.rows) ? table.rows.map((row) => Array.isArray(row) ? [...row] : []) : [];
-  const baseSpecs = Array.isArray(table.column_specs) ? [...table.column_specs] : [];
-
-  const ksIdx = baseHeaders.indexOf("KS(%)") >= 0
-    ? baseHeaders.indexOf("KS(%)")
-    : baseHeaders.indexOf("KS");
-  const ksSeries = ksIdx >= 0
-    ? baseRows.map((row) => parseNumeric(row[ksIdx])).filter((v) => v !== null)
-    : [];
-  const ksAll = ksIdx >= 0
-    ? baseRows.map((row) => parseNumeric(row[ksIdx]))
-    : [];
-
-  const sampleAtIdx = baseHeaders.indexOf("样本量");
-  const insertAt = sampleAtIdx >= 0 ? sampleAtIdx + 1 : baseHeaders.length;
-  const trendHeaders = [...baseHeaders];
-  const trendSpecs = [...baseSpecs];
-  trendHeaders.splice(insertAt, 0, "KS 趋势");
-  trendSpecs.splice(insertAt, 0, { kind: "trend-spark", __localHtml: true });
-  const trendRows = baseRows.map((row, rowIndex) => {
-    const copy = [...row];
-    const sparkHtml = renderSparklineSvg(ksSeries, ksAll[rowIndex]);
-    copy.splice(insertAt, 0, sparkHtml);
-    return copy;
-  });
-
-  return renderEnhancedTableExplicit({
-    key: table.key,
-    title: table.title,
-    headers: trendHeaders,
-    column_specs: trendSpecs,
-    rows: trendRows,
-  });
-}
-
-function renderSparklineSvg(series, currentValue) {
-  if (!series || series.length < 2) return "";
-  const minV = Math.min(...series);
-  const maxV = Math.max(...series);
-  const range = Math.max(maxV - minV, 1e-6);
-  const W = 120, H = 24, PAD_X = 4, PAD_Y = 4;
-  const stepX = (W - 2 * PAD_X) / (series.length - 1);
-  const yOf = (v) => H - PAD_Y - ((v - minV) / range) * (H - 2 * PAD_Y);
-  const linePath = series.map((v, i) => `${i === 0 ? "M" : "L"}${PAD_X + i * stepX},${yOf(v).toFixed(2)}`).join(" ");
-  const baseY = H / 2;
-  const points = series.map((v, i) => {
-    const cx = PAD_X + i * stepX;
-    const isCurrent = currentValue !== null && Math.abs(v - currentValue) < 1e-9;
-    return `<circle class="metric-sparkline-point${isCurrent ? " current" : ""}" cx="${cx.toFixed(2)}" cy="${yOf(v).toFixed(2)}" r="${isCurrent ? 3.2 : 2}" data-tip="KS ${v.toFixed(4)}"></circle>`;
-  }).join("");
-  return `<svg class="metric-sparkline" viewBox="0 0 ${W} ${H}" role="img" aria-label="KS 趋势">`
-    + `<line class="metric-sparkline-baseline" x1="${PAD_X}" y1="${baseY}" x2="${W - PAD_X}" y2="${baseY}"></line>`
-    + `<path class="metric-sparkline-line" d="${linePath}"></path>`
-    + points
-    + `</svg>`;
-}
-
-function renderRocKsCurve(table = {}) {
-  const curves = table.curves || {};
-  const splits = ["train", "test", "oot"].filter((split) => curves[split]);
-  if (splits.length === 0) {
-    return `<div class="metric-table-wrap"><div class="result-summary empty">暂无 ROC&KS 曲线数据</div></div>`;
-  }
-  const cards = splits.map((split) => renderRocCard(split, curves[split])).join("");
-  return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "ROC_KS_CURVES")}">`,
-    `<div class="roc-grid" style="--roc-count:${splits.length}">${cards}</div>`,
-    `</div>`,
-  ].join("");
-}
-
-function renderRocCard(split, curve) {
-  const W = 280, H = 240, PAD = 28;
-  const plot = { x: PAD, y: PAD - 4, w: W - PAD - 8, h: H - PAD - 14 };
-  const fpr = curve.fpr || [];
-  const tpr = curve.tpr || [];
-  const ks = curve.ks_curve || [];
-  if (fpr.length < 2) {
-    return `<div class="roc-card"><div class="roc-card-header"><span class="roc-card-split">${escapeHtml(split)}</span></div><div class="result-summary empty">无曲线数据</div></div>`;
-  }
-  const xOf = (v) => plot.x + Math.max(0, Math.min(1, v)) * plot.w;
-  const yOf = (v) => plot.y + (1 - Math.max(0, Math.min(1, v))) * plot.h;
-  const buildPath = (xs, ys) => xs.map((x, i) => `${i === 0 ? "M" : "L"}${xOf(x).toFixed(2)},${yOf(ys[i]).toFixed(2)}`).join(" ");
-
-  const tprPath = buildPath(fpr, tpr);
-  const diagonalPath = `M${xOf(0)},${yOf(0)} L${xOf(1)},${yOf(1)}`;
-  const ksPath = ks.length === fpr.length ? buildPath(fpr, ks) : "";
-  // KS marker sits on the FPR axis: anchor it at fpr[argmax(|ks_curve|)]. Using
-  // population_at_ks (a different axis) misplaces the line on imbalanced data.
-  const ksArgmax = ks.length
-    ? ks.reduce((best, value, i) => (Math.abs(value) > Math.abs(ks[best]) ? i : best), 0)
-    : 0;
-  const ksMarkerX = xOf(fpr[ksArgmax] ?? 0);
-
-  const gridLines = [0.25, 0.5, 0.75].map((t) =>
-    `<line class="roc-grid-line" x1="${xOf(t).toFixed(2)}" y1="${plot.y}" x2="${xOf(t).toFixed(2)}" y2="${plot.y + plot.h}"></line>`
-    + `<line class="roc-grid-line" x1="${plot.x}" y1="${yOf(t).toFixed(2)}" x2="${plot.x + plot.w}" y2="${yOf(t).toFixed(2)}"></line>`
-  ).join("");
-
-  const xLabels = [0, 0.5, 1].map((t) =>
-    `<text class="roc-axis-label" x="${xOf(t).toFixed(2)}" y="${H - 2}" text-anchor="middle" font-size="9">${t}</text>`
-  ).join("");
-  const yLabels = [0, 0.5, 1].map((t) =>
-    `<text class="roc-axis-label" x="${plot.x - 4}" y="${(yOf(t) + 3).toFixed(2)}" text-anchor="end" font-size="9">${t}</text>`
-  ).join("");
-
-  return [
-    `<div class="roc-card" data-split="${escapeHtml(split)}">`,
-    `  <div class="roc-card-header">`,
-    `    <span class="roc-card-split">${escapeHtml(split)}</span>`,
-    `    <span class="roc-card-ks" data-tip="KS=${(curve.ks ?? 0).toFixed(4)} at population=${(curve.population_at_ks ?? 0).toFixed(2)}">KS ${(curve.ks ?? 0).toFixed(4)}</span>`,
-    `  </div>`,
-    `  <svg class="roc-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="ROC and KS curves for ${escapeHtml(split)}"`,
-    `       data-roc-fpr="${escapeHtml(JSON.stringify(fpr))}" data-roc-tpr="${escapeHtml(JSON.stringify(tpr))}" data-roc-ks="${escapeHtml(JSON.stringify(ks))}"`,
-    `       data-roc-plot-x="${plot.x}" data-roc-plot-y="${plot.y}" data-roc-plot-w="${plot.w}" data-roc-plot-h="${plot.h}">`,
-    `    ${gridLines}`,
-    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y + plot.h}" x2="${plot.x + plot.w}" y2="${plot.y + plot.h}"></line>`,
-    `    <line class="roc-axis" x1="${plot.x}" y1="${plot.y}" x2="${plot.x}" y2="${plot.y + plot.h}"></line>`,
-    `    <path class="roc-curve roc-curve-baseline" data-series="baseline" d="${diagonalPath}"></path>`,
-    `    <path class="roc-curve roc-curve-tpr" data-series="tpr" d="${tprPath}"></path>`,
-    ksPath ? `    <path class="roc-curve roc-curve-ks" data-series="ks" d="${ksPath}"></path>` : "",
-    `    <line class="roc-ks-marker" data-series="ks-marker" x1="${ksMarkerX.toFixed(2)}" y1="${plot.y}" x2="${ksMarkerX.toFixed(2)}" y2="${plot.y + plot.h}" data-tip="KS=${(curve.ks ?? 0).toFixed(4)} at population=${(curve.population_at_ks ?? 0).toFixed(2)}"></line>`,
-    `    <line class="roc-crosshair roc-crosshair-x" x1="0" y1="0" x2="0" y2="0" style="display:none"></line>`,
-    `    <line class="roc-crosshair roc-crosshair-y" x1="0" y1="0" x2="0" y2="0" style="display:none"></line>`,
-    `    ${xLabels}`,
-    `    ${yLabels}`,
-    `  </svg>`,
-    `  <div class="roc-legend" role="group" aria-label="切换曲线显示">`,
-    `    <button type="button" class="roc-legend-tpr" data-roc-toggle="tpr" aria-pressed="true"><i></i>TPR</button>`,
-    `    <button type="button" class="roc-legend-baseline" data-roc-toggle="baseline" aria-pressed="true"><i></i>Random Baseline</button>`,
-    `    <button type="button" class="roc-legend-ks" data-roc-toggle="ks" aria-pressed="true"><i></i>KS Curve</button>`,
-    `  </div>`,
-    `  <div class="roc-readout" data-roc-readout>移动鼠标到图上查看 FPR / TPR / KS</div>`,
-    `</div>`,
-  ].join("");
-}
-
-function attachRocInteractions(rootEl) {
-  if (!rootEl) return;
-  rootEl.querySelectorAll(".roc-card").forEach((card) => {
-    const svg = card.querySelector(".roc-svg");
-    const readout = card.querySelector("[data-roc-readout]");
-    if (!svg) return;
-    const fpr = JSON.parse(svg.getAttribute("data-roc-fpr") || "[]");
-    const tpr = JSON.parse(svg.getAttribute("data-roc-tpr") || "[]");
-    const ks  = JSON.parse(svg.getAttribute("data-roc-ks")  || "[]");
-    const px = Number(svg.getAttribute("data-roc-plot-x"));
-    const py = Number(svg.getAttribute("data-roc-plot-y"));
-    const pw = Number(svg.getAttribute("data-roc-plot-w"));
-    const ph = Number(svg.getAttribute("data-roc-plot-h"));
-    const xLine = svg.querySelector(".roc-crosshair-x");
-    const yLine = svg.querySelector(".roc-crosshair-y");
-
-    const hideCrosshair = () => {
-      xLine.style.display = "none";
-      yLine.style.display = "none";
-      readout.textContent = "移动鼠标到图上查看 FPR / TPR / KS";
-    };
-
-    const onMove = (event) => {
-      const rect = svg.getBoundingClientRect();
-      const viewBox = svg.viewBox.baseVal;
-      const xViewbox = ((event.clientX - rect.left) / rect.width) * viewBox.width;
-      const fprVal = (xViewbox - px) / pw;
-      if (fprVal < 0 || fprVal > 1) { hideCrosshair(); return; }
-      let nearestIdx = 0;
-      let nearestDist = Infinity;
-      for (let i = 0; i < fpr.length; i++) {
-        const d = Math.abs(fpr[i] - fprVal);
-        if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
-      }
-      const xPos = px + fpr[nearestIdx] * pw;
-      const yPosTpr = py + (1 - tpr[nearestIdx]) * ph;
-      xLine.setAttribute("x1", xPos); xLine.setAttribute("x2", xPos);
-      xLine.setAttribute("y1", py); xLine.setAttribute("y2", py + ph);
-      xLine.style.display = "";
-      yLine.setAttribute("x1", px); yLine.setAttribute("x2", px + pw);
-      yLine.setAttribute("y1", yPosTpr); yLine.setAttribute("y2", yPosTpr);
-      yLine.style.display = "";
-      const ksHere = ks[nearestIdx] ?? Math.abs(tpr[nearestIdx] - fpr[nearestIdx]);
-      readout.textContent = `FPR ${fpr[nearestIdx].toFixed(3)}  ·  TPR ${tpr[nearestIdx].toFixed(3)}  ·  KS ${ksHere.toFixed(3)}`;
-    };
-
-    svg.addEventListener("mousemove", onMove);
-    svg.addEventListener("mouseleave", hideCrosshair);
-
-    card.querySelectorAll("[data-roc-toggle]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const series = button.getAttribute("data-roc-toggle");
-        const pressed = button.getAttribute("aria-pressed") === "true";
-        const next = !pressed;
-        button.setAttribute("aria-pressed", String(next));
-        svg.querySelectorAll(`[data-series="${series}"], [data-series="${series}-marker"]`).forEach((el) => {
-          el.style.display = next ? "" : "none";
-        });
-      });
-    });
-  });
-}
-
-let metricTooltipAttached = false;
-
-function attachMetricTooltip(rootEl) {
-  if (metricTooltipAttached || !rootEl) return;
-  const tooltip = document.getElementById("metricTooltip");
-  if (!tooltip) return;
-  metricTooltipAttached = true;
-  let currentTarget = null;
-  const positionTooltip = (el, event) => {
-    const pad = 12;
-    let x = event.clientX + pad;
-    let y = event.clientY + pad;
-    const rect = el.getBoundingClientRect();
-    if (x + rect.width > window.innerWidth) x = event.clientX - rect.width - pad;
-    if (y + rect.height > window.innerHeight) y = event.clientY - rect.height - pad;
-    el.style.left = `${x}px`;
-    el.style.top = `${y}px`;
-  };
-  const show = (target, event) => {
-    const tip = target.getAttribute("data-tip");
-    if (!tip) return;
-    currentTarget = target;
-    tooltip.textContent = tip;
-    tooltip.hidden = false;
-    positionTooltip(tooltip, event);
-  };
-  const hide = () => {
-    currentTarget = null;
-    tooltip.hidden = true;
-  };
-  document.addEventListener("mouseover", (event) => {
-    const target = event.target.closest("#metricPreview [data-tip]");
-    if (target) show(target, event);
-  });
-  document.addEventListener("mousemove", (event) => {
-    if (currentTarget && currentTarget.contains(event.target)) {
-      positionTooltip(tooltip, event);
-    }
-  });
-  document.addEventListener("mouseout", (event) => {
-    if (!currentTarget) return;
-    const next = event.relatedTarget;
-    if (!next || !currentTarget.contains(next)) hide();
-  });
-  document.addEventListener("scroll", hide, { passive: true, capture: true });
-}
-
-function renderEnhancedTable(table = {}) {
-  return renderEnhancedTableExplicit(table);
-}
-
-function renderEnhancedTableExplicit(table) {
-  const headers = Array.isArray(table.headers) ? table.headers : [];
-  const rows = Array.isArray(table.rows) ? table.rows : [];
-  const specs = Array.isArray(table.column_specs) ? table.column_specs : [];
-  const columnCount = headers.length;
-
-  const fractionsByColumn = new Map();
-  const heatByColumn = new Map();
-  const ranksByColumn = new Map();
-  for (let i = 0; i < columnCount; i++) {
-    const kind = (specs[i] && specs[i].kind) || "text";
-    if (kind === "databar" || kind === "databar-primary") {
-      fractionsByColumn.set(i, columnFractions(rows, i));
-      ranksByColumn.set(i, columnRanks(rows, i));
-    }
-    if (kind === "percent-heat") {
-      heatByColumn.set(i, columnHeatColors(rows, i));
-    }
-  }
-
-  // Columns whose text-only cells should hug the left edge (e.g.
-  // 特征 in 特征重要性). Numeric primitives stay centered regardless.
-  const leftAlignCols = new Set();
-  headers.forEach((header, i) => {
-    if (header === "特征") leftAlignCols.add(i);
-  });
-
-  const bodyRows = rows.length === 0
-    ? `<tr class="metric-table-empty"><td colspan="${Math.max(columnCount, 1)}">暂无数据</td></tr>`
-    : rows.map((row, rowIndex) => {
-        const cells = [];
-        for (let columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-          const value = Array.isArray(row) ? row[columnIndex] : "";
-          const spec = specs[columnIndex] || { kind: "text" };
-          const cell = renderCellByKind(spec, value, {
-            rowIndex,
-            columnIndex,
-            headerLabel: headers[columnIndex] ?? "",
-            fractions: fractionsByColumn.get(columnIndex) || new Map(),
-            heatColors: heatByColumn.get(columnIndex) || new Map(),
-            ranks: ranksByColumn.get(columnIndex) || new Map(),
-          });
-          const alignAttr = leftAlignCols.has(columnIndex) && (spec.kind || "text") === "text"
-            ? ' data-align="left"'
-            : "";
-          cells.push(`<td class="${cell.cls}"${alignAttr}>${cell.html}</td>`);
-        }
-        return `<tr>${cells.join("")}</tr>`;
-      }).join("");
-
-  return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "")}">`,
-    '<div class="metric-table-scroll">',
-    '<table class="metric-table metric-table-hoverable">',
-    '<thead><tr>',
-    ...headers.map((header, i) => {
-      const alignAttr = leftAlignCols.has(i) ? ' data-align="left"' : "";
-      return `<th${alignAttr}>${escapeHtml(header)}</th>`;
-    }),
-    '</tr></thead>',
-    `<tbody>${bodyRows}</tbody>`,
-    "</table>",
-    "</div>",
-    "</div>",
-  ].join("");
-}
-
-function renderLegacyTable(table = {}) {
-  const headers = Array.isArray(table.headers) ? table.headers : [];
-  const rows = Array.isArray(table.rows) ? table.rows : [];
-  const columnCount = Math.max(
-    headers.length,
-    ...rows.map((row) => (Array.isArray(row) ? row.length : 0)),
-    1,
-  );
-  const bodyRows = rows.length > 0
-    ? rows.map((row) => renderMetricTableRow(row, columnCount))
-    : [`<tr class="metric-table-empty"><td colspan="${columnCount}">暂无数据</td></tr>`];
-  return [
-    `<div class="metric-table-wrap" data-metric-key="${escapeHtml(table.key || "")}">`,
-    `<div class="metric-table-caption">${escapeHtml(table.title || "指标明细")}</div>`,
-    '<div class="metric-table-scroll">',
-    '<table class="metric-table">',
-    "<thead><tr>",
-    ...Array.from(
-      { length: columnCount },
-      (_, index) => `<th>${escapeHtml(headers[index] ?? "")}</th>`,
-    ),
-    "</tr></thead>",
-    `<tbody>${bodyRows.join("")}</tbody>`,
-    "</table>",
-    "</div>",
-    "</div>",
-  ].join("");
-}
-
-function renderMetricTableRow(row, columnCount) {
-  const cells = Array.from({ length: columnCount }, (_, index) => {
-    const value = Array.isArray(row) ? row[index] : "";
-    return `<td>${escapeHtml(value === null || value === undefined ? "" : String(value))}</td>`;
-  });
-  return `<tr>${cells.join("")}</tr>`;
 }
 
 function currentMetricPreviewHasValues(taskId = selectedTaskId) {
@@ -3830,91 +3723,6 @@ function reproducibilityStatusClass(status) {
   if (status === "fail") return "repro-status-fail";
   if (status === "review") return "repro-status-review";
   return "";
-}
-
-function roundedScoresMatch(left, right, decimals) {
-  const leftNumber = Number(left);
-  const rightNumber = Number(right);
-  if (!Number.isFinite(leftNumber) || !Number.isFinite(rightNumber)) return false;
-  return leftNumber.toFixed(decimals) === rightNumber.toFixed(decimals);
-}
-
-function precisionConsistencyTier(rate) {
-  if (rate >= 99.5) return "exact";
-  if (rate >= 90) return "strong";
-  if (rate >= 50) return "fair";
-  return "weak";
-}
-
-function buildPrecisionConsistencyBars(rows = []) {
-  const total = rows.length;
-  const bars = [];
-  for (let decimals = 1; decimals <= 6; decimals += 1) {
-    const matchCount = rows.filter((row) => (
-      roundedScoresMatch(row.score_code_model, row.score_submitted_pmml, decimals)
-    )).length;
-    const rate = total > 0 ? (matchCount / total) * 100 : 0;
-    bars.push({
-      decimals,
-      matchCount,
-      total,
-      rate,
-      tier: precisionConsistencyTier(rate),
-    });
-  }
-  return bars;
-}
-
-function formatPercentValue(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "0%";
-  return `${number.toFixed(1)}%`;
-}
-
-// Compact label for the bar tops: drop the decimal at 100% so it fits a narrow
-// column; the exact one-decimal value still shows in the hover tooltip.
-function formatPrecisionLabel(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "0%";
-  if (number >= 99.95) return "100%";
-  return `${number.toFixed(1)}%`;
-}
-
-function renderPrecisionConsistencyChart(rows = [], options = {}) {
-  if (!rows.length) return "";
-  const animationAttribute = options.animate === false ? ' data-animation="none"' : "";
-  const bars = buildPrecisionConsistencyBars(rows);
-  const barItems = bars.map((bar, index) => {
-    const height = bar.rate > 0 ? Math.max(2, Math.min(100, bar.rate)) : 0;
-    const title = `${bar.decimals} 位小数：${bar.matchCount}/${bar.total} 行一致（${formatPercentValue(bar.rate)}）`;
-    return [
-      `<div class="score-precision-bar-item" data-tier="${bar.tier}"${bar.rate > 0 ? "" : ' data-empty="true"'} title="${escapeHtml(title)}">`,
-      `<span class="score-precision-value">${escapeHtml(formatPrecisionLabel(bar.rate))}</span>`,
-      '<span class="score-precision-bar-track" aria-hidden="true">',
-      `<span class="score-precision-bar" style="height: ${height}%; --bar-index: ${index}"></span>`,
-      "</span>",
-      `<span class="score-precision-label">${bar.decimals}位</span>`,
-      "</div>",
-    ].join("");
-  });
-  return [
-    `<div class="score-precision-chart"${animationAttribute}>`,
-    '<div class="score-precision-chart-head">',
-    "<strong>四舍五入一致率</strong>",
-    `<span class="score-precision-meta">${escapeHtml(rows.length)} 行 · 保留小数位越多越严格</span>`,
-    "</div>",
-    '<div class="score-precision-plot">',
-    '<div class="score-precision-axis" aria-hidden="true">',
-    "<span>100%</span>",
-    "<span>75%</span>",
-    "<span>50%</span>",
-    "<span>25%</span>",
-    "<span>0%</span>",
-    "</div>",
-    `<div class="score-precision-bars">${barItems.join("")}</div>`,
-    "</div>",
-    "</div>",
-  ].join("");
 }
 
 function reproducibilityEvidenceSignature(reproducibility = {}, summary = {}, rows = []) {
@@ -4084,6 +3892,14 @@ function scanSummaryHasResult() {
 function updateAgentScanSectionVisibility() {
   const scanSection = $("scanSection");
   if (!scanSection) return;
+  // Driver tasks (data_join / feature / modeling) never use the validation
+  // scan→notebook→metrics flow — they drive everything through the conversation +
+  // plan rail. Hide the scan section entirely so a manual driver task doesn't show
+  // a dead "点击扫描材料开始" prompt with no scan button to click.
+  if (taskUsesPlanRail(selectedTask)) {
+    scanSection.classList.add("hidden");
+    return;
+  }
   if (!selectedTaskIsAgentMode()) {
     scanSection.classList.remove("hidden");
     return;
@@ -4249,6 +4065,23 @@ function renderAgentAcceptanceModePreference() {
   if (select.value !== agentAcceptanceMode) select.value = agentAcceptanceMode;
   const chip = select.closest(".agent-composer-acceptance");
   if (chip) chip.dataset.acceptanceMode = agentAcceptanceMode;
+  // Relabel the auto-accept option per task type so the chip reads naturally for the
+  // current flow (自动拼接/分析/建模) instead of always "自动审查".
+  const autoOption = select.querySelector('option[value="auto_accept"]');
+  if (autoOption) autoOption.textContent = autoAcceptLabel(selectedTask?.task_type);
+}
+
+function autoAcceptLabel(taskType) {
+  switch (taskType) {
+    case "data_join":
+      return "自动拼接";
+    case "feature_analysis":
+      return "自动分析";
+    case "modeling":
+      return "自动建模";
+    default:
+      return "自动审查";
+  }
 }
 
 function requestAgentConversationScrollToLatest() {
@@ -4273,8 +4106,12 @@ function renderAgentConversation() {
   const workspace = $("resultWorkspace");
   if (!panel) return;
   const isAgent = selectedTaskIsAgentMode();
-  panel.classList.toggle("hidden", !isAgent);
-  panel.setAttribute("aria-hidden", isAgent ? "false" : "true");
+  // Driver tasks (data_join / feature / modeling) show the same conversation +
+  // controls in BOTH modes. Manual = the user operates the controls (no free-text
+  // composer, no LLM); agent = an LLM operates them + free-text composer.
+  const showConversation = isAgent || taskUsesPlanRail(selectedTask);
+  panel.classList.toggle("hidden", !showConversation);
+  panel.setAttribute("aria-hidden", showConversation ? "false" : "true");
   composer?.classList.toggle("hidden", !isAgent);
   composer?.setAttribute("aria-hidden", isAgent ? "false" : "true");
   workspace?.classList.toggle("agent-composer-active", isAgent);
@@ -4282,7 +4119,20 @@ function renderAgentConversation() {
   renderAgentModelOptions();
   renderAgentEffortPreference();
   requestAnimationFrame(syncAgentComposerClearance);
-  if (!isAgent) {
+  panel.classList.remove("driver-analysis-mode");
+  panel.setAttribute("aria-label", "Agent 对话");
+  // Manual mode for a driver task is a TOOL, not a conversation: render the step
+  // outputs as analysis panels (no speaker labels / chat bubbles) and put the gate
+  // confirm controls in the step rail — exactly like 模型验证 manual mode. Only agent
+  // mode is a genuine LLM conversation; keeping manual mode conversation-free is what
+  // proves the agent-mode dialogue isn't pre-written.
+  if (showConversation && !isAgent && taskUsesPlanRail(selectedTask)) {
+    renderDriverManualAnalysis(agentMessages);
+    planRailController.resetFetchThrottle(selectedTaskId);
+    renderWorkflowStepper({ force: true });
+    return;
+  }
+  if (!showConversation) {
     agentMessages = [];
     lastAgentRenderSignature = null;
     lastAgentStructuralSignature = null;
@@ -4323,7 +4173,16 @@ function renderAgentConversation() {
   freezeAgentSectionSnapshotsForReruns();
   clearAgentStageMessages();
   renderAgentTimeline(displayedMessages);
+  attachCalibrationInteractions($("agentMessages"));
   requestAgentConversationScrollToLatest();
+  // The conversation just changed (a driver turn likely created/advanced the
+  // plan). Plan-rail tasks have no validation poll tick to refresh the right
+  // rail, so force a fresh plan fetch + re-render here (only on real changes,
+  // since this is the post-signature full-rebuild path).
+  if (taskUsesPlanRail(selectedTask)) {
+    planRailController.resetFetchThrottle(selectedTaskId);
+    renderWorkflowStepper({ force: true });
+  }
 }
 
 function agentStructuralSignature(messages = [], visibleStages = []) {
@@ -4331,6 +4190,22 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
   // streaming/thinking state, or label visibility forces a full timeline
   // rebuild. Pure content edits (typewriter tick) leave this signature
   // unchanged and take the fast path.
+  // UX-2: a gate widget's interactive/read-only state (only the latest gate
+  // is interactive) must also be part of this signature — otherwise a driver
+  // turn that resolves the pending gate and opens a new one would leave the
+  // OLD gate's widget stuck rendered as interactive (and the new one stuck
+  // read-only) under the fast path, which only patches .agent-message-content
+  // text and never touches widget markup.
+  const latestGateId = (() => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message?.role !== "assistant") continue;
+      const meta = message?.metadata || {};
+      if (meta.kind === "gate" || meta.join_c1) return String(message.id || "");
+      return "";
+    }
+    return "";
+  })();
   let previousAssistantLabel = "";
   const skeleton = messages.map((message) => {
     const role = message?.role === "user" ? "user" : "assistant";
@@ -4354,6 +4229,7 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
         awaiting_next_stage: metadata.awaiting_next_stage || "",
         intent: metadata.intent || "",
         tool_call_name: metadata.tool_call?.name || "",
+        is_latest_gate: Boolean(latestGateId) && String(message?.id || "") === latestGateId,
         memory_references: Array.isArray(metadata.memory_references)
           ? metadata.memory_references.map((reference) => [
             reference.id || "",
@@ -4370,55 +4246,15 @@ function agentStructuralSignature(messages = [], visibleStages = []) {
 }
 
 function updateAgentMessageContentsInPlace(messages = []) {
-  const scrollContent = $("resultScrollContent");
-  if (!scrollContent) return false;
-  for (const message of messages) {
-    const messageId = message?.id ? String(message.id) : "";
-    // No id means we cannot locate the article in DOM; fall back to a full
-    // rebuild so the message still renders correctly.
-    if (!messageId) return false;
-    const article = scrollContent.querySelector(
-      `article[data-agent-message-id="${cssEscapeAttr(messageId)}"]`,
-    );
-    if (!article) return false;
-    const contentNode = article.querySelector(".agent-message-content");
-    if (!contentNode) return false;
-    const streaming = agentMessageIsStreaming(message);
-    const thinking = agentMessageIsThinking(message);
-    const nextHtml = thinking
-      ? agentThinkingHtml()
-      : formatAgentMessageContent(
-        agentVisibleContent(message),
-        { markdown: message?.role !== "user" },
-      );
-    if (contentNode.innerHTML !== nextHtml) contentNode.innerHTML = nextHtml;
-    contentNode.dataset.agentStreaming = streaming ? "true" : "false";
-    contentNode.dataset.agentThinking = thinking ? "true" : "false";
-    const referencesNode = article.querySelector(".agent-memory-references");
-    const referencesHtml = message?.role === "user" ? "" : agentMemoryReferencesHtml(message?.metadata?.memory_references);
-    if (referencesNode) {
-      if (referencesHtml) referencesNode.outerHTML = referencesHtml;
-      else referencesNode.remove();
-    } else if (referencesHtml) {
-      contentNode.insertAdjacentHTML("afterend", referencesHtml);
-    }
-  }
-  return true;
-}
-
-function cssEscapeAttr(value) {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(value);
-  }
-  return String(value).replace(/["\\]/g, (ch) => `\\${ch}`);
-}
-
-function agentTimelineStageDefinitions() {
-  return [
-    { stage: "scan", sectionId: "scanSection", order: 1 },
-    { stage: "reproducibility", sectionId: "notebookSection", order: 2 },
-    { stage: "metrics", sectionId: "metricSection", order: 3 },
-  ];
+  return updateAgentMessageContentsInPlaceDom(messages, {
+    getElementById: $,
+    isStreaming: agentMessageIsStreaming,
+    isThinking: agentMessageIsThinking,
+    thinkingHtml: agentThinkingHtml,
+    visibleContent: agentVisibleContent,
+    formatMessageContent: formatAgentMessageContent,
+    memoryReferencesHtml: agentMemoryReferencesHtml,
+  });
 }
 
 function agentFrozenStageConfig(stage) {
@@ -4447,15 +4283,6 @@ function agentFrozenStageConfig(stage) {
     };
   }
   return null;
-}
-
-function agentRerunMessageFingerprint(message) {
-  if (message?.role !== "user") return "";
-  const intent = message?.metadata?.intent;
-  if (intent !== "rerun_stage" && intent !== "regenerate_report_draft") return "";
-  const stage = message?.metadata?.target_stage || "";
-  const content = String(message?.content || "").trim();
-  return `${intent}|${stage}|${content}`;
 }
 
 function freezeAgentSectionSnapshotsForReruns() {
@@ -4503,42 +4330,6 @@ function freezeAgentSectionSnapshotsForReruns() {
     updated = true;
   }
   if (updated) taskFrozenSectionSnapshots.set(selectedTaskId, stored);
-}
-
-function agentFrozenSnapshotsByTriggerId() {
-  if (typeof selectedTaskId === "undefined" || !selectedTaskId) return new Map();
-  if (typeof taskFrozenSectionSnapshots === "undefined") return new Map();
-  const stored = taskFrozenSectionSnapshots.get(selectedTaskId) || [];
-  if (stored.length === 0) return new Map();
-  if (typeof agentMessages === "undefined" || !Array.isArray(agentMessages)) {
-    return new Map();
-  }
-  const messagesById = new Map();
-  const messagesByFingerprint = new Map();
-  for (const message of agentMessages) {
-    const id = message?.id ? String(message.id) : "";
-    if (id) messagesById.set(id, message);
-    const fingerprint = agentRerunMessageFingerprint(message);
-    if (fingerprint && !messagesByFingerprint.has(fingerprint)) {
-      messagesByFingerprint.set(fingerprint, message);
-    }
-  }
-  const result = new Map();
-  for (const snapshot of stored) {
-    let anchorMessage = null;
-    if (snapshot.triggerMessageId && messagesById.has(snapshot.triggerMessageId)) {
-      anchorMessage = messagesById.get(snapshot.triggerMessageId);
-    } else if (snapshot.triggerFingerprint && messagesByFingerprint.has(snapshot.triggerFingerprint)) {
-      anchorMessage = messagesByFingerprint.get(snapshot.triggerFingerprint);
-    }
-    if (!anchorMessage) continue;
-    const anchorId = String(anchorMessage.id);
-    // Re-anchor: keep snapshot pointed at the current real id so future
-    // renders (and the structural signature) stay stable.
-    snapshot.triggerMessageId = anchorId;
-    result.set(anchorId, snapshot);
-  }
-  return result;
 }
 
 function stripIdsFromHtml(html) {
@@ -4589,75 +4380,9 @@ function agentPersistentTimelineElementIds() {
 }
 
 function restoreResultScrollDefaultOrder() {
-  const scrollContent = $("resultScrollContent");
-  if (!scrollContent) return;
-  removeAgentTimelineBuckets();
-  for (const elementId of agentPersistentTimelineElementIds()) {
-    const element = $(elementId);
-    if (element) scrollContent.appendChild(element);
-  }
-}
-
-function agentMessageIsContinuePrompt(message) {
-  const metadata = message?.metadata || {};
-  return Boolean(metadata.awaiting_next_stage);
-}
-
-function agentMessageContent(message) {
-  return String(message?.content || "").trim();
-}
-
-function agentMessageIsAdvanceIntent(message) {
-  const metadata = message?.metadata || {};
-  if (metadata.intent === "advance") return true;
-  const content = agentMessageContent(message).replace(/\s+/gu, "").replace(/[。.!！?？]+$/u, "");
-  if (["不继续", "不要继续", "先不继续", "暂不继续", "不用继续", "别继续", "无需继续"].some((marker) => content.includes(marker))) {
-    return false;
-  }
-  const phrases = ["开始", "开始验证", "继续", "继续吧", "继续执行", "继续下一步", "下一步"];
-  if (phrases.includes(content)) return true;
-  return phrases.includes(stripAgentAdvanceIntentAffixes(content));
-}
-
-function stripAgentAdvanceIntentAffixes(value) {
-  let content = value;
-  const prefixes = ["好的", "好", "那", "请", "麻烦", "帮我", "先", "可以", "确认"];
-  const suffixes = ["一下", "下", "吧", "了"];
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const prefix of prefixes) {
-      if (content.startsWith(prefix) && content.length > prefix.length) {
-        content = content.slice(prefix.length);
-        changed = true;
-      }
-    }
-    for (const suffix of suffixes) {
-      if (content.endsWith(suffix) && content.length > suffix.length) {
-        content = content.slice(0, -suffix.length);
-        changed = true;
-      }
-    }
-  }
-  return content;
-}
-
-function agentMessageIsScanLead(message) {
-  const metadata = message?.metadata || {};
-  return metadata.tool_call?.name === "scan_materials";
-}
-
-function agentReportMessagesForDisplay(messages = []) {
-  const latestConfirmationIndex = messages.reduce(
-    (latestIndex, message, index) => (
-      message?.stage === "word_conclusion_confirmed" ? index : latestIndex
-    ),
-    -1,
-  );
-  if (latestConfirmationIndex < 0) return messages;
-  return messages.filter((message, index) => {
-    if (index > latestConfirmationIndex) return true;
-    return !(message?.stage === "chat" && message?.metadata?.awaiting_confirmation);
+  restoreResultScrollDefaultOrderDom({
+    getElementById: $,
+    persistentElementIds: agentPersistentTimelineElementIds(),
   });
 }
 
@@ -4703,17 +4428,6 @@ function removeOptimisticAgentMessage(messageId) {
   renderAgentConversation();
 }
 
-function agentMessagesHtml(messages = [], labelStage) {
-  let previousAssistantLabel = "";
-  return messages.map((message) => {
-    const resolvedLabelStage = labelStage === undefined ? message?.stage : labelStage;
-    const label = message?.role === "user" ? "" : agentStageLabel(resolvedLabelStage);
-    const hideMeta = Boolean(label && label === previousAssistantLabel);
-    previousAssistantLabel = label || "";
-    return agentMessageHtml(message, resolvedLabelStage, { hideMeta });
-  }).join("");
-}
-
 function clearAgentStageMessages() {
   const stageMessageIds = [
     "agentScanLeadMessages",
@@ -4736,8 +4450,7 @@ function clearAgentStageMessages() {
 }
 
 function removeAgentTimelineBuckets() {
-  document.querySelectorAll("[data-agent-timeline-bucket]").forEach((bucket) => bucket.remove());
-  document.querySelectorAll("[data-agent-frozen-snapshot]").forEach((node) => node.remove());
+  removeAgentTimelineBucketsDom(document);
 }
 
 function agentTimelineVisibleStages() {
@@ -4749,152 +4462,62 @@ function agentTimelineVisibleStages() {
     .map(({ stage }) => stage);
 }
 
-function findLastMessageIndex(messages, predicate) {
-  if (!Array.isArray(messages)) return -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (predicate(messages[index], index)) return index;
-  }
-  return -1;
-}
-
-function agentTimelineInsertionIndex(messages = [], stage = "") {
-  if (!Array.isArray(messages) || messages.length === 0) return 0;
-  if (stage === "scan") {
-    const scanLeadIndex = findLastMessageIndex(messages, (message) => (
-      message?.stage === "scan" && agentMessageIsScanLead(message)
-    ));
-    if (scanLeadIndex >= 0) return scanLeadIndex + 1;
-    const scanIndex = findLastMessageIndex(messages, (message) => message?.stage === "scan");
-    return scanIndex >= 0 ? scanIndex : 0;
-  }
-  if (stage === "reproducibility") {
-    const reproducibilityIndex = findLastMessageIndex(
-      messages,
-      (message) => message?.stage === "reproducibility",
-    );
-    return reproducibilityIndex >= 0 ? reproducibilityIndex : messages.length;
-  }
-  if (stage === "metrics") {
-    const metricIndex = findLastMessageIndex(
-      messages,
-      (message) => message?.stage === "metrics" || message?.stage === "summary",
-    );
-    return metricIndex >= 0 ? metricIndex : messages.length;
-  }
-  return messages.length;
-}
-
-function agentTimelineItems(messages = [], visibleStages = []) {
-  const visibleStageSet = new Set(visibleStages || []);
-  const insertions = agentTimelineStageDefinitions()
-    .filter(({ stage }) => visibleStageSet.has(stage))
-    .map((definition) => ({
-      ...definition,
-      insertionIndex: agentTimelineInsertionIndex(messages, definition.stage),
-    }))
-    .sort((left, right) => (
-      left.insertionIndex - right.insertionIndex ||
-      left.order - right.order
-    ));
-  const insertionsByIndex = new Map();
-  for (const insertion of insertions) {
-    const stageInsertions = insertionsByIndex.get(insertion.insertionIndex) || [];
-    stageInsertions.push(insertion);
-    insertionsByIndex.set(insertion.insertionIndex, stageInsertions);
-  }
-
-  const snapshotsByTrigger = agentFrozenSnapshotsByTriggerId();
-
-  const items = [];
-  let messageBucket = [];
-  const flushMessages = () => {
-    if (!messageBucket.length) return;
-    items.push({ type: "messages", messages: messageBucket });
-    messageBucket = [];
-  };
-
-  for (let index = 0; index <= messages.length; index += 1) {
-    const stageInsertions = insertionsByIndex.get(index) || [];
-    if (stageInsertions.length) {
-      flushMessages();
-      for (const insertion of stageInsertions) {
-        items.push({ type: "stage", stage: insertion.stage, sectionId: insertion.sectionId });
-      }
-    }
-    if (index < messages.length) {
-      const message = messages[index];
-      const messageId = message?.id ? String(message.id) : "";
-      const snapshot = messageId ? snapshotsByTrigger.get(messageId) : null;
-      if (snapshot) {
-        // Flush so the frozen section lands between the previous bucket and
-        // the rerun user message that triggered it.
-        flushMessages();
-        items.push({ type: "frozen", snapshot });
-      }
-      messageBucket.push(message);
-    }
-  }
-  flushMessages();
-  return items;
-}
-
-function createAgentTimelineBucket() {
-  const bucket = document.createElement("section");
-  bucket.className = "agent-conversation agent-timeline-bucket";
-  bucket.dataset.agentTimelineBucket = "true";
-  bucket.setAttribute("aria-label", "Agent 对话片段");
-  const messages = document.createElement("div");
-  messages.className = "agent-messages";
-  bucket.appendChild(messages);
-  return bucket;
-}
-
 function renderAgentTimeline(messages = []) {
-  const scrollContent = $("resultScrollContent");
-  const basePanel = $("agentConversationPanel");
-  const baseMessages = $("agentMessages");
-  if (!scrollContent || !basePanel || !baseMessages) return;
+  renderAgentTimelineDom(messages, {
+    getElementById: $,
+    visibleStages: agentTimelineVisibleStages(),
+    selectedTaskId,
+    taskFrozenSectionSnapshots,
+    agentMessages,
+    createFrozenSnapshotElement: createAgentFrozenSnapshotElement,
+    persistentElementIds: agentPersistentTimelineElementIds(),
+    agentStageLabel,
+    agentMessageHtml,
+  });
+}
 
+function stripChatInstructions(content) {
+  return stripChatInstructionsController(content);
+}
+
+function driverManualAnalysisHtml(messages) {
+  return driverManualAnalysisHtmlController(messages, {
+    renderAgentMarkdown,
+    renderC1Form: agentMessageC1FormHtml,
+    renderDedupPicker: agentMessageDedupPickerHtml,
+    renderModelingSetup: agentMessageModelingSetupHtml,
+    renderScreenTable: agentMessageScreenTableHtml,
+    renderTables: agentMessageTablesHtml,
+    renderModelDelivery: agentMessageModelDeliveryHtml,
+  });
+}
+
+function latestInteractiveScreenMessageId(messages = []) {
+  return latestInteractiveScreenMessageIdController(messages);
+}
+
+function renderDriverManualAnalysis(messages) {
+  const panel = $("agentConversationPanel");
+  const container = $("agentMessages");
+  if (!panel || !container) return;
   removeAgentTimelineBuckets();
-  baseMessages.innerHTML = "";
-  basePanel.classList.add("hidden");
-  basePanel.setAttribute("aria-hidden", "true");
-
-  const visibleStages = agentTimelineVisibleStages();
-  const items = agentTimelineItems(messages, visibleStages);
-  const appendedSections = new Set();
-  let basePanelUsed = false;
-
-  for (const item of items) {
-    if (item.type === "stage") {
-      const section = $(item.sectionId);
-      if (!section) continue;
-      scrollContent.appendChild(section);
-      appendedSections.add(item.sectionId);
-      continue;
+  resetAgentTypingState();
+  panel.classList.remove("hidden");
+  panel.classList.add("driver-analysis-mode");
+  panel.setAttribute("aria-hidden", "false");
+  panel.setAttribute("aria-label", "分析结果");
+  container.innerHTML = driverManualAnalysisHtml(messages);
+  attachCalibrationInteractions(container);
+  // Keep the (hidden-for-driver) validation sections ordered after the analysis
+  // panel so a later switch to a validation task restores cleanly.
+  const scrollContent = $("resultScrollContent");
+  if (scrollContent) {
+    scrollContent.appendChild(panel);
+    for (const elementId of agentPersistentTimelineElementIds()) {
+      if (elementId === "agentConversationPanel") continue;
+      const element = $(elementId);
+      if (element) scrollContent.appendChild(element);
     }
-    if (item.type === "frozen") {
-      const frozen = createAgentFrozenSnapshotElement(item.snapshot);
-      scrollContent.appendChild(frozen);
-      continue;
-    }
-    if (item.type !== "messages" || !item.messages.length) continue;
-    const bucket = basePanelUsed ? createAgentTimelineBucket() : basePanel;
-    const bucketMessages = basePanelUsed ? bucket.querySelector(".agent-messages") : baseMessages;
-    basePanelUsed = true;
-    bucket.classList.remove("hidden");
-    bucket.setAttribute("aria-hidden", "false");
-    bucketMessages.innerHTML = agentMessagesHtml(item.messages);
-    scrollContent.appendChild(bucket);
-  }
-
-  if (!basePanelUsed) {
-    scrollContent.appendChild(basePanel);
-  }
-  for (const elementId of agentPersistentTimelineElementIds()) {
-    if (elementId === "agentConversationPanel" || appendedSections.has(elementId)) continue;
-    const element = $(elementId);
-    if (element) scrollContent.appendChild(element);
   }
 }
 
@@ -4986,13 +4609,18 @@ function agentMemoryReferencesHtml(references = []) {
   if (!Array.isArray(references) || references.length === 0) return "";
   const rows = references.map((reference) => {
     const memoryId = String(reference.id || reference.memory_id || "");
+    const kind = reference.kind || "raw";
     const type = reference.memory_type || "memory";
     const sourceTask = reference.source_task_id || "";
     const confidence = reference.confidence !== undefined ? formatMemoryConfidence(reference.confidence) : "";
     const reason = reference.use_reason || reference.reason || "";
+    const sourceCount = Array.isArray(reference.source_memory_ids) ? reference.source_memory_ids.length : 0;
     const meta = [
+      kind === "distillation" ? "进化沉淀" : "",
       type,
       sourceTask ? `来源 ${sourceTask}` : "",
+      sourceCount ? `来源记忆 ${sourceCount}` : "",
+      reference.support_count !== undefined ? `支持 ${reference.support_count}` : "",
       confidence ? `置信度 ${confidence}` : "",
     ].filter(Boolean).map(escapeHtml).join(" · ");
     return [
@@ -5003,7 +4631,7 @@ function agentMemoryReferencesHtml(references = []) {
       reason ? `<span>${escapeHtml(reason)}</span>` : "",
       "</span>",
       memoryId
-        ? `<button class="agent-memory-reference-action" type="button" data-agent-memory-inline-inspect="${escapeHtml(memoryId)}">查看</button>`
+        ? `<button class="agent-memory-reference-action" type="button" data-agent-memory-inline-inspect="${escapeHtml(memoryId)}" data-agent-memory-inline-kind="${escapeHtml(kind)}">查看</button>`
         : "",
       "</li>",
     ].join("");
@@ -5016,9 +4644,490 @@ function agentMemoryReferencesHtml(references = []) {
   ].join("");
 }
 
+// VD-1: infer a rich-cell kind from a driver table's header text, mirroring the
+// column_specs mechanism the validation metric preview uses (app.js:3502+),
+// since generic driver tables (JOIN diagnostics / feature metrics / model
+// compare) carry no explicit specs — only a {title, columns, rows} shape.
+function driverColumnKindFromHeader(headerLabel) {
+  const label = String(headerLabel || "").trim();
+  if (!label) return "text";
+  if (/^PSI$/i.test(label)) return "psi";
+  if (/(匹配率|命中率|缺失率|占比|比例|坏率|坏账率|审批率|通过率)/i.test(label)) return "databar-percent";
+  if (/^(KS|KS\(%\)|AUC|AUC\(%\)|IV|VIF|重要性|相关系数|预期利润|Gain|Lift|lift)/i.test(label)) return "databar";
+  return "text";
+}
+
+// Champion / winning candidate rows in comparison tables (候选模型对比 etc.) are
+// marked by the backend appending " ★" to the first cell (marvis/agent/
+// renderers.py:350); render that as a highlighted row instead of a literal star.
+function driverTableCellHtml(value, rowIndex, columnIndex, headerLabel, kind, fractionsForColumn) {
+  const raw = value ?? "";
+  if (columnIndex === 0 && typeof value === "string" && /\s★$/.test(value)) {
+    const label = String(raw).replace(/\s★$/, "");
+    return {
+      cls: "cell-text cell-champion",
+      html: `<span class="champion-badge" data-tip="表现最优，当前推荐候选">${escapeHtml(label)}</span>`,
+    };
+  }
+  if (kind === "psi") {
+    const numeric = parseNumeric(raw);
+    const thresholds = [0.02, 0.10];
+    const tier = psiTier(numeric, thresholds);
+    const tip = psiTooltipText(numeric, thresholds);
+    const stripMarker = numeric === null
+      ? ""
+      : `<i class="psi-marker" style="left:${Math.min(Math.abs(numeric) / 0.20, 1) * 100}%"></i>`;
+    return {
+      cls: "cell-psi",
+      html: `<span class="psi-cell" data-tip="${escapeHtml(tip)}">`
+        + `<span class="psi-value" data-tier="${tier}">${escapeHtml(String(raw))}</span>`
+        + `<span class="psi-strip"><span></span><span></span><span></span>${stripMarker}</span>`
+        + `</span>`,
+    };
+  }
+  if (kind === "databar" || kind === "databar-percent") {
+    const fraction = fractionsForColumn.get(rowIndex);
+    if (fraction !== undefined && parseNumeric(raw) !== null) {
+      const tip = `${headerLabel} ${raw}`;
+      return {
+        cls: "cell-databar",
+        // VD-9: driver-timeline tables render once and are never rebuilt in
+        // place (see comment on agentMessageTablesHtml below), so the entry
+        // animation is always safe to play here - no data-animation gate
+        // needed, unlike the polled validation metric preview above.
+        html: `<span class="databar" data-color="primary" data-tip="${escapeHtml(tip)}" style="--fraction:${fraction.toFixed(4)};--bar-index:${rowIndex}">`
+          + `<span class="databar-fill"></span>`
+          + `<span class="databar-label">${escapeHtml(String(raw))}</span>`
+          + `</span>`,
+      };
+    }
+    if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+      return { cls: "cell-number", html: escapeHtml(String(raw)) };
+    }
+    return { cls: "cell-text", html: escapeHtml(String(raw)) };
+  }
+  if (metricHeaderShouldRightAlign(headerLabel) && parseNumeric(raw) !== null) {
+    return { cls: "cell-number", html: escapeHtml(String(raw)) };
+  }
+  return { cls: "cell-text", html: escapeHtml(String(raw)) };
+}
+
+// Inline rich tables carried by the generic plan driver (data_join / future
+// feature / modeling). Format is the driver's simple {title, columns, rows};
+// validation metric tables use a different path (metadata.sections). VD-1:
+// column kind is inferred from the header text (no column_specs on this path)
+// and rendered with the same databar / PSI-band / tabular-nums primitives the
+// validation metric preview already uses (render-metrics.js). Each driver
+// message is appended whole, so this renders once on the full timeline
+// rebuild — no streaming fast-path interaction.
+function agentMessageTablesHtml(message) {
+  const tables = message?.metadata?.tables;
+  if (!Array.isArray(tables) || !tables.length) return "";
+  const blocks = tables
+    .map((table) => {
+      const columns = Array.isArray(table?.columns) ? table.columns : [];
+      const rows = Array.isArray(table?.rows) ? table.rows.map((row) => (Array.isArray(row) ? row : [row])) : [];
+      if (!columns.length && !rows.length) return "";
+      const kinds = columns.map((col) => driverColumnKindFromHeader(col));
+      const fractionsByColumn = new Map();
+      kinds.forEach((kind, columnIndex) => {
+        if (kind === "databar" || kind === "databar-percent") {
+          fractionsByColumn.set(columnIndex, columnFractions(rows, columnIndex));
+        }
+      });
+      const head = columns.length
+        ? `<thead><tr>${columns.map((col) => `<th>${escapeHtml(String(col))}</th>`).join("")}</tr></thead>`
+        : "";
+      const body = `<tbody>${rows
+        .map((cells, rowIndex) => {
+          const tds = cells.map((cell, columnIndex) => {
+            const rendered = driverTableCellHtml(
+              cell,
+              rowIndex,
+              columnIndex,
+              columns[columnIndex] ?? "",
+              kinds[columnIndex] || "text",
+              fractionsByColumn.get(columnIndex) || new Map(),
+            );
+            return `<td class="${rendered.cls}">${rendered.html}</td>`;
+          });
+          return `<tr>${tds.join("")}</tr>`;
+        })
+        .join("")}</tbody>`;
+      const caption = table?.title
+        ? `<div class="agent-inline-table-title">${escapeHtml(String(table.title))}</div>`
+        : "";
+      const chartHtml = driverTableChartHtml(table?.chart);
+      return `<div class="agent-inline-table">${caption}${chartHtml}<div class="agent-inline-table-scroll"><table>${head}${body}</table></div></div>`;
+    })
+    .join("");
+  return blocks ? `<div class="agent-message-tables">${blocks}</div>` : "";
+}
+
+// VD-4: renders the calibration reliability curve / score-band bar+line chart
+// above its table when the driver table carries a `chart` payload (see
+// marvis/agent/renderers.py::_calibration_table / _score_band_table). The
+// table itself is unchanged and stays visible below the chart — the chart is
+// an enhancement, not a replacement. Numbers are read straight off payload
+// coordinates (no frontend computation, INV-1). Missing/empty chart data
+// renders nothing rather than an empty frame.
+function driverTableChartHtml(chart) {
+  if (!chart || typeof chart !== "object") return "";
+  if (chart.kind === "calibration_curve") {
+    if (!Array.isArray(chart.points) || chart.points.length === 0) return "";
+    return `<div class="agent-inline-table-chart">${renderCalibrationCard(chart)}</div>`;
+  }
+  if (chart.kind === "score_band_bars") {
+    if (!Array.isArray(chart.bands) || chart.bands.length === 0) return "";
+    return `<div class="agent-inline-table-chart">${renderScoreBandCard(chart)}</div>`;
+  }
+  return "";
+}
+
+function agentMessageModelingSetupHtml(message, options = {}) {
+  return renderModelingSetupPanel(message, options);
+}
+
+function agentMessageModelDeliveryHtml(message, options = {}) {
+  return renderModelDeliveryPanel(message, options);
+}
+
+async function submitModelingWeightAdjust(button) {
+  return submitModelingWeightAdjustController(button, modelingSetupControllerContext());
+}
+
+function handleModelingWeightAdjustClick(event) {
+  return handleModelingWeightAdjustClickController(event, modelingSetupControllerContext());
+}
+
+function modelingSetupControllerContext() {
+  const capturedTaskId = selectedTaskId;
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    agentAcceptanceModeValue,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
+  };
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleModelingWeightAdjustClick);
+}
+
+function agentMessageC1FormHtml(message, options = {}) {
+  return renderJoinC1Form(message, options);
+}
+
+async function submitC1Assignment(button) {
+  return submitC1AssignmentController(button, joinGateControllerContext());
+}
+
+function handleC1ConfirmClick(event) {
+  return handleC1ConfirmClickController(event, joinGateControllerContext());
+}
+
+function joinGateControllerContext() {
+  const capturedTaskId = selectedTaskId;
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    agentAcceptanceModeValue,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
+  };
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleC1ConfirmClick);
+}
+
+function agentMessageScreenTableHtml(message, options = {}) {
+  return renderScreenGateTable(message, options);
+}
+
+async function submitScreenThresholdAdjust(button) {
+  return submitScreenThresholdAdjustController(button, screenGateControllerContext());
+}
+
+async function submitScreenSelection(button) {
+  return submitScreenSelectionController(button, screenGateControllerContext());
+}
+
+function handleScreenAdjustClick(event) {
+  return handleScreenAdjustClickController(event, screenGateControllerContext());
+}
+
+function handleScreenConfirmClick(event) {
+  return handleScreenConfirmClickController(event, screenGateControllerContext());
+}
+
+function screenGateControllerContext() {
+  const capturedTaskId = selectedTaskId;
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    // UX-4: the search/sort/chip/page/bulk handlers re-render a gate message's
+    // table client-side (no backend round trip), so they need to look the
+    // message back up by id from the live conversation state.
+    getAgentMessages: () => agentMessages,
+    api,
+    agentAcceptanceModeValue,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
+  };
+}
+function handleScreenSearchInput(event) {
+  return handleScreenSearchInputController(event, screenGateControllerContext());
+}
+function handleScreenSortClick(event) {
+  return handleScreenSortClickController(event, screenGateControllerContext());
+}
+function handleScreenChipClick(event) {
+  return handleScreenChipClickController(event, screenGateControllerContext());
+}
+function handleScreenPageClick(event) {
+  return handleScreenPageClickController(event, screenGateControllerContext());
+}
+function handleScreenBulkClick(event) {
+  return handleScreenBulkClickController(event, screenGateControllerContext());
+}
+function handleScreenPickChange(event) {
+  return handleScreenPickChangeController(event, screenGateControllerContext());
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleScreenAdjustClick);
+  document.addEventListener("click", handleScreenConfirmClick);
+  document.addEventListener("click", handleScreenSortClick);
+  document.addEventListener("click", handleScreenChipClick);
+  document.addEventListener("click", handleScreenPageClick);
+  document.addEventListener("click", handleScreenBulkClick);
+  document.addEventListener("input", handleScreenSearchInput);
+  document.addEventListener("change", handleScreenPickChange);
+}
+
+function agentMessageDedupPickerHtml(message, options = {}) {
+  return renderDedupPicker(message, options);
+}
+
+async function submitDedupStrategies(button) {
+  return submitDedupStrategiesController(button, joinGateControllerContext());
+}
+
+function handleDedupConfirmClick(event) {
+  return handleDedupConfirmClickController(event, joinGateControllerContext());
+}
+
+async function submitDedupExclude(button) {
+  return submitDedupExcludeController(button, joinGateControllerContext());
+}
+
+function handleDedupExcludeClick(event) {
+  return handleDedupExcludeClickController(event, joinGateControllerContext());
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDedupConfirmClick);
+  document.addEventListener("click", handleDedupExcludeClick);
+}
+
+function agentMessageGateButtonHtml(message) {
+  // UX-10: resolve the gate step's own tool (the step it is confirming) so the
+  // button copy can state the consequence (确认并执行拼接/确认所选特征/...).
+  const step = planRailController.planStep(message?.metadata || {});
+  return renderDriverGateButton(message, { gateStepTool: step?.tool_ref?.tool || "" });
+}
+
+async function submitDriverConfirm(button) {
+  return submitDriverConfirmController(button, driverConfirmControllerContext());
+}
+
+function handleDriverConfirmClick(event) {
+  return handleDriverConfirmClickController(event, driverConfirmControllerContext());
+}
+
+function driverConfirmControllerContext() {
+  const capturedTaskId = selectedTaskId;
+  return {
+    getSelectedTaskId: () => selectedTaskId,
+    api,
+    setActionStatus,
+    setAgentMessages: (messages) => {
+      if (selectedTaskId !== capturedTaskId) return;
+      agentMessages = messages || agentMessages;
+    },
+    renderAgentConversation,
+    // UX-1: let the v2 gate controllers show busy state + keep the agent-message
+    // stream and plan rail live while their driver turn (now job-wrapped, REL-1)
+    // runs, instead of freezing until the request finally resolves.
+    pollAgentMessagesUntilSettled,
+    resetFetchThrottle: (taskId) => planRailController.resetFetchThrottle(taskId),
+    renderWorkflowStepper,
+  };
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDriverConfirmClick);
+}
+
+function handleDriverReportDownloadClick(event) {
+  const button = event.target?.closest?.("[data-driver-report-download]");
+  if (!button || !selectedTaskId) return;
+  event.preventDefault();
+  window.location.href = `/api/tasks/${encodeURIComponent(selectedTaskId)}/driver-report/download`;
+}
+if (typeof document !== "undefined") {
+  document.addEventListener("click", handleDriverReportDownloadClick);
+  planRailController.installArtifactHandlers(document);
+}
+
+// VD-2: needs_confirmation gate messages get a distinct "gate card" shell
+// (left tone bar + glass tint + header pill + red-flag checklist + consequence
+// line) instead of looking like an ordinary chat bubble with one extra button.
+// Red flags are read from the backend's already-emitted "⚠️" markers (message
+// text lines + inline-table cells) — a pure presentation read, no new backend
+// data (INV-1).
+function shieldGateIconHtml() {
+  return '<svg class="gate-card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6z"/>'
+    + '<path d="M9.5 12l1.8 1.8L15 10"/>'
+    + '</svg>';
+}
+
+function driverGateRedFlags(message) {
+  const flags = [];
+  const content = String(message?.content || "");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("⚠️")) {
+      flags.push(trimmed.replace(/^⚠️\s*/, "").replace(/\*\*/g, ""));
+    }
+  }
+  const tables = Array.isArray(message?.metadata?.tables) ? message.metadata.tables : [];
+  for (const table of tables) {
+    const columns = Array.isArray(table?.columns) ? table.columns : [];
+    const rows = Array.isArray(table?.rows) ? table.rows : [];
+    rows.forEach((row) => {
+      const cells = Array.isArray(row) ? row : [row];
+      cells.forEach((cell, columnIndex) => {
+        if (typeof cell !== "string" || !cell.includes("⚠️")) return;
+        const label = columns[columnIndex] ?? "";
+        const rowLabel = cells[0] ?? "";
+        flags.push(`${escapeHtml(String(rowLabel))} · ${escapeHtml(String(label))}：${escapeHtml(cell.replace(/⚠️/g, "").trim())}`.replace(/^ · /, ""));
+      });
+    });
+  }
+  return flags;
+}
+
+function driverGateRedFlagsHtml(flags) {
+  if (!flags.length) return "";
+  return [
+    '<div class="gate-card-redflags" data-tone="warn">',
+    '<div class="gate-card-redflags-title">⚠️ 需要留意</div>',
+    '<ul class="gate-card-redflags-list">',
+    ...flags.map((flag) => `<li>${flag.includes("<") ? flag : escapeHtml(flag)}</li>`),
+    "</ul>",
+    "</div>",
+  ].join("");
+}
+
+function driverGateConsequenceHtml(message) {
+  const next = typeof planRailController?.nextStepAfter === "function"
+    ? planRailController.nextStepAfter(message?.metadata || {})
+    : null;
+  if (!next?.title) return "";
+  return `<div class="gate-card-consequence">确认后将执行：${escapeHtml(String(next.title))}</div>`;
+}
+
+function driverGateCardHeaderHtml(message) {
+  const step = agentMessagePlanStep(message?.metadata || {});
+  const stepTitle = step?.title || message?.metadata?.step_title || "";
+  return [
+    '<div class="gate-card-header">',
+    shieldGateIconHtml(),
+    '<span class="gate-card-pill">⏸ 等待确认</span>',
+    stepTitle ? `<span class="gate-card-title">待确认：${escapeHtml(String(stepTitle))}</span>` : "",
+    "</div>",
+  ].join("");
+}
+
+// Wraps an already-rendered gate message body in the gate-card shell. Shared by
+// both agent-mode chat bubbles (agentMessageHtml) and manual-mode analysis
+// sections (driverManualAnalysisHtml), so the card form is identical in both
+// modes — only the confirm control differs (chat button vs. step-rail button).
+function driverGateCardHtml(message, innerHtml) {
+  const redFlags = driverGateRedFlags(message);
+  return [
+    '<div class="gate-card" data-gate-tone="' + (redFlags.length ? "warn" : "review") + '">',
+    driverGateCardHeaderHtml(message),
+    '<div class="gate-card-body">',
+    innerHtml,
+    "</div>",
+    driverGateRedFlagsHtml(redFlags),
+    driverGateConsequenceHtml(message),
+    "</div>",
+  ].join("");
+}
+
+// UX-2: agent-mode gate widgets reuse the exact renderers + widget/table
+// placement manual mode uses (driverGateBodyHtmlController), instead of a
+// separate agent-only render branch, so a screening table / dedup picker /
+// modeling setup panel / join-C1 form always looks and behaves identically
+// in both modes — the controllers underneath (screen_gate_controller.js etc.)
+// are already mode-agnostic and post through the same structured
+// /agent/messages fields (selection / dedup_strategies / adjust_params /
+// expected_step_id). Free text in the composer remains a second channel that
+// can advance the same gate (agent mode's LLM-routing value is kept, not
+// replaced).
+function agentMessageGateBodyHtml(message, interactive) {
+  return driverGateBodyHtmlController(message, {
+    renderC1Form: agentMessageC1FormHtml,
+    renderDedupPicker: agentMessageDedupPickerHtml,
+    renderModelingSetup: agentMessageModelingSetupHtml,
+    renderScreenTable: agentMessageScreenTableHtml,
+    renderTables: agentMessageTablesHtml,
+  }, { interactive });
+}
+
 function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
   const role = message.role === "user" ? "user" : "assistant";
-  const className = role === "user" ? "agent-message user" : "agent-message assistant";
+  // join_c1 turns carry no explicit metadata.kind (backend groups them with
+  // "gate" for turn-boundary purposes at turn_handlers.py:612) but are the
+  // same needs_confirmation moment — the C1 role-assignment form — so they
+  // get the same card treatment.
+  const isGate = role === "assistant"
+    && (message?.metadata?.kind === "gate" || Boolean(message?.metadata?.join_c1));
+  const hasWidget = isGate && driverGateHasWidgetController(message);
+  const className = role === "user"
+    ? "agent-message user"
+    : `agent-message assistant${isGate ? " has-gate-card" : ""}`;
   const streaming = agentMessageIsStreaming(message);
   const thinking = agentMessageIsThinking(message);
   const contentHtml = thinking
@@ -5029,10 +5138,22 @@ function agentMessageHtml(message, labelStage = message?.stage, options = {}) {
     : "";
   const messageId = message?.id ? String(message.id) : "";
   const idAttr = messageId ? ` data-agent-message-id="${escapeHtml(messageId)}"` : "";
+  // VD-2/UX-2: only the latest gate (stale-protection identical to manual
+  // mode's latestInteractiveScreenMessageId / lastAssistantMessageId) renders
+  // its widgets as interactive; earlier gate cards render the same widgets as
+  // read-only snapshots so a stale card cannot be actioned against an
+  // already-advanced step.
+  const interactive = hasWidget && Boolean(options.isLatestGate);
+  const bodyHtml = [
+    `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    role === "assistant" && hasWidget ? agentMessageGateBodyHtml(message, interactive) : "",
+    role === "assistant" && !hasWidget ? `${agentMessageModelDeliveryHtml(message)}${agentMessageTablesHtml(message)}` : "",
+    role === "assistant" ? agentMessageGateButtonHtml(message) : "",
+  ].join("");
   return [
     `<article class="${className}"${idAttr}>`,
-    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentStageLabel(labelStage))}</div>` : "",
-    `<div class="agent-message-content" data-agent-streaming="${streaming ? "true" : "false"}" data-agent-thinking="${thinking ? "true" : "false"}">${contentHtml}</div>`,
+    role === "assistant" && !options.hideMeta ? `<div class="agent-message-meta">${escapeHtml(agentMessageMetaLabel(message, labelStage))}</div>` : "",
+    isGate ? driverGateCardHtml(message, bodyHtml) : bodyHtml,
     memoryReferencesHtml,
     "</article>",
   ].join("");
@@ -5055,6 +5176,23 @@ function agentStageLabel(_stage) {
   return agentValidatorAlias(selectedTask?.validator) || "Agent";
 }
 
+function agentMessageMetaLabel(message, labelStage = message?.stage) {
+  const pieces = [agentStageLabel(labelStage)];
+  const metadata = message?.metadata || {};
+  const step = agentMessagePlanStep(metadata);
+  const phase = metadata.phase || step?.phase || "";
+  const stepTitle = metadata.step_title || step?.title || "";
+  const runSeq = Number(metadata.run_seq);
+  if (phase) pieces.push(String(phase));
+  if (stepTitle) pieces.push(String(stepTitle));
+  if (Number.isFinite(runSeq) && runSeq > 0) pieces.push(`第 ${runSeq} 轮`);
+  return pieces.filter(Boolean).join(" · ");
+}
+
+function agentMessagePlanStep(metadata = {}) {
+  return planRailController.planStep(metadata, selectedTaskId);
+}
+
 function formatAgentMessageContent(content, { markdown = false } = {}) {
   if (markdown) return renderAgentMarkdown(content);
   return escapeHtml(content).replaceAll("\n", "<br>");
@@ -5065,15 +5203,39 @@ function shouldPreserveOptimisticAgentMessages(nextMessages = []) {
   return optimisticCount > 0 && nextMessages.length < agentMessages.length;
 }
 
+function agentMessageCanPollIncrementally({ preserveOptimistic = false } = {}) {
+  if (preserveOptimistic || !agentMessages.length) return false;
+  return !agentMessages.some((message) => message?.metadata?.optimistic || message?.metadata?.streaming);
+}
+
+function mergeIncrementalAgentMessages(nextMessages = []) {
+  if (!nextMessages.length) return false;
+  const seen = new Set(agentMessages.map((message) => message.id).filter(Boolean));
+  const additions = nextMessages.filter((message) => !seen.has(message.id));
+  if (!additions.length) return false;
+  agentMessages = [...agentMessages, ...additions];
+  return true;
+}
+
 async function loadAgentMessages(taskId = selectedTaskId, { preserveOptimistic = false } = {}) {
-  if (!taskId || !selectedTaskIsAgentMode(findTaskInCache(taskId) || selectedTask)) {
+  const messageTask = findTaskInCache(taskId) || selectedTask;
+  // Driver tasks have a conversation in manual mode too (controls, no LLM).
+  const hasConversation = selectedTaskIsAgentMode(messageTask) || taskUsesPlanRail(messageTask);
+  if (!taskId || !hasConversation) {
     agentMessages = [];
     renderAgentConversation();
     return;
   }
-  const payload = await api(`api/tasks/${taskId}/agent/messages`);
+  const useIncremental = agentMessageCanPollIncrementally({ preserveOptimistic });
+  const lastMessageId = useIncremental ? agentMessages[agentMessages.length - 1]?.id : "";
+  const suffix = lastMessageId ? `?after_id=${encodeURIComponent(lastMessageId)}` : "";
+  const payload = await api(`api/tasks/${taskId}/agent/messages${suffix}`);
   if (selectedTaskId !== taskId) return;
   const nextMessages = payload.messages || [];
+  if (payload.incremental) {
+    if (mergeIncrementalAgentMessages(nextMessages)) renderAgentConversation();
+    return;
+  }
   if (preserveOptimistic && shouldPreserveOptimisticAgentMessages(nextMessages)) return;
   agentMessages = nextMessages;
   renderAgentConversation();
@@ -5106,6 +5268,10 @@ async function startAgentValidation() {
     setActionStatus("请输入要交给 Agent 的任务。", "error");
     return;
   }
+  // Agent mode is, by definition, "manual mode with the operator's decisions made
+  // by an LLM" — so it always requires a configured LLM. Without one, error out and
+  // prompt the user to configure a model (no canned/default agent conversation).
+  // The deterministic, no-LLM flow is the *manual* mode, reached a different way.
   const unavailableModelMessage = agentModelUnavailableMessage();
   if (showAgentModelGuidance(unavailableModelMessage)) return;
   setAgentComposerNotice("");
@@ -5234,19 +5400,22 @@ function agentValidationPaused(task) {
   return ["scanned", "executed", "writing_artifacts", "review_required"].includes(status);
 }
 
-async function uploadMaterialFiles(files) {
-  if (!files.length) {
-    throw new Error("请先选择要上传的材料文件。");
-  }
-  const formData = new FormData();
-  files.forEach((item) => {
-    formData.append("files", item.file, item.name);
-    formData.append("relative_paths", item.relativePath || item.name);
-  });
-  return await api("api/material-uploads", {
-    method: "POST",
-    body: formData,
-  });
+function prefillAgentTaskInstruction(task) {
+  if (task?.run_mode !== "agent") return;
+  const input = $("agentComposerInput");
+  if (!input || input.value.trim()) return;
+  const definition = taskTypeDefinition(task.task_type || createTaskDialog.activeTaskType());
+  input.value = definition.initialGoal;
+  autoGrowComposerInput();
+  updateAgentSendDisabled();
+}
+
+// UX-5: "发消息介入" on a plan-rail no_progress event — focuses the composer
+// without overwriting anything the user may already be drafting there.
+function focusAgentComposerForIntervene() {
+  const input = $("agentComposerInput");
+  if (!input) return;
+  input.focus();
 }
 
 function setCreateTaskSubmitting(isSubmitting) {
@@ -5257,42 +5426,8 @@ function setCreateTaskSubmitting(isSubmitting) {
 }
 
 async function createTask() {
-  setCreateStatus("");
-  const selectedRunMode = document.querySelector('input[name="runMode"]:checked')?.value;
-  if (!selectedRunMode) {
-    setCreateStatus("请选择执行模式。", "error");
-    return null;
-  }
-  const payload = {
-    model_name: $("modelName").value.trim(),
-    model_version: "",
-    validator: $("validator").value.trim(),
-    source_dir: $("sourceDir").value.trim(),
-    run_mode: selectedRunMode,
-    report_values: collectCreateTaskReportValues(),
-  };
-  if (materialSourceController.mode() === "upload") {
-    const files = materialSourceController.selectedFiles();
-    if (files.length === 0) {
-      setCreateStatus("请先选择要上传的材料文件。", "error");
-      return null;
-    }
-    if (!payload.model_name || !payload.validator) {
-      setCreateStatus("请先填写模型名称和验证人员。", "error");
-      return null;
-    }
-    setCreateStatus("正在上传材料...");
-    const upload = await uploadMaterialFiles(files);
-    payload.source_dir = upload.source_dir;
-  }
-  if (!payload.model_name || !payload.validator || !payload.source_dir) {
-    setCreateStatus("请先填写模型名称、验证人员和材料目录。", "error");
-    return null;
-  }
-  const task = await api("api/tasks", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+  const task = await createTaskDialog.createTask();
+  if (!task) return null;
   selectedTaskId = task.id;
   selectedTask = task;
   rememberSelectedTaskId(task.id);
@@ -5301,6 +5436,7 @@ async function createTask() {
   await loadReportFields();
   setCreateStatus("任务已创建。");
   closeTaskDialog();
+  prefillAgentTaskInstruction(task);
   return task;
 }
 
@@ -5350,10 +5486,30 @@ async function createTaskAndScan() {
     if (!task) return;
     if (task.run_mode === "agent") {
       const taskId = task.id || selectedTaskId;
-      setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
+      const activeDialogTaskType = createTaskDialog.activeTaskType();
+      const definition = taskTypeDefinition(task.task_type || activeDialogTaskType);
+      const isValidationTask = (task.task_type || activeDialogTaskType || defaultTaskType) === "validation";
       setBusy(null, "", taskId);
       await loadAgentMessages(taskId);
       renderAll();
+      if (!isValidationTask && definition.initialGoal) {
+        // createTask() already seeded the conversation composer via
+        // prefillAgentTaskInstruction; just focus it (the V2 plan dialog is retired).
+        $("agentComposerInput")?.focus?.();
+        setActionStatus(`${definition.label}任务已创建，已填入建议目标，确认后发送即可。`, "success");
+        return;
+      }
+      setActionStatus("Agent 任务已创建，等待你的下一条指令。", "success");
+      return;
+    }
+    // Manual mode for a driver task (data_join / feature / modeling): start the
+    // deterministic, control-driven flow (no LLM). Validation manual still scans.
+    if (taskUsesPlanRail(task)) {
+      const taskId = task.id || selectedTaskId;
+      setBusy(null, "", taskId);
+      await dispatchDriverStart(taskId);
+      renderAll();
+      setActionStatus(`${taskTypeDefinition(task.task_type).label}任务已创建，请在下方逐步确认。`, "success");
       return;
     }
     setBusy(null, "", null);
@@ -5369,6 +5525,60 @@ async function createTaskAndScan() {
     createTaskInFlight = false;
     setCreateTaskSubmitting(false);
   }
+}
+
+// UX-9: one-click sample data trial — generates the built-in demo credit sample
+// (+ dictionary) into a fresh material directory, then creates a manual-mode
+// modeling task with it and starts the same deterministic plan-rail flow
+// createTaskAndScan() uses for a real driver task, so the demo exercises the
+// actual JOIN→FEATURE→MODELING confirmation-gate experience end to end.
+async function createSampleDataTask() {
+  setActionStatus("正在生成示例数据...", "busy");
+  try {
+    const upload = await api("api/sample-data", { method: "POST" });
+    const task = await api("api/tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        task_type: "modeling",
+        model_name: `${sampleDataTaskNamePrefix}演示建模`,
+        model_version: "",
+        validator: "演示",
+        source_dir: upload.source_dir,
+        run_mode: "manual",
+        report_values: {},
+      }),
+    });
+    selectedTaskId = task.id;
+    selectedTask = task;
+    rememberSelectedTaskId(task.id);
+    renderStoredStateSummaries();
+    await refreshTasks();
+    await loadReportFields();
+    setBusy(null, "", task.id);
+    await dispatchDriverStart(task.id);
+    renderAll();
+    setActionStatus("示例任务已创建，请在下方逐步确认。", "success");
+    return task;
+  } catch (error) {
+    setActionStatus(error?.message || "生成示例数据失败", "error");
+    return null;
+  }
+}
+
+function handleWelcomeSampleDataClick() {
+  void createSampleDataTask();
+}
+
+// Start a driver-based task's deterministic flow (manual mode, no LLM): POST the
+// agent-start endpoint, which routes to the plan-conversation driver.
+async function dispatchDriverStart(taskId = selectedTaskId) {
+  const normalizedTaskId = requireTaskId(taskId || selectedTaskId, "启动");
+  const result = await api(`/api/tasks/${normalizedTaskId}/agent/start`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  agentMessages = result.messages || agentMessages;
+  renderAgentConversation();
 }
 
 async function pollValidationProgress(
@@ -5581,6 +5791,25 @@ function previewWordReport() {
   openWordPreviewDialog();
 }
 
+async function loadTaskPurgeSummaryText(taskId) {
+  try {
+    const preview = await api(`api/tasks/${taskId}/purge-preview`);
+    const summary = preview && preview.purge_summary ? preview.purge_summary : null;
+    if (!summary) return "";
+    const parts = [];
+    if (summary.datasets) parts.push(`数据集 ${summary.datasets}`);
+    if (summary.joins) parts.push(`JOIN ${summary.joins}`);
+    if (summary.plans) parts.push(`计划 ${summary.plans}`);
+    if (summary.experiments) parts.push(`实验 ${summary.experiments}`);
+    if (summary.model_artifacts) parts.push(`模型产物 ${summary.model_artifacts}`);
+    if (summary.strategies) parts.push(`策略 ${summary.strategies}`);
+    if (!parts.length) return "";
+    return `\n\n将一并清理：${parts.join("、")}。`;
+  } catch (error) {
+    return "";
+  }
+}
+
 async function reconcileTaskBeforeDelete(task) {
   if (!task?.id) return null;
   if (taskBusyActions.get(task.id) !== "agent" || taskServerBusyAction(task)) {
@@ -5617,9 +5846,14 @@ async function deleteTask(task) {
     setActionStatus("运行中的任务不能删除。", "error");
     return;
   }
-  const confirmed = window.confirm(
-    `确认删除任务「${taskDisplayName(targetTask)}」？删除后将移除任务记录和本地输出文件，不能撤销。`
-  );
+  const purgeSummaryText = await loadTaskPurgeSummaryText(targetTask.id);
+  const confirmed = await showPlatformConfirm({
+    title: "删除任务",
+    message: `确认删除任务「${taskDisplayName(targetTask)}」？删除后将移除任务记录和本地输出文件，不能撤销。${purgeSummaryText}`,
+    confirmText: "删除",
+    cancelText: "取消",
+    tone: "danger",
+  });
   if (!confirmed) {
     setActionStatus("已取消删除。");
     return;
@@ -5636,6 +5870,7 @@ async function deleteTask(task) {
       rememberSelectedTaskId(null);
     }
     resultScrollPositionsByTask.delete(targetTask.id);
+    persistResultScrollPositions();
     await refreshTasks();
     renderStoredStateSummaries();
     await loadReportFields();
@@ -5651,10 +5886,12 @@ async function deleteTask(task) {
 async function runAction(action, options = {}) {
   const actionId = options.actionId || null;
   const taskId = options.taskId || selectedTaskId;
+  let shouldRenderAfter = options.renderAfter !== false;
   try {
     if (actionId) setBusy(actionId, options.busyText || "正在处理...", taskId);
     await action();
   } catch (error) {
+    shouldRenderAfter = true;
     if (error?.name === "AbortError") {
       if (actionId) setActionStatus(actionCancelledStatusTitle(actionId), "success");
       return;
@@ -5668,12 +5905,13 @@ async function runAction(action, options = {}) {
     }
     const message = error.message || "操作失败";
     if (actionId === "agentMemory") setAgentMemoryStatus(message, "error");
+    if (actionId === "draftTools") setDraftToolsStatus(message, "error");
     if (actionId) renderActionError(actionId, message);
     if (actionId) setActionStatus(actionFailureStatusTitle(actionId), "error", message);
     else setCreateStatus(message, "error");
   } finally {
     if (actionId) setBusy(null, "", taskId);
-    renderAll();
+    if (shouldRenderAfter) renderAll();
   }
 }
 
@@ -5705,6 +5943,18 @@ function closeSidebarSettingsOnOutsideClick(event) {
   const target = event.target;
   if (target instanceof Element && target.closest("#sidebarSettings")) return;
   settings.open = false;
+}
+
+function openGovernanceSettingsFromSidebar() {
+  closeSidebarSettingsMenu();
+  scheduleGovernanceSettingsFromSidebar();
+}
+
+function handleGovernanceSettingsPointerDown(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  closeSidebarSettingsMenu();
+  scheduleGovernanceSettingsFromSidebar();
 }
 
 function workflowActionConfig(actionId) {
@@ -5764,6 +6014,7 @@ function scrollToManualWorkflowSection(stepId) {
 }
 
 function handleWorkflowStepperClick(event) {
+  if (planRailController.handleClick(event)) return;
   const actionButton = event.target.closest("[data-step-action]");
   if (actionButton) {
     event.preventDefault();
@@ -5786,24 +6037,27 @@ function handleWorkflowStepperKeydown(event) {
 }
 
 $("createTaskOpenButton").onclick = openTaskTypeWelcome;
-$("welcomeModelValidationCard").onclick = openTaskDialog;
+$("collapsedCreateTaskButton").onclick = openTaskTypeWelcome;
+$("welcomeTaskCards").onclick = openTaskDialogFromCard;
+$("welcomeSampleDataButton").onclick = handleWelcomeSampleDataClick;
 $("closeTaskDialogButton").onclick = closeTaskDialog;
-$("openExecutionEnvironmentButton").onclick = openExecutionEnvironmentDialog;
-$("closeExecutionEnvironmentButton").onclick = closeExecutionEnvironmentDialog;
-$("openLLMSettingsButton").onclick = openLLMSettingsDialog;
-$("closeLLMSettingsButton").onclick = closeLLMSettingsDialog;
-$("openAgentMemoryButton").onclick = openAgentMemoryDialog;
-$("closeAgentMemoryButton").onclick = closeAgentMemoryDialog;
+$("openGovernanceSettingsButton").addEventListener("pointerdown", handleGovernanceSettingsPointerDown, true);
+$("openGovernanceSettingsButton").onclick = openGovernanceSettingsFromSidebar;
+$("closeGovernanceSettingsButton").onclick = closeGovernanceSettingsDialog;
+$("governanceSettingsDialog").addEventListener("click", handleGovernanceSettingsNavClick);
+$("governanceSettingsDialog").addEventListener("change", handleMemoryPolicyChange);
+$("governanceSettingsSearch").oninput = handleGovernanceSettingsSearch;
+$("governanceRefreshButton").onclick = refreshActiveGovernancePanel;
 $("closeWordPreviewButton").onclick = closeWordPreviewDialog;
 $("refreshExecutionEnvironmentOptionsButton").onclick = refreshExecutionEnvironmentOptions;
-$("saveExecutionEnvironmentButton").onclick = saveExecutionEnvironmentSettings;
-$("refreshAgentMemoryButton").onclick = () =>
-  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+$("executionEnvironmentList").addEventListener("click", handleExecutionEnvironmentListClick);
+$("executionEnvironmentList").addEventListener("keydown", handleExecutionEnvironmentListKeydown);
 $("addLLMModelButton").onclick = addLLMModelProfile;
 $("closeLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("cancelLLMEngineEditButton").onclick = closeLLMEngineEdit;
 $("saveLLMEngineEditButton").onclick = () =>
   runAction(saveLLMEngineEdit, { actionId: "llmSettings", busyText: "正在保存模型..." });
+$("testLLMEngineConnectionButton").onclick = testLLMEngineConnection;
 $("sidebarCollapseButton").onclick = toggleSidebarCollapsed;
 $("sidebarBrandTrigger").onclick = expandSidebarFromBrand;
 $("sidebarBrandTrigger").onkeydown = handleSidebarBrandKeydown;
@@ -5822,6 +6076,28 @@ $("taskList").addEventListener("click", () => closeTaskSearch());
 $("settingsMenu").onchange = handleSettingsMenuChange;
 $("agentMemoryList").addEventListener("click", handleAgentMemoryListClick);
 document.addEventListener("click", handleAgentMemoryInlineInspect);
+$("refreshAgentMemoryButton").onclick = () =>
+  runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+$("memoryManageDetails").addEventListener("toggle", (event) => {
+  if (event.target.open && !agentMemoryPanel.hasItems()) {
+    runAction(loadAgentMemoryItems, { actionId: "agentMemory", busyText: "正在读取 Agent 记忆..." });
+  }
+});
+$("draftManageDetails").addEventListener("toggle", (event) => {
+  if (event.target.open && !draftToolsPanel.hasLoaded()) {
+    runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
+  }
+});
+$("draftStatusFilter").onchange = () =>
+  runAction(loadDraftTools, { actionId: "draftTools", busyText: "正在读取草稿工具..." });
+$("draftToolsList").addEventListener("click", handleDraftToolsListClick);
+$("draftToolsList").addEventListener("keydown", handleDraftToolsListKeydown);
+$("runDraftButton").onclick = () =>
+  runAction(runDraftTool, { actionId: "draftTools", busyText: "正在试运行草稿..." });
+$("promoteDraftButton").onclick = () =>
+  runAction(promoteDraftTool, { actionId: "draftTools", busyText: "正在转正草稿..." });
+$("rejectDraftButton").onclick = () =>
+  runAction(rejectDraftTool, { actionId: "draftTools", busyText: "正在拒绝草稿..." });
 $("llmModelProfiles").addEventListener("click", (event) => {
   const removeButton = event.target.closest("[data-llm-remove]");
   if (removeButton) {
@@ -5856,10 +6132,17 @@ $("agentEffortSelect").onchange = (event) => {
   event.target.blur();
 };
 $("agentAcceptanceModeSelect").onchange = (event) => {
+  const previousMode = agentAcceptanceMode;
   agentAcceptanceMode = normalizeAgentAcceptanceMode(event.target.value);
   event.target.value = agentAcceptanceMode;
   renderAgentAcceptanceModePreference();
   persistCurrentAgentComposerPreference({ acceptance_mode: agentAcceptanceMode });
+  // UX-10: switching INTO auto mode is the moment the risk (Agent confirms every
+  // gate on the user's behalf, including destructive ones like execute_join) becomes
+  // real — surface it once here rather than relying only on the chip's hover title.
+  if (agentAcceptanceMode === "auto_accept" && previousMode !== "auto_accept") {
+    setAgentComposerNotice("自动模式下 Agent 将替你确认全部关键节点（含拼接执行与训练）。", "info");
+  }
   event.target.blur();
 };
 
@@ -5961,8 +6244,11 @@ function agentAcceptanceModeValue() {
   return agentAcceptanceMode;
 }
 bindRunModeDeselectableCards();
-materialSourceController.bindTabs();
-materialSourceController.bindDropzone();
+bindDialogBackdropDismissal();
+bindPlatformConfirmDialog();
+mountGovernanceExtensions();
+onSelectedTierChange(syncCreateTaskTierDefault);
+createTaskDialog.bindMaterialSourceControls();
 const pet = $("petCompanion");
 if (pet) pet.addEventListener("pointerdown", startPetDrag);
 $("leftResizeHandle").onpointerdown = (event) => startResizeDrag("left", event);
@@ -5981,7 +6267,7 @@ window.addEventListener("resize", syncTaskHeroGlassLayout);
 $("taskList").onkeydown = handleTaskListKeydown;
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && taskSearchActive) {
+  if (event.key === "Escape" && taskSearchIsActive()) {
     closeTaskSearch({ focusToggle: true });
     return;
   }
@@ -5998,29 +6284,47 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("click", (event) => {
   const copyButton = event.target.closest("[data-copy]");
-  if (copyButton) copyText(copyButton.dataset.copy);
+  if (copyButton) {
+    event.preventDefault();
+    copyText(copyButton.dataset.copy);
+  }
 });
 document.addEventListener("click", closeSidebarSettingsOnOutsideClick);
 
 installFormControlFocusRingGuard();
-restoreTheme();
-watchSystemTheme();
+themeController.restoreTheme();
+themeController.watchSystemTheme();
 restoreTaskListSettings();
 restorePetPreference();
+restoreMascotGlowPreference();
 restorePetPosition();
 restoreLayoutWidths();
 restoreSidebarCollapsed();
-// Enable slide animations only after the initial (instant) layout is painted.
-requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.add("anim-ready")));
 updateWorkspaceGreeting();
 setInterval(updateWorkspaceGreeting, 60 * 1000);
 renderSettingsState();
 loadBranding();
 loadExecutionEnvironmentSettings({ silent: true });
 loadLLMSettings({ silent: true });
+loadResultScrollPositions();
+restoreSelectedTaskPlaceholder();
+renderCurrentTask({ force: true });
 renderMetricPreview({});
 renderStoredStateSummaries();
 initializeApp();
+
+function enableAppAnimationsAfterBoot() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      document.body.classList.add("anim-ready");
+    });
+  });
+}
+
+function finishAppBoot() {
+  document.body.classList.remove("app-booting");
+  enableAppAnimationsAfterBoot();
+}
 
 async function initializeApp() {
   try {
@@ -6035,5 +6339,7 @@ async function initializeApp() {
     setCreateStatus(detail || "服务连接失败，请检查后端是否运行。", "error");
   } finally {
     renderAll();
+    await restoreResultScrollPositionAfterRender(selectedTaskId);
+    finishAppBoot();
   }
 }

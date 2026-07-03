@@ -1,0 +1,386 @@
+import pytest
+from fastapi.testclient import TestClient
+
+from marvis.app import create_app
+from marvis.drafts import DraftTool, LearningNote
+from marvis.drafts.errors import FetchError
+
+
+def _admin_headers(client) -> dict:
+    return {"X-MARVIS-Plugin-Admin": client.app.state.plugin_admin_token}
+
+
+def _draft(**overrides) -> DraftTool:
+    payload = {
+        "id": "draft-1",
+        "task_id": "task-1",
+        "name": "calc_margin",
+        "summary": "Calculate margin.",
+        "code": "def calc_margin(inputs, ctx):\n    return {'margin': inputs['revenue'] - inputs['cost']}\n",
+        "input_schema": {
+            "type": "object",
+            "properties": {"revenue": {"type": "number"}, "cost": {"type": "number"}},
+            "required": ["revenue", "cost"],
+            "additionalProperties": False,
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {"margin": {"type": "number"}},
+            "required": ["margin"],
+            "additionalProperties": False,
+        },
+        "determinism": "deterministic",
+        "source": "hand_written",
+        "learning_note_id": None,
+        "status": "draft",
+        "created_at": "2026-06-19T00:00:00Z",
+    }
+    payload.update(overrides)
+    return DraftTool(**payload)
+
+
+def _client_with_draft(tmp_path):
+    client = TestClient(create_app(tmp_path))
+    client.app.state.draft_registry.add(_draft())
+    return client
+
+
+def test_draft_routes_are_served_from_dedicated_router():
+    from marvis.routers import drafts
+
+    route_paths = {route.path for route in drafts.router.routes}
+
+    assert "/api/drafts" in route_paths
+    assert "/api/drafts/{draft_id}" in route_paths
+    assert all(route.endpoint.__module__ == "marvis.routers.drafts" for route in drafts.router.routes)
+
+
+def test_list_and_detail_draft_endpoints(tmp_path):
+    client = _client_with_draft(tmp_path)
+    client.app.state.draft_registry.add(
+        _draft(
+            id="draft-2",
+            task_id="task-2",
+            status="tested",
+            created_at="2026-06-19T00:01:00Z",
+        )
+    )
+
+    listed = client.get("/api/drafts?task_id=task-1")
+    all_listed = client.get("/api/drafts")
+    tested = client.get("/api/drafts?status=tested")
+    detail = client.get("/api/drafts/draft-1")
+
+    assert listed.status_code == 200
+    assert listed.json()["drafts"][0]["id"] == "draft-1"
+    assert listed.json()["drafts"][0]["code"] is None
+    assert [draft["id"] for draft in all_listed.json()["drafts"]] == ["draft-1", "draft-2"]
+    assert [draft["id"] for draft in tested.json()["drafts"]] == ["draft-2"]
+    paged = client.get("/api/drafts", params={"limit": 1})
+    second_page = client.get("/api/drafts", params={"limit": 1, "offset": 1})
+    capped = client.get("/api/drafts", params={"limit": 9999})
+    assert [draft["id"] for draft in paged.json()["drafts"]] == ["draft-1"]
+    assert paged.json()["has_more"] is True
+    assert paged.json()["limit"] == 1
+    assert paged.json()["offset"] == 0
+    assert [draft["id"] for draft in second_page.json()["drafts"]] == ["draft-2"]
+    assert second_page.json()["has_more"] is False
+    assert second_page.json()["limit"] == 1
+    assert second_page.json()["offset"] == 1
+    assert capped.json()["limit"] == 500
+    assert detail.status_code == 200
+    assert detail.json()["draft"]["code"].startswith("def calc_margin")
+    assert detail.json()["runs"] == []
+
+
+def test_run_draft_endpoint_records_run(tmp_path):
+    client = _client_with_draft(tmp_path)
+
+    response = client.post(
+        "/api/drafts/draft-1/run",
+        json={"inputs": {"revenue": 10, "cost": 3}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["output"] == {"margin": 7}
+    detail = client.get("/api/drafts/draft-1").json()
+    assert detail["runs"][0]["ok"] is True
+    assert detail["draft"]["status"] == "tested"
+
+
+def test_draft_web_search_endpoint_returns_offline_guidance(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_web_search(payload, _ctx):
+        assert payload == {"query": "learn joins", "max_results": 3}
+        return {
+            "results": [],
+            "offline": True,
+            "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
+        }
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_web_search", fake_web_search)
+
+    response = client.post(
+        "/api/drafts/web-search",
+        json={"query": "learn joins", "max_results": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": [],
+        "offline": True,
+        "guidance": "No network. Produce the tool externally, then upload it as a plugin.",
+    }
+
+
+@pytest.mark.parametrize("max_results", [0, 11, "abc"])
+def test_draft_web_search_endpoint_rejects_out_of_bounds_max_results(tmp_path, monkeypatch, max_results):
+    client = TestClient(create_app(tmp_path))
+
+    def fail_if_called(_payload, _ctx):
+        raise AssertionError("tool_web_search should not be called")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_web_search", fail_if_called)
+
+    response = client.post(
+        "/api/drafts/web-search",
+        json={"query": "learn joins", "max_results": max_results},
+    )
+
+    assert response.status_code == 422
+    assert "max_results" in response.json()["detail"]
+
+
+def test_draft_fetch_url_endpoint_returns_bounded_content(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_fetch(payload, _ctx):
+        assert payload == {"url": "https://example.test/a", "max_bytes": 1200}
+        return {
+            "url": "https://example.test/a",
+            "content": "bounded page contents",
+            "offline": False,
+            "guidance": "",
+        }
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fake_fetch)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": 1200},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "url": "https://example.test/a",
+        "content": "bounded page contents",
+        "offline": False,
+        "guidance": "",
+    }
+
+
+@pytest.mark.parametrize("max_bytes", [0, 500001, "abc"])
+def test_draft_fetch_url_endpoint_rejects_out_of_bounds_max_bytes(tmp_path, monkeypatch, max_bytes):
+    client = TestClient(create_app(tmp_path))
+
+    def fail_if_called(_payload, _ctx):
+        raise AssertionError("tool_fetch_url should not be called")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fail_if_called)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": max_bytes},
+    )
+
+    assert response.status_code == 422
+    assert "max_bytes" in response.json()["detail"]
+
+
+def test_draft_fetch_url_endpoint_maps_fetch_errors_to_controlled_response(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_fetch(_payload, _ctx):
+        raise FetchError("HTTP 404")
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_fetch_url", fake_fetch)
+
+    response = client.post(
+        "/api/drafts/fetch-url",
+        json={"url": "https://example.test/a", "max_bytes": 1200},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "HTTP 404"
+
+
+def test_draft_learning_note_endpoint_distills_and_returns_saved_note(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+
+    def fake_distill(payload, ctx):
+        assert payload == {
+            "query": "scorecard monitoring",
+            "contents": ["Use WOE bins and validate PSI."],
+            "sources": ["https://example.test/woe"],
+            "model_id": "m1",
+        }
+        assert ctx.workspace == client.app.state.settings.workspace
+        assert ctx.datasets_root == client.app.state.settings.datasets_dir
+        note = LearningNote(
+            id="note-1",
+            query="scorecard monitoring",
+            sources=("https://example.test/woe",),
+            distilled="Use WOE bins. Validate PSI drift.",
+            created_at="2026-06-20T00:00:00Z",
+        )
+        client.app.state.draft_repo.save_learning_note_with_audit(
+            note,
+            audit={
+                "kind": "draft.learning_note.create",
+                "target_ref": note.id,
+                "outcome": "succeeded",
+                "detail": {"query": note.query, "source_count": len(note.sources)},
+            },
+        )
+        return {"learning_note_id": note.id, "query": note.query, "source_count": 1}
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_distill_learning", fake_distill)
+
+    response = client.post(
+        "/api/drafts/learning-notes",
+        json={
+            "query": "scorecard monitoring",
+            "contents": ["Use WOE bins and validate PSI."],
+            "sources": ["https://example.test/woe"],
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "learning_note": {
+            "id": "note-1",
+            "query": "scorecard monitoring",
+            "sources": ["https://example.test/woe"],
+            "distilled": "Use WOE bins. Validate PSI drift.",
+            "created_at": "2026-06-20T00:00:00Z",
+        }
+    }
+    audits = client.app.state.plugin_repo.list_audit(kind="draft.learning_note.create")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "note-1"
+    assert audits[0]["detail"]["source_count"] == 1
+
+
+def test_draft_author_endpoint_creates_draft_from_saved_learning_note(tmp_path, monkeypatch):
+    client = TestClient(create_app(tmp_path))
+    client.app.state.draft_repo.save_learning_note(
+        LearningNote(
+            id="note-1",
+            query="scorecard monitoring",
+            sources=("https://example.test/woe",),
+            distilled="Use WOE bins. Validate PSI drift.",
+            created_at="2026-06-20T00:00:00Z",
+        )
+    )
+
+    def fake_author(payload, ctx):
+        assert payload == {
+            "goal": "build monitoring helper",
+            "learning_note_id": "note-1",
+            "model_id": "m1",
+        }
+        assert ctx.task_id == "task-1"
+        draft = _draft(
+            source="web_learning",
+            learning_note_id="note-1",
+        )
+        client.app.state.draft_registry.add_with_audit(
+            draft,
+            audit={
+                "kind": "draft.author",
+                "target_ref": draft.id,
+                "outcome": "succeeded",
+                "detail": {
+                    "task_id": draft.task_id,
+                    "learning_note_id": draft.learning_note_id,
+                    "source": draft.source,
+                },
+            },
+        )
+        return {"draft_id": draft.id, "name": draft.name, "has_schema": True}
+
+    monkeypatch.setattr("marvis.routers.drafts.tool_draft_script", fake_author)
+
+    response = client.post(
+        "/api/drafts/author",
+        json={
+            "task_id": "task-1",
+            "goal": "build monitoring helper",
+            "learning_note_id": "note-1",
+            "model_id": "m1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["draft"]["id"] == "draft-1"
+    assert response.json()["draft"]["source"] == "web_learning"
+    assert response.json()["draft"]["learning_note_id"] == "note-1"
+    assert response.json()["draft"]["code"] is None
+    audits = client.app.state.plugin_repo.list_audit(kind="draft.author")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "draft-1"
+    assert audits[0]["detail"]["task_id"] == "task-1"
+
+
+def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):
+    client = _client_with_draft(tmp_path)
+    body = {"test_cases": [{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}]}
+
+    denied = client.post("/api/drafts/draft-1/promote", json=body)
+    promoted = client.post("/api/drafts/draft-1/promote", json=body, headers=_admin_headers(client))
+
+    assert denied.status_code == 403
+    assert promoted.status_code == 200
+    assert promoted.json()["check"]["passed"] is True
+    assert promoted.json()["plugin"]["tool_count"] == 1
+    catalog = client.app.state.tool_registry.catalog_for_planner()
+    assert any(item["tool"] == "calc_margin" for item in catalog)
+    assert client.get("/api/drafts/draft-1").json()["draft"]["status"] == "promoted"
+
+
+def test_promote_draft_endpoint_rejects_malformed_test_cases(tmp_path):
+    client = _client_with_draft(tmp_path)
+
+    response = client.post(
+        "/api/drafts/draft-1/promote",
+        json={"test_cases": [{"expect": {"margin": 7}}]},
+        headers=_admin_headers(client),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["check"]["passed"] is False
+    assert response.json()["detail"]["check"]["problems"] == [
+        "test case 1 inputs must be an object"
+    ]
+
+
+def test_reject_draft_endpoint_requires_admin_and_writes_audit(tmp_path):
+    client = _client_with_draft(tmp_path)
+
+    denied = client.post("/api/drafts/draft-1/reject", json={"reason": "not useful"})
+    rejected = client.post(
+        "/api/drafts/draft-1/reject",
+        json={"reason": "not useful"},
+        headers=_admin_headers(client),
+    )
+
+    assert denied.status_code == 403
+    assert rejected.status_code == 200
+    assert client.get("/api/drafts/draft-1").json()["draft"]["status"] == "rejected"
+    audits = client.app.state.plugin_repo.list_audit(kind="draft.reject")
+    assert len(audits) == 1
+    assert audits[0]["target_ref"] == "draft-1"
+    assert audits[0]["detail"]["reason"] == "not useful"

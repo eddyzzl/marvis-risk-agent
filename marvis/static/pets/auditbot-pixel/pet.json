@@ -1,0 +1,6 @@
+{
+  "id": "auditbot-pixel",
+  "displayName": "MARVIS Pixel",
+  "description": "A pixel-art audit robot mascot.",
+  "spritesheetPath": "spritesheet.webp"
+}

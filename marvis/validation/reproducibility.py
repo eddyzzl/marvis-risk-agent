@@ -34,7 +34,11 @@ def _nullable_score(value: object) -> float | None:
     return number
 
 
-def _code_scores_by_row_index(code_scores: pd.Series | pd.DataFrame) -> pd.Series:
+def _code_scores_by_row_index(
+    code_scores: pd.Series | pd.DataFrame,
+    *,
+    expected_len: int | None = None,
+) -> pd.Series:
     if isinstance(code_scores, pd.DataFrame):
         if "row_index" not in code_scores.columns or "code_model_score" not in code_scores.columns:
             raise ValueError("code scores dataframe must contain row_index and code_model_score")
@@ -42,7 +46,10 @@ def _code_scores_by_row_index(code_scores: pd.Series | pd.DataFrame) -> pd.Serie
             code_scores["code_model_score"].astype(float).to_numpy(),
             index=_row_index_values(code_scores["row_index"]),
         )
-    return code_scores.astype(float)
+    series = code_scores.astype(float)
+    if expected_len is not None and len(series) == int(expected_len):
+        series = pd.Series(series.to_numpy(), index=range(len(series)))
+    return series
 
 
 def run_reproducibility(
@@ -52,11 +59,12 @@ def run_reproducibility(
     code_scores: pd.Series | pd.DataFrame,
     submitted_pmml_scorer: Scorer,
 ) -> ReproducibilityResult:
+    original_len = len(sample)
     sample = sample.reset_index(drop=True)
     take = min(config.random_sample_size, len(sample))
     drawn = sample.sample(n=take, random_state=config.random_seed)
 
-    code_scores_by_index = _code_scores_by_row_index(code_scores)
+    code_scores_by_index = _code_scores_by_row_index(code_scores, expected_len=original_len)
     missing_indexes = [idx for idx in drawn.index if idx not in code_scores_by_index.index]
     if missing_indexes:
         preview = ", ".join(str(idx) for idx in missing_indexes[:10])
