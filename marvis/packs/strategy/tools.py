@@ -561,6 +561,122 @@ def tool_adopt_strategy(inputs: dict, ctx) -> dict:
     }
 
 
+def tool_render_challenger_report(inputs: dict, ctx) -> dict:
+    """S6 Commit 3: assemble a challenger-vs-champion Markdown report from the compare
+    output + both backtests + the adoption status, register it as
+    strategy_artifacts(kind='challenger_report_md'), and audit it.
+
+    Graceful degradation (compare_strategies precedent): with no champion/baseline the
+    report is a no-op — it returns status='no_baseline' + a 「未提供基线」 markdown and
+    writes NO artifact, so an optional template step that ran without a champion slot
+    does not fail the plan. Every number in the report comes straight from the passed-in
+    compare/backtest tool outputs (INV-1: presentation only, report follows tool output).
+    """
+    runtime = _runtime(ctx)
+    strategy_id = str(inputs["strategy_id"])
+    champion_id = _optional_str(inputs.get("champion_strategy_id"))
+    compare = _as_dict(inputs.get("compare"))
+    # A compare that itself degraded to the no-baseline no-op carries this text; treat it
+    # as "no champion" too so the report degrades in lockstep with compare_strategies.
+    compare_degraded = str(compare.get("summary_text") or "").startswith("未提供基线")
+
+    if not champion_id or compare_degraded:
+        markdown = "# 挑战者对比报告\n\n未提供基线（champion）策略，跳过对比报告。\n"
+        return {
+            "status": "no_baseline",
+            "report_md": markdown,
+            "artifacts": [],
+        }
+
+    challenger_backtest = _as_dict(inputs.get("challenger_backtest"))
+    champion_backtest = _as_dict(inputs.get("champion_backtest"))
+    adopted = bool(inputs.get("adopted"))
+    markdown = _challenger_report_markdown(
+        strategy_id=strategy_id,
+        champion_id=champion_id,
+        compare=compare,
+        challenger_backtest=challenger_backtest,
+        champion_backtest=champion_backtest,
+        adopted=adopted,
+    )
+
+    strategy_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "strategy"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    report_path = strategy_dir / f"challenger_report_{strategy_id}.md"
+    report_path.write_text(markdown, encoding="utf-8")
+    runtime.strategies.save_strategy_artifact(
+        strategy_id, kind="challenger_report_md", path=str(report_path)
+    )
+    _write_strategy_artifact_audit(runtime, ctx, strategy_id, "challenger_report_md", report_path)
+    return {
+        "status": "rendered",
+        "report_md": markdown,
+        "report_path": str(report_path),
+        "artifacts": [{"kind": "challenger_report_md", "path": str(report_path)}],
+    }
+
+
+def _challenger_report_markdown(
+    *,
+    strategy_id: str,
+    champion_id: str,
+    compare: dict,
+    challenger_backtest: dict,
+    champion_backtest: dict,
+    adopted: bool,
+) -> str:
+    deltas = _as_dict(compare.get("deltas"))
+    lines = [
+        "# 挑战者对比报告",
+        "",
+        f"- 挑战者策略：`{strategy_id}`",
+        f"- 基线（champion）策略：`{champion_id}`",
+        f"- 采纳状态：{'已采纳挑战者' if adopted else '未采纳（仍以基线为准）'}",
+        "",
+        "## 关键指标并排",
+        "",
+        "| 指标 | 挑战者 | 基线 | 挑战者−基线 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for label, key in (
+        ("审批率", "approval_rate"),
+        ("通过客群坏率", "approved_bad_rate"),
+        ("预期利润", "expected_profit"),
+    ):
+        lines.append(
+            f"| {label} | {_report_num(challenger_backtest.get(key))} | "
+            f"{_report_num(champion_backtest.get(key))} | {_report_num(deltas.get(key))} |"
+        )
+    lines.extend([
+        "",
+        "## 结论",
+        "",
+        str(compare.get("summary_text") or ""),
+        "",
+    ])
+    red_flags = [flag for flag in (compare.get("red_flags") or []) if isinstance(flag, dict)]
+    if red_flags:
+        lines.append("## 红旗")
+        lines.append("")
+        for flag in red_flags:
+            lines.append(f"- [{flag.get('level', '')}] {flag.get('code', '')}: {flag.get('message', '')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _report_num(value) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _as_dict(value) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def tool_render_strategy_doc(inputs: dict, ctx) -> dict:
     runtime = _runtime(ctx)
     strategy_id = str(inputs["strategy_id"])

@@ -1344,6 +1344,74 @@
         "write:strategy"
       ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "render_challenger_report",
+      "summary": "Assemble a challenger-vs-champion Markdown report from a compare output + both backtests + adoption status; registers challenger_report_md. No-op (no artifact) when no champion is supplied.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "champion_strategy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "compare": {
+            "type": "object"
+          },
+          "challenger_backtest": {
+            "type": "object"
+          },
+          "champion_backtest": {
+            "type": "object"
+          },
+          "adopted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "strategy_id"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "report_md": {
+            "type": "string"
+          },
+          "report_path": {
+            "type": "string"
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "report_md",
+          "artifacts"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_render_challenger_report",
+      "side_effects": [
+        "read:strategy",
+        "write:strategy"
+      ],
+      "memory_limit_mb": 2048
     }
   ],
   "hooks": [],

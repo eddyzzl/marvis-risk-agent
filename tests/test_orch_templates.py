@@ -445,14 +445,17 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
         ToolRef("strategy", "build_strategy"),
         ToolRef("strategy", "backtest_strategy"),
         ToolRef("strategy", "compare_strategies"),
+        ToolRef("strategy", "render_challenger_report"),
         ToolRef("strategy", "adopt_strategy"),
         ToolRef("strategy", "render_strategy_doc"),
     ]
     bands_step = plan.steps[1]
     build_step = plan.steps[2]
     backtest_step = plan.steps[3]
-    adopt_step = plan.steps[5]
-    doc_step = plan.steps[6]
+    compare_step = plan.steps[4]
+    report_step = plan.steps[5]
+    adopt_step = plan.steps[6]
+    doc_step = plan.steps[7]
     assert bands_step.needs_confirmation is True
     assert backtest_step.needs_confirmation is True
     assert backtest_step.decision_point is True
@@ -462,6 +465,14 @@ def test_strategy_development_template_instantiates_and_validates(tmp_path):
     assert adopt_step.inputs["backtest_id"] == f"$ref:{backtest_step.id}.output.backtest_id"
     assert adopt_step.inputs["band_stats"] == f"$ref:{bands_step.id}.output"
     assert doc_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
+    # S6: the optional challenger report step sits after compare, before adopt. Its
+    # numbers come from the compare + backtest outputs (report follows tool output); with
+    # baseline_strategy_id omitted the champion slot drops and the tool degrades to a
+    # no-baseline no-op (工具级优雅降级) rather than the plan failing.
+    assert report_step.inputs["compare"] == f"$ref:{compare_step.id}.output"
+    assert report_step.inputs["challenger_backtest"] == f"$ref:{backtest_step.id}.output"
+    assert report_step.inputs["strategy_id"] == f"$ref:{build_step.id}.output.strategy_id"
+    assert "champion_strategy_id" not in report_step.inputs  # omitted baseline slot dropped
 
 
 def test_strategy_development_goal_patterns_do_not_cross_strategy_analysis(tmp_path):

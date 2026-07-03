@@ -453,9 +453,17 @@ def test_render_compare_strategies_matrix_table():
         "red_flags": [{"level": "red", "code": "swap_in_worse", "message": "x"}],
     })
     assert "策略对比完成" in text
+    # S6: templated Chinese conclusion line, numbers straight from the deltas.
+    assert "结论：挑战者在通过率" in text
+    # swap 2x2 is now a matrix-heat card (each cell's bad_rate colors the heat chip).
     assert tables[0]["columns"] == ["", "基线通过", "基线拒绝"]
     assert len(tables[0]["rows"]) == 2
-    assert tables[1]["title"] == "关键差异"
+    assert tables[0]["column_specs"] == [
+        {"kind": "text"}, {"kind": "matrix-heat"}, {"kind": "matrix-heat"}
+    ]
+    assert tables[0]["rows"][0][1] == 0.0   # both_approve bad_rate as heat value
+    assert tables[0]["rows"][0][2] == 0.5   # only_new bad_rate as heat value
+    assert tables[1]["title"] == "关键指标并排（挑战者 vs 基线）"
 
 
 def test_render_adopt_strategy_table():
