@@ -1,6 +1,8 @@
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+
+from marvis.errors import not_found, unprocessable
 
 from marvis.api_schemas import (
     ExecutionEnvironmentRequest,
@@ -79,7 +81,7 @@ def get_llm_settings(request: Request) -> dict:
     try:
         return load_llm_settings(request.app.state.settings.workspace)
     except LLMSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
 
 
 @router.put("/settings/llm")
@@ -90,7 +92,7 @@ def update_llm_settings(payload: LLMSettingsRequest, request: Request) -> dict:
             model_payload(payload),
         )
     except LLMSettingsError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
 
 
 # GAP-8: preflight connection check, called either from the "add/edit model"
@@ -109,7 +111,7 @@ def test_llm_settings_connection(payload: LLMConnectionTestRequest, request: Req
         try:
             saved = resolve_llm_model(workspace, payload.model_id)
         except LLMSettingsError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise not_found(str(exc)) from exc
         profile = {**saved, **{k: v for k, v in profile.items() if v}}
     result = test_llm_connection(profile, timeout_seconds=min(max(payload.timeout_seconds, 1), 60))
     return {

@@ -22,7 +22,10 @@ def test_draft_tools_panel_controller_wires_api_and_render_state():
     run_node(
         """
         import assert from "node:assert/strict";
-        import { createDraftToolsPanelController } from "./marvis/static/js/draft-tools-panel.js";
+        // The plugin-admin header is read from <body data-marvis-plugin-admin-token>
+        // (server-injected for local clients); stub it so the panel echoes it.
+        globalThis.document = { body: { dataset: { marvisPluginAdminToken: "test-admin-token" } } };
+        const { createDraftToolsPanelController } = await import("./marvis/static/js/draft-tools-panel.js");
 
         function makeElement(value = "") {
           const classes = new Set();
@@ -139,7 +142,7 @@ def test_draft_tools_panel_controller_wires_api_and_render_state():
         elements.get("draftPromotionTestCases").value = '[{"inputs":{"revenue":10},"expect":{"margin":7}}]';
         await controller.promote();
         const promoteCall = calls.find(([url]) => url === "/api/drafts/draft-1/promote");
-        assert.equal(promoteCall[1].headers["X-MARVIS-Plugin-Admin"], "local-dev");
+        assert.equal(promoteCall[1].headers["X-MARVIS-Plugin-Admin"], "test-admin-token");
         assert.deepEqual(JSON.parse(promoteCall[1].body), {
           test_cases: [{ inputs: { revenue: 10 }, expect: { margin: 7 } }],
         });

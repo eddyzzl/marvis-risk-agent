@@ -389,6 +389,27 @@ class PlanRepository:
         run_id = uuid.uuid4().hex
         now = _now()
         with connect(self.db_path) as conn:
+            # Guard: a run may only be opened for a step the executor has already
+            # moved into RUNNING (executor._execute_step sets RUNNING immediately
+            # before calling start_step_run; the retry path resets a failed step
+            # to pending and the executor loop re-runs it, passing through RUNNING
+            # again). Opening a run against a DONE/CHECKING/FAILED/pending step is
+            # a lifecycle violation -- without this guard a stale or concurrent
+            # caller could attach a spurious "running" run row to an already
+            # finished step. Read the status under BEGIN IMMEDIATE so the check
+            # and the INSERT are atomic against a concurrent status change.
+            conn.execute("BEGIN IMMEDIATE")
+            status_row = conn.execute(
+                "SELECT status FROM plan_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+            if status_row is None:
+                raise KeyError(step_id)
+            if str(status_row["status"]) != StepStatus.RUNNING.value:
+                raise ConflictError(
+                    f"cannot start run for step {step_id}: status is "
+                    f"{status_row['status']}, expected running"
+                )
             row = conn.execute(
                 "SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt FROM plan_step_runs WHERE step_id = ?",
                 (step_id,),

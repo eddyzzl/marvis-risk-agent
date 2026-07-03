@@ -390,6 +390,107 @@ def test_list_monitoring_due_skips_non_adopted_and_planless(tmp_path):
     assert StrategyRepository(settings.db_path).list_monitoring_due(now=now) == []
 
 
+def test_list_monitoring_due_crosses_month_and_year_boundaries(tmp_path):
+    """Due date is anchor + cadence via UTC timedelta arithmetic, so it crosses
+    month/year boundaries correctly (Jan 20 + 30d = Feb 19)."""
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    sid = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=30,
+        last_run_at="2026-01-20T00:00:00+00:00",
+    )
+    due = StrategyRepository(settings.db_path).list_monitoring_due(
+        now=datetime(2026, 2, 25, tzinfo=UTC)
+    )
+    assert [d["strategy_id"] for d in due] == [sid]
+    assert due[0]["due_at"] == "2026-02-19T00:00:00+00:00"
+    assert round(due[0]["overdue_days"]) == 6
+
+
+def test_list_monitoring_due_handles_leap_day(tmp_path):
+    """Feb 28 (leap year) + 1d resolves to Feb 29, not Mar 1 -- calendar-aware
+    UTC arithmetic, no manual day math."""
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=1,
+        last_run_at="2028-02-28T00:00:00+00:00",
+    )
+    due = StrategyRepository(settings.db_path).list_monitoring_due(
+        now=datetime(2028, 3, 1, tzinfo=UTC)
+    )
+    assert len(due) == 1
+    assert due[0]["due_at"] == "2028-02-29T00:00:00+00:00"
+
+
+def test_list_monitoring_due_is_dst_immune_because_timestamps_are_utc(tmp_path):
+    """All timestamps are UTC (adopted_at/last_run_at via _now() = datetime.now
+    (UTC); _parse_iso normalizes naive to UTC), and cadence is added as a UTC
+    timedelta, so a 30-day cadence spanning a wall-clock DST transition is
+    exactly 30*86400 seconds -- no ambiguity, no off-by-one-hour."""
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    # 2026-03-01 -> +30d spans the US spring-forward (2026-03-08).
+    _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=30,
+        last_run_at="2026-03-01T00:00:00+00:00",
+    )
+    repo = StrategyRepository(settings.db_path)
+    # Exactly 30 days later to the second: still not due (boundary is > 0).
+    assert repo.list_monitoring_due(now=datetime(2026, 3, 31, tzinfo=UTC)) == []
+    due = repo.list_monitoring_due(now=datetime(2026, 3, 31, 0, 0, 1, tzinfo=UTC))
+    assert len(due) == 1
+    assert due[0]["due_at"] == "2026-03-31T00:00:00+00:00"
+
+
+def test_list_monitoring_due_pins_cadence_zero_and_negative_semantics(tmp_path):
+    """Pin the current cadence-edge behavior (no reject/clamp is introduced):
+    cadence_days=0 falls back to the 30-day default (0 is falsy), and a negative
+    cadence places the due date before the anchor so the strategy reads as
+    perpetually overdue."""
+    from datetime import UTC, datetime
+
+    settings = build_settings(tmp_path / "workspace")
+    init_db(settings.db_path)
+    repo = StrategyRepository(settings.db_path)
+
+    # cadence 0 -> defaults to 30: Jan 1 + 30d = Jan 31.
+    sid_zero = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=0,
+        last_run_at="2026-01-01T00:00:00+00:00",
+    )
+    due_zero = repo.list_monitoring_due(now=datetime(2026, 2, 15, tzinfo=UTC))
+    entry_zero = next(d for d in due_zero if d["strategy_id"] == sid_zero)
+    assert entry_zero["cadence_days"] == 30
+    assert entry_zero["due_at"] == "2026-01-31T00:00:00+00:00"
+
+    # negative cadence -> due before the anchor -> always overdue.
+    sid_neg = _adopt_with_plan(
+        settings.db_path,
+        tmp_path,
+        cadence_days=-5,
+        last_run_at="2026-06-01T00:00:00+00:00",
+    )
+    due_neg = repo.list_monitoring_due(now=datetime(2026, 6, 1, 12, tzinfo=UTC))
+    entry_neg = next(d for d in due_neg if d["strategy_id"] == sid_neg)
+    assert entry_neg["cadence_days"] == -5
+    assert entry_neg["due_at"] == "2026-05-27T00:00:00+00:00"
+
+
 def test_parse_monitoring_disposition_three_keywords():
     from marvis.agent.plan_driver import _parse_monitoring_disposition as parse
 

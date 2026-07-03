@@ -76,6 +76,10 @@ class Settings:
     def db_path(self) -> Path:
         return self.workspace / "marvis.sqlite"
 
+    @property
+    def plugin_admin_token_path(self) -> Path:
+        return self.workspace / "plugin_admin_token"
+
 
 def build_settings(
     workspace: str | Path,

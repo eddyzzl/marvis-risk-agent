@@ -45,14 +45,32 @@ _ARCH7_BARE_RAISE_WHITELIST = {
 }
 
 
+# HTTP-raising helper / agent-service modules outside routers/ that were folded
+# into the same convergence (FIN-2 api lens). These must have ZERO bare raises:
+# unlike the three whitelisted routers, none of their raises need a runtime
+# status or a structured dict detail, so every one maps onto a marvis.errors
+# factory. Listed relative to the marvis package root.
+_ARCH7_SCANNED_EXTRA_MODULES = (
+    "api_task_helpers.py",
+    "api_settings.py",
+    "api_report_helpers.py",
+    "api_stage_helpers.py",
+    "app.py",
+    "agent/validation_app_service.py",
+    "agent/validation_service.py",
+)
+
+
 def test_routers_use_error_factories_not_bare_httpexception():
     import re
     from pathlib import Path
 
+    import marvis
     import marvis.routers as routers_pkg
 
     routers_dir = Path(routers_pkg.__file__).parent
-    # Any bare `raise HTTPException(` in a router is a candidate for a factory.
+    marvis_dir = Path(marvis.__file__).parent
+    # Any bare `raise HTTPException(` in a scanned module is a candidate for a factory.
     bare_pattern = re.compile(r"raise HTTPException\(")
 
     offenders = {}
@@ -61,10 +79,22 @@ def test_routers_use_error_factories_not_bare_httpexception():
         if count:
             offenders[path.name] = count
 
+    extra_offenders = {}
+    for rel in _ARCH7_SCANNED_EXTRA_MODULES:
+        count = len(bare_pattern.findall((marvis_dir / rel).read_text(encoding="utf-8")))
+        if count:
+            extra_offenders[rel] = count
+
     assert offenders == _ARCH7_BARE_RAISE_WHITELIST, (
         "Bare `raise HTTPException(...)` in routers changed from the ARCH-7 "
         "baseline. Use marvis.errors factories (not_found/conflict/...) instead, "
         "or add a justified entry to _ARCH7_BARE_RAISE_WHITELIST.\n"
         f"  expected: {_ARCH7_BARE_RAISE_WHITELIST}\n"
         f"  found:    {offenders}"
+    )
+    assert extra_offenders == {}, (
+        "Bare `raise HTTPException(...)` reappeared in a helper/agent-service "
+        "module that was converged onto marvis.errors factories. Use a factory "
+        "(not_found/conflict/unprocessable/not_implemented/...) instead.\n"
+        f"  found: {extra_offenders}"
     )

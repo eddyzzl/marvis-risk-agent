@@ -6,7 +6,8 @@ from marvis.drafts import DraftTool, LearningNote
 from marvis.drafts.errors import FetchError
 
 
-ADMIN_HEADERS = {"X-MARVIS-Plugin-Admin": "local-dev"}
+def _admin_headers(client) -> dict:
+    return {"X-MARVIS-Plugin-Admin": client.app.state.plugin_admin_token}
 
 
 def _draft(**overrides) -> DraftTool:
@@ -339,7 +340,7 @@ def test_promote_draft_endpoint_requires_admin_and_registers_plugin(tmp_path):
     body = {"test_cases": [{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}]}
 
     denied = client.post("/api/drafts/draft-1/promote", json=body)
-    promoted = client.post("/api/drafts/draft-1/promote", json=body, headers=ADMIN_HEADERS)
+    promoted = client.post("/api/drafts/draft-1/promote", json=body, headers=_admin_headers(client))
 
     assert denied.status_code == 403
     assert promoted.status_code == 200
@@ -356,7 +357,7 @@ def test_promote_draft_endpoint_rejects_malformed_test_cases(tmp_path):
     response = client.post(
         "/api/drafts/draft-1/promote",
         json={"test_cases": [{"expect": {"margin": 7}}]},
-        headers=ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
 
     assert response.status_code == 422
@@ -373,7 +374,7 @@ def test_reject_draft_endpoint_requires_admin_and_writes_audit(tmp_path):
     rejected = client.post(
         "/api/drafts/draft-1/reject",
         json={"reason": "not useful"},
-        headers=ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
 
     assert denied.status_code == 403

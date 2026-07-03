@@ -4,7 +4,8 @@ from marvis.app import create_app
 from marvis.drafts import DraftTool
 
 
-ADMIN_HEADERS = {"X-MARVIS-Plugin-Admin": "local-dev"}
+def _admin_headers(client) -> dict:
+    return {"X-MARVIS-Plugin-Admin": client.app.state.plugin_admin_token}
 
 
 def _draft() -> DraftTool:
@@ -44,7 +45,7 @@ def test_draft_stays_out_of_planner_catalog_until_admin_promotion(tmp_path):
     promoted = client.post(
         "/api/drafts/draft-1/promote",
         json={"test_cases": [{"inputs": {"revenue": 10, "cost": 3}, "expect": {"margin": 7}}]},
-        headers=ADMIN_HEADERS,
+        headers=_admin_headers(client),
     )
     after_promote = client.app.state.tool_registry.catalog_for_planner()
 

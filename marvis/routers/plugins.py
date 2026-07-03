@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hmac
+import os
+import secrets
 from pathlib import Path
 import re
 import tempfile
@@ -19,7 +22,37 @@ from marvis.plugins.manifest import PluginManifest, ToolSpec
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 PLUGIN_ADMIN_HEADER = "x-marvis-plugin-admin"
-PLUGIN_ADMIN_VALUE = "local-dev"
+
+
+def ensure_plugin_admin_token(token_path: Path) -> str:
+    """Read the per-workspace plugin-admin token, generating it on first use.
+
+    Plugin install/enable/disable/delete (and draft promote/reject) mutate the
+    running tool library, so gating them on a fixed magic header ("local-dev")
+    meant any process that could reach loopback and knew that string could run
+    arbitrary code. Instead the secret is a random token minted into the
+    workspace on first startup and stored in a 0600 file: the file's owner-only
+    permission is the single-user isolation boundary (consistent with the LT-9
+    threat model). Callers compare the presented header against this value with
+    hmac.compare_digest. Regenerating simply means deleting the file.
+    """
+    try:
+        existing = token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        existing = ""
+    if existing:
+        return existing
+    token = secrets.token_hex(32)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create with 0600 from the start (never a wider window), then write.
+    fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, token.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Defensively re-assert 0600 in case a prior umask-created file existed.
+    os.chmod(token_path, 0o600)
+    return token
 
 
 @router.get("")
@@ -104,7 +137,9 @@ def _set_enabled(request: Request, name: str, enabled: bool) -> dict:
 
 
 def _require_plugin_admin(request: Request) -> None:
-    if request.headers.get(PLUGIN_ADMIN_HEADER) != PLUGIN_ADMIN_VALUE:
+    expected = getattr(request.app.state, "plugin_admin_token", "") or ""
+    presented = request.headers.get(PLUGIN_ADMIN_HEADER, "")
+    if not expected or not hmac.compare_digest(presented, expected):
         raise forbidden("plugin admin confirmation required")
 
 

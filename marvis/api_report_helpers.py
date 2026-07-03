@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import HTTPException
+from marvis.errors import conflict
 
 from marvis.agent.service import agent_conclusions_confirmed
 from marvis.db import TaskRepository
@@ -15,10 +15,7 @@ def require_confirmed_agent_conclusions(repo: TaskRepository, task: TaskRecord) 
     values, _ = repo.get_report_values(task.id)
     if agent_conclusions_confirmed(values):
         return
-    raise HTTPException(
-        status_code=409,
-        detail="请先确认三段报告结论，确认后将生成 Word 报告",
-    )
+    raise conflict("请先确认三段报告结论，确认后将生成 Word 报告")
 
 
 def latest_driver_report_path(state, task_id: str):

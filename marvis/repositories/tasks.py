@@ -275,7 +275,17 @@ class TaskRepository:
         begin_immediate: bool = False,
     ) -> None:
         expected_set = _expected_status_set(expected)
-        if begin_immediate:
+        # The read-validate-write below must be atomic: the SELECT that reads the
+        # current status and the guarded UPDATE that transitions it have to run
+        # under the same write lock, or a concurrent writer can change the row in
+        # the SELECT->UPDATE window and defeat the expected-status check. Under
+        # isolation_level="DEFERRED" a bare SELECT reads in autocommit (no lock)
+        # and the first write only takes a RESERVED lock at UPDATE time, so we
+        # promote to BEGIN IMMEDIATE *before* the SELECT. Callers pass
+        # begin_immediate=True explicitly; we also self-guard when the connection
+        # is not already inside a transaction, so the lock-before-read invariant
+        # holds even if begin_immediate is left at its default.
+        if begin_immediate or not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         current_row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)

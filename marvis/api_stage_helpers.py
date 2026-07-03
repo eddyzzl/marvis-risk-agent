@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import traceback
 
-from fastapi import HTTPException, Request
+from fastapi import Request
+
+from marvis.errors import conflict
 
 from marvis.api_task_helpers import (
     ACTIVE_JOB_DETAIL,
@@ -22,7 +24,7 @@ def start_task_job(repo: TaskRepository, task_id: str, kind: str) -> str:
     try:
         return repo.start_job(task_id, kind)
     except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=ACTIVE_JOB_DETAIL) from exc
+        raise conflict(ACTIVE_JOB_DETAIL) from exc
 
 
 def fail_queued_job(repo: TaskRepository, job_id: str, exc: Exception) -> None:
