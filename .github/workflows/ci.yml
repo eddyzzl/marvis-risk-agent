@@ -10,7 +10,8 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The full suite takes ~70 minutes on a single hosted runner core.
+    timeout-minutes: 100
 
     steps:
       - name: Check out repository
