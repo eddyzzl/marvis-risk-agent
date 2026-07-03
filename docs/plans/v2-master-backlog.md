@@ -157,10 +157,10 @@
 | 状态 | ID | 事项 | 影响/工作量 |
 |---|---|---|---|
 | ✅ | S2 | 按 spec 四 commit 落地（Commit2=`24578b3f`/Commit3=`cf7f47de`/Commit4=`1dbf91b1`+版本化持久化 commit）：strategies 版本/状态/谱系列+strategy_artifacts 表（原子采纳 CAS+自动退役）、design_cutoff_bands 五类红旗、tradeoff 可行域、compare 2×2、adopt 强制门+决策表 CSV+监控计划 JSON、STRATEGY_DEVELOPMENT 七步四门模板、strategy_experience 记忆 kind+ARCH-4 发现的 MEM-1 kwargs 缺口修复；133 验证于合并树 | 5–8天 |
-| ⬜ | DOM-12 | （并入 S2）运营点约束不可行时静默回退；fuzzy 拒绝推断忽略逐件分数 | Low/S |
+| ✅ | DOM-12 | 核验+补齐（`89876fd6`）：约束不可行静默回退已由 S2 infeasible_constraints 覆盖（核验证实）；fuzzy 拒绝推断改逐件分箱经验映射（接受件 10 分箱查表+整体锚定+[0,1]裁剪，无分数列回退原行为），手算逐件权重断言 | Low/S |
 | ✅ | S3 | 四 commit 落地（`f5715373`/`6d82bdb2`/`d269d512`/`2d852674`）：表现期契约+马尔可夫合成快照、packs/analysis 新包（flow_rate/bucket_migration/segment_profile/expected_loss_estimate 吸收链手算断言）、PSI/CSI 趋势与 monitor_run 同内核、PORTFOLIO_ANALYSIS 并行模板+states 人工确认门+组合报告 xlsx | 5–8天 |
-| ⬜ | DOM-8 | （并入 S3）Roll-rate 缺月盲视、无余额口径、period 硬编码 | Med/M |
-| ⬜ | DOM-11 | （并入 S2/S3）swap/bad rate 空集显示 0.0%、缺标签覆盖率口径 | Low/S |
+| ✅ | DOM-8 | 场景由 S3 bucket_migration 覆盖（月对齐+exited+余额基）；旧 roll_rate_matrix 补最小修（`6a5a80d8`）：相邻观测跳月→data_quality_warnings、可选 balance_col 余额加权（缺省逐字节不变）、docstring 口径选用指引；时间排序核实为 to_datetime 非字符串序 | Med/M |
+| ✅ | DOM-11 | 空集语义修正（`ef199ca0`）：swap/2×2 空集坏率 0.0→None→渲染 n/a（契约 Optional 化+manifest 加 null）；backtest/compare 输出补 label_coverage 口径并进摘要；手算 4/6 断言 | Low/S |
 | ✅ | UX-9 | 一键示例数据首跑（`bd274e71`）：sample_data.py + POST /api/sample-data + 欢迎页入口；S3 的合成表现数据脚本仍随 S3 批次补充 | Med/M |
 
 ## 7. 阶段六：审查 Batch 3 —— 智能闭环（2–3 周）
@@ -306,7 +306,7 @@
 | ✅ | LT-16 | 已裁决：EXC 清零=仓内载体完成；真实数据对照转显式外部输入门（用户提供脱敏样本即跑，承接件就绪），见 v2-longtail-adjudications.md | roadmap |
 | ✅ | LT-17 | 已裁决：机制定型（每 2-3 阶段一轮聚焦审查），已执行三轮+收官 FIN 循环为第四轮，见 v2-longtail-adjudications.md | 本轮教训 |
 | ✅ | LT-18 | 蓄水池已建：五类 V3+ 显式不做项与准入门槛记录于 v2-longtail-adjudications.md | 产品选择 |
-| ⬜ | LT-19 | 每阶段完成后同步更新本清单与记忆索引 | 流程 |
+| ✅ | LT-19 | 全程逐阶段执行（每次合并即勾行带 hash+定期记忆快照）；收官时最终同步完成 | 流程 |
 
 ## 13. 映射、去重与已收尾文档记录
 
