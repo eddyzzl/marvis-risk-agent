@@ -4,6 +4,7 @@ import pytest
 from marvis.feature.binning import (
     assign_bins,
     chimerge_edges,
+    degraded_bin_diagnostic,
     equal_frequency_edges,
     equal_width_edges,
     manual_edges,
@@ -161,3 +162,30 @@ def test_tree_edges_find_supervised_split_and_handle_constant_target():
     assert len(edges) == 3
     assert 4.0 < edges[1] < 5.0
     assert constant.tolist() == [float("-inf"), float("inf")]
+
+
+
+# -- FIN-3 #3: opt-in diagnostic for silent bin degradation ---------------------
+def test_degraded_bin_diagnostic_flags_single_value_column():
+    # A single-valued column collapses equal_frequency_edges to one bin -- the return
+    # value is unchanged (still the [-inf, inf] fallback), but the diagnostic detects
+    # that the requested bin count was not met so a caller can warn.
+    single_value = np.full(500, 3.14, dtype=float)
+    edges = equal_frequency_edges(single_value, 10)
+    assert edges.tolist() == [float("-inf"), float("inf")]
+
+    warning = degraded_bin_diagnostic(edges, 10, feature="score")
+    assert warning is not None
+    assert warning["kind"] == "degraded_binning"
+    assert warning["requested_bin_count"] == 10
+    assert warning["actual_bin_count"] == 1
+    assert warning["feature"] == "score"
+
+
+def test_degraded_bin_diagnostic_none_when_bins_met():
+    # A well-distributed column reaches the requested bin count -- no degradation, so
+    # the diagnostic is None (nothing to surface).
+    spread = np.linspace(0.0, 1.0, 1000, dtype=float)
+    edges = equal_frequency_edges(spread, 10)
+    assert edges.size - 1 == 10
+    assert degraded_bin_diagnostic(edges, 10) is None
