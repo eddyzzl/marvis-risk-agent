@@ -111,13 +111,32 @@ def _parse_step_output_id(raw: str) -> tuple[str, int | None]:
     return step_id, int(version_text)
 
 
+_PLAN_LIST_MAX_LIMIT = 500
+
+
 @router.get("/tasks/{task_id}/plans")
-def list_task_plans(request: Request, task_id: str) -> dict:
+def list_task_plans(
+    request: Request,
+    task_id: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
     """Plans belonging to a task (oldest first). Lets the right rail resume an
-    existing task's plan; empty list (not 404) when the task has no plans yet."""
+    existing task's plan; empty list (not 404) when the task has no plans yet.
+    LT-13: limit/offset are optional -- omitting them preserves the prior
+    full-history behavior for existing callers."""
     repo = request.app.state.plan_repo
-    plans = repo.list_plans_for_task(task_id)
-    return {"plans": [_plan_payload(request, plan)["plan"] for plan in plans]}
+    bounded_limit = None if limit is None else max(1, min(int(limit), _PLAN_LIST_MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+    plans = repo.list_plans_for_task(task_id, limit=bounded_limit, offset=bounded_offset)
+    payload = {"plans": [_plan_payload(request, plan)["plan"] for plan in plans]}
+    if bounded_limit is not None or bounded_offset:
+        total = repo.count_plans_for_task(task_id)
+        payload["total"] = total
+        payload["limit"] = bounded_limit
+        payload["offset"] = bounded_offset
+        payload["has_more"] = bounded_offset + len(plans) < total
+    return payload
 
 
 @router.get("/plans/{plan_id}")

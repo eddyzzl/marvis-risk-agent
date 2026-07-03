@@ -47,19 +47,37 @@ class ModelingRepository:
             ).fetchone()
         return None if row is None else _experiment_from_row(row)
 
-    def list_experiments(self, task_id: str) -> list[Experiment]:
+    def list_experiments(
+        self,
+        task_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Experiment]:
+        bounded_limit = None if limit is None else max(1, int(limit))
+        bounded_offset = max(0, int(offset))
+        query = """
+            SELECT id, task_id, recipe_id, config_json, metrics_json,
+                   artifact_id, status, created_at
+              FROM experiments
+             WHERE task_id = ?
+             ORDER BY created_at, id
+        """
+        params: list[object] = [task_id]
+        if bounded_limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([bounded_limit, bounded_offset])
         with connect(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT id, task_id, recipe_id, config_json, metrics_json,
-                       artifact_id, status, created_at
-                  FROM experiments
-                 WHERE task_id = ?
-                 ORDER BY created_at, id
-                """,
-                (task_id,),
-            ).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
         return [_experiment_from_row(row) for row in rows]
+
+    def count_experiments(self, task_id: str) -> int:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS total FROM experiments WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["total"])
 
     def list_experiments_all(
         self,

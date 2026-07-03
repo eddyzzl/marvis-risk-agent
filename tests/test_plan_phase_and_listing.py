@@ -201,3 +201,45 @@ def test_list_task_plans_endpoint_empty_for_unknown_task(tmp_path):
     resp = client.get("/api/tasks/none/plans")
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"plans": []}
+
+
+def test_list_task_plans_endpoint_supports_limit_offset_and_reports_total(tmp_path):
+    # LT-13: limit/offset are opt-in -- omitting them (covered above) must keep
+    # returning the full per-task plan history with no pagination keys.
+    client = _plans_client(tmp_path)
+    repo = client.app.state.plan_repo
+    for index in range(3):
+        repo.create_plan(
+            _phased_plan(
+                plan_id=f"p-{index}",
+                task_id="task-X",
+                created_at=f"2026-06-25T0{index}:00:00+00:00",
+            )
+        )
+
+    first_page = client.get("/api/tasks/task-X/plans", params={"limit": 2, "offset": 0})
+    assert first_page.status_code == 200, first_page.text
+    body = first_page.json()
+    assert [p["id"] for p in body["plans"]] == ["p-0", "p-1"]
+    assert body["total"] == 3
+    assert body["limit"] == 2
+    assert body["offset"] == 0
+    assert body["has_more"] is True
+
+    second_page = client.get("/api/tasks/task-X/plans", params={"limit": 2, "offset": 2})
+    body2 = second_page.json()
+    assert [p["id"] for p in body2["plans"]] == ["p-2"]
+    assert body2["total"] == 3
+    assert body2["has_more"] is False
+
+
+def test_list_task_plans_endpoint_limit_is_bounded_at_maximum(tmp_path):
+    client = _plans_client(tmp_path)
+    repo = client.app.state.plan_repo
+    repo.create_plan(_phased_plan(plan_id="p-only", task_id="task-Y"))
+
+    response = client.get("/api/tasks/task-Y/plans", params={"limit": 999999})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["limit"] == 500
+    assert [p["id"] for p in body["plans"]] == ["p-only"]
