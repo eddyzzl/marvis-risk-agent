@@ -50,6 +50,7 @@
   --radius-md: 16px;
   --radius-lg: 16px;
   --radius-control: 10px;
+  --radius-pill: 999px;
   --shadow-lift: 0 1px 3px rgba(15, 23, 42, 0.1);
   --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   --switch-on: #34c759;
@@ -795,7 +796,7 @@ body[data-theme="dark"] .button.dialog-close-button:active:not(:disabled) {
   margin-right: 7px;
   border: 2px solid currentColor;
   border-right-color: transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   content: "";
 }
 
@@ -804,7 +805,7 @@ body[data-theme="dark"] .button.dialog-close-button:active:not(:disabled) {
   align-items: center;
   justify-content: center;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-secondary);
   background: var(--pill-bg);
   font-size: 12px;
@@ -1481,7 +1482,7 @@ body.search-active .app-shell.sidebar-collapsed .delete-task-button {
 .task-form::-webkit-scrollbar-thumb,
 .metric-table-scroll::-webkit-scrollbar-thumb {
   border: 2px solid var(--scrollbar-track);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--scrollbar-thumb);
 }
 
@@ -1958,7 +1959,7 @@ body.anim-ready:not(.is-resizing) .pet-companion:not(.dragging) {
   bottom: 14px;
   left: 5px;
   width: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   content: "";
 }
@@ -2818,7 +2819,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
   margin-top: 0;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   color: var(--text-secondary);
   font-size: 12px;
@@ -2829,7 +2830,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 .governance-setting-row .governance-status-badge::before {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--success);
   content: "";
 }
@@ -2847,7 +2848,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
   min-height: 28px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   color: var(--text-secondary);
   font-size: 12px;
@@ -2858,7 +2859,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
 .governance-panel .settings-row-control .governance-status-badge::before {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   /* Green dot = this protection is enabled (locked on), matching the toggles. */
   background: var(--switch-on);
   content: "";
@@ -2877,7 +2878,7 @@ body[data-theme="dark"] .governance-head-actions .governance-icon-button:active:
   max-height: 22px;
   margin: 0;
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -4118,7 +4119,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   bottom: 0;
   z-index: 0;
   height: 1px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   pointer-events: none;
   opacity: 0;
   background:
@@ -4171,7 +4172,7 @@ body[data-theme="dark"] .run-mode-card.selected-tone-green {
   flex: none;
   padding: 5px 13px 5px 11px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 700;
   /* opaque, saturated chip so the status colour stays legible over any content
@@ -4901,7 +4902,7 @@ body[data-theme="dark"] .progress-rail {
   gap: 6px;
   justify-self: start;
   padding: 3px 11px 3px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 12.5px;
   font-weight: 600;
   line-height: 1.35;
@@ -5157,7 +5158,7 @@ body[data-theme="dark"] .progress-rail {
   display: block;
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--pill-bg);
 }
 
@@ -5230,7 +5231,7 @@ body[data-theme="dark"] .progress-rail {
   max-width: 100%;
   padding: 5px 8px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-secondary);
   background: var(--surface);
   font-family: var(--font-mono);
@@ -5611,7 +5612,7 @@ dialog.draft-tools-dialog,
 .draft-status-chip {
   flex: none;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -5912,7 +5913,7 @@ dialog.draft-tools-dialog,
   align-items: center;
   gap: 6px;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -6000,7 +6001,7 @@ body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
   gap: 6px;
   padding: 3px 8px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   cursor: pointer;
   font-weight: 700;
@@ -6076,7 +6077,7 @@ body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
 .agent-thinking-dots span {
   width: 4px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
   opacity: 0.22;
   animation: agent-thinking-dot 1.15s ease-in-out infinite;
@@ -6275,7 +6276,7 @@ body[data-theme="dark"] .gate-card[data-gate-tone="review"] {
   content: "";
   width: 5px;
   height: 5px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
@@ -6411,7 +6412,7 @@ body[data-theme="dark"] .agent-composer {
   position: relative;
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   transition: background 140ms ease;
 }
 
@@ -6425,7 +6426,7 @@ body[data-theme="dark"] .agent-composer {
   min-height: 30px;
   padding: 4px 26px 4px 29px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-secondary);
   font-size: 12.5px;
@@ -6558,7 +6559,7 @@ body[data-theme="dark"] .agent-composer-effort:hover select {
   height: 36px;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--button-primary-text);
   background: var(--button-primary-bg);
   cursor: pointer;
@@ -6965,7 +6966,7 @@ body[data-theme="dark"] .metric-table-section {
 .heat-chip {
   display: inline-block;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--heat, var(--metric-heat-default));
   font-size: 12px;
   font-weight: 600;
@@ -6976,7 +6977,7 @@ body[data-theme="dark"] .metric-table-section {
 .split-badge {
   display: inline-block;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--metric-inverse-text);
   font-size: 11px;
@@ -7356,7 +7357,7 @@ body[data-theme="dark"] .metric-sparkline-baseline {
   align-items: center;
   gap: 4px;
   border: 1px solid var(--metric-border);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--metric-surface);
   padding: 2px 8px;
   cursor: pointer;
