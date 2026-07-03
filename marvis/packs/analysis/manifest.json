@@ -157,6 +157,77 @@
       "entrypoint": "tool_expected_loss_estimate",
       "side_effects": ["read:dataset"],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "score_stability_trend",
+      "summary": "Per-month score PSI vs the training baseline, green/amber/red trend (same compute_psi kernel as monitor_run).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {"type": "string", "minLength": 1},
+          "dataset_ids": {"type": "array", "items": {"type": "string"}},
+          "months": {"type": "array", "items": {"type": "string"}},
+          "dataset_id": {"type": "string"},
+          "month_col": {"type": "string"},
+          "score_col": {"type": "string"},
+          "thresholds": {"type": "object"}
+        },
+        "required": ["experiment_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "metric_name": {"type": "string"},
+          "trend": {"type": "array", "items": {"type": "object"}},
+          "per_feature_trend": {"type": "array", "items": {"type": "object"}},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["metric_name", "trend", "per_feature_trend", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_score_stability_trend",
+      "side_effects": ["read:dataset", "read:experiment"],
+      "memory_limit_mb": 4096
+    },
+    {
+      "name": "feature_csi_trend",
+      "summary": "Per-month max feature CSI vs the training baseline plus per-feature drift rows (same kernel as monitor_run).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "experiment_id": {"type": "string", "minLength": 1},
+          "dataset_ids": {"type": "array", "items": {"type": "string"}},
+          "months": {"type": "array", "items": {"type": "string"}},
+          "dataset_id": {"type": "string"},
+          "month_col": {"type": "string"},
+          "score_col": {"type": "string"},
+          "feature_cols": {"type": "array", "items": {"type": "string"}},
+          "thresholds": {"type": "object"}
+        },
+        "required": ["experiment_id"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "metric_name": {"type": "string"},
+          "trend": {"type": "array", "items": {"type": "object"}},
+          "per_feature_trend": {"type": "array", "items": {"type": "object"}},
+          "red_flags": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["metric_name", "trend", "per_feature_trend", "red_flags"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_feature_csi_trend",
+      "side_effects": ["read:dataset", "read:experiment"],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],

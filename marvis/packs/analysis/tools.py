@@ -15,10 +15,13 @@ import pandas as pd
 
 from marvis.data.backend import DataBackend
 from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository
+from marvis.db import DatasetRepository, ModelingRepository
+from marvis.packs.analysis.errors import AnalysisError, MissingBaselineError
 from marvis.packs.analysis.flow import bucket_migration, flow_rate
 from marvis.packs.analysis.loss import expected_loss_estimate
 from marvis.packs.analysis.segment import ProfitParams, segment_profile
+from marvis.packs.analysis.trend import feature_csi_trend, score_stability_trend
+from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.settings import build_settings
 
 
@@ -29,6 +32,8 @@ class _Runtime:
         self.repo = DatasetRepository(self.settings.db_path)
         self.backend = DataBackend(self.datasets_root)
         self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+        self.experiments = ExperimentStore(self.settings.db_path)
+        self.modeling_repo = ModelingRepository(self.settings.db_path)
 
 
 def _runtime(ctx) -> _Runtime:
@@ -145,6 +150,38 @@ def tool_expected_loss_estimate(inputs: dict, ctx) -> dict:
     }
 
 
+def tool_score_stability_trend(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    baseline = _baseline(runtime, str(inputs["experiment_id"]))
+    score_col = str(inputs.get("score_col") or "model_score")
+    month_frames = _month_frames(runtime, inputs, score_col=score_col)
+    thresholds = _trend_thresholds(inputs.get("thresholds"))
+    result = score_stability_trend(
+        baseline,
+        month_frames,
+        score_col=score_col,
+        warn=thresholds[0],
+        fail=thresholds[1],
+    )
+    return _trend_output(result)
+
+
+def tool_feature_csi_trend(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    baseline = _baseline(runtime, str(inputs["experiment_id"]))
+    score_col = str(inputs.get("score_col") or "model_score")
+    month_frames = _month_frames(runtime, inputs, score_col=score_col)
+    thresholds = _trend_thresholds(inputs.get("thresholds"))
+    result = feature_csi_trend(
+        baseline,
+        month_frames,
+        feature_cols=_optional_str_list(inputs.get("feature_cols")),
+        warn=thresholds[0],
+        fail=thresholds[1],
+    )
+    return _trend_output(result)
+
+
 # ---- helpers -----------------------------------------------------------------
 
 
@@ -152,6 +189,80 @@ def _dataset_frame(runtime: _Runtime, dataset_id: str, *, columns: list[str] | N
     dataset = runtime.registry.get(dataset_id)
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
 
+
+def _baseline(runtime: _Runtime, experiment_id: str) -> dict:
+    experiment = runtime.experiments.get(experiment_id)
+    if experiment.artifact_id is None:
+        raise MissingBaselineError(
+            experiment_id=experiment_id,
+            reason=f"实验 {experiment_id} 尚无训练产物，无法读取基准分布快照。",
+        )
+    artifact = runtime.modeling_repo.get_model_artifact(experiment.artifact_id)
+    if artifact is None or not artifact.baseline_distributions:
+        raise MissingBaselineError(
+            experiment_id=experiment_id,
+            reason=(
+                f"实验 {experiment_id} 的产物无训练期基准分布快照（S1b 之前训练或非二分类目标）；"
+                "稳定性趋势没有可对比的基准，请重训该实验以捕获基准，或改用带基准的实验。"
+            ),
+        )
+    return dict(artifact.baseline_distributions)
+
+
+def _month_frames(runtime: _Runtime, inputs: dict, *, score_col: str) -> list[tuple[str, pd.DataFrame]]:
+    """把趋势输入解析成按月排好的 (month, frame) 列表。
+
+    支持两种模式：
+      - ``dataset_ids``：每个 id 是一张打分衍生集，用其 ``month`` 输入或数据里的
+        ``month_col`` 推断月份；这里要求每张表要么整表同月（取 month_col 众数/首值），
+        要么直接由并列的 ``months`` 列表逐一对应。
+      - ``dataset_id`` + ``month_col``：单张打分表按 month_col 切分成逐月子表。
+    """
+    dataset_ids = inputs.get("dataset_ids")
+    dataset_id = _optional_str(inputs.get("dataset_id"))
+    month_col = _optional_str(inputs.get("month_col"))
+    if dataset_ids:
+        months = inputs.get("months")
+        frames: list[tuple[str, pd.DataFrame]] = []
+        for index, raw_id in enumerate(dataset_ids):
+            frame = _dataset_frame(runtime, str(raw_id))
+            if months and index < len(months):
+                month = str(months[index])
+            elif month_col and month_col in frame.columns:
+                month = str(frame[month_col].iloc[0]) if len(frame) else str(index)
+            else:
+                month = str(index)
+            frames.append((month, frame))
+        return sorted(frames, key=lambda item: item[0])
+    if dataset_id and month_col:
+        frame = _dataset_frame(runtime, dataset_id)
+        if month_col not in frame.columns:
+            raise AnalysisError(f"单表趋势要求月份列 `{month_col}` 存在。")
+        out: list[tuple[str, pd.DataFrame]] = []
+        for month, group in frame.groupby(frame[month_col].astype(str), sort=True):
+            out.append((str(month), group))
+        return out
+    raise AnalysisError("趋势工具需要 dataset_ids 或 (dataset_id + month_col)。")
+
+
+def _trend_thresholds(payload) -> tuple[float, float]:
+    if isinstance(payload, dict):
+        warn = payload.get("warn")
+        fail = payload.get("fail")
+        if warn is not None and fail is not None:
+            return float(warn), float(fail)
+    from marvis.packs.analysis.trend import _PSI_FAIL, _PSI_WARN
+
+    return _PSI_WARN, _PSI_FAIL
+
+
+def _trend_output(result) -> dict:
+    return {
+        "metric_name": result.metric_name,
+        "trend": [_jsonable(asdict(point)) for point in result.trend],
+        "per_feature_trend": [_jsonable(asdict(point)) for point in result.per_feature_trend],
+        "red_flags": _jsonable(result.red_flags),
+    }
 
 def _profit_params(payload) -> ProfitParams | None:
     if not payload:
@@ -195,6 +306,8 @@ def _jsonable(value):
 __all__ = [
     "tool_bucket_migration",
     "tool_expected_loss_estimate",
+    "tool_feature_csi_trend",
     "tool_flow_rate",
+    "tool_score_stability_trend",
     "tool_segment_profile",
 ]
