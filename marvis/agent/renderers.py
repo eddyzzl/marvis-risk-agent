@@ -332,6 +332,35 @@ def _render_train(o: dict):
     return text, tables
 
 
+def _champion_evidence_text(experiments, best_id, selector_key, selector_label, higher_is_better) -> str:
+    """LT-11 (B.1/B.2): champion evidence -- the selected metric's champion value and
+    the gap to the runner-up algorithm on that same metric, both read from the
+    experiments' own metrics (INV-1: presentation only, the gap is a subtraction on
+    existing fields). Empty when the champion or a runner-up value is unavailable."""
+    def _val(exp):
+        metrics = exp.get("metrics") or {}
+        value = metrics.get(selector_key)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    champion = next((e for e in experiments if e.get("experiment_id") == best_id), None)
+    champion_value = _val(champion) if champion is not None else None
+    if champion_value is None:
+        return ""
+    others = [
+        (e, _val(e)) for e in experiments
+        if e.get("experiment_id") != best_id and _val(e) is not None
+    ]
+    if not others:
+        return f"（依据：{selector_label}={champion_value:.4f}，为唯一可比算法）"
+    runner_up, runner_value = max(others, key=lambda item: item[1]) if higher_is_better else min(others, key=lambda item: item[1])
+    gap = champion_value - runner_value
+    return (
+        f"（依据：{selector_label}={champion_value:.4f}，"
+        f"较次优 {runner_up.get('recipe', '?')}（{runner_value:.4f}）"
+        f"{'高' if higher_is_better else '低'} {abs(gap):.4f}）"
+    )
+
+
 def _render_train_models(o: dict):
     experiments = [e for e in (o.get("experiments") or []) if isinstance(e, dict)]
     best_id = o.get("best_experiment_id")
@@ -343,12 +372,15 @@ def _render_train_models(o: dict):
     if target_type == "continuous":
         metric_columns = ["train_rmse", "test_rmse", "oot_rmse", "test_mae", "oot_mae", "test_r2", "oot_r2"]
         selector_label = "按 OOT RMSE"
+        selector_key, higher_is_better = "oot_rmse", False
     elif target_type == "multiclass":
         metric_columns = ["train_macro_auc", "test_macro_auc", "oot_macro_auc", "test_logloss", "oot_logloss", "test_accuracy", "oot_accuracy"]
         selector_label = "按 OOT macro-AUC"
+        selector_key, higher_is_better = "oot_macro_auc", True
     else:
         metric_columns = ["train_ks", "test_ks", "oot_ks", "test_auc", "oot_auc"]
         selector_label = "按 OOT KS"
+        selector_key, higher_is_better = "oot_ks", True
     for exp in experiments:
         metrics = exp.get("metrics") or {}
         is_best = exp.get("experiment_id") == best_id
@@ -359,7 +391,18 @@ def _render_train_models(o: dict):
             + [_num(metrics.get(column)) for column in metric_columns]
         )
     if len(experiments) > 1:
-        text = f"**训练完成**:对比 {len(experiments)} 个算法，最优 **{best_recipe}**（★；{selector_label}）。"
+        # LT-11 (B.1/B.2): the champion choice carries its evidence -- the selection
+        # metric it won on (selector_label), the champion's own value, and the gap to
+        # the runner-up algorithm on that SAME metric so the user sees what the
+        # champion beat. All numbers are the experiments' own already-computed metrics
+        # (INV-1: presentation only; the gap is a plain subtraction on existing fields).
+        evidence = _champion_evidence_text(
+            experiments, best_id, selector_key, selector_label, higher_is_better
+        )
+        text = (
+            f"**训练完成**:对比 {len(experiments)} 个算法，"
+            f"最优 **{best_recipe}**（★；{selector_label}）{evidence}。"
+        )
         tables.append({
             "title": "候选模型对比",
             "columns": ["算法", *metric_columns],
@@ -606,17 +649,75 @@ def _render_backtest_strategy(o: dict):
     return text, tables
 
 
+def _profit_delta_text(value, other) -> str:
+    """预期利润差值文案（推荐 vs 备选），只对已有输出字段做减法（不新增任何计算口径,
+    与 compare 渲染器对 tool deltas 取差同源，presentation-only INV-1）。"""
+    try:
+        diff = float(value) - float(other)
+    except (TypeError, ValueError):
+        return "n/a"
+    sign = "+" if diff >= 0 else ""
+    return f"{sign}{diff:.4f}"
+
+
+def _tradeoff_alternatives(points: list, recommended: dict | None) -> tuple[list[list], dict | None]:
+    """LT-11 (B.2): the top-2 feasible cutoff alternatives *other than* the
+    recommended one (each with its 预期利润 gap vs the recommended point) plus the
+    single best alternative point itself, so the caller can also state the
+    recommendation's advantage. All numbers are the points' own already-computed
+    fields; the gap is a plain subtraction (no new computation口径)."""
+    if not recommended:
+        return [], None
+    reco_cutoff = recommended.get("cutoff")
+    feasible = [
+        point for point in points
+        if point.get("feasible", True) and point.get("cutoff") != reco_cutoff
+    ]
+    # Order by expected_profit desc (the same objective the recommend picked on), so
+    # "备选" reads as the runner-up feasible operating points.
+    feasible.sort(
+        key=lambda p: p.get("expected_profit") if isinstance(p.get("expected_profit"), (int, float)) else float("-inf"),
+        reverse=True,
+    )
+    rows = [
+        [
+            _fmt(point.get("cutoff")),
+            _pct(point.get("approval_rate")),
+            _pct(point.get("bad_rate")),
+            _num(point.get("expected_profit")),
+            _profit_delta_text(point.get("expected_profit"), recommended.get("expected_profit")),
+        ]
+        for point in feasible[:2]
+    ]
+    return rows, (feasible[0] if feasible else None)
+
+
 def _render_tradeoff_view(o: dict):
     points = [point for point in (o.get("points") or []) if isinstance(point, dict)]
     recommended = o.get("recommended") if isinstance(o.get("recommended"), dict) else None
     direction_label = "分数越高风险越低" if o.get("score_direction") == "higher_is_better" else "分数越高风险越高"
+    feasible_points = [point for point in points if point.get("feasible", True)]
+    alt_rows, best_alt = _tradeoff_alternatives(points, recommended)
     if recommended:
+        # LT-11 (B.1): the recommendation carries its evidence -- it is a *feasible*
+        # operating point (constraint-satisfying), and how many of the scanned
+        # cutoffs were feasible at all; plus (B.2) the profit advantage over the
+        # next-best feasible cutoff so 推荐 is not a bare conclusion. Every number is
+        # a field already in the tool output (INV-1: presentation only, no
+        # re-computation; the advantage is a subtraction of two existing points).
+        evidence = f"依据：满足约束的可行点（共 {len(feasible_points)}/{len(points)} 个 cutoff 可行）"
+        if best_alt is not None:
+            advantage = _profit_delta_text(
+                recommended.get("expected_profit"), best_alt.get("expected_profit")
+            )
+            evidence += f"，且预期利润较次优 cutoff `{_fmt(best_alt.get('cutoff'))}` 高 {advantage}"
         text = (
             f"**策略权衡视图完成**（{direction_label}）："
             f"推荐 cutoff `{_fmt(recommended.get('cutoff'))}`，"
             f"审批率 {_pct(recommended.get('approval_rate'))}，"
             f"坏率 {_pct(recommended.get('bad_rate'))}，"
-            f"预期利润 {_num(recommended.get('expected_profit'))}。"
+            f"预期利润 {_num(recommended.get('expected_profit'))}"
+            f"（{evidence}）。"
         )
     else:
         text = f"**策略权衡视图完成**（{direction_label}）。"
@@ -626,12 +727,14 @@ def _render_tradeoff_view(o: dict):
         names = "、".join(str(flag.get("code")) for flag in red_items)
         text += f" 红旗：{names}。"
     tables = []
+    reco_cutoff = recommended.get("cutoff") if recommended else None
     if points:
         tables.append({
             "title": "cutoff 权衡点",
-            "columns": ["cutoff", "审批率", "坏率", "预期利润", "可行"],
+            "columns": ["推荐", "cutoff", "审批率", "坏率", "预期利润", "可行"],
             "rows": [
                 [
+                    "★" if point.get("cutoff") == reco_cutoff and recommended else "",
                     _fmt(point.get("cutoff")),
                     _pct(point.get("approval_rate")),
                     _pct(point.get("bad_rate")),
@@ -640,6 +743,14 @@ def _render_tradeoff_view(o: dict):
                 ]
                 for point in points[:20]
             ],
+        })
+    # LT-11 (B.2): top-2 feasible备选 with the预期利润 gap to推荐, so the user sees
+    # what the recommendation gives up relative to the runner-up operating points.
+    if alt_rows:
+        tables.append({
+            "title": "次优可行 cutoff（备选，含与推荐的预期利润差）",
+            "columns": ["cutoff", "审批率", "坏率", "预期利润", "与推荐预期利润差"],
+            "rows": alt_rows,
         })
     if red_flags:
         tables.append(_red_flag_table(red_flags))
@@ -672,8 +783,25 @@ def _render_design_cutoff_bands(o: dict):
     approved = [band for band in bands if band.get("decision") == "approve"]
     rules = [rule for rule in (o.get("recommended_rules") or []) if isinstance(rule, dict)]
     rule_text = rules[0].get("condition") if rules else "无"
+    # LT-11 (B.1): the recommended cut carries its evidence -- the cumulative bad
+    # rate and approval rate *at the approved frontier* (the最后一个 approve 带's own
+    # cum_* fields the bands already carry), so 推荐切法 shows why it is safe rather
+    # than only naming the rule. Numbers are the bands' own fields (INV-1: no
+    # re-computation). Frontier band = the approved band with the widest cumulative
+    # approval (the boundary the cut lands on).
+    frontier = max(
+        approved,
+        key=lambda b: b.get("cum_approval_rate") if isinstance(b.get("cum_approval_rate"), (int, float)) else -1.0,
+        default=None,
+    )
+    evidence = ""
+    if rules and frontier is not None:
+        evidence = (
+            f"（依据：通过客群累计坏率 {_pct(frontier.get('cum_bad_rate'))}，"
+            f"累计审批率 {_pct(frontier.get('cum_approval_rate'))}，满足约束）"
+        )
     text = (
-        f"**分数带设计完成**：推荐切法 `{rule_text}`（拒绝规则），"
+        f"**分数带设计完成**：推荐切法 `{rule_text}`（拒绝规则）{evidence}，"
         f"通过 {len(approved)}/{len(bands)} 个分数带，红旗 {len(red_flags)} 项。"
     )
     if red_items:

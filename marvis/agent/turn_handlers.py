@@ -981,6 +981,7 @@ def agent_autodrive_turn(
             "replan_goal",
             "clarifying_question",
             "confidence",
+            "safety_rationale",
         ):
             if key in decision:
                 decision_meta[key] = decision[key]
@@ -1337,8 +1338,16 @@ def _modeling_project_meta(task: TaskRecord) -> dict[str, str]:
 
 def _auto_decision_content(decision: dict) -> str:
     reason = str(decision.get("reason") or "").strip() or "自动决策已生成。"
-    if decision.get("action") == "clarify" and decision.get("clarifying_question"):
+    action = decision.get("action")
+    if action == "clarify" and decision.get("clarifying_question"):
         return f"🤖 {reason}\n\n需要确认:{decision['clarifying_question']}"
-    if decision.get("action") == "replan" and decision.get("replan_goal"):
+    if action == "replan" and decision.get("replan_goal"):
         return f"🤖 {reason}\n\n重规划目标:{decision['replan_goal']}"
+    # LT-11 (B.3): when AUTO auto-confirms a low-risk gate, append the "why safe"
+    # rationale (_apply_safety_policy attached it because no risk flag / wide reset
+    # fired) so the auto-confirm explains itself. A halt already cites the specific
+    # risk_flag code in its reason (from _gate_risk_reason), so no extra line there.
+    rationale = str(decision.get("safety_rationale") or "").strip()
+    if action == "confirm" and rationale:
+        return f"🤖 {reason}\n\n为何可自动确认:{rationale}"
     return f"🤖 {reason}"

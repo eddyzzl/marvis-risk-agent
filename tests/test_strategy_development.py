@@ -598,3 +598,89 @@ def test_tool_adopt_strategy_double_adopt_conflicts(tmp_path):
         task_id=task.id,
     )
     assert second.ok is False
+
+
+# ---------------------------------------------------------------------------
+# LT-11: recommendations carry evidence (B.1) + tradeoff alternatives (B.2).
+# All numbers come from fields the tool output already carries -- no new compute.
+# ---------------------------------------------------------------------------
+def test_render_tradeoff_view_recommendation_carries_evidence_and_alternatives():
+    from marvis.agent.renderers import _render_tradeoff_view
+
+    text, tables = _render_tradeoff_view({
+        "score_direction": "higher_is_better",
+        "recommended": {"cutoff": 500, "approval_rate": 0.33, "bad_rate": 0.0,
+                        "expected_profit": 120.0, "feasible": True},
+        "points": [
+            {"cutoff": 300, "approval_rate": 0.67, "bad_rate": 0.0,
+             "expected_profit": 100.0, "feasible": True},
+            {"cutoff": 500, "approval_rate": 0.33, "bad_rate": 0.0,
+             "expected_profit": 120.0, "feasible": True},
+            {"cutoff": 200, "approval_rate": 0.83, "bad_rate": 0.2,
+             "expected_profit": 80.0, "feasible": False},
+        ],
+        "red_flags": [],
+    })
+    # B.1: the推荐 line cites its evidence -- feasible-point count + advantage over次优.
+    assert "推荐 cutoff `500`" in text
+    assert "依据：满足约束的可行点（共 2/3 个 cutoff 可行）" in text
+    assert "预期利润较次优 cutoff `300` 高 +20.0000" in text
+    # points table gains a 推荐 marker column; the recommended row is ★.
+    points_table = next(t for t in tables if t["title"] == "cutoff 权衡点")
+    assert points_table["columns"] == ["推荐", "cutoff", "审批率", "坏率", "预期利润", "可行"]
+    reco_row = next(row for row in points_table["rows"] if row[1] == "500")
+    assert reco_row[0] == "★"
+    # B.2: a top-2 feasible备选 table shows what推荐 gives up (profit delta vs推荐).
+    alt_table = next(t for t in tables if t["title"].startswith("次优可行 cutoff"))
+    assert alt_table["columns"][-1] == "与推荐预期利润差"
+    assert alt_table["rows"][0][0] == "300"
+    assert alt_table["rows"][0][-1] == "-20.0000"
+
+
+def test_render_tradeoff_view_without_recommendation_has_no_evidence():
+    from marvis.agent.renderers import _render_tradeoff_view
+
+    text, tables = _render_tradeoff_view({
+        "score_direction": "higher_is_better",
+        "recommended": None,
+        "points": [{"cutoff": 300, "approval_rate": 0.5, "bad_rate": 0.3,
+                    "expected_profit": 10.0, "feasible": False}],
+    })
+    assert "策略权衡视图完成" in text
+    assert "依据" not in text
+    assert not any(t["title"].startswith("次优可行 cutoff") for t in tables)
+
+
+def test_render_design_cutoff_bands_recommendation_carries_evidence():
+    from marvis.agent.renderers import _render_design_cutoff_bands
+
+    text, _ = _render_design_cutoff_bands({
+        "bands": [
+            {"lo": 100, "hi": 300, "pop_pct": 0.5, "bad_rate": 0.2,
+             "cum_approval_rate": 0.5, "cum_bad_rate": 0.2, "decision": "decline"},
+            {"lo": 300, "hi": 600, "pop_pct": 0.5, "bad_rate": 0.0,
+             "cum_approval_rate": 0.5, "cum_bad_rate": 0.0, "decision": "approve"},
+        ],
+        "recommended_rules": [{"condition": "score < 300", "decision": "reject"}],
+        "red_flags": [],
+    })
+    # B.1: the推荐切法 cites its evidence -- the通过客群 cumulative bad/approval at the cut.
+    assert "推荐切法 `score < 300`" in text
+    assert "依据：通过客群累计坏率 0.0%，累计审批率 50.0%，满足约束" in text
+
+
+def test_render_train_models_champion_carries_evidence_vs_runner_up():
+    from marvis.agent.renderers import _render_train_models
+
+    text, _ = _render_train_models({
+        "target_type": "binary",
+        "best_experiment_id": "exp-1", "best_recipe": "lgb",
+        "experiments": [
+            {"experiment_id": "exp-1", "recipe": "lgb", "metrics": {"oot_ks": 0.43}},
+            {"experiment_id": "exp-2", "recipe": "xgb", "metrics": {"oot_ks": 0.39}},
+        ],
+    })
+    # B.1/B.2: champion line cites the selection metric value + gap to the runner-up.
+    assert "最优 **lgb**" in text
+    assert "依据：按 OOT KS=0.4300" in text
+    assert "较次优 xgb（0.3900）高 0.0400" in text
