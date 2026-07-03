@@ -8,7 +8,7 @@ from marvis.feature.metrics import feature_auc, feature_ks
 from marvis.packs.modeling.errors import ModelingError
 from marvis.validation.binning import bin_distribution, compute_psi
 
-from marvis.packs.modeling._common import _effective_seed, _optional_float, _optional_str
+from marvis.packs.modeling._common import _effective_seed, _optional_float, _optional_str, _unique_columns
 from marvis.packs.modeling._runtime import _artifact, _artifact_base_dir, _runtime
 from marvis.packs.modeling.delivery_tools import _monitoring_check_status
 from marvis.packs.modeling.scoring import _ModelArtifactScorer
@@ -208,7 +208,18 @@ def tool_monitor_run(inputs: dict, ctx) -> dict:
 
     if scored_dataset_id:
         dataset = runtime.registry.get(scored_dataset_id)
-        frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
+        dataset_path = runtime.registry.resolve_path(dataset.id)
+        # LT-6: monitor_run only ever reads score_col/feature_list/target_col off this
+        # frame (never writes it back), so project instead of pulling the full modeling
+        # frame -- filtered against the dataset's actual columns first (not requested
+        # blind) so a feature_list entry or target_col absent from THIS dataset degrades
+        # the same way it always has (_monitor_run_feature_csi_checks' `feature not in
+        # frame.columns` skip / _monitor_run_label_checks' n/a rows) instead of read_frame
+        # raising on an unknown column.
+        available = set(runtime.backend.column_names(dataset_path))
+        columns = _unique_columns([score_col, target_col, *artifact.feature_list])
+        columns = [column for column in columns if column in available]
+        frame = runtime.backend.read_frame(dataset_path, columns=columns)
         if score_col not in frame.columns:
             raise ModelingError(
                 f"scored dataset {dataset.id!r} has no column {score_col!r}; "
@@ -217,7 +228,16 @@ def tool_monitor_run(inputs: dict, ctx) -> dict:
         scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
     else:
         dataset = runtime.registry.get(str(dataset_id))
-        frame = runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id))
+        dataset_path = runtime.registry.resolve_path(dataset.id)
+        # LT-6: NOT column-projected, unlike the scored_dataset_id branch above --
+        # replay_preprocessing=True means the preprocessing chain may reference raw
+        # input columns (e.g. a pre-onehot/pre-woe source column) that are not
+        # themselves in artifact.feature_list, and apply_preprocessing_steps silently
+        # SKIPS a step whose input column is absent from the frame rather than raising
+        # (see marvis.feature.preprocessing.apply_preprocessing_steps). Projecting here
+        # could silently drop a preprocessing step instead of erroring, corrupting the
+        # replayed scores/CSI -- exactly the drift the task's hard constraint forbids.
+        frame = runtime.backend.read_frame(dataset_path)
         scorer = _ModelArtifactScorer(artifact, base_dir=base_dir, replay_preprocessing=True)
         scores = np.asarray(scorer.score(frame), dtype=float)
 

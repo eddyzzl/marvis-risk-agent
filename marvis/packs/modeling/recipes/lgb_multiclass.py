@@ -22,6 +22,7 @@ from marvis.packs.modeling.recipes.common import (
     model_params,
     pop_boost_rounds,
     split_modeling_frame,
+    training_frame_columns,
 )
 
 
@@ -33,7 +34,9 @@ def train_lgb_multiclass(backend, dataset_path, config: TrainConfig, *, out_dir:
     so the column→class mapping is deterministic. predict returns an N×K probability
     matrix consumed by ``compute_multiclass_model_metrics`` for macro_auc/logloss/
     accuracy; binary KS/AUC and regression RMSE/MAE fields stay None."""
-    frame = backend.read_frame(dataset_path)
+    frame = backend.read_frame(
+        dataset_path, columns=training_frame_columns(backend, dataset_path, config)
+    )
     train, test, oot = split_modeling_frame(frame, config)
     train, test, oot, oot_has_labels, audit = resolve_modeling_splits(
         train, test, oot, target_col=config.target_col, drop_nan_labels=config.drop_nan_labels,
