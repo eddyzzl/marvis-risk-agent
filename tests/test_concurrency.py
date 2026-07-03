@@ -10,16 +10,18 @@ path had zero test coverage. These tests cover:
       reads -- zero database-locked errors, bounded poll latency. PASSES.
   (b) two threads confirming the same plan-step gate concurrently should
       yield exactly one 202 (confirmed) and one 409 (ConflictError), never a
-      double-confirm. This uncovered a real bug (PlanRepository.confirm_step
-      guards on the wrong column, so double confirmation is not actually
-      prevented -- reproducible even without threading) plus a second,
-      independent TOCTOU race in the HTTP layer's job bookkeeping. Both are
-      documented and reproduced as xfail tests below rather than fixed here
-      (out of scope; see each test's xfail reason for file:line evidence).
+      double-confirm. This originally uncovered two real bugs: PlanRepository.
+      confirm_step guarded on status alone (not confirmed), so a repeat confirm
+      in the AWAITING_CONFIRM window silently succeeded, plus a second,
+      independent TOCTOU race in the HTTP layer's job bookkeeping. Both are now
+      fixed (confirm_step is a real compare-and-swap on confirmed; start_job
+      no longer leaks a raw IntegrityError), and the tests below assert the
+      corrected behavior.
   (c) two threads uploading distinct datasets to the same task concurrently
-      should not cross-contaminate. This uncovered a real bug (concurrent
-      CSV ingestion races on DuckDB's process-wide implicit default
-      connection) -- documented and reproduced as an xfail test below.
+      should not cross-contaminate. This originally uncovered a DuckDB race
+      (concurrent CSV ingestion on the process-wide implicit default
+      connection); it is now fixed by using per-operation connections, and the
+      test below asserts non-contamination.
 
 Uses TestClient + threading (an in-process real SQLite file, no real
 subprocess needed). Marked slow: excluded from the default fast tier.
@@ -217,10 +219,12 @@ def _confirm_race_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def test_sequential_double_confirm_step_should_conflict_but_does_not(tmp_path):
+def test_sequential_double_confirm_step_conflicts(tmp_path):
     """Deterministic (no threading needed): calling confirm_step twice in a
-    row on the same AWAITING_CONFIRM step should raise ConflictError on the
-    second call -- it doesn't, because the guard checks the wrong column."""
+    row on the same AWAITING_CONFIRM step raises ConflictError on the second
+    call. confirm_step is a compare-and-swap on the confirmed column (WHERE
+    status = ? AND confirmed = 0), so the repeat confirm matches zero rows and
+    conflicts."""
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     task_id = _create_task(db_path)
