@@ -5855,6 +5855,83 @@ def test_driver_manual_analysis_omits_plan_overview_messages():
     assert "driverManualAnalysisHtmlController(messages" in app_js
 
 
+def test_task_creation_clicks_are_serialized_while_create_request_is_pending():
+    app_js = _read_static("app.js")
+
+    create_start = app_js.index("async function createTask")
+    create_end = app_js.index("async function refreshTasks", create_start)
+    create_submit_start = app_js.index("function setCreateTaskSubmitting")
+    create_submit_end = app_js.index("async function createTask", create_submit_start)
+    create_scan_start = app_js.index("async function createTaskAndScan")
+    create_scan_end = app_js.index("async function pollValidationProgress", create_scan_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = null;",
+            "let selectedTask = null;",
+            "let createTaskInFlight = false;",
+            "let createApiCalls = 0;",
+            "let renderAllCalls = 0;",
+            "const statuses = [];",
+            "const elements = {",
+            "  modelName: { value: '模型A' },",
+            "  validator: { value: '验证员' },",
+            "  sourceDir: { value: '/tmp/materials' },",
+            "  createTaskButton: { disabled: false, dataset: {} },",
+            "};",
+            "const checkedRunMode = { value: 'agent' };",
+            "function $(id) { return elements[id] || null; }",
+            "const document = { querySelector(selector) { return selector === 'input[name=\"runMode\"]:checked' ? checkedRunMode : null; } };",
+            "const materialSourceController = { mode() { return 'path'; }, selectedFiles() { return []; } };",
+            "const createTaskDialog = {",
+            "  activeTaskType() { return 'modeling'; },",
+            "  async createTask() {",
+            "    createApiCalls += 1;",
+            "    await new Promise((resolve) => setTimeout(resolve, 20));",
+            "    return { id: `task-${createApiCalls}`, run_mode: 'agent' };",
+            "  },",
+            "};",
+            "function taskTypeDefinition() { return { initialGoal: '', label: '建模' }; }",
+            "const defaultTaskType = 'modeling';",
+            "function prefillAgentTaskInstruction() {}",
+            "function setCreateStatus(message, kind = '') { statuses.push({ message, kind }); }",
+            "function collectCreateTaskReportValues() { return {}; }",
+            "async function uploadMaterialFiles() { throw new Error('upload should not run'); }",
+            "function rememberSelectedTaskId() {}",
+            "function renderStoredStateSummaries() {}",
+            "async function refreshTasks() {}",
+            "async function loadReportFields() {}",
+            "function closeTaskDialog() {}",
+            "function setActionStatus() {}",
+            "function setBusy() {}",
+            "async function loadAgentMessages() {}",
+            "function renderAll() { renderAllCalls += 1; }",
+            "async function scanCurrentTask() { throw new Error('agent mode should not scan'); }",
+            "async function loadTaskEvidence() {}",
+            "async function api(endpoint) {",
+            "  throw new Error(`unexpected endpoint ${endpoint}`);",
+            "}",
+            app_js[create_submit_start:create_submit_end],
+            app_js[create_start:create_end],
+            app_js[create_scan_start:create_scan_end],
+            "await Promise.all([createTaskAndScan(), createTaskAndScan()]);",
+            "process.stdout.write(JSON.stringify({ createApiCalls, disabled: elements.createTaskButton.disabled, busy: elements.createTaskButton.dataset.createBusy || '', statuses, renderAllCalls }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["createApiCalls"] == 1
+    assert payload["disabled"] is False
+    assert payload["busy"] == "false"
+    assert any(status["message"] == "任务正在创建，请稍候。" for status in payload["statuses"])
+    assert payload["renderAllCalls"] == 1
+
+
 def test_api_paths_are_absolute_and_agent_start_rejects_missing_task_id():
     app_js = _read_static("app.js")
     api_js = _read_static("js/api.js")
@@ -5881,7 +5958,7 @@ def test_delete_task_blocks_active_jobs_instead_of_stale_running_status():
     delete_end = app_js.index("async function runAction", delete_start)
     delete_body = app_js[delete_start:delete_end]
 
-    assert "taskServerBusyAction(task)" in delete_body
+    assert "taskServerBusyAction(targetTask)" in delete_body
     assert 'task.status === "running"' not in delete_body
 
 
@@ -6050,6 +6127,79 @@ process.stdout.write("ok");
     )
 
     assert result.stdout == "ok"
+
+
+def test_delete_task_reconciles_stale_local_agent_busy_before_delete():
+    app_js = _read_static("app.js")
+
+    busy_start = app_js.index("function taskBusyAction")
+    busy_end = app_js.index("function selectedTaskIsBusy", busy_start)
+    set_busy_start = app_js.index("function setBusy")
+    set_busy_end = app_js.index("function setAgentMemoryStatus", set_busy_start)
+    refresh_start = app_js.index("async function refreshTasks")
+    refresh_end = app_js.index("async function scanCurrentTask", refresh_start)
+    reconcile_start = app_js.index("async function reconcileTaskBeforeDelete")
+    reconcile_end = app_js.index("async function deleteTask", reconcile_start)
+    delete_start = app_js.index("async function deleteTask")
+    delete_end = app_js.index("async function runAction", delete_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-1';",
+            "let selectedTask = { id: 'task-1', model_name: '模型A', status: 'created', active_job_kind: null };",
+            "let globalBusyAction = null;",
+            "let taskCache = [selectedTask];",
+            "const taskBusyActions = new Map([['task-1', 'agent']]);",
+            "const statuses = [];",
+            "const apiCalls = [];",
+            "let refreshed = false;",
+            "function taskStopped() { return false; }",
+            "function syncSelectedTaskFromCache() { selectedTask = taskCache.find((task) => task.id === selectedTaskId) || null; }",
+            "function findTaskInCache(taskId) { return taskCache.find((task) => task.id === taskId) || null; }",
+            "function ensureActiveTaskProgressPolling() {}",
+            "function setActionStatus(message, kind = '', detail = '') { statuses.push({ message, kind, detail }); }",
+            "function renderWorkflowStepper() {}",
+            "function renderPetState() {}",
+            "function updateAgentSendDisabled() {}",
+            "function taskDisplayName(task) { return task.model_name; }",
+            "const window = { confirm() { return true; } };",
+            "function rememberSelectedTaskId() {}",
+            "const resultScrollPositionsByTask = new Map();",
+            "function renderStoredStateSummaries() {}",
+            "async function loadReportFields() {}",
+            "function renderAll() {}",
+            "async function loadTaskPurgeSummaryText() { return \"\"; }",
+            "function showPlatformConfirm() { return true; }",
+            "function persistResultScrollPositions() {}",
+            "async function api(endpoint, options = {}) {",
+            "  apiCalls.push({ endpoint, method: options.method || 'GET' });",
+            "  if (endpoint === 'api/tasks') {",
+            "    refreshed = true;",
+            "    return [{ id: 'task-1', model_name: '模型A', status: 'created', active_job_kind: null }];",
+            "  }",
+            "  if (endpoint === 'api/tasks/task-1' && options.method === 'DELETE') return null;",
+            "  throw new Error(`unexpected ${endpoint}`);",
+            "}",
+            app_js[busy_start:busy_end],
+            app_js[set_busy_start:set_busy_end],
+            app_js[refresh_start:refresh_end],
+            app_js[reconcile_start:reconcile_end],
+            app_js[delete_start:delete_end],
+            "await deleteTask(selectedTask);",
+            "process.stdout.write(JSON.stringify({ refreshed, apiCalls, hasBusy: taskBusyActions.has('task-1'), statuses }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["refreshed"] is True
+    assert payload["hasBusy"] is False
+    assert {"endpoint": "api/tasks/task-1", "method": "DELETE"} in payload["apiCalls"]
+    assert payload["statuses"][-1]["message"] == "任务已删除。"
 
 
 def test_agent_stop_response_polls_until_active_agent_job_finishes():
@@ -7581,6 +7731,7 @@ def test_agent_send_shows_thinking_message_before_network_wait():
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
+            "const agentRequestAbortControllers = new Map();",
             "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
             "const modelSelect = { value: 'model-1' };",
             "const renderSnapshots = [];",
@@ -7644,6 +7795,7 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
             "function taskUsesPlanRail(t) { const type = t && t.task_type; return Boolean(type) && type !== 'validation'; }",
             "let agentMessages = [];",
             "let lastAgentRenderSignature = null;",
+            "const agentRequestAbortControllers = new Map();",
             "let pollCount = 0;",
             "let firstPollOptions = null;",
             "const input = { value: '解释一下', style: {}, classList: { toggle() {} } };",
@@ -7685,6 +7837,83 @@ def test_agent_send_polls_streaming_messages_before_network_response_finishes():
     assert payload["polledBeforeResponse"] is True
     assert payload["pollCount"] >= 1
     assert payload["firstPollOptions"] == {"preserveOptimistic": True}
+
+
+def test_agent_stop_aborts_in_flight_message_request_and_clears_optimistic_state():
+    app_js = _read_static("app.js")
+    message_helpers_start = app_js.index("function appendOptimisticAgentUserMessage")
+    message_helpers_end = app_js.index("function clearAgentStageMessages", message_helpers_start)
+    send_start = app_js.index("async function startAgentValidation")
+    send_end = app_js.index("async function dispatchAgentValidation", send_start)
+    stop_start = app_js.index("async function stopAgentValidation")
+    stop_end = app_js.index("async function waitForAgentValidation", stop_start)
+    script = "\n".join(
+        [
+            "let selectedTaskId = 'task-1';",
+            "let agentMessages = [];",
+            "let lastAgentRenderSignature = null;",
+            "const agentRequestAbortControllers = new Map();",
+            "const statuses = [];",
+            "let messageSignal = null;",
+            "let stopCalled = false;",
+            "const input = { value: '开始', style: {}, classList: { toggle() {} } };",
+            "const modelSelect = { value: 'model-1' };",
+            "function $(id) { return id === 'agentComposerInput' ? input : modelSelect; }",
+            "function autoGrowComposerInput() {}",
+            "function updateAgentSendDisabled() {}",
+            "function setActionStatus(message, kind = '') { statuses.push({ message, kind }); }",
+            "function renderAgentConversation() {}",
+            "function agentMessageIsAdvanceIntent() { return false; }",
+            "function agentModelUnavailableMessage() { return ''; }",
+            "function showAgentModelGuidance() { return false; }",
+            "function setAgentComposerNotice() {}",
+            "function agentModelConfigurationErrorMessage() { return ''; }",
+            "function agentEffort() { return 'high'; }",
+            "function agentAcceptanceModeValue() { return 'normal'; }",
+            "function pollAgentMessagesUntilSettled(_taskId, pendingPromise) { return pendingPromise.catch(() => {}); }",
+            "function requireTaskId(taskId) { return taskId; }",
+            "async function waitForAgentValidation() { throw new Error('wait should not run'); }",
+            "async function api(endpoint, options = {}) {",
+            "  if (endpoint === 'api/tasks/task-1/agent/messages') {",
+            "    messageSignal = options.signal;",
+            "    return await new Promise((_resolve, reject) => {",
+            "      options.signal.addEventListener('abort', () => {",
+            "        const error = new Error('aborted');",
+            "        error.name = 'AbortError';",
+            "        reject(error);",
+            "      });",
+            "    });",
+            "  }",
+            "  if (endpoint === 'api/tasks/task-1/agent/stop') {",
+            "    stopCalled = true;",
+            "    return { status: 'message_saved', message: '已停止当前动作，请问有什么指示？', messages: [] };",
+            "  }",
+            "  throw new Error(`unexpected ${endpoint}`);",
+            "}",
+            app_js[message_helpers_start:message_helpers_end],
+            app_js[send_start:send_end],
+            app_js[stop_start:stop_end],
+            "const sendPromise = startAgentValidation();",
+            "await new Promise((resolve) => setTimeout(resolve, 0));",
+            "const optimisticCount = agentMessages.length;",
+            "await Promise.all([sendPromise, stopAgentValidation()]);",
+            "process.stdout.write(JSON.stringify({ stopCalled, signalAborted: messageSignal?.aborted === true, optimisticCount, finalMessages: agentMessages.length, hasController: agentRequestAbortControllers.has('task-1'), statuses }));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["stopCalled"] is True
+    assert payload["signalAborted"] is True
+    assert payload["optimisticCount"] == 2
+    assert payload["finalMessages"] == 0
+    assert payload["hasController"] is False
+    assert payload["statuses"][-1]["message"] == "已停止当前动作，请问有什么指示？"
 
 
 def test_agent_composer_model_and_effort_preferences_survive_refresh_until_user_changes_them():

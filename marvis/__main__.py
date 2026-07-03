@@ -1,11 +1,19 @@
 import argparse
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import zlib
+
+
+DEFAULT_CONDA_ENV_NAME = "marvis"
+DEFAULT_CONDA_PYTHON = "3.12"
+LAUNCHER_ENV_FILE = ".marvis-launcher-env"
+DELEGATED_COMMANDS = {None, "serve", "validate"}
 
 
 @dataclass(frozen=True)
@@ -17,13 +25,21 @@ class ServeOptions:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = _parse_args(raw_argv)
     try:
+        if _should_delegate_to_dedicated_conda_env(args):
+            _delegate_to_dedicated_conda_env(raw_argv, env_name=_launcher_env_name())
+            return
         if args.command == "validate":
             _validate(args)
         elif args.command == "update":
             result = _update(args)
             print(f"MARVIS updated at {result['repo']} ({result['version']}).")
+            if result.get("install_target", "").startswith("conda:"):
+                env_name = result["install_target"].split(":", 1)[1]
+                print(f"MARVIS was installed into conda environment '{env_name}'.")
+                print("Run `marvis` to start MARVIS.")
         elif args.command == "version":
             _print_version()
         elif args.command == "eval-llm":
@@ -78,6 +94,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_parser.add_argument("--remote", default="origin")
     update_parser.add_argument("--branch", default="main")
     update_parser.add_argument("--skip-install", action="store_true")
+    update_parser.add_argument(
+        "--env-name",
+        default=DEFAULT_CONDA_ENV_NAME,
+        help="Dedicated conda environment to create or reuse when update is run from conda base.",
+    )
+    update_parser.add_argument(
+        "--no-dedicated-env",
+        action="store_true",
+        help="Allow update to refresh the current conda base environment.",
+    )
+    update_parser.add_argument(
+        "--with-deps",
+        action="store_true",
+        help="Refresh MARVIS dependencies too. Default update only refreshes the editable install.",
+    )
 
     subparsers.add_parser("version", help="Print the installed MARVIS version")
 
@@ -347,10 +378,190 @@ def _update(args: argparse.Namespace) -> dict[str, str]:
 
     _run_git(repo, "fetch", args.remote)
     _run_git(repo, "pull", "--ff-only", args.remote, args.branch or current_branch)
+    install_target = "skipped"
     if not args.skip_install:
-        _run_process([sys.executable, "-m", "pip", "install", "-e", "."], cwd=repo)
+        if _should_use_dedicated_conda_env(args):
+            created = _ensure_conda_env(args.env_name, cwd=repo)
+            install_with_deps = args.with_deps or created
+            _run_process(
+                _conda_env_install_command(args.env_name, with_deps=install_with_deps),
+                cwd=repo,
+            )
+            _write_launcher_env_name(repo, args.env_name)
+            install_target = f"conda:{args.env_name}"
+        else:
+            _run_process(_editable_install_command(with_deps=args.with_deps), cwd=repo)
+            install_target = "current-python"
     version = _git_output(repo, "describe", "--tags", "--always")
-    return {"repo": str(repo), "version": version}
+    return {"repo": str(repo), "version": version, "install_target": install_target}
+
+
+def _editable_install_command(*, with_deps: bool) -> list[str]:
+    command = [sys.executable, "-m", "pip", "install", "-e", "."]
+    if not with_deps:
+        command.append("--no-deps")
+    return command
+
+
+def _conda_env_install_command(env_name: str, *, with_deps: bool) -> list[str]:
+    command = [
+        _conda_command(),
+        "run",
+        "-n",
+        env_name,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        ".",
+    ]
+    if not with_deps:
+        command.append("--no-deps")
+    return command
+
+
+def _should_use_dedicated_conda_env(args: argparse.Namespace) -> bool:
+    if args.no_dedicated_env:
+        return False
+    if not args.env_name:
+        return False
+    return _current_python_is_conda_base()
+
+
+def _should_delegate_to_dedicated_conda_env(args: argparse.Namespace) -> bool:
+    if args.command not in DELEGATED_COMMANDS:
+        return False
+    return _current_python_is_conda_base()
+
+
+def _launcher_env_name() -> str:
+    env_name = os.environ.get("MARVIS_CONDA_ENV")
+    if env_name:
+        return env_name
+    try:
+        repo = _git_root(_package_root())
+    except RuntimeError:
+        return DEFAULT_CONDA_ENV_NAME
+    path = repo / LAUNCHER_ENV_FILE
+    try:
+        configured = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return DEFAULT_CONDA_ENV_NAME
+    return configured or DEFAULT_CONDA_ENV_NAME
+
+
+def _write_launcher_env_name(repo: Path, env_name: str) -> None:
+    try:
+        (repo / LAUNCHER_ENV_FILE).write_text(f"{env_name}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _delegate_to_dedicated_conda_env(raw_argv: list[str], *, env_name: str) -> None:
+    repo = _git_root(_package_root())
+    created = _ensure_conda_env(env_name, cwd=repo)
+    if created or not _conda_env_has_marvis(env_name):
+        _run_process(_conda_env_install_command(env_name, with_deps=True), cwd=repo)
+    command = [_conda_command(), "run", "-n", env_name, "marvis", *raw_argv]
+    _run_process(command, cwd=Path.cwd())
+
+
+def _conda_env_has_marvis(env_name: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [_conda_command(), "run", "-n", env_name, "marvis", "version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "marvis detected conda base, but the conda command was not found; "
+            "activate conda first"
+        ) from exc
+    return completed.returncode == 0
+
+
+def _current_python_is_conda_base() -> bool:
+    if os.environ.get("CONDA_DEFAULT_ENV") == "base":
+        return True
+
+    conda_info = _conda_info()
+    if not conda_info:
+        return False
+    root_prefix = str(conda_info.get("root_prefix") or conda_info.get("base_prefix") or "")
+    if not root_prefix:
+        return False
+    return _safe_same_path(Path(sys.prefix), Path(root_prefix))
+
+
+def _conda_info() -> dict:
+    try:
+        completed = subprocess.run(
+            [_conda_command(), "info", "--json"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if completed.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _ensure_conda_env(env_name: str, *, cwd: Path) -> bool:
+    if _conda_env_exists(env_name):
+        return False
+    _run_process(
+        [
+            _conda_command(),
+            "create",
+            "-y",
+            "-n",
+            env_name,
+            f"python={DEFAULT_CONDA_PYTHON}",
+            "pip",
+        ],
+        cwd=cwd,
+    )
+    return True
+
+
+def _conda_env_exists(env_name: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [_conda_command(), "run", "-n", env_name, "python", "-V"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "marvis update detected conda base, but the conda command was not found; "
+            "activate conda first or rerun with --no-dedicated-env"
+        ) from exc
+    return completed.returncode == 0
+
+
+def _conda_command() -> str:
+    return os.environ.get("CONDA_EXE") or "conda"
+
+
+def _safe_same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left.absolute() == right.absolute()
 
 
 def _git_root(path: Path) -> Path:
@@ -383,7 +594,12 @@ def _run_git(repo: Path, *args: str) -> None:
 
 
 def _run_process(command: list[str], *, cwd: Path) -> None:
-    subprocess.run(command, cwd=cwd, check=True)
+    try:
+        subprocess.run(command, cwd=cwd, check=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"command not found: {command[0]}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"command failed with exit code {exc.returncode}: {' '.join(command)}") from exc
 
 
 def _print_version() -> None:

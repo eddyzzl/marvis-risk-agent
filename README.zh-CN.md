@@ -18,13 +18,13 @@
 
 MARVIS-Agent V2 是面向可用 Agent 工作台的开发线。它保留本地文件、本地运行环境和可审计证据优先的边界，并在 V1.1 已稳定的模型验证工作流之外，继续扩展数据处理、特征分析、模型开发、策略和 Vintage 等信贷风控任务。
 
-V2 不是只有运行时外壳。V2 的产品目标是：欢迎页露出的每个任务入口，都必须成为真实可用的端到端工作流，包含人在环确认、工具执行、结构化结果展示、下载或报告，以及可审计历史。
+V2 不是只有运行时外壳：欢迎页露出的每个任务入口都是真实可用的端到端工作流，包含人在环确认、工具执行、结构化结果展示、下载或报告，以及可审计历史。截至 V2.0，这覆盖数据拼接、特征分析、模型开发与交付、打分与监控、策略开发（分数带/规则挖掘/版本化采纳）、组合分析、额度定价与即席问数——完整证据链见 `docs/plans/v2-master-backlog.md` 与 `docs/reviews/`。
 
 当前 checkout 的状态：
 
 - **模型验证**：继续保留 V1.1 已稳定的手动模式和 Agent 辅助验证路径。
 - **数据处理、特征分析、模型开发**：是当前 V2 主线，围绕 Plugin/Tool/Workflow 运行时和任务级 Agent 流程推进。
-- **策略和 Vintage 工作流**：属于 V2 产品目标，但只有在后端流程真实接通后才应作为可用能力展示。
+- **策略、监控、组合分析与 Vintage 工作流**：已端到端接通（S1-S6 批次），每个关键门带红旗清单确认。
 
 ## 你可以获得什么
 
@@ -166,11 +166,19 @@ marvis serve --profile v2 --port 8217 --workspace ./custom-workspace
 marvis update
 ```
 
-该命令会执行 `git fetch origin`、`git pull --ff-only origin main`，然后刷新 editable 安装：
+该命令会执行 `git fetch origin`、`git pull --ff-only origin main`，然后刷新 MARVIS 的 editable 安装，但不重新解析整个 Python 环境依赖：
 
 ```bash
-python -m pip install -e .
+python -m pip install -e . --no-deps
 ```
+
+如果在 Anaconda/conda `base` 里运行 `marvis update`，MARVIS 会自动创建或复用专用的 `marvis` 环境，并把安装写入该环境，不修改 `base`。更新完成后仍然只需要输入一个命令启动：
+
+```bash
+marvis
+```
+
+`base` 里的 `marvis` 入口会自动把运行命令代理到专用环境。这个默认行为是为了兼容 Anaconda 和 Windows 机器上同一环境内其他包的严格依赖约束。可以用 `--env-name <name>` 指定其他专用 conda 环境。如果未来版本新增运行时依赖，请在专门的 MARVIS 环境里运行 `marvis update --with-deps`，不要在 Anaconda `base` 环境里刷新依赖树。
 
 如果已跟踪文件有未提交改动，`marvis update` 会拒绝继续。请先 `git commit`、`git stash` 或备份这些 tracked 改动后再升级。未跟踪的本地文件允许保留，除非 Git 判断本次 pull 会覆盖它们。
 
@@ -178,7 +186,16 @@ python -m pip install -e .
 
 ```bash
 git pull --ff-only origin main
-python -m pip install -e .
+python -m pip install -e . --no-deps
+```
+
+如果当前在 Anaconda `base`，第一次手动升级先只安装轻量 MARVIS 入口，再让 `marvis update` 准备专用环境：
+
+```bash
+git pull --ff-only origin main
+python -m pip install -e . --no-deps
+marvis update
+marvis
 ```
 
 完成后，后续升级就可以使用 `marvis update`。

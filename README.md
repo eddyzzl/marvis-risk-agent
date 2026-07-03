@@ -18,13 +18,13 @@
 
 MARVIS-Agent V2 is the development line for a usable credit-risk Agent workbench. It keeps governed work close to local files, local runtimes, and auditable evidence while expanding beyond the stable V1.1 model-validation workflow.
 
-V2 is not just a runtime shell. Its product target is that every task entry shown on the welcome screen becomes a real end-to-end workflow with human-in-the-loop confirmation, tool execution, structured results, downloads or reports, and audit history.
+V2 is not just a runtime shell: every task entry shown on the welcome screen is a real end-to-end workflow with human-in-the-loop confirmation, tool execution, structured results, downloads or reports, and audit history. As of V2.0 this covers data join, feature analysis, model development and delivery, scoring and monitoring, strategy development (cutoff bands, rule mining, adoption with versioning), portfolio analysis, limit/pricing, and ad-hoc slice analytics — see `docs/plans/v2-master-backlog.md` and `docs/reviews/` for the full evidence trail.
 
 Current status in this checkout:
 
 - **Model validation** keeps the stable V1.1 manual and Agent-assisted validation path.
 - **Data processing, feature analysis, and model development** are the active V2 build path, using the Plugin/Tool/Workflow runtime and task-level Agent flow.
-- **Strategy and vintage workflows** are V2 product targets, but should only be presented as usable once their backend flows are actually wired.
+- **Strategy, monitoring, portfolio analysis, and vintage workflows** are wired end to end (S1-S6 batches), each behind confirmation gates with red-flag checklists.
 
 ## What You Get
 
@@ -166,11 +166,19 @@ If MARVIS was installed from a GitHub clone and the checkout is on a clean `main
 marvis update
 ```
 
-The command runs `git fetch origin`, `git pull --ff-only origin main`, then refreshes the editable install:
+The command runs `git fetch origin`, `git pull --ff-only origin main`, then refreshes the editable MARVIS install without re-resolving the whole Python environment:
 
 ```bash
-python -m pip install -e .
+python -m pip install -e . --no-deps
 ```
+
+If `marvis update` is run from Anaconda/conda `base`, MARVIS creates or reuses a dedicated `marvis` environment and installs there instead of modifying `base`. After the update, start the app with the same single command:
+
+```bash
+marvis
+```
+
+The `base` launcher automatically delegates runtime commands into the dedicated environment. This default is intentional for Anaconda and Windows machines where unrelated packages in the same environment may have strict pins. Use `--env-name <name>` to choose another dedicated conda environment. If a future release adds new runtime dependencies, run `marvis update --with-deps` from a dedicated MARVIS environment, not from Anaconda `base`.
 
 If tracked local files have uncommitted changes, `marvis update` refuses to continue. Commit, stash, or back up those tracked changes before updating. Untracked local files are allowed unless Git itself detects that a pull would overwrite them.
 
@@ -178,7 +186,16 @@ If your current older install does not have `marvis update` yet, run one manual 
 
 ```bash
 git pull --ff-only origin main
-python -m pip install -e .
+python -m pip install -e . --no-deps
+```
+
+From Anaconda `base`, install only the lightweight MARVIS launcher first, then let `marvis update` prepare the dedicated environment:
+
+```bash
+git pull --ff-only origin main
+python -m pip install -e . --no-deps
+marvis update
+marvis
 ```
 
 After that, future upgrades can use `marvis update`.
