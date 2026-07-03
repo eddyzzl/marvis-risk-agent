@@ -499,6 +499,159 @@
         "write:dataset"
       ],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "slice_aggregate",
+      "summary": "Deterministic whitelisted group-by aggregate over a registered dataset (LLM produces only a structured spec; a single parameterized DuckDB SQL computes the numbers).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dataset_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "group_by": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "maxItems": 3
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "count",
+                    "sum",
+                    "mean",
+                    "min",
+                    "max",
+                    "bad_rate",
+                    "approval_rate",
+                    "distinct"
+                  ]
+                },
+                "col": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "op"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "col": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "==",
+                    "!=",
+                    ">",
+                    ">=",
+                    "<",
+                    "<=",
+                    "in",
+                    "between"
+                  ]
+                },
+                "value": {}
+              },
+              "required": [
+                "col",
+                "op",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 8
+          },
+          "month_col": {
+            "type": "string",
+            "minLength": 1
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sort_by": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "dataset_id",
+          "metrics"
+        ],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "spec_echo": {
+            "type": "object"
+          },
+          "n_rows_scanned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "red_flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "columns",
+          "rows",
+          "spec_echo",
+          "n_rows_scanned",
+          "red_flags"
+        ],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_slice_aggregate",
+      "side_effects": [
+        "read:dataset"
+      ],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],

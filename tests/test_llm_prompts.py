@@ -33,6 +33,7 @@ _LOCKED_HASHES = {
     "LEARN_SYS": (1, "40267be3b94b3147"),
     "CROSS_SYS": (1, "0d13fa241b855e51"),
     "REPORT_NARRATIVE_SYS": (1, "a6ff4690f78c4fe2"),
+    "SLICE_SPEC_SYS": (1, "11e47cc62475346a"),
 }
 
 

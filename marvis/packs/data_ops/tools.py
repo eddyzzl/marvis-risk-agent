@@ -9,13 +9,19 @@ import pandas as pd
 from marvis.agent.data_dictionary import first_data_dictionary_id, load_business_names
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.align import ColumnAligner
-from marvis.data.backend import DataBackend
+from marvis.data.backend import (
+    DataBackend,
+    connect_duckdb,
+    sql_identifier,
+)
 from marvis.data.dedup import two_level_dedup
 from marvis.data.errors import DedupRequiredError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.join_engine import JoinEngine
 from marvis.data.registry import DatasetRegistry
 from marvis.db import DatasetRepository
+from marvis.db_schema import connect
+from marvis.repositories.strategy import _write_audit_row
 from marvis.safe_paths import assert_within
 from marvis.settings import build_settings
 
@@ -351,11 +357,272 @@ def _conflict_report_json(report) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# S6 ad-hoc slice/aggregate: a deterministic, whitelisted group-by aggregate over
+# a registered dataset. Every group_by/metric/filter column is validated against
+# the dataset's column profile (``sql_identifier`` raises on any unknown name), the
+# op->SQL mapping is a fixed dictionary, and a single parameterized DuckDB SQL is
+# compiled with an explicit ORDER BY -- so the LLM only ever produces a structured
+# spec (it never computes a number), and a `; DROP` style injected column name is
+# rejected as a typed error before any SQL runs (INV-1).
+# ---------------------------------------------------------------------------
+
+# Whitelisted aggregate operators. Each maps to a DuckDB SQL template that takes a
+# single already-quoted column identifier. bad_rate/approval_rate encode the fixed
+# credit-risk conventions (mean of a 0/1 target, share of an approve decision).
+_AGG_COMPARATORS = {"==": "=", "!=": "<>", ">": ">", ">=": ">=", "<": "<", "<=": "<="}
+_MAX_GROUP_BY = 3
+_MAX_FILTERS = 8
+_DEFAULT_TOP_K = 50
+
+
+def tool_slice_aggregate(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    dataset_id = str(inputs["dataset_id"])
+    dataset = runtime.registry.get(dataset_id)
+    path = runtime.registry.resolve_path(dataset.id)
+    # The column whitelist IS the dataset profile: only names the backend can see in
+    # the physical file are legal anywhere in the spec (group_by/metrics/filters/
+    # month_col/sort_by). Anything else -> DataSecurityError from sql_identifier.
+    allowed_columns = set(runtime.backend.column_names(path))
+
+    group_by = [str(col) for col in (inputs.get("group_by") or [])]
+    if len(group_by) > _MAX_GROUP_BY:
+        raise ValueError(f"group_by supports at most {_MAX_GROUP_BY} columns")
+    metrics = [dict(metric) for metric in (inputs.get("metrics") or []) if isinstance(metric, dict)]
+    if not metrics:
+        raise ValueError("slice_aggregate requires at least one metric")
+    filters = [dict(f) for f in (inputs.get("filters") or []) if isinstance(f, dict)]
+    if len(filters) > _MAX_FILTERS:
+        raise ValueError(f"filters supports at most {_MAX_FILTERS} conditions")
+    top_k = int(inputs.get("top_k") or _DEFAULT_TOP_K)
+    if top_k < 1:
+        raise ValueError("top_k must be >= 1")
+
+    group_sql = [sql_identifier(col, allowed_columns) for col in group_by]
+    metric_selects, metric_labels = _metric_selects(metrics, allowed_columns)
+    where_sql, where_params = _filter_clause(filters, allowed_columns)
+    month_where_sql, month_params = _month_clause(
+        _optional_str(inputs.get("month_col")),
+        inputs.get("months"),
+        allowed_columns,
+    )
+    all_where = [clause for clause in (where_sql, month_where_sql) if clause]
+    where_clause = f" WHERE {' AND '.join(all_where)}" if all_where else ""
+
+    order_sql = _order_clause(
+        _optional_str(inputs.get("sort_by")), group_by, metric_labels, allowed_columns
+    )
+    rel = runtime.backend._duckdb_rel(path)  # parquet_rel/csv_rel -- read-only scan
+    select_parts = [*group_sql, *metric_selects]
+    query = (
+        f"SELECT {', '.join(select_parts)} FROM {rel}{where_clause}"
+        + (f" GROUP BY {', '.join(group_sql)}" if group_sql else "")
+        + f" ORDER BY {order_sql}"
+        + f" LIMIT {int(top_k) + 1}"  # fetch one extra row to detect truncation
+    )
+    params = [*where_params, *month_params]
+    with connect_duckdb(runtime.backend._temp_directory) as conn:
+        scanned_row = conn.execute(f"SELECT count(*) FROM {rel}{where_clause}", params).fetchone()
+        frame = conn.execute(query, params).df()
+
+    n_rows_scanned = int(scanned_row[0] or 0)
+    truncated = len(frame) > top_k
+    if truncated:
+        frame = frame.head(top_k)
+    columns = [*group_by, *metric_labels]
+    rows = [
+        {column: _jsonable_cell(value) for column, value in zip(columns, record, strict=True)}
+        for record in frame.itertuples(index=False, name=None)
+    ]
+
+    red_flags: list[dict] = []
+    if not rows:
+        red_flags.append({
+            "code": "empty_result",
+            "level": "amber",
+            "message": "当前口径下无匹配样本，请检查筛选条件或时间范围。",
+        })
+    if truncated:
+        red_flags.append({
+            "code": "truncated",
+            "level": "amber",
+            "message": f"结果超过 top_k={top_k} 行已截断，请收窄分组或加筛选。",
+        })
+
+    spec_echo = {
+        "dataset_id": dataset_id,
+        "group_by": group_by,
+        "metrics": [{"op": str(m.get("op")), "col": _optional_str(m.get("col"))} for m in metrics],
+        "filters": [
+            {"col": str(f.get("col")), "op": str(f.get("op")), "value": _jsonable_cell(f.get("value"))}
+            for f in filters
+        ],
+        "month_col": _optional_str(inputs.get("month_col")),
+        "months": [str(month) for month in (inputs.get("months") or [])],
+        "top_k": top_k,
+        "sort_by": _optional_str(inputs.get("sort_by")),
+    }
+
+    with connect(runtime.settings.db_path) as conn:
+        _write_audit_row(
+            conn,
+            kind="data.slice_aggregate",
+            target_ref=dataset_id,
+            outcome="succeeded",
+            detail={
+                "task_id": str(ctx.task_id),
+                "group_by": group_by,
+                "metrics": spec_echo["metrics"],
+                "n_rows_scanned": n_rows_scanned,
+                "n_rows_returned": len(rows),
+                "truncated": truncated,
+            },
+        )
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "spec_echo": spec_echo,
+        "n_rows_scanned": n_rows_scanned,
+        "red_flags": red_flags,
+    }
+
+
+def _metric_selects(metrics: list[dict], allowed_columns: set[str]) -> tuple[list[str], list[str]]:
+    """(select_expr, output_label) per metric. The op->SQL mapping is a fixed dict so
+    an LLM can only pick an operator name, never inject an expression; the target
+    column (when the op needs one) is validated against the profile whitelist."""
+    selects: list[str] = []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for metric in metrics:
+        op = str(metric.get("op") or "")
+        col = _optional_str(metric.get("col"))
+        label = _metric_label(op, col)
+        if label in seen:
+            raise ValueError(f"duplicate metric label: {label}")
+        seen.add(label)
+        selects.append(f"{_metric_expr(op, col, allowed_columns)} AS {_quote(label)}")
+        labels.append(label)
+    return selects, labels
+
+
+def _metric_expr(op: str, col: str | None, allowed_columns: set[str]) -> str:
+    if op == "count":
+        return "count(*)"
+    if op in {"sum", "mean", "min", "max", "distinct"}:
+        if not col:
+            raise ValueError(f"metric op {op!r} requires a column")
+        ident = sql_identifier(col, allowed_columns)
+        numeric = f"try_cast({ident} AS DOUBLE)"
+        return {
+            "sum": f"coalesce(sum({numeric}), 0)",
+            "mean": f"avg({numeric})",
+            "min": f"min({numeric})",
+            "max": f"max({numeric})",
+            "distinct": f"count(DISTINCT {ident})",
+        }[op]
+    if op == "bad_rate":
+        if not col:
+            raise ValueError("metric op 'bad_rate' requires the target column")
+        ident = sql_identifier(col, allowed_columns)
+        return f"avg(CASE WHEN try_cast({ident} AS DOUBLE) = 1 THEN 1.0 ELSE 0.0 END)"
+    if op == "approval_rate":
+        if not col:
+            raise ValueError("metric op 'approval_rate' requires the decision column")
+        ident = sql_identifier(col, allowed_columns)
+        return f"avg(CASE WHEN lower(trim(CAST({ident} AS VARCHAR))) = 'approve' THEN 1.0 ELSE 0.0 END)"
+    raise ValueError(f"unsupported metric op: {op}")
+
+
+def _metric_label(op: str, col: str | None) -> str:
+    return op if op == "count" or not col else f"{op}_{col}"
+
+
+def _filter_clause(filters: list[dict], allowed_columns: set[str]) -> tuple[str, list]:
+    """Compile filters into a parameterized WHERE (values bound, never interpolated)."""
+    clauses: list[str] = []
+    params: list = []
+    for f in filters:
+        col = str(f.get("col") or "")
+        op = str(f.get("op") or "")
+        value = f.get("value")
+        ident = sql_identifier(col, allowed_columns)
+        if op in _AGG_COMPARATORS:
+            clauses.append(f"{ident} {_AGG_COMPARATORS[op]} ?")
+            params.append(value)
+        elif op == "in":
+            values = list(value) if isinstance(value, (list, tuple)) else [value]
+            if not values:
+                raise ValueError("filter op 'in' requires a non-empty value list")
+            placeholders = ", ".join("?" for _ in values)
+            clauses.append(f"{ident} IN ({placeholders})")
+            params.extend(values)
+        elif op == "between":
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError("filter op 'between' requires a [low, high] value pair")
+            clauses.append(f"{ident} BETWEEN ? AND ?")
+            params.extend([value[0], value[1]])
+        else:
+            raise ValueError(f"unsupported filter op: {op}")
+    return " AND ".join(clauses), params
+
+
+def _month_clause(month_col: str | None, months, allowed_columns: set[str]) -> tuple[str, list]:
+    if not month_col:
+        return "", []
+    month_values = [str(month) for month in (months or [])]
+    if not month_values:
+        return "", []
+    ident = sql_identifier(month_col, allowed_columns)
+    placeholders = ", ".join("?" for _ in month_values)
+    return f"CAST({ident} AS VARCHAR) IN ({placeholders})", month_values
+
+
+def _order_clause(
+    sort_by: str | None,
+    group_by: list[str],
+    metric_labels: list[str],
+    allowed_columns: set[str],
+) -> str:
+    """Explicit deterministic ordering. sort_by may name a group column or a metric
+    output label; default is group_by lexicographic (or the first metric when there
+    is no group_by), so identical inputs always yield identical row order (INV-1)."""
+    if sort_by:
+        if sort_by in metric_labels:
+            return f"{_quote(sort_by)} DESC"
+        # A group column must be whitelisted; sort ascending for stable ordering.
+        return f"{sql_identifier(sort_by, allowed_columns)} ASC"
+    if group_by:
+        return ", ".join(f"{sql_identifier(col, allowed_columns)} ASC" for col in group_by)
+    return f"{_quote(metric_labels[0])} DESC"
+
+
+def _quote(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _jsonable_cell(value):
+    if value is None:
+        return None
+    try:
+        import math
+
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+    except Exception:
+        pass
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 class _Runtime:
     def __init__(self, ctx):
-        settings = build_settings(ctx.workspace)
+        self.settings = build_settings(ctx.workspace)
         self.datasets_root = Path(ctx.datasets_root)
-        self.repo = DatasetRepository(settings.db_path)
+        self.repo = DatasetRepository(self.settings.db_path)
         self.backend = DataBackend(self.datasets_root)
         self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
         self.aligner = ColumnAligner(self.backend)
@@ -368,6 +635,12 @@ def _runtime(ctx) -> _Runtime:
 
 def _seed(ctx) -> int:
     return int(ctx.seed or 0)
+
+
+def _optional_str(value) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _apply_clean_op(series: pd.Series, op: str) -> pd.Series:
