@@ -197,6 +197,27 @@ def _repo(tmp_path, plan):
     return repo
 
 
+def _seed_run_for_checking_step(repo, step_id, *, inputs=None):
+    """Seed a run-ledger row for a step that is now CHECKING, the way it really
+    happens: the run is opened while the step is RUNNING (start_step_run only
+    accepts RUNNING), then the step advances to CHECKING before the simulated
+    crash. Returns the run id, leaving the step back in CHECKING."""
+    plan = repo.load_plan("plan-1")
+    step = next(s for s in plan.steps if s.id == step_id)
+    original_status = step.status
+    step.status = StepStatus.RUNNING
+    repo.update_step(step)
+    run_id = repo.start_step_run(
+        plan_id="plan-1",
+        step_id=step_id,
+        tool_ref="_sample.echo",
+        inputs=inputs or {},
+    )
+    step.status = original_status
+    repo.update_step(step)
+    return run_id
+
+
 def _executor(repo, runner, reviewer=None, subagents=None, hooks=None):
     return PlanExecutor(
         repo,
@@ -768,12 +789,7 @@ def test_plan_executor_recovers_checking_step_from_persisted_output_without_reru
 def test_plan_executor_recovers_checking_step_with_run_ledger_output_without_step_ref(tmp_path):
     plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
     repo = _repo(tmp_path, plan)
-    run_id = repo.start_step_run(
-        plan_id="plan-1",
-        step_id="step-1",
-        tool_ref="_sample.echo",
-        inputs={"message": "hi"},
-    )
+    run_id = _seed_run_for_checking_step(repo, "step-1", inputs={"message": "hi"})
     output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
     runner = FakeRunner([])
 
@@ -793,12 +809,7 @@ def test_plan_executor_recovers_checking_step_with_run_ledger_output_without_ste
 def test_plan_executor_recovers_checking_step_from_succeeded_run_without_step_ref(tmp_path):
     plan = _plan(_step("step-1", status=StepStatus.CHECKING), status=PlanStatus.RUNNING)
     repo = _repo(tmp_path, plan)
-    run_id = repo.start_step_run(
-        plan_id="plan-1",
-        step_id="step-1",
-        tool_ref="_sample.echo",
-        inputs={"message": "hi"},
-    )
+    run_id = _seed_run_for_checking_step(repo, "step-1", inputs={"message": "hi"})
     output_ref = repo.store_step_output("step-1", {"echoed": "hi"})
     repo.finish_step_run(run_id, status="succeeded", output_ref=output_ref, duration_ms=10)
     runner = FakeRunner([])

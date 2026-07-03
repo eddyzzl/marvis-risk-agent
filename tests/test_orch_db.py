@@ -230,11 +230,21 @@ def test_plan_repository_redacts_step_output_and_evidence_before_persisting(tmp_
     assert evidence["persistence_redacted_count"] >= 4
 
 
+def _mark_step_running(repo: PlanRepository, step_id: str) -> None:
+    # start_step_run only opens a run for a RUNNING step (matching the executor,
+    # which sets RUNNING before starting the run). Move the step there first.
+    plan = repo.load_plan("plan-1")
+    step = next(s for s in plan.steps if s.id == step_id)
+    step.status = StepStatus.RUNNING
+    repo.update_step(step)
+
+
 def test_plan_repository_records_step_run_lifecycle(tmp_path):
     db_path = tmp_path / "app.sqlite"
     init_db(db_path)
     repo = PlanRepository(db_path)
     repo.create_plan(_plan())
+    _mark_step_running(repo, "step-1")
 
     run_id = repo.start_step_run(
         plan_id="plan-1",
@@ -264,6 +274,66 @@ def test_plan_repository_records_step_run_lifecycle(tmp_path):
     assert runs[0]["output_ref"] == "metrics:step-1:v1"
     assert runs[0]["duration_ms"] == 12
     assert runs[0]["side_effects"] == ["artifact:report"]
+
+
+def test_start_step_run_rejects_step_not_running(tmp_path):
+    """A run may only be opened for a RUNNING step. Opening one against a DONE
+    step (a stale/concurrent caller) raises ConflictError and writes no run row,
+    so a finished step never grows a spurious 'running' run."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_plan())
+    plan = repo.load_plan("plan-1")
+    step = plan.steps[0]
+    step.status = StepStatus.DONE
+    repo.update_step(step)
+
+    with pytest.raises(ConflictError, match="expected running"):
+        repo.start_step_run(
+            plan_id="plan-1", step_id="step-1", tool_ref="_sample.echo", inputs={}
+        )
+    assert repo.list_step_runs("step-1") == []
+
+
+def test_start_step_run_allowed_on_retry_after_step_returns_to_running(tmp_path):
+    """The retry path is not broken: retry_failed_step resets a failed step to
+    pending, the executor re-runs it through RUNNING, and start_step_run then
+    opens attempt 2. Simulate that flow and assert the second run is accepted
+    and numbered attempt 2."""
+    db_path = tmp_path / "app.sqlite"
+    init_db(db_path)
+    repo = PlanRepository(db_path)
+    repo.create_plan(_plan())
+
+    _mark_step_running(repo, "step-1")
+    run1 = repo.start_step_run(
+        plan_id="plan-1", step_id="step-1", tool_ref="_sample.echo", inputs={}
+    )
+    repo.finish_step_run(run1, status="failed", error="boom", error_kind="RuntimeError")
+
+    # Retry resets the step to pending (mimicking retry_failed_step), then the
+    # executor advances it back to RUNNING before the next run. retry_failed_step
+    # requires a FAILED plan+step; set both directly (this test targets the
+    # step-run guard, not the plan state machine).
+    plan = repo.load_plan("plan-1")
+    step = plan.steps[0]
+    step.status = StepStatus.FAILED
+    repo.update_step(step)
+    with connect(db_path) as conn:
+        conn.execute(
+            "UPDATE plans SET status = ? WHERE id = ?",
+            (PlanStatus.FAILED.value, "plan-1"),
+        )
+    repo.retry_failed_step("plan-1", "step-1")
+    _mark_step_running(repo, "step-1")
+
+    run2 = repo.start_step_run(
+        plan_id="plan-1", step_id="step-1", tool_ref="_sample.echo", inputs={}
+    )
+    runs = {r["id"]: r for r in repo.list_step_runs("step-1")}
+    assert runs[run2]["attempt"] == 2
+    assert runs[run2]["status"] == "running"
 
 
 def test_plan_repository_reset_step_clears_stale_execution_state(tmp_path):
