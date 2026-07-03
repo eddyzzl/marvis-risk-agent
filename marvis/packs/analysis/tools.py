@@ -13,9 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from marvis.data.backend import DataBackend
-from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, ModelingRepository
+from marvis.db import ModelingRepository
 from marvis.packs.analysis.errors import AnalysisError, MissingBaselineError
 from marvis.packs.analysis.flow import bucket_migration, flow_rate
 from marvis.packs.analysis.loss import expected_loss_estimate
@@ -23,16 +21,11 @@ from marvis.packs.analysis.segment import ProfitParams, segment_profile
 from marvis.packs.analysis.report import build_report, gate_summary_payload
 from marvis.packs.analysis.trend import feature_csi_trend, score_stability_trend
 from marvis.packs.modeling.experiment import ExperimentStore
-from marvis.settings import build_settings
+from marvis.plugins.sdk import PackRuntime
 
 
-class _Runtime:
-    def __init__(self, ctx):
-        self.settings = build_settings(ctx.workspace)
-        self.datasets_root = Path(ctx.datasets_root)
-        self.repo = DatasetRepository(self.settings.db_path)
-        self.backend = DataBackend(self.datasets_root)
-        self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+class _Runtime(PackRuntime):
+    def _extend(self, ctx) -> None:
         self.experiments = ExperimentStore(self.settings.db_path)
         self.modeling_repo = ModelingRepository(self.settings.db_path)
 
