@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+from marvis.errors import conflict, not_found, unprocessable
 
 from marvis.agent_memory.api_support import (
     memory_api_filter_match,
@@ -62,7 +63,7 @@ def list_agent_memory(
             has_more = len(entries) > bounded_limit
             entries = entries[:bounded_limit]
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"invalid memory filter: {exc}") from exc
+        raise unprocessable(f"invalid memory filter: {exc}") from exc
     items = [memory_entry_payload(entry) for entry in entries]
     return {
         "items": items,
@@ -91,7 +92,7 @@ def list_agent_memory_distillations(
             offset=bounded_offset,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"invalid distillation filter: {exc}") from exc
+        raise unprocessable(f"invalid distillation filter: {exc}") from exc
     has_more = len(distillations) > bounded_limit
     return {
         "items": [memory_distillation_payload(item) for item in distillations[:bounded_limit]],
@@ -120,7 +121,7 @@ def consolidate_agent_memory(
     try:
         result = scheduler.consolidate_all([category] if category else None)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     return {"consolidated": result}
 
 
@@ -130,7 +131,7 @@ def get_agent_memory_distillation(distillation_id: str, request: Request) -> dic
     try:
         distillation = store.get_distillation(distillation_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory distillation not found") from exc
+        raise not_found("memory distillation not found") from exc
     return memory_distillation_detail(store, distillation)
 
 
@@ -142,9 +143,9 @@ def rollback_agent_memory_distillation(distillation_id: str, request: Request) -
         EvolutionManager(store).rollback(distillation_id)
         distillation = store.get_distillation(distillation_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory distillation not found") from exc
+        raise not_found("memory distillation not found") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     restored = (
         memory_distillation_payload(store.get_distillation(predecessor.id))
         if predecessor is not None
@@ -162,7 +163,7 @@ def get_agent_memory(memory_id: str, request: Request) -> dict:
     try:
         entry = store.get_entry(memory_id, include_deleted=True, audit=True)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise not_found("memory not found") from exc
     return {
         "memory": memory_entry_payload(entry),
         "events": store.list_events(memory_id),
@@ -194,9 +195,9 @@ def report_agent_memory_negative_feedback(
     try:
         entry = store.record_negative_feedback(memory_id, reason=reason or "user_reported")
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise not_found("memory not found") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     return {"memory": memory_entry_payload(entry), "events": store.list_events(memory_id)}
 
 
@@ -206,7 +207,7 @@ def delete_agent_memory(memory_id: str, request: Request) -> dict:
     try:
         entry = store.delete(memory_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise not_found("memory not found") from exc
     return {"memory": memory_entry_payload(entry), "events": store.list_events(memory_id)}
 
 
@@ -218,11 +219,11 @@ def get_agent_message_memory_references(
 ) -> dict:
     repo = TaskRepository(request.app.state.settings.db_path)
     if repo.get_task(task_id) is None:
-        raise HTTPException(status_code=404, detail="task not found")
+        raise not_found("task not found")
     try:
         message = repo.get_agent_message(task_id, message_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Agent message not found") from exc
+        raise not_found("Agent message not found") from exc
     references = (message.get("metadata") or {}).get("memory_references")
     return {
         "task_id": task_id,
@@ -236,9 +237,9 @@ def _set_agent_memory_status(request: Request, memory_id: str, status: str) -> d
     try:
         entry = store.set_status(memory_id, status)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="memory not found") from exc
+        raise not_found("memory not found") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     return {"memory": memory_entry_payload(entry), "events": store.list_events(memory_id)}
 
 

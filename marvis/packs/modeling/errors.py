@@ -1,3 +1,6 @@
+from marvis.errors import ErrorKind
+
+
 class ModelingError(ValueError):
     pass
 
@@ -24,7 +27,7 @@ class ReportScoreMissingError(ModelingError):
     def to_detail(self) -> dict:
         """Structured diagnostics (never parsed from free text)."""
         return {
-            "kind": "report_score_missing",
+            "kind": ErrorKind.REPORT_SCORE_MISSING,
             "experiment_id": self.experiment_id,
             "dataset_id": self.dataset_id,
         }

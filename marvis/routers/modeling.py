@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
+from marvis.errors import not_found
 
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import ModelingRepository, TaskRepository
@@ -160,6 +161,6 @@ def get_experiment(experiment_id: str, request: Request) -> dict:
     repo = _modeling_repo(request)
     experiment = repo.get_experiment(experiment_id)
     if experiment is None:
-        raise HTTPException(status_code=404, detail="experiment not found")
+        raise not_found("experiment not found")
     artifacts = repo.list_model_artifacts(experiment_id=experiment_id)
     return _experiment_detail_payload(experiment, artifacts)

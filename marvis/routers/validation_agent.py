@@ -1,4 +1,5 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Request
+from marvis.errors import unprocessable
 
 from marvis.agent.service import (
     agent_rerun_stage,
@@ -117,7 +118,7 @@ def post_agent_message(
     require_wired_agent_task_type(task, WIRED_AGENT_TASK_TYPES)
     content = payload.content.strip()
     if not content:
-        raise HTTPException(status_code=422, detail="message content is required")
+        raise unprocessable("message content is required")
     if is_stop_validation_intent(content):
         user_message = repo.add_agent_message(
             task_id,

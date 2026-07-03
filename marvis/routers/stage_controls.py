@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+from marvis.errors import conflict
 
 from marvis.api_task_helpers import get_task_or_404
 from marvis.db import TaskRepository
@@ -25,10 +26,7 @@ def cancel_task_notebook(task_id: str, request: Request) -> dict:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
     if task.status != TaskStatus.RUNNING:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot cancel notebook in status {task.status.value}",
-        )
+        raise conflict(f"cannot cancel notebook in status {task.status.value}")
     request_notebook_cancellation(task_id)
     return {
         "task_id": task_id,
@@ -42,10 +40,7 @@ def cancel_task_metrics(task_id: str, request: Request) -> dict:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
     if task.status != TaskStatus.COMPUTING_METRICS:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot cancel metrics in status {task.status.value}",
-        )
+        raise conflict(f"cannot cancel metrics in status {task.status.value}")
     _write_metrics_cancel_marker(request.app.state.settings.tasks_dir / task_id)
     request_notebook_cancellation(task_id)
     return {
@@ -60,12 +55,9 @@ def cancel_task_report(task_id: str, request: Request) -> dict:
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
     if task.status not in {TaskStatus.WRITING_ARTIFACTS, TaskStatus.REVIEW_REQUIRED}:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot cancel report in status {task.status.value}",
-        )
+        raise conflict(f"cannot cancel report in status {task.status.value}")
     if repo.get_active_job_kind(task_id) != "report":
-        raise HTTPException(status_code=409, detail="task has no active report job")
+        raise conflict("task has no active report job")
     request_notebook_cancellation(task_id)
     return {
         "task_id": task_id,
@@ -85,7 +77,7 @@ def cancel_task_join(task_id: str, request: Request) -> dict:
     get_task_or_404(repo, task_id)
     job_id = _active_job_id(repo, task_id, "join")
     if job_id is None:
-        raise HTTPException(status_code=409, detail="task has no active join job")
+        raise conflict("task has no active join job")
     request_job_cancellation(job_id)
     return {
         "task_id": task_id,

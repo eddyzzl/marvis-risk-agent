@@ -5,6 +5,7 @@ import re
 import tempfile
 
 from fastapi import APIRouter, HTTPException, Request
+from marvis.errors import bad_request, conflict, forbidden, not_found, unprocessable
 
 from marvis.plugins.errors import (
     DuplicatePluginError,
@@ -44,9 +45,9 @@ async def upload_plugin(request: Request) -> dict:
         try:
             manifest = install_plugin(upload_path, settings.plugins_dir, registry)
         except DuplicatePluginError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise conflict(str(exc)) from exc
         except ManifestError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise unprocessable(str(exc)) from exc
         except PluginError as exc:
             detail = str(exc)
             status_code = 422 if "invalid json schema" in detail else 400
@@ -77,9 +78,9 @@ def remove_plugin(request: Request, name: str) -> dict:
     try:
         request.app.state.plugin_registry.remove(name)
     except PluginNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise bad_request(str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
     return {"ok": True}
 
@@ -89,7 +90,7 @@ def list_plugin_tools(request: Request, name: str) -> dict:
     try:
         manifest = request.app.state.plugin_registry.get(name)
     except PluginNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     return {"tools": [_public_tool(tool) for tool in manifest.tools]}
 
 
@@ -97,14 +98,14 @@ def _set_enabled(request: Request, name: str, enabled: bool) -> dict:
     try:
         request.app.state.plugin_registry.set_enabled(name, enabled)
     except PluginNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise not_found(str(exc)) from exc
     request.app.state.hook_dispatcher.rebuild_index()
     return {"ok": True}
 
 
 def _require_plugin_admin(request: Request) -> None:
     if request.headers.get(PLUGIN_ADMIN_HEADER) != PLUGIN_ADMIN_VALUE:
-        raise HTTPException(status_code=403, detail="plugin admin confirmation required")
+        raise forbidden("plugin admin confirmation required")
 
 
 def _public_plugin(manifest: PluginManifest, enabled: bool) -> dict:
@@ -140,7 +141,7 @@ async def _read_plugin_upload(request: Request) -> tuple[str, bytes]:
 
     boundary_match = re.search(r"boundary=([^;]+)", content_type)
     if boundary_match is None:
-        raise HTTPException(status_code=400, detail="multipart boundary is missing")
+        raise bad_request("multipart boundary is missing")
     boundary = boundary_match.group(1).strip().strip('"').encode("utf-8")
     delimiter = b"--" + boundary
     for part in body.split(delimiter):
@@ -157,7 +158,7 @@ async def _read_plugin_upload(request: Request) -> tuple[str, bytes]:
             if payload.endswith(b"\r\n"):
                 payload = payload[:-2]
         return filename, payload
-    raise HTTPException(status_code=400, detail="file field is required")
+    raise bad_request("file field is required")
 
 
 def _filename_from_content_disposition(header_blob: bytes) -> str | None:

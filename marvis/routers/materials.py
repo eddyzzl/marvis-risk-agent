@@ -4,7 +4,8 @@ from pathlib import Path, PurePosixPath
 import shutil
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
+from marvis.errors import server_error, unprocessable
 
 from marvis.safe_paths import assert_within
 from marvis.sample_data import write_sample_materials
@@ -25,13 +26,13 @@ def _new_material_upload_dir(settings) -> Path:
         except FileExistsError:
             continue
         return candidate
-    raise HTTPException(status_code=500, detail="failed to allocate material upload directory")
+    raise server_error("failed to allocate material upload directory")
 
 
 def _validate_upload_relative_path(raw_path: str | None) -> PurePosixPath:
     value = str(raw_path or "").replace("\\", "/").strip()
     if not value:
-        raise HTTPException(status_code=422, detail="invalid upload path: empty filename")
+        raise unprocessable("invalid upload path: empty filename")
     path = PurePosixPath(value)
     invalid = (
         path.is_absolute()
@@ -39,7 +40,7 @@ def _validate_upload_relative_path(raw_path: str | None) -> PurePosixPath:
         or any(part in {"", ".", ".."} for part in path.parts)
     )
     if invalid:
-        raise HTTPException(status_code=422, detail=f"invalid upload path: {value}")
+        raise unprocessable(f"invalid upload path: {value}")
     return path
 
 
@@ -64,17 +65,11 @@ async def upload_materials(
     relative_paths: list[str] | None = Form(default=None),
 ) -> dict:
     if not files:
-        raise HTTPException(status_code=422, detail="at least one material file is required")
+        raise unprocessable("at least one material file is required")
     if len(files) > MAX_MATERIAL_UPLOAD_FILES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"too many material files: max_files={MAX_MATERIAL_UPLOAD_FILES}",
-        )
+        raise unprocessable(f"too many material files: max_files={MAX_MATERIAL_UPLOAD_FILES}")
     if relative_paths and len(relative_paths) != len(files):
-        raise HTTPException(
-            status_code=422,
-            detail="relative_paths count must match uploaded files count",
-        )
+        raise unprocessable("relative_paths count must match uploaded files count")
 
     upload_dir = _new_material_upload_dir(request.app.state.settings)
     saved_files: list[dict[str, object]] = []
@@ -89,20 +84,14 @@ async def upload_materials(
             relative_path = _validate_upload_relative_path(raw_relative_path)
             relative_path_text = relative_path.as_posix()
             if relative_path_text in seen_paths:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"duplicate upload path: {relative_path_text}",
-                )
+                raise unprocessable(f"duplicate upload path: {relative_path_text}")
             seen_paths.add(relative_path_text)
 
             destination = (upload_dir / Path(*relative_path.parts)).resolve()
             try:
                 destination = assert_within(upload_dir, destination)
             except PermissionError as exc:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"invalid upload path: {relative_path_text}",
-                ) from exc
+                raise unprocessable(f"invalid upload path: {relative_path_text}") from exc
             size_bytes = await _save_upload_file(upload, destination)
             saved_files.append(
                 {

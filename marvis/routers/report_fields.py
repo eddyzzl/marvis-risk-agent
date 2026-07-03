@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, Request
+from marvis.errors import bad_request, conflict, precondition_required, unprocessable
 
 from marvis.api_report_field_helpers import build_report_field_payload
 from marvis.api_schemas import ReportFieldsUpdateRequest
@@ -40,14 +41,11 @@ def update_report_fields(
     repo = _repo(request)
     task = get_task_or_404(repo, task_id)
     if if_match is None:
-        raise HTTPException(status_code=428, detail="If-Match header is required")
+        raise precondition_required("If-Match header is required")
     try:
         expected_revision = int(if_match)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="If-Match must be an integer",
-        ) from exc
+        raise bad_request("If-Match must be an integer") from exc
     try:
         revision = repo.update_report_values_with_audit(
             task_id,
@@ -65,7 +63,7 @@ def update_report_fields(
         )
         values, _ = repo.get_report_values(task_id)
     except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise conflict(str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise unprocessable(str(exc)) from exc
     return build_report_field_payload(request, task, values, revision)

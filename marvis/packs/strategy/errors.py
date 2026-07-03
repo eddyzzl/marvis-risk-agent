@@ -1,3 +1,6 @@
+from marvis.errors import ErrorKind
+
+
 class StrategyError(ValueError):
     pass
 
@@ -20,7 +23,7 @@ class StrategyNotAdoptedError(StrategyError):
 
     def to_detail(self) -> dict:
         return {
-            "kind": "strategy_not_adopted",
+            "kind": ErrorKind.STRATEGY_NOT_ADOPTED,
             "strategy_id": self.strategy_id,
             "status": self.status,
         }

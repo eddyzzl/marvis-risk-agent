@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+from marvis.errors import conflict, unprocessable
 
 from marvis.api_scan_helpers import perform_scan_task, scan_hook_payload
 from marvis.api_task_helpers import (
@@ -28,10 +29,7 @@ def scan_task(task_id: str, request: Request) -> dict:
         TaskStatus.RUNNING,
         TaskStatus.COMPUTING_METRICS,
     }:
-        raise HTTPException(
-            status_code=409,
-            detail=f"cannot scan task in status {task.status.value}",
-        )
+        raise conflict(f"cannot scan task in status {task.status.value}")
     try:
         payload = perform_scan_task(repo, task, request.app.state.settings)
         if payload.get("status") == TaskStatus.SCANNED.value:
@@ -44,4 +42,4 @@ def scan_task(task_id: str, request: Request) -> dict:
         return payload
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         # scan_source_dir limit and source-dir errors are client-side invalid input.
-        raise HTTPException(status_code=422, detail=f"source dir invalid: {exc}") from exc
+        raise unprocessable(f"source dir invalid: {exc}") from exc
