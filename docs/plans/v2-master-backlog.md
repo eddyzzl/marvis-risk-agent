@@ -196,7 +196,7 @@
 | 状态 | ID | 事项 | 工作量 |
 |---|---|---|---|
 | ✅ | S4 | 两 commit 落地（`8a6a5ed6`/`a4ce4162`）：双通道挖掘（树路径+单变量，确定性）、瀑布评估+重叠矩阵、三方共享条件求值（往返锁）、RULE_STRATEGY 模板+「选 1,3,5」规则集门+采纳面复用 S2；e2e 含门覆盖重跑 | 4–6天 |
-| ⬜ | S5 | 监控闭环与定期报告：MONITORING_RUN + 稳定性趋势 + expected_loss_estimate（EL≈EAD×PD_chain×LGD）+ portfolio_report + 告警门 | 3–5天 |
+| ✅ | S5 | 两 commit 落地（`d7cd5292`/`d9e551d6`）：monitoring_plan.py 单一来源+run_strategy_monitoring（委托 monitor_run 内核+策略面 ±5pp/±10pp 漂移分级带 IEEE-754 边界 eps、无标签 n/a、纯规则跳 PSI/CSI、last_run_at 写回+审计）、STRATEGY_MONITORING 告警门（挂报告步——executor 先暂停后执行的机制现实，语义等价；红灯三选项处置→next_action 不自动建任务）、逾期可见（health 计数+/api/strategies/monitoring-due）；e2e 红灯全旅程 | 3–5天 |
 | ⬜ | S6 | 即席分析（对话 turn 先行，slice_aggregate 白名单）+ limit_pricing_matrix（已拍板本期做）+ compare_strategies 呈现 | 5–8天 |
 
 ## 9. 阶段八：审查 Batch 4 —— 领域剩余（约 1 周）
