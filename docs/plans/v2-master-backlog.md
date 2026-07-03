@@ -295,7 +295,7 @@
 | ⬜ | LT-5 | UnitOfWork 战役收尾：output version+step state 单事务、finalize_with_connection 扩到剩余多写工具、三类写路径文档化（ARCH-3 之外的推广面） | 追踪器 |
 | ⬜ | LT-6 | TrainingDataset adapter 扩到剩余辅助读路径（按 profiling 证据） | 追踪器 |
 | ⬜ | LT-7 | 特征筛选/大摘要加 DuckDB query-backed helpers 替代全帧 pandas | 追踪器 |
-| ⬜ | LT-8 | 性能回归三件套：大 parquet 筛选 / 多配方 read-count / join match-rate smoke | 追踪器 |
+| ✅ | LT-8 | 三件套落地（`435bb86c`）：筛选列批读计数（20万行×80列，7 次调用严格匹配批算术）、多配方端到端单次加载守卫（真实 backend 非 mock）、join 连接数与行数无关+双实例确定性；六连跑零 flake，未发现回归点 | 追踪器 |
 | ✅ | LT-9 | 已裁决：subprocess+护栏为 V2 终态（威胁模型=单机单用户；TST-4 真进程证据链）；OS 沙箱升级条件=V3 多用户，见 v2-longtail-adjudications.md | 6-28+roadmap |
 | ✅ | LT-10 | 已裁决：triple-opt-in legacy-only 为终态（settings 双开关+env var 三重门槛既有）；不做 RPC 化，只收安全修复，见 v2-longtail-adjudications.md | 追踪器 |
 | ⬜ | LT-11 | agent 推荐产品化：引用 evidence refs、给 tradeoff、AUTO 解释 bounded action 为何安全 | 追踪器 |
