@@ -1113,9 +1113,142 @@ def _render_monitor_run(o: dict):
     return text, tables
 
 
+def _render_flow_rate(o: dict):
+    months = [str(m) for m in (o.get("months") or [])]
+    net_flows = [row for row in (o.get("net_flows") or []) if isinstance(row, dict)]
+    red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
+    text = f"**桶流量分析完成**:{len(months)} 个相邻月对。"
+    if red_flags:
+        text += f" 红旗 {len(red_flags)} 项。"
+    tables = []
+    if net_flows:
+        tables.append({
+            "title": "逐月净流量（进入坏 / 退出坏）",
+            "columns": ["月份", "进入坏", "退出坏"],
+            "rows": [[str(r.get("month") or ""), _fmt(r.get("into_bad")), _fmt(r.get("out_of_bad"))] for r in net_flows],
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_bucket_migration(o: dict):
+    states = [str(s) for s in (o.get("states") or [])]
+    to_states = [str(s) for s in (o.get("to_states") or [])]
+    heat_table = [row for row in (o.get("heat_table") or []) if isinstance(row, dict)]
+    red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
+    window = [str(m) for m in (o.get("window_months") or [])]
+    text = f"**桶迁徙热力完成**:{len(states)} 状态，窗口 {len(window)} 个月。"
+    tables = []
+    if heat_table and to_states:
+        columns = ["from", *to_states]
+        rows = [[str(row.get("from") or ""), *[_pct(row.get(state)) for state in to_states]] for row in heat_table]
+        # matrix-heat column_specs: the from label is text, each to-state cell is a
+        # heat cell colored from its own 0..1 migration rate (frontend matrix-heat).
+        column_specs = [{"kind": "text"}, *[{"kind": "matrix-heat"} for _ in to_states]]
+        tables.append({
+            "title": "平均迁徙率矩阵",
+            "columns": columns,
+            "rows": rows,
+            "column_specs": column_specs,
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_segment_profile(o: dict):
+    segments = [row for row in (o.get("segments") or []) if isinstance(row, dict)]
+    conc = o.get("concentration") if isinstance(o.get("concentration"), dict) else {}
+    red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
+    text = (
+        f"**细分画像完成**:{len(segments)} 个细分，top1 占比 {_pct(conc.get('top1_pct'))}，"
+        f"HHI {_fmt(conc.get('hhi'))}。"
+    )
+    tables = []
+    if segments:
+        tables.append({
+            "title": "细分画像",
+            "columns": ["细分", "样本数", "占比", "坏率", "均分", "净利润"],
+            "rows": [
+                [
+                    str(r.get("segment") or ""),
+                    _fmt(r.get("count")),
+                    _pct(r.get("pop_pct")),
+                    _pct(r.get("bad_rate")) if r.get("bad_rate") is not None else "n/a",
+                    _fmt(r.get("avg_score")) if r.get("avg_score") is not None else "n/a",
+                    _fmt(r.get("net_profit")) if r.get("net_profit") is not None else "n/a",
+                ]
+                for r in segments
+            ],
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_el_estimate(o: dict):
+    chain = [row for row in (o.get("chain") or []) if isinstance(row, dict)]
+    el_by_month = [row for row in (o.get("el_by_month") or []) if isinstance(row, dict)]
+    red_flags = [f for f in (o.get("red_flags") or []) if isinstance(f, dict)]
+    text = f"**预期损失估计完成**:损失态 `{o.get('loss_state', '')}`，合计 EL {_fmt(o.get('total_el'))}。"
+    tables = []
+    if chain:
+        tables.append({
+            "title": "各状态到损失态的吸收概率",
+            "columns": ["起始状态", "P(损失)"],
+            "rows": [[str(r.get("from_state") or ""), _pct(r.get("p_to_loss"))] for r in chain],
+        })
+    if el_by_month:
+        tables.append({
+            "title": "逐月预期损失",
+            "columns": ["月份", "余额", "预期损失"],
+            "rows": [[str(r.get("month") or ""), _fmt(r.get("balance")), _fmt(r.get("expected_loss"))] for r in el_by_month],
+        })
+    if red_flags:
+        tables.append(_red_flag_table(red_flags))
+    return text, tables
+
+
+def _render_portfolio_report(o: dict):
+    sheets = [str(s) for s in (o.get("sheets") or [])]
+    text = f"**组合报告已生成**:`{o.get('report_path', '')}`，含 {len(sheets)} 个 sheet。"
+    tables = []
+    if sheets:
+        tables.append({"title": "报告 sheet", "columns": ["#", "sheet"], "rows": [[str(i), s] for i, s in enumerate(sheets, start=1)]})
+    return text, tables
+
+
+def _render_portfolio_gate_summary(o: dict):
+    checklist = [str(item) for item in (o.get("checklist") or [])]
+    highlights = o.get("highlights") if isinstance(o.get("highlights"), dict) else {}
+    text = f"**组合分析汇总**:{o.get('red_flag_count', 0)} 项数据质量红旗，请确认后生成报告。"
+    tables = []
+    if highlights:
+        tables.append({
+            "title": "关键数字",
+            "columns": ["指标", "值"],
+            "rows": [[str(k), _fmt(v)] for k, v in highlights.items()],
+        })
+    if checklist:
+        tables.append({
+            "title": "红旗 checklist",
+            "columns": ["#", "红旗"],
+            "rows": [[str(i), item] for i, item in enumerate(checklist, start=1)],
+        })
+    return text, tables
+
+
+def _red_flag_table(red_flags: list[dict]) -> dict:
+    return {
+        "title": "数据质量红旗",
+        "columns": ["类型", "说明"],
+        "rows": [[str(f.get("kind") or ""), str(f.get("message") or "")] for f in red_flags],
+    }
+
+
 _RENDERERS = {
-    "make_split": _render_make_split,
-    "choose_modeling_spec": _render_choose_modeling_spec,
+    "make_split": _render_make_split,    "choose_modeling_spec": _render_choose_modeling_spec,
     "screen_features": _render_screen,
     "select_features": _render_select,
     "configure_tuning": _render_configure_tuning,
@@ -1141,6 +1274,12 @@ _RENDERERS = {
     "vintage_curve": _render_vintage_curve,
     "score_dataset": _render_score_dataset,
     "monitor_run": _render_monitor_run,
+    "flow_rate": _render_flow_rate,
+    "bucket_migration": _render_bucket_migration,
+    "segment_profile": _render_segment_profile,
+    "expected_loss_estimate": _render_el_estimate,
+    "portfolio_gate_summary": _render_portfolio_gate_summary,
+    "portfolio_report": _render_portfolio_report,
 }
 
 

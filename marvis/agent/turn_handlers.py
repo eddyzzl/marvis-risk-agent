@@ -14,6 +14,13 @@ from marvis.agent.memory_bridge import (
 )
 from marvis.agent.modeling_setup import ModelingSetupError, build_modeling_proposal
 from marvis.agent.plan_driver import DriverError, PlanDriver, is_confirm
+from marvis.agent.portfolio_setup import (
+    PortfolioProposal,
+    PortfolioSetupError,
+    build_portfolio_proposal,
+    build_states_gate_state,
+    parse_states_reply,
+)
 from marvis.agent.strategy_setup import StrategySetupError, build_strategy_proposal
 from marvis.agent.vintage_setup import VintageSetupError, build_vintage_proposal
 from marvis.agent_memory.api_support import audit_agent_memory_use_from_store
@@ -25,6 +32,7 @@ from marvis.domain import (
     TASK_TYPE_DATA_JOIN,
     TASK_TYPE_FEATURE_ANALYSIS,
     TASK_TYPE_MODELING,
+    TASK_TYPE_PORTFOLIO,
     TASK_TYPE_STRATEGY,
     TASK_TYPE_VINTAGE,
     TaskRecord,
@@ -45,6 +53,7 @@ DRIVER_AGENT_TASK_TYPES = frozenset(
         TASK_TYPE_MODELING,
         TASK_TYPE_STRATEGY,
         TASK_TYPE_VINTAGE,
+        TASK_TYPE_PORTFOLIO,
     }
 )
 
@@ -196,6 +205,30 @@ def run_vintage_driver_turn(
 ) -> dict:
     return _run_driver_turn(
         _VINTAGE_SPEC,
+        runtime,
+        repo,
+        task,
+        user_text=user_text,
+        selection=selection,
+        dedup_strategies=dedup_strategies,
+        adjust_params=adjust_params,
+        expected_step_id=expected_step_id,
+    )
+
+
+def run_portfolio_driver_turn(
+    runtime: DriverTurnRuntime,
+    repo: TaskRepository,
+    task: TaskRecord,
+    *,
+    user_text: str | None,
+    selection: list | None = None,
+    dedup_strategies: dict | None = None,
+    adjust_params: dict | None = None,
+    expected_step_id: str | None = None,
+) -> dict:
+    return _run_driver_turn(
+        _PORTFOLIO_SPEC,
         runtime,
         repo,
         task,
@@ -434,6 +467,97 @@ def _run_vintage_setup(
     return (proposal.template_id, proposal.template_slots(), {})
 
 
+def _portfolio_success_criteria(task: TaskRecord) -> list[dict] | None:
+    """S3: optional deterministic criterion mirroring _strategy_success_criteria.
+    task's optional portfolio_el_max (getattr-based -- no schema migration backs
+    it) becomes a total_el ceiling final_review can evaluate; absent -> no
+    criterion injected (same graceful default as strategy/modeling)."""
+    el_max = getattr(task, "portfolio_el_max", None)
+    if el_max is None:
+        return None
+    return [{"metric": "total_el", "max": float(el_max)}]
+
+
+def _latest_portfolio_states(conversation: list[dict]) -> dict | None:
+    for message in reversed(conversation):
+        if message.get("role") != "assistant":
+            continue
+        meta = message.get("metadata") or {}
+        if "portfolio_states" in meta:
+            return meta["portfolio_states"]
+    return None
+
+
+def _run_portfolio_setup(
+    runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
+) -> dict | tuple:
+    backend, registry = _modeling_data_runtime(runtime.settings)
+    conversation = repo.list_agent_messages(task.id)
+    gate_state = _latest_portfolio_states(conversation)
+    if gate_state is None:
+        proposal = build_portfolio_proposal(
+            registry,
+            backend,
+            task.id,
+            task.source_dir,
+            segment_col=getattr(task, "segment_col", "") or None,
+            score_col=getattr(task, "score_col", "") or None,
+            experiment_id=getattr(task, "experiment_id", "") or None,
+        )
+        states_text = " → ".join(f"`{state}`" for state in proposal.proposed_states)
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=(
+                f"开始组合分析:表现期表 `{proposal.dataset_name}`，贷款id `{proposal.id_col}`，"
+                f"快照月 `{proposal.snapshot_col}`，逾期桶 `{proposal.bucket_col}`。\n"
+                f"我按恶化程度排的桶顺序（由好到坏）：{states_text}。\n"
+                "**桶的语义顺序机器不可猜，必须你确认**：无误回复「确认」；要改就按由好到坏顺序"
+                "重列所有桶（逗号分隔）。"
+            ),
+            metadata={"portfolio_states": build_states_gate_state(proposal), "kind": "gate"},
+        )
+        return join_turn_response(repo, task.id)
+
+    states = parse_states_reply(user_text, gate_state)
+    if states is None:
+        proposed = gate_state.get("proposed_states") or []
+        states_text = " → ".join(f"`{state}`" for state in proposed)
+        repo.add_agent_message(
+            task.id,
+            role="assistant",
+            stage="chat",
+            content=(
+                "还没确认桶顺序。默认（由好到坏）："
+                f"{states_text}。无误回复「确认」，或按由好到坏重列所有桶（逗号分隔）。"
+            ),
+            metadata={"portfolio_states": gate_state, "kind": "gate"},
+        )
+        return join_turn_response(repo, task.id)
+
+    proposal = PortfolioProposal(
+        dataset_id=gate_state["dataset_id"],
+        dataset_name="",
+        id_col=gate_state["id_col"],
+        snapshot_col=gate_state["snapshot_col"],
+        bucket_col=gate_state["bucket_col"],
+        proposed_states=list(states),
+        balance_col=gate_state.get("balance_col"),
+        segment_col=gate_state.get("segment_col"),
+        score_col=gate_state.get("score_col"),
+        experiment_id=gate_state.get("experiment_id"),
+    )
+    repo.add_agent_message(
+        task.id,
+        role="assistant",
+        stage="chat",
+        content=f"已确认桶顺序：{' → '.join(states)}。开始并行分析（流量/迁徙/细分" + ("/趋势" if proposal.experiment_id else "") + "），随后汇总确认。",
+        metadata={"intent": "portfolio"},
+    )
+    return (proposal.template_id, proposal.template_slots(states), {})
+
+
 def _run_modeling_setup(
     runtime: DriverTurnRuntime, repo: TaskRepository, task: TaskRecord, user_text: str | None
 ) -> dict | tuple:
@@ -536,6 +660,16 @@ _VINTAGE_SPEC = _TurnHandlerSpec(
     pass_memory_kwargs=True,
 )
 
+_PORTFOLIO_SPEC = _TurnHandlerSpec(
+    intent="portfolio",
+    setup_error_types=(PortfolioSetupError,),
+    error_label="组合分析出错",
+    run_setup=_run_portfolio_setup,
+    format_user_display=_identity_display_text,
+    pass_memory_kwargs=True,
+    success_criteria=_portfolio_success_criteria,
+)
+
 _MODELING_SPEC = _TurnHandlerSpec(
     intent="modeling",
     setup_error_types=(JoinSetupError, ModelingSetupError),
@@ -552,6 +686,7 @@ DRIVER_TURN_FUNCS = {
     TASK_TYPE_FEATURE_ANALYSIS: run_feature_driver_turn,
     TASK_TYPE_STRATEGY: run_strategy_driver_turn,
     TASK_TYPE_VINTAGE: run_vintage_driver_turn,
+    TASK_TYPE_PORTFOLIO: run_portfolio_driver_turn,
 }
 
 

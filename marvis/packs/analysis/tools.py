@@ -20,6 +20,7 @@ from marvis.packs.analysis.errors import AnalysisError, MissingBaselineError
 from marvis.packs.analysis.flow import bucket_migration, flow_rate
 from marvis.packs.analysis.loss import expected_loss_estimate
 from marvis.packs.analysis.segment import ProfitParams, segment_profile
+from marvis.packs.analysis.report import build_report, gate_summary_payload
 from marvis.packs.analysis.trend import feature_csi_trend, score_stability_trend
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.settings import build_settings
@@ -182,6 +183,41 @@ def tool_feature_csi_trend(inputs: dict, ctx) -> dict:
     return _trend_output(result)
 
 
+def tool_portfolio_gate_summary(inputs: dict, ctx) -> dict:
+    """Pure assembler: aggregate each injected step output's red_flags + key
+    numbers into a gate payload (the red-flag list is the gate checklist)."""
+    return gate_summary_payload(
+        flow=_as_dict(inputs.get("flow")),
+        migration=_as_dict(inputs.get("migration")),
+        segment=_as_dict(inputs.get("segment")),
+        trend=_as_dict(inputs.get("trend")),
+        expected_loss=_as_dict(inputs.get("expected_loss")),
+    )
+
+
+def tool_portfolio_report(inputs: dict, ctx) -> dict:
+    runtime = _runtime(ctx)
+    out_dir = Path(runtime.settings.tasks_dir) / str(ctx.task_id) / "portfolio"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "portfolio_report.xlsx"
+    final_path, sheets = build_report(
+        project_meta=_as_dict(inputs.get("project_meta")) or {},
+        flow=_as_dict(inputs.get("flow")),
+        migration=_as_dict(inputs.get("migration")),
+        segment=_as_dict(inputs.get("segment")),
+        trend=_as_dict(inputs.get("trend")),
+        expected_loss=_as_dict(inputs.get("expected_loss")),
+        out_path=out_path,
+    )
+    runtime.repo.write_audit(
+        kind="analysis.portfolio.report",
+        target_ref=str(ctx.task_id),
+        outcome="succeeded",
+        detail={"report_path": str(final_path), "sheets": sheets},
+    )
+    return {"report_path": str(final_path), "sheets": sheets}
+
+
 # ---- helpers -----------------------------------------------------------------
 
 
@@ -189,6 +225,9 @@ def _dataset_frame(runtime: _Runtime, dataset_id: str, *, columns: list[str] | N
     dataset = runtime.registry.get(dataset_id)
     return runtime.backend.read_frame(runtime.registry.resolve_path(dataset.id), columns=columns)
 
+
+def _as_dict(value) -> dict | None:
+    return dict(value) if isinstance(value, dict) else None
 
 def _baseline(runtime: _Runtime, experiment_id: str) -> dict:
     experiment = runtime.experiments.get(experiment_id)
@@ -308,6 +347,8 @@ __all__ = [
     "tool_expected_loss_estimate",
     "tool_feature_csi_trend",
     "tool_flow_rate",
+    "tool_portfolio_gate_summary",
+    "tool_portfolio_report",
     "tool_score_stability_trend",
     "tool_segment_profile",
 ]

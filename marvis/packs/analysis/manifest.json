@@ -228,8 +228,73 @@
       "entrypoint": "tool_feature_csi_trend",
       "side_effects": ["read:dataset", "read:experiment"],
       "memory_limit_mb": 4096
+    },
+    {
+      "name": "portfolio_gate_summary",
+      "summary": "Aggregate prior step red_flags and key numbers into a decision-gate summary payload.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "flow": {"type": "object"},
+          "migration": {"type": "object"},
+          "segment": {"type": "object"},
+          "trend": {"type": "object"},
+          "expected_loss": {"type": "object"}
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "highlights": {"type": "object"},
+          "red_flags": {"type": "array", "items": {"type": "object"}},
+          "red_flag_count": {"type": "integer"},
+          "checklist": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["highlights", "red_flags", "red_flag_count", "checklist"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 60,
+      "failure_policy": "fail",
+      "entrypoint": "tool_portfolio_gate_summary",
+      "side_effects": [],
+      "memory_limit_mb": 2048
+    },
+    {
+      "name": "portfolio_report",
+      "summary": "Assemble the portfolio analysis xlsx report from prior step outputs (carries numbers, never recomputes).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "flow": {"type": "object"},
+          "migration": {"type": "object"},
+          "segment": {"type": "object"},
+          "trend": {"type": "object"},
+          "expected_loss": {"type": "object"},
+          "project_meta": {"type": "object"}
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "report_path": {"type": "string"},
+          "sheets": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["report_path", "sheets"],
+        "additionalProperties": false
+      },
+      "determinism": "deterministic",
+      "timeout_seconds": 120,
+      "failure_policy": "fail",
+      "entrypoint": "tool_portfolio_report",
+      "side_effects": ["write:report"],
+      "memory_limit_mb": 4096
     }
   ],
   "hooks": [],
-  "permissions": ["read:dataset", "write:dataset", "read:experiment"]
+  "permissions": ["read:dataset", "write:dataset", "read:experiment", "write:report"]
 }
