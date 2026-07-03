@@ -1928,6 +1928,96 @@ def test_select_experiment_refits_champion_on_train_plus_test_by_default(tmp_pat
     assert set(refit_artifact.feature_list) == {"x1", "x2"}
 
 
+def test_select_experiment_refit_attach_failure_rolls_back_unattached_artifact_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+):
+    """LT-5: _apply_champion_refit's file (already promoted by
+    _refit_champion_on_train_plus_test/save_model) and its later, separate
+    attach_result DB write are not one transaction -- a failure between them must
+    not leave an orphan model file/meta with no DB row, and select_experiment must
+    still work cleanly on a fresh retry afterward."""
+    runner, _pr, registry, _backend, settings, task = _runtime(tmp_path)
+    dataset = _register_modeling_sample(registry, tmp_path, task.id)
+    prepared = runner.invoke(
+        ToolRef("modeling", "prepare_modeling_frame"),
+        {"dataset_id": dataset.id, "target_col": "y", "feature_cols": ["x1", "x2"], "split_col": "split", "seed": 11},
+        task_id=task.id,
+    )
+    assert prepared.ok is True, prepared.error
+    trained = runner.invoke(
+        ToolRef("modeling", "train_model"),
+        {
+            "dataset_id": prepared.output["result_dataset_id"],
+            "recipe": "lgb",
+            "features": ["x1", "x2"],
+            "target_col": "y",
+            "split_col": "split",
+            "split_values": {"train": "train", "test": "test", "oot": "oot"},
+            "params": {"num_boost_round": 5, "learning_rate": 0.1, "num_leaves": 4},
+            "seed": 23,
+        },
+        task_id=task.id,
+    )
+    assert trained.ok is True, trained.error
+
+    base_dir = Path(settings.tasks_dir) / task.id / "modeling_artifacts"
+    baseline_files = sorted(path.name for path in base_dir.iterdir() if path.is_file())
+    baseline_latest_meta = (base_dir / "model_meta.json").read_bytes()
+
+    original_write_audit = modeling_repo_module._write_audit_row
+
+    def fail_trained_audit(conn, *args, **kwargs):
+        if kwargs.get("kind") == "modeling.experiment.trained":
+            raise RuntimeError("refit trained audit down")
+        return original_write_audit(conn, *args, **kwargs)
+
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", fail_trained_audit)
+
+    from marvis.packs.modeling import select_tools as modeling_select_tools
+
+    ctx = SimpleNamespace(
+        workspace=settings.workspace,
+        datasets_root=settings.datasets_dir,
+        task_id=task.id,
+        seed=None,
+    )
+    with pytest.raises(RuntimeError, match="refit trained audit down"):
+        modeling_select_tools.tool_select_experiment(
+            {
+                "experiment_ids": [trained.output["experiment_id"]],
+                "selected_experiment_id": trained.output["experiment_id"],
+                "target_type": "binary",
+            },
+            ctx,
+        )
+
+    assert sorted(path.name for path in base_dir.iterdir() if path.is_file()) == baseline_files
+    assert (base_dir / "model_meta.json").read_bytes() == baseline_latest_meta
+    assert not (base_dir / ".staging").exists()
+
+    store = ExperimentStore(settings.db_path)
+    experiments = store.list_for_task(task.id)
+    failed = [experiment for experiment in experiments if experiment.status == "failed"]
+    assert len(failed) == 1
+    assert failed[0].artifact_id is None
+
+    artifacts = ModelingRepository(settings.db_path).list_model_artifacts()
+    assert [artifact.id for artifact in artifacts] == [trained.output["artifact_id"]]
+
+    monkeypatch.setattr(modeling_repo_module, "_write_audit_row", original_write_audit)
+    retried = runner.invoke(
+        ToolRef("modeling", "select_experiment"),
+        {
+            "experiment_ids": [trained.output["experiment_id"]],
+            "selected_experiment_id": trained.output["experiment_id"],
+            "target_type": "binary",
+        },
+        task_id=task.id,
+    )
+    assert retried.ok is True, retried.error
+    assert retried.output["refit"]["applied"] is True
+
+
 @pytest.mark.slow
 def test_select_experiment_refit_on_train_plus_test_false_keeps_original_champion(tmp_path):
     """TUNE-4 escape hatch: refit_on_train_plus_test=False keeps the pre-refit
