@@ -9,6 +9,7 @@ import pandas as pd
 from marvis.data.direction import ScoreDirection, check_score_direction
 from marvis.data.errors import ScoreDirectionConflictError
 from marvis.packs.modeling.errors import ModelingError
+from marvis.validation.binning import assign_bins, equal_frequency_bin_edges
 
 
 INFERRED_TARGET_COL = "__reject_inference_target__"
@@ -128,6 +129,10 @@ def reject_inference(
             weight=reject_weight,
             output_target_col=output_target_col,
             output_weight_col=output_weight_col,
+            score_col=score_col,
+            accepted=accepted,
+            accepted_target_col=output_target_col,
+            accepted_bad_rate=accepted_bad_rate,
         )
     inferred[METHOD_COL] = method
 
@@ -209,6 +214,11 @@ def _parcel_rejected(
     return out
 
 
+#: DOM-12: number of equal-frequency bins used to map accepted-population empirical
+#: bad rates onto rejected rows by score when a score_col is available.
+_FUZZY_SCORE_BIN_COUNT = 10
+
+
 def _fuzzy_augment_rejected(
     frame: pd.DataFrame,
     *,
@@ -216,23 +226,105 @@ def _fuzzy_augment_rejected(
     weight: float,
     output_target_col: str,
     output_weight_col: str,
+    score_col: str | None = None,
+    accepted: pd.DataFrame | None = None,
+    accepted_target_col: str | None = None,
+    accepted_bad_rate: float | None = None,
 ) -> pd.DataFrame:
+    per_row_bad_rate = _per_row_fuzzy_bad_rate(
+        frame,
+        fallback_bad_rate=bad_rate,
+        score_col=score_col,
+        accepted=accepted,
+        accepted_target_col=accepted_target_col,
+        accepted_bad_rate=accepted_bad_rate,
+    )
     bad = frame.copy()
     good = frame.copy()
     bad[output_target_col] = 1
     good[output_target_col] = 0
-    bad[output_weight_col] = float(weight) * bad_rate
-    good[output_weight_col] = float(weight) * (1.0 - bad_rate)
+    bad_weights = float(weight) * per_row_bad_rate
+    good_weights = float(weight) * (1.0 - per_row_bad_rate)
+    bad[output_weight_col] = bad_weights
+    good[output_weight_col] = good_weights
     bad[SOURCE_COL] = "rejected_inferred_bad"
     good[SOURCE_COL] = "rejected_inferred_good"
+    bad_mask = bad_weights > 0
+    good_mask = good_weights > 0
     parts = []
-    if float(weight) * bad_rate > 0:
-        parts.append(bad)
-    if float(weight) * (1.0 - bad_rate) > 0:
-        parts.append(good)
+    if bool(bad_mask.any()):
+        parts.append(bad.loc[bad_mask])
+    if bool(good_mask.any()):
+        parts.append(good.loc[good_mask])
     if not parts:
         raise ModelingError("fuzzy reject inference produced no positive-weight rows")
     return pd.concat(parts, ignore_index=True, sort=False)
+
+
+def _per_row_fuzzy_bad_rate(
+    frame: pd.DataFrame,
+    *,
+    fallback_bad_rate: float,
+    score_col: str | None,
+    accepted: pd.DataFrame | None,
+    accepted_target_col: str | None,
+    accepted_bad_rate: float | None,
+) -> np.ndarray:
+    """Per-record PD for fuzzy augmentation (DOM-12).
+
+    With a score column and enough accepted rows to bin, each rejected row gets the
+    empirical bad rate of its equal-frequency score bin (computed on accepted rows),
+    scaled so the population-weighted average matches ``fallback_bad_rate`` (the
+    already-resolved bad-rate assumption -- either the observed accepted rate or an
+    explicit ``reject_bad_rate`` override). This replaces the old single global rate
+    applied uniformly to every rejected row. Falls back to the flat global rate when
+    no score column is supplied (industry MVP default, unchanged).
+    """
+    n = frame.shape[0]
+    if (
+        not score_col
+        or accepted is None
+        or accepted_target_col is None
+        or accepted_bad_rate is None
+        or score_col not in frame.columns
+        or score_col not in accepted.columns
+        or accepted.shape[0] < _FUZZY_SCORE_BIN_COUNT
+    ):
+        return np.full(n, float(fallback_bad_rate), dtype=float)
+
+    accepted_scores = pd.to_numeric(accepted[score_col], errors="coerce").to_numpy(dtype=float)
+    accepted_labels = accepted[accepted_target_col].to_numpy(dtype=float)
+    valid = np.isfinite(accepted_scores)
+    if int(valid.sum()) < _FUZZY_SCORE_BIN_COUNT:
+        return np.full(n, float(fallback_bad_rate), dtype=float)
+
+    edges = equal_frequency_bin_edges(accepted_scores[valid], _FUZZY_SCORE_BIN_COUNT)
+    accepted_bins = assign_bins(accepted_scores, edges)
+    bin_count = len(edges) - 1
+    bin_bad_rate = np.full(bin_count + 1, float(fallback_bad_rate), dtype=float)
+    for bin_index in range(1, bin_count + 1):
+        mask = accepted_bins == bin_index
+        if mask.any():
+            bin_bad_rate[bin_index] = float(accepted_labels[mask].mean())
+
+    # Anchor the binned rates to the resolved bad-rate assumption: when an explicit
+    # reject_bad_rate overrides the raw accepted rate, scale every bin proportionally
+    # so the (accepted-weighted) average still lands on fallback_bad_rate, then clip
+    # back into [0, 1] (deterministic, no randomness -- INV-1).
+    if accepted_bad_rate and accepted_bad_rate > 0:
+        scale = float(fallback_bad_rate) / float(accepted_bad_rate)
+        bin_bad_rate = np.clip(bin_bad_rate * scale, 0.0, 1.0)
+    else:
+        bin_bad_rate = np.clip(bin_bad_rate, 0.0, 1.0)
+
+    rejected_scores = pd.to_numeric(frame[score_col], errors="coerce").to_numpy(dtype=float)
+    rejected_bins = assign_bins(rejected_scores, edges)
+    per_row = np.where(
+        rejected_bins > 0,
+        bin_bad_rate[np.clip(rejected_bins, 0, bin_count)],
+        float(fallback_bad_rate),
+    )
+    return per_row
 
 
 def _risk_order(
