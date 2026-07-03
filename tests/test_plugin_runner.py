@@ -1352,6 +1352,39 @@ def test_worker_entrypoint_import_stays_dependency_free():
     assert leaked == [], f"worker entrypoint import pulled in heavy modules: {leaked}"
 
 
+def test_all_pack_runtimes_share_the_packruntime_base():
+    """ARCH-8: strategy/data_ops/feature/modeling/analysis each used to hand-roll an
+    identical five-object ``_Runtime`` (settings/datasets_root/repo/backend/registry)
+    wired straight from ``ToolContext``. They now all derive from the shared
+    ``marvis.plugins.sdk.PackRuntime`` base so the five-object construction can't
+    re-fork pack by pack; this test pins that invariant structurally."""
+    from marvis.plugins.sdk import PackRuntime
+
+    import marvis.packs.analysis.tools as analysis_tools
+    import marvis.packs.data_ops.tools as data_ops_tools
+    import marvis.packs.feature.tools as feature_tools
+    import marvis.packs.modeling._runtime as modeling_runtime
+    import marvis.packs.strategy.tools as strategy_tools
+
+    pack_runtimes = {
+        "strategy": strategy_tools._Runtime,
+        "data_ops": data_ops_tools._Runtime,
+        "feature": feature_tools._Runtime,
+        "modeling": modeling_runtime._Runtime,
+        "analysis": analysis_tools._Runtime,
+    }
+    for pack_name, runtime_cls in pack_runtimes.items():
+        assert issubclass(runtime_cls, PackRuntime), (
+            f"{pack_name} pack's _Runtime must subclass PackRuntime (got MRO {runtime_cls.__mro__})"
+        )
+        assert runtime_cls is not PackRuntime, f"{pack_name} pack must define its own _Runtime subclass"
+
+    # modeling/tools.py re-exports the same _Runtime object as a facade (ARCH-2 split).
+    import marvis.packs.modeling.tools as modeling_tools
+
+    assert modeling_tools._Runtime is modeling_runtime._Runtime
+
+
 def test_tool_runner_kills_worker_when_rss_exceeds_soft_limit(tmp_path):
     runner, repo = _runtime(tmp_path)
     runner._rss_memory_limit_mb = 64

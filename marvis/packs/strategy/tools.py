@@ -8,11 +8,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from marvis.data.backend import DataBackend
 from marvis.data.direction import check_score_direction, normalize_score_direction
 from marvis.data.labels import resolve_labeled_frame
-from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, StrategyRepository
+from marvis.db import StrategyRepository
 from marvis.packs.strategy.backtest import backtest_strategy
 from marvis.packs.strategy.bands import design_cutoff_bands
 from marvis.packs.strategy.compare import compare_strategies
@@ -47,7 +45,7 @@ from marvis.packs.strategy.tradeoff import (
     tradeoff_view,
 )
 from marvis.packs.strategy.vintage import vintage_curve, vintage_summary
-from marvis.settings import build_settings
+from marvis.plugins.sdk import PackRuntime
 
 
 def tool_vintage_curve(inputs: dict, ctx) -> dict:
@@ -991,13 +989,8 @@ def _band_stats_from_inputs(value) -> list[dict]:
     return []
 
 
-class _Runtime:
-    def __init__(self, ctx):
-        self.settings = build_settings(ctx.workspace)
-        self.datasets_root = Path(ctx.datasets_root)
-        self.repo = DatasetRepository(self.settings.db_path)
-        self.backend = DataBackend(self.datasets_root)
-        self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+class _Runtime(PackRuntime):
+    def _extend(self, ctx) -> None:
         self.strategies = StrategyRepository(self.settings.db_path)
 
 

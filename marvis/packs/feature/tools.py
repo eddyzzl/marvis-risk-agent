@@ -8,10 +8,7 @@ import numpy as np
 import pandas as pd
 
 from marvis.artifacts import ArtifactUnitOfWork
-from marvis.data.backend import DataBackend
 from marvis.data.labels import require_labels_confirmed
-from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository
 from marvis.feature.candidates import (
     candidate_numeric_features,
     excluded_categorical_columns,
@@ -45,6 +42,7 @@ from marvis.feature.transform import (
     minmax_normalize,
     zscore_standardize,
 )
+from marvis.plugins.sdk import PackRuntime
 from marvis.settings import build_settings
 
 
@@ -747,13 +745,8 @@ def tool_derive_date_features(inputs: dict, ctx) -> dict:
     return {"result_dataset_id": result.id, "new_columns": new_columns}
 
 
-class _Runtime:
-    def __init__(self, ctx):
-        settings = build_settings(ctx.workspace)
-        self.datasets_root = Path(ctx.datasets_root)
-        self.backend = DataBackend(self.datasets_root)
-        self.repo = DatasetRepository(settings.db_path)
-        self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+class _Runtime(PackRuntime):
+    pass
 
 
 def _runtime(ctx) -> _Runtime:

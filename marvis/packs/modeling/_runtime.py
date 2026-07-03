@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import pandas as pd
-from marvis.data.backend import DataBackend
-from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository, ModelingRepository
+from marvis.db import ModelingRepository
 from marvis.feature.candidates import candidate_numeric_features
 from marvis.packs.modeling.contracts import ModelArtifact
 from marvis.packs.modeling.errors import ModelingError
 from marvis.packs.modeling.experiment import ExperimentStore
 from marvis.packs.modeling.training_dataset import TrainingDataset
-from marvis.settings import build_settings
+from marvis.plugins.sdk import PackRuntime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,13 +15,8 @@ from types import SimpleNamespace
 MODELING_ARTIFACTS_DIR_NAME = "modeling_artifacts"
 
 
-class _Runtime:
-    def __init__(self, ctx):
-        self.settings = build_settings(ctx.workspace)
-        self.datasets_root = Path(ctx.datasets_root)
-        self.repo = DatasetRepository(self.settings.db_path)
-        self.backend = DataBackend(self.datasets_root)
-        self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+class _Runtime(PackRuntime):
+    def _extend(self, ctx) -> None:
         self.experiments = ExperimentStore(self.settings.db_path)
         self.modeling_repo = ModelingRepository(self.settings.db_path)
 

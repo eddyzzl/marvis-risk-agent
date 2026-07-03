@@ -10,7 +10,6 @@ from marvis.agent.data_dictionary import first_data_dictionary_id, load_business
 from marvis.artifacts import ArtifactUnitOfWork
 from marvis.data.align import ColumnAligner
 from marvis.data.backend import (
-    DataBackend,
     connect_duckdb,
     sql_identifier,
 )
@@ -18,12 +17,10 @@ from marvis.data.dedup import two_level_dedup
 from marvis.data.errors import DedupRequiredError
 from marvis.data.excel_ingest import ingest_sheet, list_sheets
 from marvis.data.join_engine import JoinEngine
-from marvis.data.registry import DatasetRegistry
-from marvis.db import DatasetRepository
 from marvis.db_schema import connect
+from marvis.plugins.sdk import PackRuntime
 from marvis.repositories.strategy import _write_audit_row
 from marvis.safe_paths import assert_within
-from marvis.settings import build_settings
 
 
 def tool_ingest_excel(inputs: dict, ctx) -> dict:
@@ -618,13 +615,8 @@ def _jsonable_cell(value):
     return str(value)
 
 
-class _Runtime:
-    def __init__(self, ctx):
-        self.settings = build_settings(ctx.workspace)
-        self.datasets_root = Path(ctx.datasets_root)
-        self.repo = DatasetRepository(self.settings.db_path)
-        self.backend = DataBackend(self.datasets_root)
-        self.registry = DatasetRegistry(self.repo, self.backend, self.datasets_root)
+class _Runtime(PackRuntime):
+    def _extend(self, ctx) -> None:
         self.aligner = ColumnAligner(self.backend)
         self.join_engine = JoinEngine(self.backend, self.aligner, self.registry, self.repo)
 
