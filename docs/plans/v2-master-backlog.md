@@ -258,7 +258,7 @@
 | ✅ | ARCH-5 | worker 协议 protocol_version 握手（`74fa5c7`）：不匹配→typed error+审计；入口 import 轻量护栏保持绿 | Med/M | — |
 | ✅ | ARCH-6 | pipeline 拆四模块（`6a411a3`：errors/cellgen/io/memory，门面保 monkeypatch 命名空间语义）+ 阶段边界/重试点/异常路径结构化日志；auto_distill 门控（INV-4）原样 | Med/M | ✅ |
 | ⬜ | ARCH-7 | 错误分类学散乱：132 处手写 HTTPException、error_kind 裸字符串 | Med/M | — |
-| ⬜ | ARCH-8 | 四个 pack 的 _Runtime 复制粘贴，pack SDK 公共层缺位 | Med/S | — |
+| ✅ | ARCH-8 | PackRuntime 公共基座（`660bfce8`，marvis/plugins/sdk.py）：五 pack _Runtime 全部改子类只留 _extend 域扩展、modeling 门面公有名原样透传、worker 懒加载路径不变（PERF-5 护栏绿）、防再分叉结构断言；275 测试绿 | Med/S | ✅ |
 | ✅ | ARCH-9 | 模板按域拆八模块（`aa064cce`：_shared/sample_echo/validation/modeling/join/feature/strategy/monitoring），sample.py 缩为 36 行注册门面；拆分前后 WorkflowTemplate 输出 SHA256 字节等价验证 | Med/S | ✅ |
 | ✅ | ARCH-10 | schema_version 落 PRAGMA user_version（`51a3130`）：编号迁移清单、旧库无损升级测试、重复 init 幂等 | Low/S | ✅ |
 | ✅ | ARCH-11 | 纯函数簇抽出（`ea96e8b5`：metric-tables 609 行/precision-consistency 86/step-checker 38，app.js 6970→6254）+ 状态所有权地图交付（40 全局态归属定界）；深拆的硬边界=Node harness 内联整文件直呼顶层符号（编排函数被测试架构钉住），继续拆需 harness 重构——记录为显式架构决策非欠账；真浏览器 smoke 3 通过 | Med/L | ✅ |
